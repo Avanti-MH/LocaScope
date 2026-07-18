@@ -1,0 +1,55 @@
+-----------------
+loading CUDA 12.6
+-----------------
+
+======== [5/5] SIFT+RANSAC (overlap + filter) ========
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/transformers/utils/generic.py:441: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+WSI : /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+GT  : x=31700  y=33600  mpp=0.252
+
+[1] Cropping query from WSI...
+  1440×1024  patches=4×5
+
+[0] Loading GigaPath model...
+  device=cuda
+
+[2] Estimating MPP...
+  Level 0  MPP=0.252  sampled 40/40
+  Level 1  MPP=1.008  sampled 40/40
+  Level 2  MPP=4.031  sampled 40/40
+  Level 3  MPP=8.062  sampled 40/40
+  mpp_gt=0.2520  mpp_est=0.2519  error=0.0%
+
+[3] Building tissue mask...
+  5 regions after filtering
+
+[4] Running GigaPathSlidingWinSim...
+  best=(31712, 33697)  score=0.7376  region=0  overlap=True
+
+[5] Running SIFT+RANSAC...
+  success=True  matches=6416  inliers=6415
+  SIFT location=(31699, 33599)
+
+[6] Verifying...
+  GT              : (31700, 33600)
+  Retrieval       : (31712, 33697)  error=24.6 µm
+  SIFT refined    : (31699, 33599)  error=0.4 µm  (+24.3 µm improvement)
+  Tolerance       : 64.5 µm (one tile)
+Saved /work/u26130998/LocaScope/result/sift_ransac__ov_flt.png
+
+──────────────────────────────────────────
+  Step                       Time  % total
+──────────────────────────────────────────
+  1. crop query              0.1s     0.0%
+  0. load model             19.3s     1.5%
+  2. estimate mpp            5.8s     0.5%
+  3. tissue mask             2.0s     0.2%
+  4. retrieval            1234.3s    96.4%
+  5. sift ransac             3.7s     0.3%
+  6. figure                 15.3s     1.2%
+──────────────────────────────────────────
+  Total                   1280.3s
+──────────────────────────────────────────
+
+Done.

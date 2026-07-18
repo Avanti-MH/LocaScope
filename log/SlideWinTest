@@ -1,0 +1,326 @@
+-----------------
+loading CUDA 12.6
+-----------------
+
+======== [1/4] overlap + filter ========
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/transformers/utils/generic.py:441: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+WSI : /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+GT  : x=31700  y=33600  mpp=0.252
+
+[1] Cropping query from WSI...
+  Query size: 1440×1024  mpp_gt=0.252
+  Patches: 4×5 main
+
+[0] Loading GigaPath model...
+  device=cuda
+
+[2] Estimating MPP...
+  Level 0  MPP=0.252  sampled 40/40
+  Level 1  MPP=1.008  sampled 40/40
+  Level 2  MPP=4.031  sampled 40/40
+  Level 3  MPP=8.062  sampled 40/40
+  mpp_gt=0.2520  mpp_est=0.2519  error=0.0%
+
+[3] Building tissue mask...
+  60 regions  tissue=36.9%
+  filtered → 1 regions (removed 59: <10% of largest or contained)
+
+[4] Running GigaPathSlideWinSim...
+  region 0: main (212, 377) windows  mean=0.2803  max=0.6981  |  overlap mean=0.2810  max=0.7050
+
+[5] Verifying...
+  GT location   : (31700, 33600)
+  Main best     : (31739, 33707)  score=0.6981  dist=28.7 µm
+  Overlap best  : (31611, 33579)  score=0.7050  dist=23.0 µm  <- closer
+  Winner        : overlap  (diff=5.7 µm)
+  Tolerance     : 64.5 µm  (one tile at estimated level)
+
+  [PASS] best error=23.0 µm  tol=64.5 µm
+Saved /work/u26130998/LocaScope/result/slide_win_sim__ov_flt.png
+
+──────────────────────────────────────────
+  Step                       Time  % total
+──────────────────────────────────────────
+  1. crop query              0.1s     0.0%
+  0. load model             18.1s     0.9%
+  2. estimate mpp            4.3s     0.2%
+  3. tissue mask             0.4s     0.0%
+  4. slide win sim        1959.0s    98.3%
+  5. verify                  0.0s     0.0%
+  6. figure                 10.4s     0.5%
+──────────────────────────────────────────
+  Total                   1992.2s
+──────────────────────────────────────────
+
+Done.
+======== [2/4] overlap + no-filter ========
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/transformers/utils/generic.py:441: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+WSI : /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+GT  : x=31700  y=33600  mpp=0.252
+
+[1] Cropping query from WSI...
+  Query size: 1440×1024  mpp_gt=0.252
+  Patches: 4×5 main
+
+[0] Loading GigaPath model...
+  device=cuda
+
+[2] Estimating MPP...
+  Level 0  MPP=0.252  sampled 40/40
+  Level 1  MPP=1.008  sampled 40/40
+  Level 2  MPP=4.031  sampled 40/40
+  Level 3  MPP=8.062  sampled 40/40
+  mpp_gt=0.2520  mpp_est=0.2519  error=0.0%
+
+[3] Building tissue mask...
+  60 regions  tissue=36.9%
+  filter disabled — using all 60 regions
+
+[4] Running GigaPathSlideWinSim...
+  region 0: main (212, 377) windows  mean=0.2803  max=0.6981  |  overlap mean=0.2810  max=0.7050
+  region 1: [EMPTY]
+  region 2: [EMPTY]
+  region 3: [EMPTY]
+  region 4: main (4, 6) windows  mean=0.3594  max=0.4032  |  overlap mean=0.3655  max=0.3952
+  region 5: [EMPTY]
+  region 6: [EMPTY]
+  region 7: main (5, 4) windows  mean=0.3398  max=0.3744  |  overlap mean=0.3590  max=0.4255
+  region 8: [EMPTY]
+  region 9: [EMPTY]
+  region 10: [EMPTY]
+  region 11: [EMPTY]
+  region 12: [EMPTY]
+  region 13: [EMPTY]
+  region 14: [EMPTY]
+  region 15: [EMPTY]
+  region 16: main (2, 6) windows  mean=0.3263  max=0.3706  |  overlap mean=0.3178  max=0.3407
+  region 17: [EMPTY]
+  region 18: [EMPTY]
+  region 19: [EMPTY]
+  region 20: [EMPTY]
+  region 21: main (7, 3) windows  mean=0.3425  max=0.3671  |  overlap mean=0.3465  max=0.3858
+  region 22: [EMPTY]
+  region 23: main (6, 1) windows  mean=0.3402  max=0.3758
+  region 24: main (5, 5) windows  mean=0.3598  max=0.3917  |  overlap mean=0.3662  max=0.3815
+  region 25: main (3, 1) windows  mean=0.3521  max=0.3796
+  region 26: [EMPTY]
+  region 27: main (27, 22) windows  mean=0.3444  max=0.4524  |  overlap mean=0.3460  max=0.4479
+  region 28: [EMPTY]
+  region 29: [EMPTY]
+  region 30: [EMPTY]
+  region 31: main (11, 10) windows  mean=0.3469  max=0.3931  |  overlap mean=0.3520  max=0.4136
+  region 32: [EMPTY]
+  region 33: main (13, 14) windows  mean=0.3614  max=0.4157  |  overlap mean=0.3614  max=0.4144
+  region 34: [EMPTY]
+  region 35: [EMPTY]
+  region 36: [EMPTY]
+  region 37: main (18, 20) windows  mean=0.3406  max=0.4209  |  overlap mean=0.3428  max=0.4065
+  region 38: [EMPTY]
+  region 39: main (6, 5) windows  mean=0.3501  max=0.3854  |  overlap mean=0.3515  max=0.3878
+  region 40: [EMPTY]
+  region 41: [EMPTY]
+  region 42: main (13, 9) windows  mean=0.3319  max=0.3797  |  overlap mean=0.3346  max=0.3678
+  region 43: [EMPTY]
+  region 44: [EMPTY]
+  region 45: [EMPTY]
+  region 46: [EMPTY]
+  region 47: main (6, 6) windows  mean=0.3466  max=0.3778  |  overlap mean=0.3391  max=0.3735
+  region 48: [EMPTY]
+  region 49: [EMPTY]
+  region 50: [EMPTY]
+  region 51: main (6, 6) windows  mean=0.3327  max=0.3720  |  overlap mean=0.3441  max=0.3979
+  region 52: [EMPTY]
+  region 53: [EMPTY]
+  region 54: main (4, 4) windows  mean=0.3443  max=0.3709  |  overlap mean=0.3329  max=0.3604
+  region 55: [EMPTY]
+  region 56: main (2, 2) windows  mean=0.3449  max=0.3771  |  overlap mean=0.3429  max=0.3429
+  region 57: [EMPTY]
+  region 58: [EMPTY]
+  region 59: [EMPTY]
+
+[5] Verifying...
+  GT location   : (31700, 33600)
+  Main best     : (31739, 33707)  score=0.6981  dist=28.7 µm
+  Overlap best  : (31611, 33579)  score=0.7050  dist=23.0 µm  <- closer
+  Winner        : overlap  (diff=5.7 µm)
+  Tolerance     : 64.5 µm  (one tile at estimated level)
+
+  [PASS] best error=23.0 µm  tol=64.5 µm
+Saved /work/u26130998/LocaScope/result/slide_win_sim__ov_noflt.png
+
+──────────────────────────────────────────
+  Step                       Time  % total
+──────────────────────────────────────────
+  1. crop query              0.1s     0.0%
+  0. load model             16.8s     0.8%
+  2. estimate mpp            4.0s     0.2%
+  3. tissue mask             0.4s     0.0%
+  4. slide win sim        2026.4s    98.5%
+  5. verify                  0.0s     0.0%
+  6. figure                 10.4s     0.5%
+──────────────────────────────────────────
+  Total                   2058.1s
+──────────────────────────────────────────
+
+Done.
+======== [3/4] no-overlap + filter ========
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/transformers/utils/generic.py:441: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+WSI : /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+GT  : x=31700  y=33600  mpp=0.252
+
+[1] Cropping query from WSI...
+  Query size: 1440×1024  mpp_gt=0.252
+  Patches: 4×5 main
+
+[0] Loading GigaPath model...
+  device=cuda
+
+[2] Estimating MPP...
+  Level 0  MPP=0.252  sampled 40/40
+  Level 1  MPP=1.008  sampled 40/40
+  Level 2  MPP=4.031  sampled 40/40
+  Level 3  MPP=8.062  sampled 40/40
+  mpp_gt=0.2520  mpp_est=0.2519  error=0.0%
+
+[3] Building tissue mask...
+  60 regions  tissue=36.9%
+  filtered → 1 regions (removed 59: <10% of largest or contained)
+
+[4] Running GigaPathSlideWinSim...
+  region 0: main (212, 377) windows  mean=0.2803  max=0.6981
+
+[5] Verifying...
+  GT location   : (31700, 33600)
+  Main best     : (31739, 33707)  score=0.6981  dist=28.7 µm
+  Tolerance     : 64.5 µm  (one tile at estimated level)
+
+  [PASS] best error=28.7 µm  tol=64.5 µm
+Saved /work/u26130998/LocaScope/result/slide_win_sim__nov_flt.png
+
+──────────────────────────────────────────
+  Step                       Time  % total
+──────────────────────────────────────────
+  1. crop query              0.1s     0.0%
+  0. load model             16.7s     1.5%
+  2. estimate mpp            3.9s     0.4%
+  3. tissue mask             0.4s     0.0%
+  4. slide win sim        1071.2s    97.2%
+  5. verify                  0.0s     0.0%
+  6. figure                 10.1s     0.9%
+──────────────────────────────────────────
+  Total                   1102.3s
+──────────────────────────────────────────
+
+Done.
+======== [4/4] no-overlap + no-filter ========
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/transformers/utils/generic.py:441: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+WSI : /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+GT  : x=31700  y=33600  mpp=0.252
+
+[1] Cropping query from WSI...
+  Query size: 1440×1024  mpp_gt=0.252
+  Patches: 4×5 main
+
+[0] Loading GigaPath model...
+  device=cuda
+
+[2] Estimating MPP...
+  Level 0  MPP=0.252  sampled 40/40
+  Level 1  MPP=1.008  sampled 40/40
+  Level 2  MPP=4.031  sampled 40/40
+  Level 3  MPP=8.062  sampled 40/40
+  mpp_gt=0.2520  mpp_est=0.2519  error=0.0%
+
+[3] Building tissue mask...
+  60 regions  tissue=36.9%
+  filter disabled — using all 60 regions
+
+[4] Running GigaPathSlideWinSim...
+  region 0: main (212, 377) windows  mean=0.2803  max=0.6981
+  region 1: [EMPTY]
+  region 2: [EMPTY]
+  region 3: [EMPTY]
+  region 4: main (4, 6) windows  mean=0.3594  max=0.4032
+  region 5: [EMPTY]
+  region 6: [EMPTY]
+  region 7: main (5, 4) windows  mean=0.3398  max=0.3744
+  region 8: [EMPTY]
+  region 9: [EMPTY]
+  region 10: [EMPTY]
+  region 11: [EMPTY]
+  region 12: [EMPTY]
+  region 13: [EMPTY]
+  region 14: [EMPTY]
+  region 15: [EMPTY]
+  region 16: main (2, 6) windows  mean=0.3263  max=0.3706
+  region 17: [EMPTY]
+  region 18: [EMPTY]
+  region 19: [EMPTY]
+  region 20: [EMPTY]
+  region 21: main (7, 3) windows  mean=0.3425  max=0.3671
+  region 22: [EMPTY]
+  region 23: main (6, 1) windows  mean=0.3402  max=0.3758
+  region 24: main (5, 5) windows  mean=0.3598  max=0.3917
+  region 25: main (3, 1) windows  mean=0.3521  max=0.3796
+  region 26: [EMPTY]
+  region 27: main (27, 22) windows  mean=0.3444  max=0.4524
+  region 28: [EMPTY]
+  region 29: [EMPTY]
+  region 30: [EMPTY]
+  region 31: main (11, 10) windows  mean=0.3469  max=0.3931
+  region 32: [EMPTY]
+  region 33: main (13, 14) windows  mean=0.3614  max=0.4157
+  region 34: [EMPTY]
+  region 35: [EMPTY]
+  region 36: [EMPTY]
+  region 37: main (18, 20) windows  mean=0.3406  max=0.4209
+  region 38: [EMPTY]
+  region 39: main (6, 5) windows  mean=0.3501  max=0.3854
+  region 40: [EMPTY]
+  region 41: [EMPTY]
+  region 42: main (13, 9) windows  mean=0.3319  max=0.3797
+  region 43: [EMPTY]
+  region 44: [EMPTY]
+  region 45: [EMPTY]
+  region 46: [EMPTY]
+  region 47: main (6, 6) windows  mean=0.3466  max=0.3778
+  region 48: [EMPTY]
+  region 49: [EMPTY]
+  region 50: [EMPTY]
+  region 51: main (6, 6) windows  mean=0.3327  max=0.3720
+  region 52: [EMPTY]
+  region 53: [EMPTY]
+  region 54: main (4, 4) windows  mean=0.3443  max=0.3709
+  region 55: [EMPTY]
+  region 56: main (2, 2) windows  mean=0.3449  max=0.3771
+  region 57: [EMPTY]
+  region 58: [EMPTY]
+  region 59: [EMPTY]
+
+[5] Verifying...
+  GT location   : (31700, 33600)
+  Main best     : (31739, 33707)  score=0.6981  dist=28.7 µm
+  Tolerance     : 64.5 µm  (one tile at estimated level)
+
+  [PASS] best error=28.7 µm  tol=64.5 µm
+Saved /work/u26130998/LocaScope/result/slide_win_sim__nov_noflt.png
+
+──────────────────────────────────────────
+  Step                       Time  % total
+──────────────────────────────────────────
+  1. crop query              0.1s     0.0%
+  0. load model             16.8s     1.5%
+  2. estimate mpp            3.9s     0.3%
+  3. tissue mask             0.4s     0.0%
+  4. slide win sim        1113.3s    97.3%
+  5. verify                  0.0s     0.0%
+  6. figure                 10.1s     0.9%
+──────────────────────────────────────────
+  Total                   1144.5s
+──────────────────────────────────────────
+
+Done.

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Distribution / build
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Model checkpoints (large binaries)
+aiNNModel/ckpt/*.ckpt
+aiNNModel/ckpt/*.pt
+aiNNModel/ckpt/*.pth
+
+# Results / outputs
+results/
+result/
+*.png
+*.jpg
+
+# else
+Note
+.env

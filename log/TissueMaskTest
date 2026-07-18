@@ -1,0 +1,37 @@
+-----------------
+loading CUDA 12.6
+-----------------
+
+[PASS] constructor: all fields assigned correctly
+[PASS] tissue_fraction: 0%, 50%, 100% cases correct
+[PASS] _search_tissue_regions: 2 blobs found, coords correct, tiny filtered
+[PASS] has_tissue: centre/corner/ratio cases correct
+[PASS] has_tissue_l0: level-0 coords correctly converted
+[PASS] _levelCoordinate_converter: level-2 and level-0 correct
+[PASS] _mppCoordinate_converter: scalar and tuple mpp correct
+[PASS] loc / levelloc / mpploc: all return correct mask slices
+[PASS] from_wsi: tissue=0.8%, 389 regions, mask=(9192, 8504)
+
+[sweep] WSI has 10 levels:
+  level 0: 272128×294144  ds=1.0
+  level 1: 136064×147072  ds=2.0
+  level 2: 68032×73536  ds=4.0
+  level 3: 34016×36768  ds=8.0
+  level 4: 17008×18384  ds=16.0
+  level 5: 8504×9192  ds=32.0
+  level 6: 4252×4596  ds=64.0
+  level 7: 2126×2298  ds=128.0
+  level 8: 1063×1149  ds=256.0
+  level 9: 531×574  ds=512.0
+  level=-1  : mask=531×574  ds_x=512.5  tissue=0.1%  regions=1
+  level=-2  : mask=1063×1149  ds_x=256.0  tissue=0.2%  regions=7
+  level=-3  : mask=2126×2298  ds_x=128.0  tissue=0.4%  regions=20
+  ds=4      : mask=68032×73536  ds_x=4.0  tissue=0.6%  regions=23009
+  ds=16     : mask=17008×18384  ds_x=16.0  tissue=0.9%  regions=1496
+  ds=32     : mask=8504×9192  ds_x=32.0  tissue=0.8%  regions=389
+  ds=64     : mask=4252×4596  ds_x=64.0  tissue=0.6%  regions=116
+  ds=128    : mask=2126×2298  ds_x=128.0  tissue=0.4%  regions=20
+[PASS] from_wsi sweep: 8/8 configs ok
+
+Saved /work/u26130998/LocaScope/result/tissue_mask__regions.png
+All checks passed.

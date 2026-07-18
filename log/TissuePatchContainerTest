@@ -1,0 +1,60 @@
+-----------------
+loading CUDA 12.6
+-----------------
+
+[PASS] QPC main: 16 patches, 3 access methods verified
+[PASS] QPC overlap: 9 patches, pixel + corner-pixel OK
+[PASS] QPC iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] QPC shapes: all 25 patches are (128,128,3)
+[PASS] QPC overlap=False: 16 main patches, mixed-parity tuple OK
+[PASS] QPC from_path: identical to direct constructor
+[PASS] QPC from_pil: identical to direct constructor
+[PASS] QPC from_array: identical to direct constructor
+[PASS] QPC RGBA→RGB: alpha dropped, RGB preserved
+[PASS] QPC grayscale→RGB: all 3 channels equal original
+[PASS] QPC errors: RuntimeError / OOB IndexError / mixed-parity IndexError
+[PASS] TPC case1 (full, no region): 16 patches
+[PASS] TPC-case1 iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] TPC-case1 shapes: all 25 patches are (128,128,3)
+[PASS] TPC-case1 overlap corner-pixel: 9 patches verified
+[PASS] TPC case2 (full + region): 8 patches, offset verified
+[PASS] TPC-case2 iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] TPC-case2 shapes: all 11 patches are (128,128,3)
+[PASS] TPC-case2 overlap corner-pixel: 3 patches verified
+[PASS] TPC case3 (is_crop + region): 8 main patches match case2
+[PASS] TPC case3 overlap: 3 overlap patches match case2
+[PASS] TPC-case3 shapes: all 11 patches are (128,128,3)
+[PASS] TPC ds=4.0 level=2: 2 patches, x/y offset (64,96), ds/level in PatchInfo verified
+[PASS] TPC region y_offset=256: 4 patches verified
+[PASS] TPC PatchInfo meta: ds/level/mpp forwarded to all 25 patches
+[PASS] TPC overlap=False: 8 main patches, no overlap
+[PASS] TPC from_path: identical to direct constructor
+[PASS] TPC from_pil: identical to direct constructor
+[PASS] TPC from_array: identical to direct constructor
+[PASS] TPC errors: ValueError / RuntimeError / OOB IndexError
+[PASS] real-query(2.bmp) shapes: all 32 patches are (256,256,3)
+[PASS] real-query iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] real-query main: 20 patches, 3 access methods verified
+[PASS] real-query overlap: 12 patches, pixel + corner-pixel OK
+[PASS] Real query 2.bmp: 1440x1024, 32 patches (size=256)
+[PASS] roi-as-query shapes: all 105 patches are (256,256,3)
+[PASS] roi-as-query iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] roi-as-query main: 60 patches, 3 access methods verified
+[PASS] roi-as-query overlap: 45 patches, pixel + corner-pixel OK
+[PASS] RoI as query BRACS_264_N_5.png: 1716x2645, 105 patches (size=256)
+[PASS] real-roi shapes: all 105 patches are (256,256,3)
+[PASS] real-roi iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] real-roi overlap corner-pixel: 45 patches verified
+[PASS] Real RoI BRACS_264_N_5.png: 1716x2645, 105 patches (size=256)
+[PASS] real-wsi-full shapes: all 98 patches are (256,256,3)
+[PASS] real-wsi-full iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] real-wsi-full overlap corner-pixel: 42 patches verified
+[PASS] Real WSI BRACS_1003691.svs level=3 (ds=32) 1933x2205: 98 patches (size=256)
+[PASS] from_openslide shapes: all 98 patches are (256,256,3)
+[PASS] from_openslide iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
+[PASS] from_openslide overlap corner-pixel: 42 patches verified
+[PASS] from_openslide level=3 (1933x2205): 98 patches
+Saved /work/u26130998/LocaScope/result/tissue_patch_container_grid.png
+Saved /work/u26130998/LocaScope/result/tissue_patch_container_grid_reconstruction.png
+
+All checks passed.
