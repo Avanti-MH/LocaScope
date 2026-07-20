@@ -28,6 +28,9 @@ build/
 aiNNModel/ckpt/*.ckpt
 aiNNModel/ckpt/*.pt
 aiNNModel/ckpt/*.pth
+training/checkpoints/*.ckpt
+training/checkpoints/*.pt
+training/checkpoints/*.pth
 
 # Results / outputs
 results/
