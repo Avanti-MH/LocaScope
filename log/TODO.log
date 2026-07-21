@@ -1,0 +1,203 @@
+================================================================================
+  LocaScope — TODO Log
+  格式：[ ] 未完成   [x] 已完成
+  新增 TODO 請附上日期與來源檔
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+  TissuesRegionsMask
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] 2026-07-21 | utilities/TissuesRegionsMask.py
+    merge_regions — 將指定的 tissue regions 合併成一個
+    使用場景：兩塊相鄰組織被切成兩個 region，但實際上應視為同一塊
+    介面待決：
+      A. merge_regions(indices: list[int]) → 用 index 指定要合併哪幾個
+      B. merge_adjacent(gap_px: float)    → 自動合併間距 < gap_px 的 region
+      C. 兩者都加
+    合併後的 bounding box = 所有 region 的 union bbox
+    修改 self.tissue_regions in place（與 filter_regions 一致）
+
+────────────────────────────────────────────────────────────────────────────────
+  PatchingLib
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] 2026-07-21 | PatchingLib.py:697
+    crop_grid — 以 tile 為單位 crop，回傳同型別的新 container
+    目的：讓 SiftRansacLocalizer 不需要手動算像素座標與 clamp，
+          crop 後的 img_origin_x/y 自動反映偏移。
+    方案：
+      A. 直接在 TissuePatchContainer 實作（優先）
+      B. TPC + QPC 都加，介面對稱
+      C. 先在 PatchGrid 抽 sub-grid 索引邏輯，container 組合使用
+
+[ ] 2026-07-21 | PatchingLib.py:940
+    WsiTissuesContainer.from_mpp_continuous
+    目前 from_mpp 要求 mpp 精確對應到某個 WSI level（_find_level），
+    若未來 MPP 估測器輸出連續值（非 level-bound），需新增此方法：
+      - ds_target = mpp / base_mpp
+      - 取 best level，read_region 後 cv2.resize 到 ds_target
+      - img_ds = ds_target，下游座標不需另外補償
+
+────────────────────────────────────────────────────────────────────────────────
+  LocaScope Pipeline 設計
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] 2026-07-21 | LocaScope.md 開放問題
+    filter_patchable 每次 locate 重跑 → 可能改變 mask.tissue_regions，
+    多 query 時有副作用。考慮在 locate 內用 temp list 或 copy。
+
+[ ] 2026-07-21 | LocaScope.md 開放問題
+    wsi lifetime 管理：LocaScope 不 close wsi，需在 docstring 明確說明
+    呼叫者負責管理。
+
+[ ] 2026-07-21 | LocaScope.md 開放問題
+    MPP 估算失敗時的 fallback 策略（目前 GigaPathKnnEstiMpp 一定給結果，
+    但若信心不足是否需要 warning 或 raise？）
+
+[ ] 2026-07-21 | LocaScope.md 開放問題
+    是否暴露 wsi_container、localizer 供外部 debug 用
+    （方便 notebook 裡 introspect 中間結果）
+
+────────────────────────────────────────────────────────────────────────────────
+  Inference 加速（2_retrieval/INFERENCE_SPEEDUP.md）
+  目前一張 WSI encode 約 30 分鐘，目標依序縮短
+────────────────────────────────────────────────────────────────────────────────
+
+  ★  立即可做（不需改模型）
+
+[x] 2026-07-19 | bench_gigapath_infer.py
+    fp16 autocast + batch_size sweep benchmark（Part 1 synthetic、Part 2 WSI）
+    CPU/GPU ratio 自動判斷 DataLoader 是否值得加
+
+[ ] 2026-07-21 | GigaPathFunc.py / GigaPathSlideWinSim.py
+    torch.compile(model, mode='reduce-overhead')
+    第一次 forward 需幾分鐘 compile，之後每次用 compiled graph
+    目標：30 min → 12 min（搭配 fp16）
+
+  ★★  中度（系統層優化，不需改模型）
+
+[x] 2026-07-21 | GigaPathFunc.py
+    Flash Attention 2：減少 self-attention memory bandwidth，預估加速 20–50%
+    kwarg 路線不通（prov-gigapath __init__ 不接受 attn_implementation）
+    ✓ 改以安裝 flash-attn==2.5.8，timm 自動偵測啟用
+    驗證：flash_attn 2.5.8 / timm fused_attn=True / block[0].attn.fused=True
+
+[ ] 2026-07-21 | bench_gigapath_infer.py → GigaPathSlideWinSim.py
+    DataLoader preprocessing（num_workers + pin_memory + non_blocking）
+    先跑 bench Part 1 確認 CPU/GPU ratio > 0.3 再決定是否做
+
+[ ] 2026-07-21 | GigaPathFunc.py / GigaPathSlideWinSim.py
+    Token Merging（ToMe）r=8，每層 merge 8 個 token，預估減少 30% 計算量
+    需驗證 retrieval 精度，目標 8 min
+    ✓ prov-gigapath 架構相容確認（output shape [1, 1536] OK）
+    ✓ gigapath_apply_tome(model, r=8) 已加入 GigaPathFunc.py
+    安裝順序（順序不可反）：
+      pip install git+https://github.com/facebookresearch/ToMe.git
+      pip install "timm>=1.0.3"
+
+[ ] 2026-07-21 | jobscripts/SlideWinTest.sh + GigaPathSlideWinSim.py
+    Multi-GPU DataParallel（--gpus-per-node=2）
+    `if torch.cuda.device_count() > 1: model = nn.DataParallel(model)`
+    目標：4 min
+
+[ ] 2026-07-21 | GigaPathSlideWinSim.py
+    Feature cache：WSI encode 結果序列化到 cache/{stem}_level{n}.pt
+    多 query 搜同一張 WSI 時免去重複 encode（省 100%）
+
+  ★★★  較難（格式轉換 / 量化）
+
+[ ] 2026-07-21 | GigaPathFunc.py / GigaPathSlideWinSim.py
+    INT8 quantization（bitsandbytes 或 torch.ao.quantization）
+    速度 ~2×、記憶體減半，需驗證 retrieval accuracy
+    建議 fp16 + ToMe 都完成後再做
+
+[ ] 2026-07-21 | GigaPathFunc.py
+    TensorRT export（ONNX → trtexec --fp16 --saveEngine），預估加速 3–5×
+    export 流程複雜，適合 pipeline 穩定後再做
+
+  ★★★★  研究級（需 fine-tune 或重訓）
+
+[ ] 2026-07-21 | GigaPathSlideWinSim.py
+    Dynamic ViT / EViT：forward 中動態跳過低重要性 token（30–50% 加速）
+    DynamicViT 用 predictor；EViT 用 [CLS] attention 篩選
+    需針對 ViT-g 架構改寫 + fine-tune，成本高
+    與 ToMe 差異：ToMe 合併（無損），Dynamic ViT 丟棄（有損）
+
+[ ] 2026-07-21 | GigaPathFunc.py
+    Structured Pruning：剪 attention head 或整層（1.5–3× 加速）
+    ViT-g 有 40 層 × 16 heads，需 fine-tune 恢復精度
+
+[ ] 2026-07-21 | aiNNModel/（長期研究方向）
+    Knowledge Distillation：GigaPath 為 teacher，訓練輕量 student（5–10×）
+    需大量病理資料集重訓，難度最高，不在近期 roadmap
+
+────────────────────────────────────────────────────────────────────────────────
+  API 一致性
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] 2026-07-21 | aiNNModel/GigaPathFunc.py
+    make_gigapath_encoder(model, device, batch_size, dtype) → callable
+    與 make_hest_method 對稱，讓外部不需寫 lambda 就能取得 encoder callable。
+    ✓ 程式碼已寫入 GigaPathFunc.py，待實際執行驗證
+    完成後 test_gigapath_knn_esti_mpp.py 的 inline lambda 可換成這個
+
+────────────────────────────────────────────────────────────────────────────────
+  實作缺口
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] 2026-07-21 | LocaScope.py
+    LocaScope 主類別尚未實作（目前只有 LocaScope.md 設計文件）
+
+[ ] 2026-07-21 | 1_estimate_query_mpp/estimate_mpp_classic.py
+    Classic MPP 估算（非 GigaPath）尚未實作（空檔案）
+
+[ ] 2026-07-21 | 2_retrieval/retrieval_gigapth.py
+    Retrieval entry point 尚未實作（空檔案）
+
+[ ] 2026-07-21 | training/models/mppResNet.py
+    MPP 估算用的 ResNet 只有 stub（2 行），訓練邏輯尚未完成
+
+────────────────────────────────────────────────────────────────────────────────
+  已完成
+────────────────────────────────────────────────────────────────────────────────
+
+[x] 2026-07-21 | TissuesRegionsMask.py
+    from_wsi 重設計：thumb_size → ds + level（支援負數索引）
+    舊版保留為 comment block
+
+[x] 2026-07-21 | HESTSegFunc.py
+    make_hest_method factory，讓 HEST DeepLab 接上 from_wsi method 介面
+
+[x] 2026-07-21 | SIFT_RANSAC.py
+    SiftRansacResult 加入 level: int 欄位
+
+[x] 2026-07-21 | test_sift_ransac.py
+    px@lvl-n → px@lvl{sift.level}，顯示真實 level 數字
+
+[x] 2026-07-21 | test_tissues_regions_mask.py
+    Sweep test（ds × level 矩陣）、--sweep、--region-index、--bbox-lw
+    SWEEP_PER_ROW=4 折行排版
+
+[x] 2026-07-21 | aiNNModel/GigaPathFunc.py
+    移除 hardcoded HF token，改為 os.environ.setdefault + .env（gitignored）
+
+[x] 2026-07-21 | aiNNModel/GigaPathFunc.py
+    gigapath_model：HF_TOKEN 空時自動載入 .env、multi_gpu 參數
+    gigapath_encode：dtype + autocast、normalize 前 .float()、batch_size 32 → 128
+    gigapath_compile：torch.compile 封裝（mode='reduce-overhead'）
+    make_gigapath_encoder：closure factory，對稱 make_hest_method
+    gigapath_apply_tome：ToMe 封裝（tome 需先裝於 timm 之前）
+    ⚠ encode/compile/encoder/multi_gpu 程式碼已寫，待實際跑過驗證
+
+[x] 2026-07-21 | 環境
+    flash-attn 2.5.8 安裝（wget wheel 繞開跨裝置問題）
+    timm 升至 1.0.28（tome 安裝後再升以覆蓋舊版）
+    tome 安裝（GitHub 版，PyPI 同名套件為 Python 2 舊包）
+    environment.yml 輸出至 LocaScope/environment.yml（含安裝注釋）
+
+[x] 2026-07-21 | 專案衛生
+    .gitignore、Makefile（make clean）、8 支 SLURM job scripts
+    GitHub 初始化並推送至 Avanti-MH/LocaScope
+
+================================================================================
