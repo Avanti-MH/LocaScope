@@ -425,6 +425,128 @@ def validate_tpc_errors(img: np.ndarray, size: int):
     print('[PASS] TPC errors: ValueError / RuntimeError / OOB IndexError')
 
 
+# ── crop() ────────────────────────────────────────────────────────────────────
+
+def validate_container_crop(container, label: str = ''):
+    """
+    Verify container.crop() correctness across grid / pixel units, size / bottom_right,
+    padding, clamping, and error cases.
+
+    Assertions:
+      - grid + bottom_right: img_origin & new-grid offset correct, patches identical
+      - grid + size + pad:   pad clamps within grid bounds
+      - pixel + size:        top-left floor / bottom-right ceil (round-up rule)
+      - pixel + pad:         pad_unit='pixel' ceils to full grid tiles
+      - PatchInfo.x/y stays in level-N global coords after crop
+      - 6 invalid argument combos raise ValueError
+    """
+    grid = container.grid
+    ts   = grid.tile_size
+    R, C = grid.grid_rows, grid.grid_cols
+    if R < 2 or C < 2:
+        print(f'[SKIP] {label}crop: grid too small ({R}x{C})')
+        return
+
+    # ── (1) grid unit: (r0,c0) + bottom_right ─────────────────────────────────
+    r0, c0, r1, c1 = 0, 0, min(2, R), min(2, C)
+    sub = container.crop((r0, c0), bottom_right=(r1, c1), unit='grid')
+
+    assert sub.width  == (c1 - c0) * ts
+    assert sub.height == (r1 - r0) * ts
+    assert sub.img_origin_x == grid.x_offset + c0 * ts
+    assert sub.img_origin_y == grid.y_offset + r0 * ts
+    assert sub.grid.x_offset == sub.img_origin_x   # invariant: grid starts at img[0,0]
+    assert sub.grid.y_offset == sub.img_origin_y
+
+    for r in range(r1 - r0):
+        for c in range(c1 - c0):
+            new_idx = (2*r, 2*c)         if sub.grid.has_overlap else (r, c)
+            old_idx = (2*(r0+r), 2*(c0+c)) if grid.has_overlap    else (r0+r, c0+c)
+            assert np.array_equal(sub[new_idx], container[old_idx]), \
+                f'{label}crop main patch ({r},{c}) mismatch'
+
+    # PatchInfo.x/y is still level-N global
+    for info in sub.grid.main_patch_infos:
+        orig_r = (info.y - grid.y_offset) // ts
+        orig_c = (info.x - grid.x_offset) // ts
+        assert r0 <= orig_r < r1 and c0 <= orig_c < c1, \
+            f'{label}crop PatchInfo.x/y not global: got ({info.y},{info.x})'
+    print(f'[PASS] {label}crop grid+corners: {sub.grid.grid_rows}x{sub.grid.grid_cols}, '
+          f'origin=({sub.img_origin_x},{sub.img_origin_y}), patches match, x/y stays global')
+
+    # ── (2) grid unit: size + pad ─────────────────────────────────────────────
+    sub2 = container.crop((0, 0), size=(1, 1), unit='grid', pad=1)
+    # size=(1,1) → [0,1); pad=1 → [-1,2); clamp → [0, min(R,2))
+    assert sub2.grid.grid_rows == min(2, R)
+    assert sub2.grid.grid_cols == min(2, C)
+    print(f'[PASS] {label}crop grid+size+pad: {sub2.grid.grid_rows}x{sub2.grid.grid_cols} '
+          'after clamp')
+
+    # ── (3) pixel unit: non-aligned size → round up ───────────────────────────
+    x0, y0 = grid.x_offset + 1, grid.y_offset + 1
+    w, h   = ts + 3, ts + 3
+    sub3 = container.crop((x0, y0), size=(w, h), unit='pixel')
+    # top-left floor: (1//ts, 1//ts) = (0, 0)
+    # bottom-right ceil: ceil((ts+4)/ts) = 2
+    assert sub3.grid.grid_rows == min(2, R)
+    assert sub3.grid.grid_cols == min(2, C)
+    print(f'[PASS] {label}crop pixel+size+roundup: {sub3.grid.grid_rows}x{sub3.grid.grid_cols} '
+          '(bottom-right ceiled to tile boundary)')
+
+    # ── (4) pixel unit: pad (should ceil to whole grid tiles) ─────────────────
+    sub4 = container.crop((grid.x_offset, grid.y_offset), size=(ts, ts),
+                          unit='pixel', pad=ts + 1, pad_unit='pixel')
+    # size=(ts,ts) → grid [0,1); pad_g = ceil((ts+1)/ts) = 2 → [-2, 3); clamp → [0, min(R,3))
+    assert sub4.grid.grid_rows == min(3, R)
+    assert sub4.grid.grid_cols == min(3, C)
+    print(f'[PASS] {label}crop pixel-pad (ceil to grid): '
+          f'{sub4.grid.grid_rows}x{sub4.grid.grid_cols}')
+
+    # ── (5) invalid arg combos → ValueError ───────────────────────────────────
+    bad_cases = [
+        dict(top_left=(0, 0)),                                          # no br, no size
+        dict(top_left=(0, 0), bottom_right=(1, 1), size=(1, 1)),        # both
+        dict(top_left=(0, 0), size=(1, 1), unit='what'),                # bad unit
+        dict(top_left=(0, 0), size=(1, 1), pad=1, pad_unit='what'),     # bad pad_unit
+        dict(top_left=(0, 0), bottom_right=(0, 0)),                     # empty (r0==r1)
+        dict(top_left=(R, C), size=(1, 1)),                             # out-of-bounds → empty
+    ]
+    for kwargs in bad_cases:
+        try:
+            container.crop(**kwargs)
+            raise AssertionError(f'{label}crop expected ValueError for {kwargs}')
+        except ValueError:
+            pass
+    print(f'[PASS] {label}crop errors: {len(bad_cases)} invalid arg combos raise ValueError')
+
+    return sub  # for downstream figure demo
+
+
+def validate_crop_before_extract():
+    """crop() before extract_all() must raise RuntimeError (same contract as __getitem__)."""
+    img  = make_gradient_image(128, 128)
+    fresh_qc = QueryPatchContainer(img.copy())
+    fresh_tc = TissuePatchContainer(img.copy())
+    for c, name in [(fresh_qc, 'QPC'), (fresh_tc, 'TPC')]:
+        try:
+            c.crop((0, 0), size=(1, 1), unit='grid')
+            raise AssertionError(f'{name} crop before extract must raise RuntimeError')
+        except RuntimeError:
+            pass
+    print('[PASS] crop before extract: QPC / TPC both raise RuntimeError')
+
+
+def validate_tpc_crop_extra_fields(tc: TissuePatchContainer, label: str = 'TPC '):
+    """_copy_extra_after_crop must shallow-copy tissue_region / img_ds / is_crop / at_level."""
+    sub = tc.crop((0, 0), size=(2, 2), unit='grid')
+    assert sub.tissue_region is tc.tissue_region, f'{label}crop lost tissue_region'
+    assert sub.img_ds        == tc.img_ds,        f'{label}crop img_ds mismatch'
+    assert sub.is_crop       == tc.is_crop,       f'{label}crop is_crop mismatch'
+    assert sub.at_level      == tc.at_level,      f'{label}crop at_level mismatch'
+    print(f'[PASS] {label}crop extra fields shallow-copied '
+          '(tissue_region / img_ds / is_crop / at_level)')
+
+
 # ── Real data tests ───────────────────────────────────────────────────────────
 
 def test_real_query(path: str, size: int) -> QueryPatchContainer:
@@ -719,6 +841,15 @@ def main():
     validate_tpc_factory_methods(img, size)
     validate_tpc_errors(img, size)
 
+    # ── crop() ────────────────────────────────────────────────────────────────
+    qc_sub  = validate_container_crop(qc,  label='QPC ')
+    tc1_sub = validate_container_crop(tc1, label='TPC-case1 ')
+    tc2_sub = validate_container_crop(tc2, label='TPC-case2 ')
+    tc3_sub = validate_container_crop(tc3, label='TPC-case3 ')
+    validate_crop_before_extract()
+    validate_tpc_crop_extra_fields(tc2, 'TPC-case2 ')
+    validate_tpc_crop_extra_fields(tc3, 'TPC-case3 ')
+
     # ── Real data ─────────────────────────────────────────────────────────────
     rsize = args.rsize
     real_qc = real_roi_qc = real_roi_tc = real_wsi_tc = None
@@ -834,6 +965,14 @@ def main():
         (tc2,  img,       'TPC case2 (full + region)'),
         (tc3,  crop_img,  'TPC case3 (is_crop + region)'),
     ]
+    # crop() demos — sub.img is exactly the pixel slice, so recon vs sub.img
+    # gives diff=0 iff crop preserves patch coordinates correctly
+    for sub, title in [
+        (qc_sub,  'QPC crop (2x2 grid)'),
+        (tc2_sub, 'TPC-case2 crop (2x2 grid)'),
+    ]:
+        if sub is not None:
+            recon_cases.append((sub, sub.img, title))
     real_recon = [
         (real_qc,     None,  'Real query (QPC)'),
         (real_roi_qc, None,  'RoI as query (QPC)'),

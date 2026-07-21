@@ -12,6 +12,7 @@ Later:
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
@@ -448,6 +449,24 @@ class PatchGrid:
             return len(self.main_patch_infos)
         return sum(self._row_scan_width(r) for r in range(self.grid_rows))
 
+    # ── Pixel ↔ grid ──────────────────────────────────────────────────────────
+
+    def pixel_to_grid(self, y: int, x: int, round_up: bool = False) -> Tuple[int, int]:
+        '''
+        Global level-N pixel (y, x) → grid tile index (r, c).
+
+        round_up=False (default, floor): 給 top-left；pixel 落在 tile (r,c) 內就算該 tile
+        round_up=True   (ceil):         給 bottom-right / size；餘數補齊一個 tile
+
+        注意: 不做 clamp — 允許回傳超出 grid 邊界的值（由 caller 處理）。
+        '''
+        ts = self.tile_size
+        dy = y - self.y_offset
+        dx = x - self.x_offset
+        if round_up:
+            return math.ceil(dy / ts), math.ceil(dx / ts)
+        return dy // ts, dx // ts
+
     # ── Iteration ─────────────────────────────────────────────────────────────
 
     def iter_main_infos(self) -> Iterator[PatchInfo]:
@@ -614,6 +633,10 @@ class PatchContainerBase(ABC):
         self.source = source
         self.grid: Optional[PatchGrid] = None
         self.patches: List[Any] = []
+        # img_origin: 目前 self.img[0,0] 在 level-N global 座標的位置
+        # QPC / TPC 未 crop 時預設 (0, 0)；TPC(is_crop=True) 或 crop() 之後會 override
+        self.img_origin_x: int = 0
+        self.img_origin_y: int = 0
 
     @property
     @abstractmethod
@@ -694,36 +717,131 @@ class PatchContainerBase(ABC):
             print('Grid         : not extracted yet')
         return self
 
-    # TODO crop_grid — 以 tile 為單位 crop，回傳同型別的新 container
-    #
-    #   目的：讓 SiftRansacLocalizer / 其他模組不需要手動算像素座標與 clamp，
-    #         crop 後的 img_origin_x/y 自動反映偏移，外部座標轉換不需另記 crop_origin。
-    #
-    #   介面（subclass 各自 override）：
-    #     def crop_grid(self, r0, c0, r1, c1, pad=0) -> '<SameType>':
-    #
-    #   三種實作方案（擇一或分層組合）：
-    #
-    #   方案A — 直接在 TissuePatchContainer 實作（主要動機）
-    #     ts    = self.grid.tile_size
-    #     r0c, c0c = max(0, r0-pad), max(0, c0-pad)
-    #     r1c, c1c = min(grid_rows, r1+pad), min(grid_cols, c1+pad)
-    #     px0 = grid.x_offset + c0c*ts;  py0 = grid.y_offset + r0c*ts
-    #     px1 = grid.x_offset + c1c*ts;  py1 = grid.y_offset + r1c*ts
-    #     new_img       = self.img[py0:py1, px0:px1].copy()
-    #     new_origin_x  = self.img_origin_x + px0
-    #     new_origin_y  = self.img_origin_y + py0
-    #     → 需新增 TPC classmethod 接受 (img, origin_x, origin_y, img_ds)
-    #     注意：QPC 無 img_origin，實作較簡單（只需 crop img + re-bind grid）。
-    #
-    #   方案B — TPC + QPC 都加，介面對稱
-    #     與方案A相同邏輯，另在 QPC 加對稱方法（QPC 無 global 座標）。
-    #     已有 patches 時應 subset 而非重新 extract，避免重複切割。
-    #
-    #   方案C — 先在 PatchGrid 抽 sub-grid 索引邏輯，container 組合使用
-    #     PatchGrid.crop_grid(r0,c0,r1,c1) → 新 PatchGrid（含 offset 更新）
-    #     TPC/QPC 用其 offset 計算 img slicing，再 re-bind。
-    #     優點：邏輯集中；缺點：多一層間接，caller 用起來差異不大。
+    def crop(self,
+             top_left:     Tuple[int, int],
+             bottom_right: Optional[Tuple[int, int]] = None,
+             size:         Optional[Tuple[int, int]] = None,
+             unit:         str = 'grid',
+             pad:          int = 0,
+             pad_unit:     Optional[str] = None,
+             ) -> PatchContainerBase:
+        '''
+        Crop a rectangular sub-region → new container of same type.
+
+        座標:
+            unit='grid':  top_left / bottom_right = (r, c)   size = (rows, cols)
+            unit='pixel': top_left / bottom_right = (x, y)   size = (w, h)      (level-N global)
+
+        `bottom_right` 和 `size` 二選一。
+
+        pad 為四邊 padding；pad_unit 預設同 unit。
+        pixel pad 換算 grid 時無條件進位（不漏 pixel）。
+
+        新 container 的 img_origin_x/y 和新 grid 的 x/y_offset 都會反映 crop 後的偏移，
+        `PatchInfo.x/y` 仍是原本 level-N global 座標，caller 不需另記 offset。
+
+        crop 前需已 extract（沿用 _require_extracted() 契約）。
+        '''
+        grid = self._require_extracted()
+        ts   = grid.tile_size
+
+        # ── Step 1: normalize to (r0, c0), (r1, c1) in grid units ─────────────
+        if (bottom_right is None) == (size is None):
+            raise ValueError('crop: provide exactly one of bottom_right or size')
+
+        if unit == 'grid':
+            r0, c0 = top_left
+            if bottom_right is not None:
+                r1, c1 = bottom_right
+            else:
+                rows, cols = size
+                r1, c1 = r0 + rows, c0 + cols
+        elif unit == 'pixel':
+            x0, y0 = top_left
+            if bottom_right is not None:
+                x1, y1 = bottom_right
+            else:
+                w, h   = size
+                x1, y1 = x0 + w, y0 + h
+            r0, c0 = grid.pixel_to_grid(y0, x0, round_up=False)
+            r1, c1 = grid.pixel_to_grid(y1, x1, round_up=True)
+        else:
+            raise ValueError(f"unit must be 'grid' or 'pixel', got {unit!r}")
+
+        # ── Step 2: padding → grid units ──────────────────────────────────────
+        pad_unit = pad_unit or unit
+        if pad_unit == 'pixel':
+            pad_g = math.ceil(pad / ts)
+        elif pad_unit == 'grid':
+            pad_g = pad
+        else:
+            raise ValueError(f"pad_unit must be 'grid' or 'pixel', got {pad_unit!r}")
+        r0 -= pad_g; c0 -= pad_g
+        r1 += pad_g; c1 += pad_g
+
+        # ── Step 3: clamp to grid bounds ──────────────────────────────────────
+        r0 = max(0, r0);              c0 = max(0, c0)
+        r1 = min(grid.grid_rows, r1); c1 = min(grid.grid_cols, c1)
+        if r0 >= r1 or c0 >= c1:
+            raise ValueError(f'crop is empty: rows [{r0}, {r1}) cols [{c0}, {c1})')
+
+        # ── Step 4: pixel bounds (global → local) ─────────────────────────────
+        px0_g = grid.x_offset + c0 * ts
+        py0_g = grid.y_offset + r0 * ts
+        px1_g = grid.x_offset + c1 * ts
+        py1_g = grid.y_offset + r1 * ts
+        lx0   = px0_g - self.img_origin_x
+        ly0   = py0_g - self.img_origin_y
+        lx1   = px1_g - self.img_origin_x
+        ly1   = py1_g - self.img_origin_y
+        new_img = self.img[ly0:ly1, lx0:lx1].copy()
+
+        # ── Step 5: new grid (keep tile_size / overlap / ds / level) ──────────
+        sample   = grid.main_patch_infos[0]
+        new_grid = PatchGrid.from_size(
+            width    = (c1 - c0) * ts,
+            height   = (r1 - r0) * ts,
+            tile_size= ts,
+            overlap  = grid.has_overlap,
+            x_offset = px0_g,
+            y_offset = py0_g,
+            ds       = sample.ds,
+            level    = sample.level,
+        )
+
+        # ── Step 6: subset patches (map new PatchInfo.x/y → old flat) ─────────
+        half        = ts // 2
+        new_patches = []
+        for new_info in new_grid.iter_infos():
+            if new_info.kind == 'main':
+                old_r = (new_info.y - grid.y_offset) // ts
+                old_c = (new_info.x - grid.x_offset) // ts
+                old_flat = grid.flat_index_for_main(old_r, old_c)
+            else:
+                old_r = (new_info.y - grid.y_offset - half) // ts
+                old_c = (new_info.x - grid.x_offset - half) // ts
+                old_flat = grid.flat_index_for_overlap(old_r, old_c)
+            new_patches.append(self.patches[old_flat])
+
+        # ── Step 7: build new container ───────────────────────────────────────
+        new = self.__class__.__new__(self.__class__)
+        PatchContainerBase.__init__(new, source=self.source)
+        new.img          = new_img
+        new.height, new.width = new_img.shape[:2]
+        new.img_origin_x = px0_g
+        new.img_origin_y = py0_g
+        self._copy_extra_after_crop(new)
+        new._bind(new_grid, new_patches)
+        return new
+
+    def _copy_extra_after_crop(self, new: PatchContainerBase) -> None:
+        '''Hook: subclasses copy their extra fields (region / ds / level …) to the crop result.
+        Base 什麼都不做。
+        '''
+
+    # TODO(A): 決定 crop 後新 container 的 is_crop / tissue_region 語義
+    #   - 新 img 已被切到 sub-bbox，是否算 is_crop=True？
+    #   - tissue_region 是否要按新 bbox 修正？（目前 _copy_extra_after_crop 只 shallow-copy 原欄位）
 
 
 class QueryPatchContainer(PatchContainerBase):
@@ -828,17 +946,20 @@ class TissuePatchContainer(PatchContainerBase):
 
         # img_origin: where self.img[0,0] is in level-N global space
         # local crop: crop starts at region position → origin = region.x / img_ds
-        # full image: image starts at (0, 0) globally → origin = 0
+        # full image: image starts at (0, 0) globally → base default (0, 0) applies
         if self.is_crop and self.tissue_region is not None:
             self.img_origin_x = int(self.tissue_region.x / self.img_ds)
             self.img_origin_y = int(self.tissue_region.y / self.img_ds)
-        else:
-            self.img_origin_x = 0
-            self.img_origin_y = 0
 
     @property
     def source_type(self) -> str:
         return 'tissue'
+
+    def _copy_extra_after_crop(self, new: PatchContainerBase) -> None:
+        new.tissue_region = self.tissue_region
+        new.img_ds        = self.img_ds
+        new.is_crop       = self.is_crop
+        new.at_level      = self.at_level
 
     @classmethod
     def from_path(cls, source: str, region: Optional[TissueRegion] = None,

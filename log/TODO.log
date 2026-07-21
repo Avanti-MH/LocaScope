@@ -22,14 +22,17 @@
   PatchingLib
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] 2026-07-21 | PatchingLib.py:697
-    crop_grid — 以 tile 為單位 crop，回傳同型別的新 container
-    目的：讓 SiftRansacLocalizer 不需要手動算像素座標與 clamp，
-          crop 後的 img_origin_x/y 自動反映偏移。
-    方案：
-      A. 直接在 TissuePatchContainer 實作（優先）
-      B. TPC + QPC 都加，介面對稱
-      C. 先在 PatchGrid 抽 sub-grid 索引邏輯，container 組合使用
+[x] 2026-07-22 | PatchingLib.py → crop() 已實作
+    原「crop_grid — 以 tile 為單位 crop」需求已由 crop() 統一介面達成
+    詳見「已完成」區 crop() 條目
+
+[ ] 2026-07-22 | PatchingLib.py — crop() TODO(A)
+    決定 crop 後新 container 的 is_crop / tissue_region 語義
+      - 新 img 已被切到 sub-bbox，是否算 is_crop=True？
+      - tissue_region 是否要按新 bbox 修正？
+      - 目前 _copy_extra_after_crop 只 shallow-copy 原欄位
+      - 影響：sub container 若再呼叫 extract_all()，
+        is_crop=False 分支會用原 tissue_region.w/h（可能超過 sub.img 尺寸 → bug）
 
 [ ] 2026-07-21 | PatchingLib.py:940
     WsiTissuesContainer.from_mpp_continuous
@@ -199,5 +202,29 @@
 [x] 2026-07-21 | 專案衛生
     .gitignore、Makefile（make clean）、8 支 SLURM job scripts
     GitHub 初始化並推送至 Avanti-MH/LocaScope
+
+[x] 2026-07-22 | PatchingLib.py — crop() 統一切子區域介面
+    以 tile / pixel 為單位切子區域，回傳同型別的新 container
+    ✓ 4 種輸入形式合一：(grid|pixel) × (bottom_right|size)，可選 pad + pad_unit
+    ✓ img_origin_x/y 提到 base，QPC / TPC 一致；PatchInfo.x/y 仍是 level-N global
+    ✓ 已保留 _require_extracted() 契約：未 extract 前呼叫 raise
+    ✓ 邊界規則：pixel 用 floor（top-left）/ ceil（bottom-right / pad），不漏 pixel
+    ⚠ TODO(A) 見上方 PatchingLib 區
+    5 個實作 edit：
+      +---+--------------------------------------+-------------------------------+
+      | # | 位置                                 | 動作                          |
+      +---+--------------------------------------+-------------------------------+
+      | 1 | 檔頭 imports                         | import math                   |
+      | 2 | PatchGrid iteration 前               | 新增 pixel_to_grid()          |
+      | 3 | PatchContainerBase.__init__          | 加 img_origin_x/y = 0 為預設  |
+      | 4 | 原 TODO block (line 697)             | 換成 crop() + hook + TODO(A)  |
+      | 5 | TissuePatchContainer                 | 簡化 img_origin；加 _copy_extra_after_crop |
+      +---+--------------------------------------+-------------------------------+
+
+[x] 2026-07-22 | test_tissue_patch_container.py — crop() 驗證
+    ✓ validate_container_crop：grid/pixel × bottom_right/size × pad + 6 種 error case
+    ✓ validate_crop_before_extract：QPC / TPC 未 extract 皆 raise RuntimeError
+    ✓ validate_tpc_crop_extra_fields：tissue_region / img_ds / is_crop / at_level shallow-copy
+    ✓ 在 recon_cases 加 QPC / TPC-case2 crop demo，重用 reconstruction diff figure 證明像素一致
 
 ================================================================================
