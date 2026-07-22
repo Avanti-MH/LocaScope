@@ -1,0 +1,91 @@
+-----------------
+loading CUDA 12.6
+-----------------
+
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/transformers/utils/generic.py:441: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/torch/nn/modules/conv.py:456: UserWarning: Plan failed with a cudnnException: CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR: cudnnFinalize Descriptor Failed cudnn_status: CUDNN_STATUS_NOT_SUPPORTED (Triggered internally at ../aten/src/ATen/native/cudnn/Conv_v8.cpp:919.)
+  return F.conv2d(input, weight, bias, self.stride,
+Device : cuda
+GPU 0  : NVIDIA H200
+
+════════════════════════════════════════════════════════════════════════
+  Part 1 — Comparison Sweep  n=40960 synthetic patches
+════════════════════════════════════════════════════════════════════════
+  [torch.compile warmup for: compile  only (fp32)]
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/torch/_inductor/compile_fx.py:124: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+  [torch.compile warmup for: ALL  fp16+flash+tome+compile]
+
+  [Flat — (config, bs) rows]
+  config                                   bs   patches/s  vs baseline    GPU MB
+────────────────────────────────────────────────────────────────────────
+  baseline  fp32                            8        74.8        1.00×      4764 ←
+  baseline  fp32                           16        80.9        1.00×      4912 ←
+  baseline  fp32                           64        95.3        1.00×      5794 ←
+  baseline  fp32                          128        97.2        1.00×      6967 ←
+  baseline  fp32                          512        97.4        1.00×     14020 ←
+  baseline  fp32                         1024        97.4        1.00×     23418 ←
+  baseline  fp32                         4096        97.1        1.00×     79820 ←
+  fp16  only                                8       354.3        4.74×      6944
+  fp16  only                               16       444.0        5.48×      7030
+  fp16  only                               64       514.1        5.39×      7599
+  fp16  only                              128       529.4        5.45×      8361
+  fp16  only                              512       538.0        5.53×     12931
+  fp16  only                             1024       533.4        5.48×     19028
+  fp16  only                             4096       526.2        5.42×     55600
+········································································
+  flash-attn  only (fp32)                   8        74.8        1.00×      4765
+  flash-attn  only (fp32)                  16        81.4        1.01×      4912
+  flash-attn  only (fp32)                  64        96.1        1.01×      5794
+  flash-attn  only (fp32)                 128        97.7        1.01×      6968
+  flash-attn  only (fp32)                 512        97.8        1.00×     14020
+  flash-attn  only (fp32)                1024        97.9        1.01×     23419
+  flash-attn  only (fp32)                4096        97.7        1.01×     79822
+········································································
+  ToMe r=8  only (fp32)                     8       178.7        2.39×      4727
+  ToMe r=8  only (fp32)                    16       212.0        2.62×      4873
+  ToMe r=8  only (fp32)                    64       248.5        2.61×      5751
+  ToMe r=8  only (fp32)                   128       262.1        2.70×      6925
+  ToMe r=8  only (fp32)                   512       272.1        2.79×     13963
+  ToMe r=8  only (fp32)                  1024       273.3        2.81×     23347
+  ToMe r=8  only (fp32)                  4096       273.6        2.82×     79646
+········································································
+  compile  only (fp32)                      8        83.0        1.11×      4552
+  compile  only (fp32)                     16        88.9        1.10×      4562
+  compile  only (fp32)                     64        98.3        1.03×      4620
+  compile  only (fp32)                    128        99.7        1.03×      4697
+  compile  only (fp32)                    512        99.4        1.02×      5163
+  compile  only (fp32)                   1024        99.4        1.02×      5782
+  compile  only (fp32)                   4096        98.5        1.01×      9500
+········································································
+  fp16 + flash                              8       350.1        4.68×     11488
+  fp16 + flash                             16       435.1        5.37×     11582
+  fp16 + flash                             64       517.6        5.43×     12152
+  fp16 + flash                            128       531.6        5.47×     12900
+  fp16 + flash                            512       540.0        5.55×     17470
+  fp16 + flash                           1024       535.7        5.50×     23565
+  fp16 + flash                           4096       526.8        5.43×     60136
+········································································
+  ALL  fp16+flash+tome+compile              8       593.6        7.94×      4550
+  ALL  fp16+flash+tome+compile             16       723.2        8.93×      4560
+  ALL  fp16+flash+tome+compile             64       842.2        8.83×      4618
+  ALL  fp16+flash+tome+compile            128       881.2        9.06×      4695
+  ALL  fp16+flash+tome+compile            512       904.8        9.29×      5160
+  ALL  fp16+flash+tome+compile           1024       913.4        9.38×      5780
+  ALL  fp16+flash+tome+compile           4096       894.6        9.21×      9498
+········································································
+────────────────────────────────────────────────────────────────────────
+
+  [Matrix — patches/s for baseline; ×speedup for others]
+  config                                   bs=8    bs=16    bs=64   bs=128   bs=512    bs=1K    bs=4K
+────────────────────────────────────────────────────────────────────────
+  baseline  fp32                             75       81       95       97       97       97       97  p/s
+  fp16  only                              4.74×    5.48×    5.39×    5.45×    5.53×    5.48×    5.42×  ×  
+  flash-attn  only (fp32)                 1.00×    1.01×    1.01×    1.01×    1.00×    1.01×    1.01×  ×  
+  ToMe r=8  only (fp32)                   2.39×    2.62×    2.61×    2.70×    2.79×    2.81×    2.82×  ×  
+  compile  only (fp32)                    1.11×    1.10×    1.03×    1.03×    1.02×    1.02×    1.01×  ×  
+  fp16 + flash                            4.68×    5.37×    5.43×    5.47×    5.55×    5.50×    5.43×  ×  
+  ALL  fp16+flash+tome+compile            7.94×    8.93×    8.83×    9.06×    9.29×    9.38×    9.21×  ×  
+────────────────────────────────────────────────────────────────────────
+Done.
