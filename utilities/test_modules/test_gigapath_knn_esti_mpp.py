@@ -21,7 +21,7 @@ import numpy as np
 import openslide
 import torch
 
-from _paths import RESULT_DIR, setup_import_paths
+from _paths import job_result_dir, setup_import_paths
 
 setup_import_paths()
 from QueryFromWSI import QueryFromWSI
@@ -208,8 +208,9 @@ def main():
     est.build_ref_features()
     print(f'  reference tiles: {len(est.ref_mpps)}')
 
+    _job_dir = job_result_dir('KnnEstiMppTest')
     plot_reference_bank(est, n_per_level=8,
-                        out=os.path.join(RESULT_DIR, 'knn_mpp__ref_bank.png'))
+                        out=os.path.join(_job_dir, 'knn_mpp__ref_bank.png'))
     print('=' * 65)
 
     # ── Test each level ───────────────────────────────────────────────────────
@@ -247,7 +248,7 @@ def main():
         print(f'  patch votes: {votes}')
 
         plot_knn_debug(est, gt_mpp, n_patches=8,
-                       out=os.path.join(RESULT_DIR, f'knn_mpp__debug_lv{lv}.png'))
+                       out=os.path.join(_job_dir, f'knn_mpp__debug_lv{lv}.png'))
 
     if not gt_list:
         sys.exit('Error: no valid test cases.')
@@ -258,7 +259,6 @@ def main():
     print(f'  max  error : {np.max(knn_errors):.1f}%')
 
     # ── Plot ──────────────────────────────────────────────────────────────────
-    os.makedirs(RESULT_DIR, exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
     ax = axes[0]
@@ -281,7 +281,7 @@ def main():
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    out = os.path.join(RESULT_DIR, 'knn_mpp__accuracy.png')
+    out = os.path.join(_job_dir, 'knn_mpp__accuracy.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f'\nSaved {out}')

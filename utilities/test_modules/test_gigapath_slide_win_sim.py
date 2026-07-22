@@ -24,7 +24,7 @@ import numpy as np
 import openslide
 
 import torch
-from _paths import RESULT_DIR, setup_import_paths
+from _paths import job_result_dir, setup_import_paths
 setup_import_paths()
 
 from PatchingLib import QueryPatchContainer
@@ -461,7 +461,8 @@ def main():
     wsi.close()
 
     tag = f"{'ov' if args.overlap else 'nov'}_{'flt' if args.filter else 'noflt'}"
-    out = args.out or os.path.join(RESULT_DIR, f'slide_win_sim__{tag}.png')
+    out = args.out or os.path.join(job_result_dir('SlideWinTest'),
+                                    f'slide_win_sim__{tag}.png')
     draw_figure(
         thumb, mask, query_np, query_qpc,
         sim_maps, ds_est, args.tile,

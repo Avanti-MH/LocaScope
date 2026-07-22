@@ -26,7 +26,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from _paths import RESULT_DIR, setup_import_paths
+from _paths import job_result_dir, setup_import_paths
 
 setup_import_paths()
 from PatchingLib import PatchGrid, PatchInfo, TissuePatchContainer
@@ -234,7 +234,8 @@ def main():
 
     fig.tight_layout()
 
-    out = args.out or os.path.join(RESULT_DIR, 'patch_info__coords.png')
+    out = args.out or os.path.join(job_result_dir('PatchInfoCoordsTest'),
+                                    'patch_info__coords.png')
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
     plt.close(fig)

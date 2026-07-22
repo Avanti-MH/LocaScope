@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from PIL import Image as PILImage
 
-from _paths import RESULT_DIR, setup_import_paths
+from _paths import job_result_dir, setup_import_paths
 setup_import_paths()
 
 from PatchingLib import QueryPatchContainer, TissuePatchContainer
@@ -951,7 +951,8 @@ def main():
             ax.axis('off')
     fig.tight_layout()
 
-    out = args.out or os.path.join(RESULT_DIR, 'patch_container__grid.png')
+    out = args.out or os.path.join(job_result_dir('TissuePatchContainerTest'),
+                                    'patch_container__grid.png')
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)

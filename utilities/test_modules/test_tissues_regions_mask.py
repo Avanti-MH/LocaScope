@@ -30,7 +30,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from _paths import RESULT_DIR, setup_import_paths
+from _paths import job_result_dir, setup_import_paths
 setup_import_paths()
 
 from TissuesRegionsMask import TissueRegion, TissuesRegionsMask
@@ -501,7 +501,8 @@ def main():
             draw_mask_with_regions(ax_all[1 + ro, c], trm, label, show_index=si, linewidth=lw)
 
     fig.tight_layout()
-    out = args.out or os.path.join(RESULT_DIR, 'tissue_mask__regions.png')
+    out = args.out or os.path.join(job_result_dir('TissueMaskTest'),
+                                    'tissue_mask__regions.png')
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out, dpi=600, bbox_inches='tight')
     plt.close(fig)

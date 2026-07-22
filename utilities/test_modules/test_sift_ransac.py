@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from _paths import RESULT_DIR, setup_import_paths
+from _paths import job_result_dir, setup_import_paths
 setup_import_paths()
 
 from PatchingLib import QueryPatchContainer
@@ -489,7 +489,8 @@ def main():
     )
 
     tag = f"{'ov' if args.overlap else 'nov'}_{'flt' if args.filter else 'noflt'}"
-    out = args.out or os.path.join(RESULT_DIR, f'sift_ransac__{tag}.png')
+    out = args.out or os.path.join(job_result_dir('SiftRansacTest'),
+                                    f'sift_ransac__{tag}.png')
 
     draw_figure(
         thumb=thumb, mask=mask,
