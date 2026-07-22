@@ -8,18 +8,7 @@
   TissuesRegionsMask
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] 2026-07-22 | utilities/TissuesRegionsMask.py
-    merge_regions — 自動合併「有相交但不完全重疊」的兩個 tissue regions
-    使用場景：兩塊相鄰組織的 bbox 有部分交集，但形狀上其實是同一塊
-    合併準則（partial overlap only）：
-      對每一對 (A, B) tissue region，只有下列條件同時成立才合併：
-        1. bbox intersect area > 0
-        2. NOT (A.bbox contains B.bbox)   ← 排除 B 完全被 A 包住
-        3. NOT (B.bbox contains A.bbox)   ← 排除 A 完全被 B 包住
-      → IoU=1（identical）或包含關係都跳過，避免誤合併雜訊 / 巢狀孔洞
-    介面：
-      merge_overlapping() — 掃過所有 pair，用 union-find 傳遞合併（A∩B、B∩C 都合 → A/B/C 一組）
-      合併後 bbox = union bbox；tissue_regions in place 更新（與 filter_regions 一致）
+  （目前無 pending — 見已完成區 merge_overlapping / regions history entry）
 
 ────────────────────────────────────────────────────────────────────────────────
   PatchingLib
@@ -416,6 +405,26 @@
          而不是 encode -> 焦點轉 extract 那條 TODO
 
     副產物保留：log/tmp/embeddings.pt 可反覆做進階 rank stability 分析
+
+[x] 2026-07-23 | TissuesRegionsMask.py — merge_overlapping + regions history
+    merge_overlapping():
+      - 對 tissue_regions 兩兩檢查 partial overlap（bbox 相交 > 0 且雙向不
+        包含），用 union-find 傳遞合併鏈式重疊（A∩B、B∩C -> A/B/C 一組）
+      - 合併後 bbox = union bbox；index 重排 0..N-1
+      - Identical / 包含關係都跳過（避免誤合併雜訊 / 巢狀孔洞）
+    Undo/Resume 機制（同一個 commit）：
+      - _snapshot(): 每個 mutation 前 deep-copy 當前 tissue_regions 到 stack
+      - regions_undo(): pop 上次 snapshot (LIFO)
+      - regions_resume(): 重跑 _search_tissue_regions 回到 pristine，清 stack
+      - filter_regions / filter_patchable / merge_overlapping 三個 mutation
+        method 都會呼叫 _snapshot()
+    驗證：
+      - validate_merge_overlapping (synthetic)：4-region 情境確認 A-B-C 鏈式
+        合併 + 完全被包含的 E-in-B 不動 + isolated D 不動 + index 重排
+      - TileSampler._sample_level 用 filter->merge->patchable + finally undo
+        pattern，跨 level 不污染 mask
+      - TissueMaskTest --ops 圖示 baseline / filter / merge / patchable /
+        pipeline [1]->[2]->[3] 5 個 panel
 
 [x] 2026-07-22 | 加速技術驗證與決策（BenchMarkV2 gating）
     對 ★/★★ 級每項優化，透過 bench 決定是否進 production：
