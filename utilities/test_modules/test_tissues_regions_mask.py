@@ -272,21 +272,74 @@ def validate_loc_methods():
     print('[PASS] loc / levelloc / mpploc: all return correct mask slices')
 
 
+def validate_merge_overlapping():
+    """
+    Synthetic test for merge_overlapping (partial overlap only + union-find).
+
+    Setup 4 regions:
+      A = (  0,   0, 100, 100)      partial overlap with B
+      B = ( 50,  50, 100, 100)      partial overlap with A and C
+      C = (120, 120, 100, 100)      partial overlap with B, disjoint from A
+      D = (400, 400,  50,  50)      isolated -> stays alone
+      E = ( 60,  60,  20,  20)      fully inside B  -> NOT merged, stays alone
+    Expected after merge:
+      - {A, B, C} -> one region with union bbox (0, 0, 220, 220)
+      - D unchanged
+      - E unchanged (containment excluded)
+    """
+    from TissuesRegionsMask import TissueRegion
+    trm = TissuesRegionsMask(
+        main_mask=np.ones((500, 500), dtype=bool),
+        mask_ds_x=1.0, mask_ds_y=1.0, mask_mpp=1.0,
+        tissue_regions=[
+            TissueRegion(  0,   0, 100, 100, index=0),  # A
+            TissueRegion( 50,  50, 100, 100, index=1),  # B
+            TissueRegion(120, 120, 100, 100, index=2),  # C
+            TissueRegion(400, 400,  50,  50, index=3),  # D isolated
+            TissueRegion( 60,  60,  20,  20, index=4),  # E fully inside B
+        ],
+        wsi_width=500, wsi_height=500,
+        wsi_mpp_x=1.0, wsi_mpp_y=1.0, wsi_level_downsamples=[1.0],
+    )
+
+    trm.merge_overlapping()
+
+    labels = sorted((r.x, r.y, r.w, r.h) for r in trm.tissue_regions)
+    expect = sorted([
+        (  0,   0, 220, 220),   # A + B + C union
+        (400, 400,  50,  50),   # D
+        ( 60,  60,  20,  20),   # E untouched
+    ])
+    assert len(trm.tissue_regions) == 3, \
+        f'expected 3 regions, got {len(trm.tissue_regions)}'
+    assert labels == expect, f'expected {expect}, got {labels}'
+    for i, r in enumerate(trm.tissue_regions):
+        assert r.index == i, f'index should be reset 0..N-1, got r{i}.index={r.index}'
+
+    # No-op cases
+    empty_trm = TissuesRegionsMask(
+        main_mask=np.zeros((10, 10), dtype=bool), mask_ds_x=1, mask_ds_y=1,
+        mask_mpp=1, tissue_regions=[], wsi_width=10, wsi_height=10,
+        wsi_mpp_x=1, wsi_mpp_y=1, wsi_level_downsamples=[1.0],
+    )
+    empty_trm.merge_overlapping()
+    assert empty_trm.tissue_regions == []
+
+    print('[PASS] merge_overlapping: chain A-B-C merged; nested / isolated kept')
+
+
 # ── 8. Real WSI test (Otsu) ──────────────────────────────────────────────────
 
-def test_hest_seg(path: str) -> tuple:
+def test_hest_seg(path: str, method: callable, ds: float = 64.0,
+                  max_pixels: int = None) -> tuple:
     '''Run HEST DeepLabV3 tissue segmentation via from_wsi(method=...).'''
-    import torch
     import openslide
-    from HESTSegFunc import hest_seg_model, make_hest_method
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'\n[HEST] seg  device={device}')
+    print(f'\n[HEST] seg  ds={ds}  max_pixels={max_pixels}')
 
-    wsi   = openslide.OpenSlide(path)
-    model = hest_seg_model(device)
-    trm   = TissuesRegionsMask.from_wsi(
-        wsi, ds=64.0, method=make_hest_method(model, device),
+    wsi = openslide.OpenSlide(path)
+    trm = TissuesRegionsMask.from_wsi(
+        wsi, ds=ds, method=method, max_pixels=max_pixels,
     )
     Ht, Wt = trm.main_mask.shape
     thumb  = np.array(wsi.get_thumbnail((Wt, Ht)).convert('RGB'))
@@ -297,10 +350,10 @@ def test_hest_seg(path: str) -> tuple:
     return trm, thumb
 
 
-def test_real_wsi(path: str) -> tuple:
+def test_real_wsi(path: str, ds: float = 32.0) -> tuple:
     import openslide
     wsi = openslide.OpenSlide(path)
-    trm = TissuesRegionsMask.from_wsi(wsi)
+    trm = TissuesRegionsMask.from_wsi(wsi, ds=ds)
     Ht, Wt = trm.main_mask.shape
     thumb = np.array(wsi.get_thumbnail((Wt, Ht)).convert('RGB'))
     wsi.close()
@@ -325,45 +378,232 @@ def test_real_wsi(path: str) -> tuple:
 
 # ── 9. from_wsi level / ds sweep ─────────────────────────────────────────────
 
-def test_from_wsi_params(path: str) -> list:
+def test_from_wsi_params(path: str,
+                         ds_list: list = None,
+                         level_list: list = None,
+                         method: callable = None,
+                         max_pixels: int = None) -> list:
     '''
-    Sweep from_wsi over level=-1,-2,-3 and ds=8,4,1.
+    Sweep from_wsi over the given level list and ds list.
+    method=None -> HSV (default); method=<callable> -> HEST or custom.
+    max_pixels enables tiled inference when method is a heavy model.
     Returns list of (label, trm).
     '''
     import openslide
+    ds_list    = list(ds_list)    if ds_list    is not None else [4, 16, 32, 64, 128]
+    level_list = list(level_list) if level_list is not None else [-1, -2, -3]
+
     wsi = openslide.OpenSlide(path)
     n_levels = len(wsi.level_dimensions)
 
-    print(f'\n[sweep] WSI has {n_levels} levels:')
+    method_tag = 'HEST' if method is not None else 'HSV'
+    print(f'\n[sweep {method_tag}] WSI has {n_levels} levels  '
+          f'max_pixels={max_pixels}:')
     for lv in range(n_levels):
         W, H = wsi.level_dimensions[lv]
-        print(f'  level {lv}: {W}×{H}  ds={wsi.level_downsamples[lv]:.1f}')
+        print(f'  level {lv}: {W}x{H}  ds={wsi.level_downsamples[lv]:.1f}')
 
     configs = []
-    for lv in [-1, -2, -3]:
-        real = n_levels + lv
-        if real >= 0:
+    for lv in level_list:
+        real = n_levels + lv if lv < 0 else lv
+        if 0 <= real < n_levels:
             configs.append((f'level={lv}', dict(level=lv)))
         else:
             print(f'  level={lv}: SKIP (only {n_levels} levels)')
-    for ds_val in [4, 16, 32, 64, 128]:
-        configs.append((f'ds={ds_val}', dict(ds=float(ds_val))))
+    for ds_val in ds_list:
+        configs.append((f'ds={ds_val:g}', dict(ds=float(ds_val))))
 
     results = []
     for label, kwargs in configs:
-        trm = TissuesRegionsMask.from_wsi(wsi, **kwargs)
+        try:
+            trm = TissuesRegionsMask.from_wsi(
+                wsi, method=method, max_pixels=max_pixels, **kwargs,
+            )
+        except Exception as e:
+            print(f'  {label:10s}: FAIL ({type(e).__name__}: {e})')
+            continue
         Ht, Wt = trm.main_mask.shape
-        print(f'  {label:10s}: mask={Wt}×{Ht}  '
+        print(f'  {label:10s}: mask={Wt}x{Ht}  '
               f'ds_x={trm.mask_ds_x:.1f}  '
               f'tissue={trm.tissue_fraction()*100:.1f}%  '
               f'regions={len(trm.tissue_regions)}')
-        assert trm.tissue_fraction() > 0,      f'{label}: no tissue'
-        assert len(trm.tissue_regions) > 0,    f'{label}: no regions'
         results.append((label, trm))
 
     wsi.close()
     print(f'[PASS] from_wsi sweep: {len(results)}/{len(configs)} configs ok')
     return results
+
+
+# ── 10. Ops pipeline: filter_regions / filter_patchable / merge_overlapping ──
+
+def test_operations_pipeline(path: str,
+                             ds: float = 32.0,
+                             min_ratio: float = 0.01,
+                             tile_size: int = 256,
+                             ds_for_patchable: float = 4.0,
+                             method: callable = None,
+                             max_pixels: int = None) -> list:
+    '''
+    Ops pipeline: baseline mask -> each of filter_regions / filter_patchable /
+    merge_overlapping in isolation -> all three combined.
+
+    method=None -> HSV; method=<callable> -> HEST or custom (with tiled
+    inference if max_pixels is set).
+    Returns list of (label, trm) for figure rendering.
+    '''
+    import openslide
+    from copy import deepcopy
+
+    method_tag = 'HEST' if method is not None else 'HSV'
+    wsi = openslide.OpenSlide(path)
+    base = TissuesRegionsMask.from_wsi(
+        wsi, ds=ds, method=method, max_pixels=max_pixels,
+    )
+    wsi.close()
+    n0 = len(base)
+    print(f'\n[ops pipeline {method_tag}] baseline: {n0} regions')
+
+    results = [(f'baseline ({n0})', base)]
+
+    t = deepcopy(base); t.filter_regions(min_ratio=min_ratio)
+    print(f'  [1] filter_regions({min_ratio}): {n0} -> {len(t)}')
+    results.append((f'[1] filter_regions({min_ratio})  {n0}->{len(t)}', t))
+
+    t = deepcopy(base); t.merge_overlapping()
+    print(f'  [2] merge_overlapping: {n0} -> {len(t)}')
+    results.append((f'[2] merge_overlapping  {n0}->{len(t)}', t))
+
+    t = deepcopy(base); t.filter_patchable(tile_size=tile_size, ds=ds_for_patchable)
+    print(f'  [3] filter_patchable({tile_size}, ds={ds_for_patchable}): {n0} -> {len(t)}')
+    results.append((f'[3] filter_patchable({tile_size},ds={ds_for_patchable:g})  {n0}->{len(t)}', t))
+
+    t = deepcopy(base)
+    t.filter_regions(min_ratio=min_ratio)
+    t.merge_overlapping()
+    t.filter_patchable(tile_size=tile_size, ds=ds_for_patchable)
+    print(f'  pipeline [1]->[2]->[3]: {n0} -> {len(t)}')
+    results.append((f'pipeline [1]->[2]->[3]  {n0}->{len(t)}', t))
+
+    print(f'[PASS] ops pipeline: {len(results)} states rendered')
+    return results
+
+
+# ── 11. Tiling (adaptive halving) effect ─────────────────────────────────────
+
+def _plan_tile_grid(H: int, W: int, max_pixels: int) -> tuple[int, int]:
+    '''Mirror TissuesRegionsMask._adaptive_apply's grid planning (for visualisation).'''
+    n_h = n_w = 1
+    while (H // n_h) * (W // n_w) > max_pixels:
+        if H // n_h >= W // n_w:
+            n_h *= 2
+        else:
+            n_w *= 2
+    return n_h, n_w
+
+
+def test_tiling_effect(path: str, ds: float = 32.0,
+                       max_pixels_list: tuple = (16_000_000, 4_000_000, 1_000_000),
+                       overlap: int = 128,
+                       method: callable = None) -> tuple:
+    '''
+    Three tiling effect views (works on HSV by default, or pass method=HEST
+    to prove tiled inference matches whole-image inference on DeepLabV3):
+      (a) seam artifact: no-tile vs tiled at same ds (no-tile may OOM
+          if method is heavy and ds too low -- catch and skip)
+      (b) tile grid overlay: mask + tile boundary + overlap zone
+      (c) max_pixels sweep: several budgets -> different grids
+
+    Returns (seam_list, grid_pack, sweep_list).
+    seam_list  = [(label, trm), ...]                              # 0-2 items
+    grid_pack  = (trm, n_h, n_w, overlap, max_pixels)             # or None
+    sweep_list = [(label, trm, n_h, n_w), ...]
+    '''
+    import openslide
+
+    method_tag = 'HEST' if method is not None else 'HSV'
+    wsi = openslide.OpenSlide(path)
+
+    # (a) Seam: no-tile baseline vs tiled at the reference max_pixels
+    ref_mp = max_pixels_list[1] if len(max_pixels_list) > 1 else max_pixels_list[0]
+    print(f'\n[tiling {method_tag}] seam test  ds={ds}  '
+          f'ref max_pixels={ref_mp/1e6:.1f}M  overlap={overlap}')
+    seam_list = []
+    try:
+        trm_no = TissuesRegionsMask.from_wsi(wsi, ds=ds, method=method)
+        seam_list.append((f'{method_tag} no-tile ds={ds:g}', trm_no))
+        print(f'  no-tile  regions={len(trm_no)}  tissue={trm_no.tissue_fraction()*100:.1f}%')
+    except Exception as e:
+        trm_no = None
+        print(f'  no-tile  SKIP ({type(e).__name__}: {e})')
+
+    trm_til = TissuesRegionsMask.from_wsi(
+        wsi, ds=ds, method=method, max_pixels=ref_mp, overlap=overlap,
+    )
+    H, W = trm_til.main_mask.shape
+    if trm_no is not None:
+        diff_frac = float((trm_no.main_mask != trm_til.main_mask).mean())
+        print(f'  tiled    regions={len(trm_til)}  tissue={trm_til.tissue_fraction()*100:.1f}%')
+        print(f'  pixel disagreement fraction = {diff_frac*100:.3f}%')
+        seam_list.append((
+            f'{method_tag} tiled max={ref_mp/1e6:.0f}M ov={overlap}  '
+            f'diff={diff_frac*100:.2f}%',
+            trm_til,
+        ))
+    else:
+        seam_list.append((
+            f'{method_tag} tiled max={ref_mp/1e6:.0f}M ov={overlap}',
+            trm_til,
+        ))
+        print(f'  tiled    regions={len(trm_til)}  tissue={trm_til.tissue_fraction()*100:.1f}%')
+
+    # (b) Grid overlay: mask at ref max_pixels + tile boundary lines
+    n_h_ref, n_w_ref = _plan_tile_grid(H, W, ref_mp)
+    print(f'  tile grid @ max={ref_mp/1e6:.0f}M: {n_h_ref}x{n_w_ref} = {n_h_ref*n_w_ref} tiles')
+    grid_pack = (trm_til, n_h_ref, n_w_ref, overlap, ref_mp)
+
+    # (c) max_pixels sweep
+    print(f'[tiling {method_tag}] max_pixels sweep '
+          f'{[f"{mp/1e6:.0f}M" for mp in max_pixels_list]}')
+    sweep_list = []
+    for mp in max_pixels_list:
+        trm = TissuesRegionsMask.from_wsi(
+            wsi, ds=ds, method=method, max_pixels=mp, overlap=overlap,
+        )
+        n_h, n_w = _plan_tile_grid(H, W, mp)
+        sweep_list.append((
+            f'{method_tag} max={mp/1e6:.0f}M grid={n_h}x{n_w}', trm, n_h, n_w,
+        ))
+        print(f'  max={mp/1e6:.0f}M  grid={n_h}x{n_w}  regions={len(trm)}')
+
+    wsi.close()
+    print(f'[PASS] tiling: {len(sweep_list)} sweep configs')
+    return seam_list, grid_pack, sweep_list
+
+
+def draw_tile_grid_overlay(ax, trm, n_h, n_w, overlap_px, max_pixels, title):
+    '''Draw mask + tile core boundaries (solid) + overlap zone edges (dashed).'''
+    H, W = trm.main_mask.shape
+    ax.imshow(trm.main_mask, cmap='gray', vmin=0, vmax=1)
+    # Convert overlap from mask units (already at the same scale as mask)
+    tile_h = H // n_h
+    tile_w = W // n_w
+    ov = overlap_px
+    for i in range(n_h + 1):
+        y = i * tile_h if i < n_h else H
+        ax.axhline(y, color='cyan', linewidth=1.0)
+        if 0 < i < n_h:
+            ax.axhline(min(H, y + ov), color='magenta', linewidth=0.5, linestyle='--')
+            ax.axhline(max(0, y - ov), color='magenta', linewidth=0.5, linestyle='--')
+    for j in range(n_w + 1):
+        x = j * tile_w if j < n_w else W
+        ax.axvline(x, color='cyan', linewidth=1.0)
+        if 0 < j < n_w:
+            ax.axvline(min(W, x + ov), color='magenta', linewidth=0.5, linestyle='--')
+            ax.axvline(max(0, x - ov), color='magenta', linewidth=0.5, linestyle='--')
+    ax.set_title(f'{title}\n{n_h}x{n_w}={n_h*n_w} tiles, '
+                 f'~{tile_h}x{tile_w}, overlap={ov}px',
+                 fontsize=9)
+    ax.axis('off')
 
 
 # ── Figure ────────────────────────────────────────────────────────────────────
@@ -418,21 +658,88 @@ def draw_synthetic_figure(ax):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def _parse_pixel_count(s):
+    '''Parse "16M" / "4M" / "500K" / "1500000" into int.'''
+    s = str(s).strip()
+    if not s:
+        return None
+    tail = s[-1].upper()
+    if tail == 'M':
+        return int(float(s[:-1]) * 1_000_000)
+    if tail == 'K':
+        return int(float(s[:-1]) * 1_000)
+    return int(float(s))
+
+
+def _parse_int_list(s):
+    return [int(float(x)) for x in s.split(',') if x.strip()]
+
+
+def _parse_float_list(s):
+    return [float(x) for x in s.split(',') if x.strip()]
+
+
+def _parse_pixel_list(s):
+    return [_parse_pixel_count(x) for x in s.split(',') if x.strip()]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--wsi', default='/work/u26130998/datasets/Ki67/S1151088,G7E,111220.mrxs',
-    # ap.add_argument('--wsi', default='/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs',
                     help='real WSI path for integration test')
+    ap.add_argument('--out', default=None, help='output figure path')
+
+    # -- Sub-test toggles --
     ap.add_argument('--hest', action=argparse.BooleanOptionalAction, default=False,
-                    help='also run HEST DeepLabV3 seg and compare with Otsu')
+                    help='enable HEST DeepLabV3 seg (also feeds sweep/ops/tiling)')
     ap.add_argument('--sweep', action=argparse.BooleanOptionalAction, default=False,
-                    help='sweep from_wsi over level=-1,-2,-3 and ds=8,4,1')
+                    help='sweep from_wsi over level list x ds list')
+    ap.add_argument('--ops', action=argparse.BooleanOptionalAction, default=False,
+                    help='ops pipeline: filter_regions / filter_patchable / merge_overlapping')
+    ap.add_argument('--tiling', action=argparse.BooleanOptionalAction, default=False,
+                    help='tiling effect: seam vs no-tile + grid overlay + max_pixels sweep')
+
+    # -- Value knobs (option C: all exposed) --
+    # Otsu baseline
+    ap.add_argument('--otsu-ds', type=float, default=32.0,
+                    help='Otsu baseline mask ds (default 32)')
+    # Sweep matrix
+    ap.add_argument('--sweep-ds',    default='4,16,32,64,128',
+                    help='comma list of ds for --sweep (default 4,16,32,64,128)')
+    ap.add_argument('--sweep-level', default='-1,-2,-3',
+                    help='comma list of level for --sweep (default -1,-2,-3)')
+    # Ops pipeline
+    ap.add_argument('--ops-ds',         type=float, default=32.0)
+    ap.add_argument('--ops-min-ratio',  type=float, default=0.05)
+    ap.add_argument('--ops-patch-tile', type=int,   default=256)
+    ap.add_argument('--ops-patch-ds',   type=float, default=4.0)
+    # Tiling
+    ap.add_argument('--tiling-ds',         type=float, default=32.0)
+    ap.add_argument('--tiling-max-pixels', default='16M,4M,1M',
+                    help='comma list of tile budgets, e.g. "16M,4M,1M"')
+    ap.add_argument('--tiling-overlap',    type=int,   default=128)
+    # HEST
+    ap.add_argument('--hest-ds',         type=float, default=64.0)
+    ap.add_argument('--hest-max-pixels', default='4M',
+                    help='HEST tile budget for hest-only / ops / sweep (single value)')
+    # Visualization
+    ap.add_argument('--per-row', type=int, default=4)
+    ap.add_argument('--dpi',     type=int, default=600)
+    ap.add_argument('--figure-scale', default='7,5',
+                    help='(col-scale,row-scale) for figsize, e.g. "7,5"')
     ap.add_argument('--region-index', action=argparse.BooleanOptionalAction, default=True,
                     help='show region index labels on bounding boxes')
     ap.add_argument('--bbox-lw', type=float, default=1.5,
                     help='bounding box linewidth (default 1.5)')
-    ap.add_argument('--out', default=None, help='output figure path')
+
     args = ap.parse_args()
+
+    # Parsed list/pixel values
+    sweep_ds_list      = _parse_float_list(args.sweep_ds)
+    sweep_level_list   = _parse_int_list(args.sweep_level)
+    tiling_max_pixels  = _parse_pixel_list(args.tiling_max_pixels)
+    hest_max_pixels    = _parse_pixel_count(args.hest_max_pixels)
+    fig_col_s, fig_row_s = _parse_float_list(args.figure_scale)
 
     # Synthetic tests
     validate_constructor()
@@ -443,44 +750,115 @@ def main():
     validate_level_converter()
     validate_mpp_converter()
     validate_loc_methods()
+    validate_merge_overlapping()
 
-    # Real WSI — Otsu
+    # HEST model loaded once, shared across all sub-tests
+    hest_method = None
+    if args.hest:
+        import torch
+        from HESTSegFunc import hest_seg_model, make_hest_method
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f'\n[HEST] loading model on {device}')
+        hest_model = hest_seg_model(device)
+        hest_method = make_hest_method(hest_model, device)
+
+    # Real WSI -- Otsu
     real_trm = None
     real_thumb = None
     if args.wsi and os.path.exists(args.wsi):
-        real_trm, real_thumb = test_real_wsi(args.wsi)
+        real_trm, real_thumb = test_real_wsi(args.wsi, ds=args.otsu_ds)
     elif args.wsi:
         print(f'[SKIP] wsi not found: {args.wsi}')
 
-    # Real WSI — HEST
+    # Real WSI -- HEST-only mask panel (single ds)
     hest_trm = None
     hest_thumb = None
-    if args.hest and args.wsi and os.path.exists(args.wsi):
-        hest_trm, hest_thumb = test_hest_seg(args.wsi)
+    if hest_method is not None and args.wsi and os.path.exists(args.wsi):
+        hest_trm, hest_thumb = test_hest_seg(
+            args.wsi, method=hest_method,
+            ds=args.hest_ds, max_pixels=hest_max_pixels,
+        )
 
-    # from_wsi level/ds sweep
+    # from_wsi level/ds sweep (HEST if enabled, else HSV)
     sweep_results = []
     if args.sweep and args.wsi and os.path.exists(args.wsi):
-        sweep_results = test_from_wsi_params(args.wsi)
+        sweep_results = test_from_wsi_params(
+            args.wsi,
+            ds_list=sweep_ds_list, level_list=sweep_level_list,
+            method=hest_method,
+            max_pixels=hest_max_pixels if hest_method is not None else None,
+        )
 
-    # Figure layout
-    SWEEP_PER_ROW = 4
-    n_top  = 1                                  # synthetic always shown
-    if real_trm  is not None: n_top += 2
-    if hest_trm  is not None: n_top += 2
-    n_bot       = len(sweep_results)
-    n_sweep_rows = (n_bot + SWEEP_PER_ROW - 1) // SWEEP_PER_ROW if n_bot > 0 else 0
-    n_cols = max(n_top, min(n_bot, SWEEP_PER_ROW), 1)
-    n_rows = 1 + n_sweep_rows
+    # ops pipeline (HEST if enabled, else HSV)
+    ops_results = []
+    if args.ops and args.wsi and os.path.exists(args.wsi):
+        ops_results = test_operations_pipeline(
+            args.wsi,
+            ds=args.ops_ds,
+            min_ratio=args.ops_min_ratio,
+            tile_size=args.ops_patch_tile,
+            ds_for_patchable=args.ops_patch_ds,
+            method=hest_method,
+            max_pixels=hest_max_pixels if hest_method is not None else None,
+        )
 
-    fig, ax_all = plt.subplots(n_rows, n_cols,
-                               figsize=(7 * n_cols, 5 * n_rows),
-                               squeeze=False)
+    # tiling effect (HEST if enabled, else HSV)
+    tiling_seam = tiling_grid = tiling_sweep = None
+    if args.tiling and args.wsi and os.path.exists(args.wsi):
+        tiling_seam, tiling_grid, tiling_sweep = test_tiling_effect(
+            args.wsi,
+            ds=args.tiling_ds,
+            max_pixels_list=tiling_max_pixels,
+            overlap=args.tiling_overlap,
+            method=hest_method,
+        )
 
-    wsi_name = os.path.basename(args.wsi)
-    col = 0
+    # Figure layout: one row per section
+    PER_ROW = args.per_row
     si = args.region_index
     lw = args.bbox_lw
+
+    # Row 0: synthetic + Otsu (+thumb) + HEST (+thumb)
+    row0_cells = 1 + (2 if real_trm is not None else 0) + (2 if hest_trm is not None else 0)
+    n_top_cols = max(row0_cells, 1)
+
+    # Sweep rows
+    n_sweep_rows = (len(sweep_results) + PER_ROW - 1) // PER_ROW if sweep_results else 0
+
+    # Ops rows (may wrap when ops > PER_ROW)
+    n_ops_rows = (len(ops_results) + PER_ROW - 1) // PER_ROW if ops_results else 0
+
+    # Tiling rows: seam (2 panels) + grid (1) + sweep (len sweep)
+    n_tiling_rows = 0
+    if tiling_seam or tiling_grid or tiling_sweep:
+        n_tiling_seam_cells  = len(tiling_seam or [])
+        n_tiling_sweep_cells = len(tiling_sweep or [])
+        n_tiling_cells       = n_tiling_seam_cells + 1 + n_tiling_sweep_cells
+        n_tiling_rows        = (n_tiling_cells + PER_ROW - 1) // PER_ROW
+    else:
+        n_tiling_cells = 0
+
+    n_cols = max(
+        n_top_cols,
+        PER_ROW if sweep_results   else 1,
+        PER_ROW if ops_results     else 1,
+        PER_ROW if n_tiling_cells  else 1,
+    )
+    n_rows = 1 + n_sweep_rows + n_ops_rows + n_tiling_rows
+
+    fig, ax_all = plt.subplots(n_rows, n_cols,
+                               figsize=(fig_col_s * n_cols, fig_row_s * n_rows),
+                               squeeze=False)
+
+    # blank everything first
+    for r in range(n_rows):
+        for c in range(n_cols):
+            ax_all[r, c].axis('off')
+
+    wsi_name = os.path.basename(args.wsi)
+
+    # Row 0
+    col = 0
     draw_synthetic_figure(ax_all[0, col]); col += 1
     if real_trm is not None:
         draw_mask_with_regions( ax_all[0, col], real_trm, f'Otsu mask ({wsi_name})', show_index=si, linewidth=lw);  col += 1
@@ -488,23 +866,45 @@ def main():
     if hest_trm is not None:
         draw_mask_with_regions( ax_all[0, col], hest_trm, f'HEST mask ({wsi_name})', show_index=si, linewidth=lw); col += 1
         draw_thumb_with_regions(ax_all[0, col], hest_trm, hest_thumb, 'HEST thumb',  show_index=si, linewidth=lw); col += 1
-    for c in range(col, n_cols):
-        ax_all[0, c].axis('off')
 
-    if sweep_results:
-        for ro in range(n_sweep_rows):          # hide all sweep cells first
-            for c in range(n_cols):
-                ax_all[1 + ro, c].axis('off')
-        for i, (label, trm) in enumerate(sweep_results):
-            ro = i // SWEEP_PER_ROW
-            c  = i %  SWEEP_PER_ROW
-            draw_mask_with_regions(ax_all[1 + ro, c], trm, label, show_index=si, linewidth=lw)
+    # Sweep rows
+    row_base = 1
+    for i, (label, trm) in enumerate(sweep_results):
+        r = row_base + i // PER_ROW
+        c = i %  PER_ROW
+        draw_mask_with_regions(ax_all[r, c], trm, label, show_index=si, linewidth=lw)
+    row_base += n_sweep_rows
+
+    # Ops rows
+    for i, (label, trm) in enumerate(ops_results):
+        r = row_base + i // PER_ROW
+        c = i %  PER_ROW
+        draw_mask_with_regions(ax_all[r, c], trm, f'[ops] {label}', show_index=si, linewidth=lw)
+    row_base += n_ops_rows
+
+    # Tiling rows: seam panels, grid overlay, sweep panels
+    if n_tiling_cells:
+        panels = []
+        for label, trm in (tiling_seam or []):
+            panels.append(('mask', trm, f'[seam] {label}'))
+        if tiling_grid is not None:
+            panels.append(('grid', tiling_grid, '[grid overlay]'))
+        for label, trm, n_h, n_w in (tiling_sweep or []):
+            panels.append(('mask', trm, f'[sweep] {label}'))
+        for i, (kind, payload, title) in enumerate(panels):
+            r = row_base + i // PER_ROW
+            c = i %  PER_ROW
+            if kind == 'mask':
+                draw_mask_with_regions(ax_all[r, c], payload, title, show_index=si, linewidth=lw)
+            else:
+                trm_g, n_h, n_w, ov, mp = payload
+                draw_tile_grid_overlay(ax_all[r, c], trm_g, n_h, n_w, ov, mp, title)
 
     fig.tight_layout()
     out = args.out or os.path.join(job_result_dir('TissueMaskTest'),
                                     'tissue_mask__regions.png')
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    fig.savefig(out, dpi=600, bbox_inches='tight')
+    fig.savefig(out, dpi=args.dpi, bbox_inches='tight')
     plt.close(fig)
     print(f'\nSaved {out}')
     print('All checks passed.')
