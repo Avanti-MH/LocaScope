@@ -8,15 +8,18 @@
   TissuesRegionsMask
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] 2026-07-21 | utilities/TissuesRegionsMask.py
-    merge_regions — 將指定的 tissue regions 合併成一個
-    使用場景：兩塊相鄰組織被切成兩個 region，但實際上應視為同一塊
-    介面待決：
-      A. merge_regions(indices: list[int]) → 用 index 指定要合併哪幾個
-      B. merge_adjacent(gap_px: float)    → 自動合併間距 < gap_px 的 region
-      C. 兩者都加
-    合併後的 bounding box = 所有 region 的 union bbox
-    修改 self.tissue_regions in place（與 filter_regions 一致）
+[ ] 2026-07-22 | utilities/TissuesRegionsMask.py
+    merge_regions — 自動合併「有相交但不完全重疊」的兩個 tissue regions
+    使用場景：兩塊相鄰組織的 bbox 有部分交集，但形狀上其實是同一塊
+    合併準則（partial overlap only）：
+      對每一對 (A, B) tissue region，只有下列條件同時成立才合併：
+        1. bbox intersect area > 0
+        2. NOT (A.bbox contains B.bbox)   ← 排除 B 完全被 A 包住
+        3. NOT (B.bbox contains A.bbox)   ← 排除 A 完全被 B 包住
+      → IoU=1（identical）或包含關係都跳過，避免誤合併雜訊 / 巢狀孔洞
+    介面：
+      merge_overlapping() — 掃過所有 pair，用 union-find 傳遞合併（A∩B、B∩C 都合 → A/B/C 一組）
+      合併後 bbox = union bbox；tissue_regions in place 更新（與 filter_regions 一致）
 
 ────────────────────────────────────────────────────────────────────────────────
   PatchingLib
@@ -114,20 +117,63 @@
 
   ★★  精度驗證（accuracy trade-off，決定是否進 production）
 
-[ ] 2026-07-22 | 精度損失分析 — fp16 + ToMe
+[ ] 2026-07-22 | 精度損失分析 — Level 1 + 2（fp16 + ToMe）
     BenchMarkV2 顯示 ALL fp16+flash+tome+compile 有 9.4× speedup（H200, bs=1K），
     需驗證這些近似對下游 retrieval / MPP-KNN 的精度損失，才能決定是否進 production
-    要跑的比對：
-      1. baseline fp32                → reference embeddings
-      2. fp16-only                    → 幾乎無損（歷史經驗）
-      3. ToMe r=8                     → 需重點驗證（token merge 有 lossy）
-      4. fp16 + ToMe r=8              → 疊加後最終方案
-    指標：
-      - 逐 patch cosine similarity vs baseline（distribution: mean / std / p1 / p99）
-      - retrieval top-K recall（若 GT 資料已備）
-      - MPP-KNN 估測誤差（GigaPathKnnEstiMpp 上跑同一組 query）
-      - ToMe 建議掃 r ∈ {4, 6, 8, 12} 找 speed/accuracy 拐點
-    產出：一張 table + cosine sim 分布圖（放 log/AccuracyV1 之類）
+
+    Sampling design：
+      - WSIs：1 SVS + 1 MRXS（涵蓋兩種格式）
+        SVS  = /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+        MRXS = /work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs
+      - HEST tissue mask ds = 32
+      - Total patches：200（分散給 N 個 WSI 各 200 // N）
+        e.g. 2 WSI → 各 100；3 WSI → 各 66/67
+      - 每 WSI 內：sample 該 WSI 所有 level（不同 WSI level 數不同）
+        wsi_budget = 200 // N_WSI
+        per_level  = wsi_budget // wsi.level_count
+        e.g. SVS 4 levels → 25/level；MRXS 10 levels → 10/level
+      - Sampling pipeline：
+          a. HESTSegFunc.make_hest_method(model, device)
+          b. TissuesRegionsMask.from_wsi(wsi, ds=8, method=...)
+          c. TileSampler(wsi, mask, tile_size=256, seed=...)
+             sampler.sample(n=per_level)   ← level=None 一次跑所有 level
+          d. sampler.save() 存 JSON，之後 encode reproducible
+      - 各 tile 的 mpp 存在 TileInfo.mpp（可用來後續分 level 統計）
+      - Encoding configs：
+          主要 4 個：baseline fp32 / fp16-only / ToMe r=8 / fp16+ToMe
+          ToMe r sweep：r ∈ {0, 4, 6, 8, 12}（r=0 sanity 應等於 baseline）
+
+    Level 1（embedding fidelity, intrinsic）：
+      - 對每 speed config vs baseline 逐 patch 算 cosine similarity
+      - 分布統計：mean / std / p1 / p5 / p50 / p95 / p99
+      - 產出：histogram（4 條疊加） + summary table
+      - 判斷閾值：mean cos > 0.999 幾乎無損；< 0.99 有風險
+
+    Level 2（ranking preservation, intrinsic）：
+      - 200 × 200 pairwise cos matrix，baseline vs 每個 speed config
+      - Spearman 相關（全 pair scores，共 200×199/2 = 19900 對）
+      - Top-K neighbor overlap（K ∈ {1, 5, 10, 50}）：|topK(base) ∩ topK(speed)| / K
+      - Rank shift 分布：baseline 第 1 名在 speed config 排第幾
+      - 判斷閾值：top-5 overlap > 0.95 → retrieval 幾乎無影響
+
+    ToMe r sweep 附帶產出：曲線 x=r y=mean-cos-sim + 雙軸 speedup
+    → 一眼看到 speed / accuracy 拐點
+
+    實作：
+      新腳本 utilities/test_modules/bench_gigapath_accuracy.py
+      沿用 bench 架構（configs closure、GigaPathFunc._TRANSFORM / make_gigapath_encoder）
+      L1 + L2 共用同一批 embeddings（不重跑 encode）
+      產出：log/AccuracyV1（表 + 分布圖 + ToMe 拐點圖）
+
+[ ] 2026-07-22 | 精度損失分析 — Level 3（task-level, extrinsic, deferred）
+    Level 1+2 通過後，用實際下游任務量測誤差：
+      A. MPP-KNN 估測誤差（GigaPathKnnEstiMpp）
+         現成資料：log/KnnEstiMppTest 的 query 集
+         指標：MAE / RMSE / median % error of estimated MPP
+         → L1+L2 一過就可以跑
+      B. Retrieval top-K recall
+         需資料：query_sim / synth_fov 產旋轉+變形 query + GT 位置
+         → 等 query_sim 整合完成（見 query_sim/ARCHITECTURE.md）
 
   ★★★  較難（格式轉換 / 量化）
 
