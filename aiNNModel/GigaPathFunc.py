@@ -49,14 +49,53 @@ def gigapath_apply_tome(model: torch.nn.Module, r: int = 8) -> torch.nn.Module:
     '''
     Apply Token Merging (ToMe) to the model in-place.
 
-    r: tokens merged per layer. r=8 ≈ 30% speedup with minimal accuracy loss.
+    r: tokens merged per layer. r=8 ~ 30% speedup with minimal accuracy loss.
     Must be called before gigapath_compile() if both are used.
 
     Install: pip install git+https://github.com/facebookresearch/ToMe.git
              pip install "timm>=1.0.3"   # must come after tome
+
+    LayerScale fix
+    --------------
+    Upstream tome (0.1.x) ToMeBlock.forward omits self.ls1 / self.ls2.
+    Modern timm ViT-g / DINOv2-style models (GigaPath included) rely on
+    LayerScale with gamma ~ 1e-4 to keep residuals stable; skipping it
+    scales the attention branch ~1e4x too large and the forward collapses
+    to a near-random embedding within a few blocks. We patch the class
+    forward here so any ToMeBlock instance created by tome.patch.timm uses
+    the LayerScale-aware version.
     '''
     import tome
+    from tome.patch.timm import ToMeBlock
+    from tome.merge import bipartite_soft_matching, merge_source, merge_wavg
+
     tome.patch.timm(model)
+
+    def _forward_with_ls(self, x):
+        attn_size = self._tome_info['size'] if self._tome_info['prop_attn'] else None
+        x_attn, metric = self.attn(self.norm1(x), attn_size)
+        x = x + self._drop_path1(self.ls1(x_attn))
+
+        r_ = self._tome_info['r'].pop(0)
+        if r_ > 0:
+            merge, _ = bipartite_soft_matching(
+                metric, r_,
+                self._tome_info['class_token'],
+                self._tome_info['distill_token'],
+            )
+            if self._tome_info['trace_source']:
+                self._tome_info['source'] = merge_source(
+                    merge, x, self._tome_info['source']
+                )
+            x, self._tome_info['size'] = merge_wavg(
+                merge, x, self._tome_info['size']
+            )
+
+        x = x + self._drop_path2(self.ls2(self.mlp(self.norm2(x))))
+        return x
+
+    ToMeBlock.forward = _forward_with_ls
+
     model.r = r
     return model
 
