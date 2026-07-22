@@ -22,10 +22,6 @@
   PatchingLib
 ────────────────────────────────────────────────────────────────────────────────
 
-[x] 2026-07-22 | PatchingLib.py → crop() 已實作
-    原「crop_grid — 以 tile 為單位 crop」需求已由 crop() 統一介面達成
-    詳見「已完成」區 crop() 條目
-
 [ ] 2026-07-22 | PatchingLib.py — crop() TODO(A)
     決定 crop 後新 container 的 is_crop / tissue_region 語義
       - 新 img 已被切到 sub-bbox，是否算 is_crop=True？
@@ -33,6 +29,28 @@
       - 目前 _copy_extra_after_crop 只 shallow-copy 原欄位
       - 影響：sub container 若再呼叫 extract_all()，
         is_crop=False 分支會用原 tissue_region.w/h（可能超過 sub.img 尺寸 → bug）
+
+[ ] 2026-07-22 | PatchingLib.py — crop() TODO(B) top_left 屬於 overlap grid
+    top_left 座標（不論 (r, c) 或 (x, y)）若屬於 overlap tile 而非 main tile 時的處理
+
+    現行行為:
+      - unit='grid': (r, c) 一律當 main index，無法指定 overlap
+      - unit='pixel': pixel_to_grid 只 floor 到 main 邊界，
+                      落在 overlap 中心的 (x, y) 會被 snap 到所在 main tile
+
+    需求（若要允許從 overlap 起點 crop）:
+      - PatchGrid.pixel_to_grid 需能回傳 overlap grid 的 (r, c)
+        signature 擴充：加 kind='main' | 'overlap' 參數，
+        或回傳 (kind, r, c) 讓 caller 判斷
+      - crop() 若 top_left 落在 overlap：
+        新 grid.x_offset += half，新 grid.y_offset += half
+        → 新 main tile == 舊 overlap tile
+           新 overlap tile == 舊 main tile （角色互換）
+        → Step 6 subset 映射需改：new main patches 從 old overlap 拿
+
+    未決:
+      - 是否有實際 use case 需要 overlap-aligned crop？
+      - 若無，可維持現狀並在 docstring 明說「crop 一律對齊 main grid」
 
 [ ] 2026-07-21 | PatchingLib.py:940
     WsiTissuesContainer.from_mpp_continuous
@@ -69,35 +87,21 @@
 
   ★  立即可做（不需改模型）
 
-[x] 2026-07-19 | bench_gigapath_infer.py
-    fp16 autocast + batch_size sweep benchmark（Part 1 synthetic、Part 2 WSI）
-    CPU/GPU ratio 自動判斷 DataLoader 是否值得加
-
-[ ] 2026-07-21 | GigaPathFunc.py / GigaPathSlideWinSim.py
-    torch.compile(model, mode='reduce-overhead')
-    第一次 forward 需幾分鐘 compile，之後每次用 compiled graph
-    目標：30 min → 12 min（搭配 fp16）
+  （目前無 pending — 見已完成區）
 
   ★★  中度（系統層優化，不需改模型）
 
-[x] 2026-07-21 | GigaPathFunc.py
-    Flash Attention 2：減少 self-attention memory bandwidth，預估加速 20–50%
-    kwarg 路線不通（prov-gigapath __init__ 不接受 attn_implementation）
-    ✓ 改以安裝 flash-attn==2.5.8，timm 自動偵測啟用
-    驗證：flash_attn 2.5.8 / timm fused_attn=True / block[0].attn.fused=True
-
-[ ] 2026-07-21 | bench_gigapath_infer.py → GigaPathSlideWinSim.py
-    DataLoader preprocessing（num_workers + pin_memory + non_blocking）
-    先跑 bench Part 1 確認 CPU/GPU ratio > 0.3 再決定是否做
-
-[ ] 2026-07-21 | GigaPathFunc.py / GigaPathSlideWinSim.py
-    Token Merging（ToMe）r=8，每層 merge 8 個 token，預估減少 30% 計算量
-    需驗證 retrieval 精度，目標 8 min
-    ✓ prov-gigapath 架構相容確認（output shape [1, 1536] OK）
-    ✓ gigapath_apply_tome(model, r=8) 已加入 GigaPathFunc.py
-    安裝順序（順序不可反）：
-      pip install git+https://github.com/facebookresearch/ToMe.git
-      pip install "timm>=1.0.3"
+[ ] 2026-07-22 | PatchingLib.py / GigaPathSlideWinSim.py — extract 加速
+    來源：BenchMarkV2 + Standard BenchMark 顯示 WSI Pipeline extract 才是 bottleneck
+      - extract 佔 total 46–79%，encode（fp16+…）只 15–40%
+      - 就算 encode 再快 9.4×，extract 不動 total 也砍不到 30%
+    候選方向：
+      A. Async / prefetch：extract next region 與 encode current region 重疊
+      B. Region-level cache：同 WSI 多 query 時序列化 extracted patches
+         → 已有相關 [ ] Feature cache TODO（下方），可合併設計
+      C. openslide read_region 換 tifffile / OpenSlide-Python 直讀 tiles
+      D. 大 region 一次讀 + patch cropping 在 numpy 中做（減少 read_region call）
+    未決：需先 profile extract 內部（read_region vs. tissue mask 判斷 vs. patching）
 
 [ ] 2026-07-21 | jobscripts/SlideWinTest.sh + GigaPathSlideWinSim.py
     Multi-GPU DataParallel（--gpus-per-node=2）
@@ -107,6 +111,23 @@
 [ ] 2026-07-21 | GigaPathSlideWinSim.py
     Feature cache：WSI encode 結果序列化到 cache/{stem}_level{n}.pt
     多 query 搜同一張 WSI 時免去重複 encode（省 100%）
+
+  ★★  精度驗證（accuracy trade-off，決定是否進 production）
+
+[ ] 2026-07-22 | 精度損失分析 — fp16 + ToMe
+    BenchMarkV2 顯示 ALL fp16+flash+tome+compile 有 9.4× speedup（H200, bs=1K），
+    需驗證這些近似對下游 retrieval / MPP-KNN 的精度損失，才能決定是否進 production
+    要跑的比對：
+      1. baseline fp32                → reference embeddings
+      2. fp16-only                    → 幾乎無損（歷史經驗）
+      3. ToMe r=8                     → 需重點驗證（token merge 有 lossy）
+      4. fp16 + ToMe r=8              → 疊加後最終方案
+    指標：
+      - 逐 patch cosine similarity vs baseline（distribution: mean / std / p1 / p99）
+      - retrieval top-K recall（若 GT 資料已備）
+      - MPP-KNN 估測誤差（GigaPathKnnEstiMpp 上跑同一組 query）
+      - ToMe 建議掃 r ∈ {4, 6, 8, 12} 找 speed/accuracy 拐點
+    產出：一張 table + cosine sim 分布圖（放 log/AccuracyV1 之類）
 
   ★★★  較難（格式轉換 / 量化）
 
@@ -157,6 +178,39 @@
 
 [ ] 2026-07-21 | 2_retrieval/retrieval_gigapth.py
     Retrieval entry point 尚未實作（空檔案）
+
+[ ] 2026-07-22 | query_sim/ — 整合 synth_fov_generator + query_sim
+    合併兩個工具為一個統一 package
+    設計文件：query_sim/ARCHITECTURE.md
+    目標：保留兩邊最強實作
+      - query_sim: modular augment（cv2 精度）、MPP→level 邏輯、demo CLI
+      - synth_fov: 批量 + GT、tissue filter、region 分類、rotation + scale
+    三層 API: augment/ → pipeline.py → generator.py → cli/{demo,batch}.py
+    遷移 9 步詳見 ARCHITECTURE.md「遷移建議順序」
+    可討論取捨：
+      - rename query_sim/ 為更精確的名字（e.g. microscope_sim/）
+      - 是否跟 PatchingLib.WsiTissuesContainer 整合 WSI 讀取
+      - iterator vs list、seed 統一入口、多 WSI 混合輸出
+
+[ ] 2026-07-22 | 2_retrieval/ — rotation-aware retrieval
+    query 可能被旋轉 0 / 90 / 180 / 270（放片方向未知）
+    需求：
+      1. 在不知道旋轉方向的情況下仍能找到正確 WSI 位置
+      2. 同時回報實際旋轉了幾度（給下游校正用）
+    候選方案：
+      A. Query-side 4x：對 query 產生 4 個旋轉版本各自 encode，
+         分別 retrieve，取 score 最高者為答案，該旋轉即結果
+         → retrieval 時間 x4，但實作最簡單
+      B. WSI-side 4x：對 WSI 每個 patch 存 4 個 rotated feature
+         → storage x4，query 時間不變
+      C. Rotation-invariant embedding：用 e.g. rotation pooling
+         或訓一個 rotation-equivariant head
+         → 需 fine-tune GigaPath 或加 adapter，實作成本高
+      D. 兩階段：先用 rotation-invariant 粗篩，再用原始 embedding 細比對
+    未決：
+      - GigaPath (ViT) 本身無 rotation invariance，需驗證方案 A 的 top-1 準確率
+      - 對稱組織區（e.g. 均勻背景）4 個方向 score 可能接近 → 需 tie-break 策略
+      - 需在 synth_fov / query_sim 產生旋轉 GT 資料集才能 benchmark
 
 [ ] 2026-07-21 | training/models/mppResNet.py
     MPP 估算用的 ResNet 只有 stub（2 行），訓練邏輯尚未完成
@@ -221,10 +275,69 @@
       | 5 | TissuePatchContainer                 | 簡化 img_origin；加 _copy_extra_after_crop |
       +---+--------------------------------------+-------------------------------+
 
+[x] 2026-07-22 | bench_gigapath_infer.py — Compare mode + BenchMarkV2 實測
+    Standard mode 保留（fp16 sweep + CPU/GPU ratio 分析）
+    新增 Compare mode：7 configs × 7 batch_sizes，flat + matrix 兩種輸出
+    Configs: baseline / fp16 / flash / ToMe r=8 / compile / fp16+flash / ALL
+    重構亮點：
+      ✓ 匯入 GigaPathFunc._TRANSFORM / make_gigapath_encoder（不再重寫 transform）
+      ✓ _sweep_configs(encode_fn) closure 讓 synthetic / WSI 共用同一 loop
+      ✓ Per-batch 2-phase timing：Phase A CPU transform, Phase B H2D+forward+D2H
+        → 之前 H2D/D2H 落在未計時 gap，V2 正確歸入 t_gpu
+    BenchMark.sh 加 --wsi-compare-* 參數；no-wsi 變體 for Part 1 only
+    H200 實測結果（n=40960 synthetic patches, log/BenchMarkV2）：
+      +---------------------------+-------+-------+-------+-------+-------+
+      | config \\ bs              |     8 |    16 |   128 |   1K  |   4K  |
+      +---------------------------+-------+-------+-------+-------+-------+
+      | baseline fp32 (p/s)       |    75 |    81 |    97 |    97 |    97 |
+      | fp16 only                 | 4.74× | 5.48× | 5.45× | 5.48× | 5.42× |
+      | flash-attn only (fp32)    | 1.00× | 1.01× | 1.01× | 1.01× | 1.01× |
+      | ToMe r=8 only (fp32)      | 2.39× | 2.62× | 2.70× | 2.81× | 2.82× |
+      | compile only (fp32)       | 1.11× | 1.10× | 1.03× | 1.02× | 1.01× |
+      | fp16 + flash              | 4.68× | 5.37× | 5.47× | 5.50× | 5.43× |
+      | ALL fp16+flash+tome+compile| 7.94× | 8.93× | 9.06× | 9.38× | 9.21×|
+      +---------------------------+-------+-------+-------+-------+-------+
+    觀察：
+      - fp16 是最大單一貢獻（~5×），ToMe 疊加後再拿 ~1.7×
+      - flash-only 在 H200 幾乎沒感（memory bandwidth 已充足）
+      - compile-only 貢獻小；主要靠圖優化配合其它 kernel
+      - GPU MB：ALL 只 5–9 GB（vs baseline bs=4K 79 GB）→ ToMe 顯著省顯存
+    ⚠ 開放：精度損失待驗證（見「精度驗證」區）
+
 [x] 2026-07-22 | test_tissue_patch_container.py — crop() 驗證
     ✓ validate_container_crop：grid/pixel × bottom_right/size × pad + 6 種 error case
     ✓ validate_crop_before_extract：QPC / TPC 未 extract 皆 raise RuntimeError
     ✓ validate_tpc_crop_extra_fields：tissue_region / img_ds / is_crop / at_level shallow-copy
     ✓ 在 recon_cases 加 QPC / TPC-case2 crop demo，重用 reconstruction diff figure 證明像素一致
+
+[x] 2026-07-22 | 加速技術驗證與決策（BenchMarkV2 gating）
+    對 ★/★★ 級每項優化，透過 bench 決定是否進 production：
+
+    ● torch.compile (mode='reduce-overhead')
+        wrapper: gigapath_compile 已於 GigaPathFunc.py
+        BenchMarkV2 實測 compile-only ≈ 1.01–1.11×（小 bs 較明顯）
+        → 單獨效益小，但作為 ALL 疊加成員仍納入
+
+    ● Flash Attention 2（flash-attn 2.5.8 + timm fused_attn）
+        安裝 / 啟用已完成（見 2026-07-21 環境 entry）
+        BenchMarkV2 實測 flash-only（fp32）≈ 1.00–1.01×
+        推測：H200 memory bandwidth 大幅提升，attn 已非 bottleneck
+        → A100 / L40S 等仍可能有感，H200 上效益不顯
+
+    ● Token Merging r=8
+        wrapper: gigapath_apply_tome 已於 GigaPathFunc.py
+        BenchMarkV2 實測 ToMe-only ≈ 2.4–2.8×（bs=4K 達 2.82×）
+        顯存亦大幅下降（ALL bs=4K 只 9.5 GB vs baseline 79.8 GB）
+        ⚠ 精度損失尚未驗證 → 進 production 前 gate 於「精度驗證」區 TODO
+
+    ● DataLoader preprocessing（num_workers + pin_memory + non_blocking）
+        Standard mode BenchMark 已跑（log/BenchMark），gate = ratio > 0.3
+        結果：
+          - fp32 all bs: ratio 0.03–0.07 → DataLoader marginal
+          - fp16 small bs: ratio 0.19–0.28 → DataLoader marginal
+          - fp16 大 bs (64+): ratio 0.32–0.56 → balanced, worth trying
+        關鍵發現：WSI Pipeline bottleneck summary 顯示 encode 只佔 15–40%，
+                 extract（openslide read_region）才佔 46–79%
+        → 不採用 DataLoader；優化重心應轉向 extract（region caching / async read）
 
 ================================================================================
