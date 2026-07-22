@@ -71,6 +71,8 @@ _MAIN_CONFIGS = [
     ('fp16 only',        torch.float16,   0),
     ('ToMe r=8',         torch.float32,   8),
     ('fp16 + ToMe r=8',  torch.float16,   8),
+    ('fp16 + ToMe r=4',  torch.float16,   4),
+    ('fp16 + ToMe r=2',  torch.float16,   2),
 ]
 
 _BASE_LABEL = 'baseline fp32'

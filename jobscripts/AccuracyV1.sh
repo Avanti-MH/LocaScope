@@ -23,12 +23,12 @@ SVS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/T
 MRXS=/work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs
 
 TOTAL_PATCHES=4096
-HEST_DS=32
+HEST_DS=4
 TILE_SIZE=256
 TISSUE_RATIO=0.5
 SEED=42
 BATCH_SIZE=128
-TOME_R_SWEEP="0, 1, 2, 3, 4, 8"
+TOME_R_SWEEP="0,1,2,3,4,8"
 
 # --out-dir defaults to result/$SLURM_JOB_NAME (set by SLURM automatically)
 # --tmp-dir defaults to log/tmp
@@ -44,7 +44,7 @@ python utilities/test_modules/bench_gigapath_accuracy.py \
   --tissue-ratio    $TISSUE_RATIO \
   --seed            $SEED \
   --batch-size      $BATCH_SIZE \
-  --tome-r-sweep    $TOME_R_SWEEP
+  --tome-r-sweep    "$TOME_R_SWEEP"
 
 # Resume tiles (skip HEST + sampling if tiles already exist):
 # python utilities/test_modules/bench_gigapath_accuracy.py --resume-tiles
