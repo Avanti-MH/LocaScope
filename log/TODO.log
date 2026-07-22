@@ -117,27 +117,6 @@
 
   ★★  精度驗證（accuracy trade-off，決定是否進 production）
 
-[ ] 2026-07-23 | 精度損失分析 — 跑 AccuracyV1 + 決策（框架已就緒）
-    Framework、tiling、ToMe LayerScale fix 都完成（見已完成區同日 3 條 entry
-    + MILESTONE M3）。這條 TODO 剩下的是**跑 + 分析 + 下決策**。
-
-    要跑：
-      sbatch jobscripts/AccuracyV1.sh   (1024 patches, SVS+MRXS, ToMe r sweep {1,2,3,4,8})
-
-    要看：
-      result/AccuracyV1/summary.txt     L1 表 + L2 表 + ToMe r sweep
-      result/AccuracyV1/cos_hist.png    L1 疊加 histogram
-      result/AccuracyV1/tome_sweep.png  r vs mean cos 曲線
-
-    要決策：
-      - fp16 進 production 嗎？（預期 cos > 0.999 -> yes）
-      - ToMe 甜蜜點 r 是多少？（top-5 overlap > 0.95 的最大 r）
-      - fp16 + ToMe 混用時 r 該用多少？
-      - MRXS (Ki67 IHC) 若 HEST 抓不到 tissue（symptom：tissue_fraction < 5%），
-        換 SVS 或改用 HSV method 做對照組
-
-    embeddings.pt 保留在 log/tmp/，之後想做進階 rank stability 或跨 level
-    分析都能重跑不需再過 GPU。
 
 [ ] 2026-07-22 | 精度損失分析 — Level 3（task-level, extrinsic, deferred）
     Level 1+2 通過後，用實際下游任務量測誤差：
@@ -402,6 +381,42 @@
       test_gigapath_slide_win_sim / bench_gigapath_accuracy
     - result/ 專門放最終產出，log/ 專門放 SLURM stdout/stderr + tmp/ 副產物
 
+[x] 2026-07-23 | AccuracyV1 跑完 -> production 決策
+    Sampling: SVS BRACS_1228 + MRXS Ki67 (HEST ds=4, region-first sampling
+    via TileSampler w/ mask snapshot+undo)  Total 3374 patches
+    Configs 12 個：baseline fp32 / fp16 / ToMe r=0/1/2/3/4/8 (fp32) /
+                   fp16+ToMe r=2/4/8
+
+    Level 1 (cos vs baseline fp32):
+      +---------------------------+--------+-------+---------------------+
+      | config                    | mean   | p5    | 觀察                 |
+      +---------------------------+--------+-------+---------------------+
+      | fp16 only                 | 0.99995| 0.9998| 完美                |
+      | ToMe r=1  (fp32)          | 0.988  | 0.968 | 小損                |
+      | ToMe r=2  (fp32)          | 0.968  | 0.921 | 中度損失            |
+      | ToMe r=3  (fp32)          | 0.937  | 0.863 | 明顯                |
+      | ToMe r=4  (fp32)          | 0.886  | 0.763 | 大                  |
+      | ToMe r=8  (fp32)          | 0.388  | 0.202 | 崩 (token exhaustion)|
+      | fp16 + ToMe r=2/4/8       | NaN    | NaN   | 全崩！              |
+      +---------------------------+--------+-------+---------------------+
+
+    Level 2 (retrieval preservation, top-5 overlap vs baseline):
+      fp16 only          top-5=0.990   spearman=0.99998   完美
+      ToMe r=8 (fp32)    top-5=0.260   spearman=0.760     retrieval 崩
+      fp16 + ToMe        all NaN
+
+    決策：
+      ✅ fp16 alone 進 production：5.5x 加速、cos=0.99995、top-5=0.99
+      ❌ ToMe 不採用：
+         - fp16 + ToMe 全 r 值 NaN (fp16 autocast 下 ToMe 內部
+           bipartite_soft_matching / merge_wavg / size.log 精度不足)
+         - fp32 ToMe alone 破 retrieval (top-5 只 0.26)
+         - 修復需 fork tome 強制 fp32 內部運算 (工程成本大)
+      ➡ 加速空間下一步在 extract (BenchMarkV2 顯示 extract 佔 46-79%)
+         而不是 encode -> 焦點轉 extract 那條 TODO
+
+    副產物保留：log/tmp/embeddings.pt 可反覆做進階 rank stability 分析
+
 [x] 2026-07-22 | 加速技術驗證與決策（BenchMarkV2 gating）
     對 ★/★★ 級每項優化，透過 bench 決定是否進 production：
 
@@ -420,7 +435,9 @@
         wrapper: gigapath_apply_tome 已於 GigaPathFunc.py
         BenchMarkV2 實測 ToMe-only ≈ 2.4–2.8×（bs=4K 達 2.82×）
         顯存亦大幅下降（ALL bs=4K 只 9.5 GB vs baseline 79.8 GB）
-        ⚠ 精度損失尚未驗證 → 進 production 前 gate 於「精度驗證」區 TODO
+        ❌ 精度驗證後不採用 → 見 2026-07-23 AccuracyV1 決策 entry
+           - fp16+ToMe 全 r 值 NaN；fp32 ToMe alone top-5 只 0.26
+           - 修復需 fork tome；不划算
 
     ● DataLoader preprocessing（num_workers + pin_memory + non_blocking）
         Standard mode BenchMark 已跑（log/BenchMark），gate = ratio > 0.3
