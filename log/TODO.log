@@ -117,53 +117,27 @@
 
   ★★  精度驗證（accuracy trade-off，決定是否進 production）
 
-[ ] 2026-07-22 | 精度損失分析 — Level 1 + 2（fp16 + ToMe）
-    BenchMarkV2 顯示 ALL fp16+flash+tome+compile 有 9.4× speedup（H200, bs=1K），
-    需驗證這些近似對下游 retrieval / MPP-KNN 的精度損失，才能決定是否進 production
+[ ] 2026-07-23 | 精度損失分析 — 跑 AccuracyV1 + 決策（框架已就緒）
+    Framework、tiling、ToMe LayerScale fix 都完成（見已完成區同日 3 條 entry
+    + MILESTONE M3）。這條 TODO 剩下的是**跑 + 分析 + 下決策**。
 
-    Sampling design：
-      - WSIs：1 SVS + 1 MRXS（涵蓋兩種格式）
-        SVS  = /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
-        MRXS = /work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs
-      - HEST tissue mask ds = 32
-      - Total patches：200（分散給 N 個 WSI 各 200 // N）
-        e.g. 2 WSI → 各 100；3 WSI → 各 66/67
-      - 每 WSI 內：sample 該 WSI 所有 level（不同 WSI level 數不同）
-        wsi_budget = 200 // N_WSI
-        per_level  = wsi_budget // wsi.level_count
-        e.g. SVS 4 levels → 25/level；MRXS 10 levels → 10/level
-      - Sampling pipeline：
-          a. HESTSegFunc.make_hest_method(model, device)
-          b. TissuesRegionsMask.from_wsi(wsi, ds=8, method=...)
-          c. TileSampler(wsi, mask, tile_size=256, seed=...)
-             sampler.sample(n=per_level)   ← level=None 一次跑所有 level
-          d. sampler.save() 存 JSON，之後 encode reproducible
-      - 各 tile 的 mpp 存在 TileInfo.mpp（可用來後續分 level 統計）
-      - Encoding configs：
-          主要 4 個：baseline fp32 / fp16-only / ToMe r=8 / fp16+ToMe
-          ToMe r sweep：r ∈ {0, 4, 6, 8, 12}（r=0 sanity 應等於 baseline）
+    要跑：
+      sbatch jobscripts/AccuracyV1.sh   (1024 patches, SVS+MRXS, ToMe r sweep {1,2,3,4,8})
 
-    Level 1（embedding fidelity, intrinsic）：
-      - 對每 speed config vs baseline 逐 patch 算 cosine similarity
-      - 分布統計：mean / std / p1 / p5 / p50 / p95 / p99
-      - 產出：histogram（4 條疊加） + summary table
-      - 判斷閾值：mean cos > 0.999 幾乎無損；< 0.99 有風險
+    要看：
+      result/AccuracyV1/summary.txt     L1 表 + L2 表 + ToMe r sweep
+      result/AccuracyV1/cos_hist.png    L1 疊加 histogram
+      result/AccuracyV1/tome_sweep.png  r vs mean cos 曲線
 
-    Level 2（ranking preservation, intrinsic）：
-      - 200 × 200 pairwise cos matrix，baseline vs 每個 speed config
-      - Spearman 相關（全 pair scores，共 200×199/2 = 19900 對）
-      - Top-K neighbor overlap（K ∈ {1, 5, 10, 50}）：|topK(base) ∩ topK(speed)| / K
-      - Rank shift 分布：baseline 第 1 名在 speed config 排第幾
-      - 判斷閾值：top-5 overlap > 0.95 → retrieval 幾乎無影響
+    要決策：
+      - fp16 進 production 嗎？（預期 cos > 0.999 -> yes）
+      - ToMe 甜蜜點 r 是多少？（top-5 overlap > 0.95 的最大 r）
+      - fp16 + ToMe 混用時 r 該用多少？
+      - MRXS (Ki67 IHC) 若 HEST 抓不到 tissue（symptom：tissue_fraction < 5%），
+        換 SVS 或改用 HSV method 做對照組
 
-    ToMe r sweep 附帶產出：曲線 x=r y=mean-cos-sim + 雙軸 speedup
-    → 一眼看到 speed / accuracy 拐點
-
-    實作：
-      新腳本 utilities/test_modules/bench_gigapath_accuracy.py
-      沿用 bench 架構（configs closure、GigaPathFunc._TRANSFORM / make_gigapath_encoder）
-      L1 + L2 共用同一批 embeddings（不重跑 encode）
-      產出：log/AccuracyV1（表 + 分布圖 + ToMe 拐點圖）
+    embeddings.pt 保留在 log/tmp/，之後想做進階 rank stability 或跨 level
+    分析都能重跑不需再過 GPU。
 
 [ ] 2026-07-22 | 精度損失分析 — Level 3（task-level, extrinsic, deferred）
     Level 1+2 通過後，用實際下游任務量測誤差：
@@ -355,6 +329,78 @@
     ✓ validate_crop_before_extract：QPC / TPC 未 extract 皆 raise RuntimeError
     ✓ validate_tpc_crop_extra_fields：tissue_region / img_ds / is_crop / at_level shallow-copy
     ✓ 在 recon_cases 加 QPC / TPC-case2 crop demo，重用 reconstruction diff figure 證明像素一致
+
+[x] 2026-07-23 | ToMe LayerScale 相容 bug 修復（詳見 MILESTONE M3）
+    ── 症狀 ──
+    accuracy bench 第一次跑，ToMe r=4/8/16 三個 config cos-sim vs baseline 皆
+    ~0.015（隨機正交），且統計數字（std=0.025514 = 1/sqrt(1536)）完全一模一
+    樣。輸出退化為 unit-normalized 隨機向量。
+
+    ── 挖掘 ──（8 步排除法，詳見 MILESTONE M3）
+    (1) 時間隨 r 遞減 -> r 有生效
+    (2) tensor 各自不同，但 std=1/sqrt(1536) -> collapse 到隨機方向
+    (3-5) tome API 用對；GigaPath 用純 timm 標準 Block/Attention；沒開 QK-Norm
+    (6) 最小重現腳本三 part：確認手寫 attention vs fused attention 等價 ->
+        問題不在 attention，在 ToMeBlock forward
+    (7) diff ToMeBlock.forward vs timm Block.forward：發現 tome 完全略過
+        self.ls1 / self.ls2 (LayerScale)
+    (8) 確認 GigaPath 有真的 LayerScale（gamma mean=4.3e-4）
+
+    ── 原理 ──
+    LayerScale (Touvron 2021) 讓深 ViT (40 blocks ViT-g) residual branch
+    初始 gamma~1e-4 -> 對主幹貢獻很小。tome 略過 -> residual 直接以 ~2000x
+    幅度加回 -> forward 幾層內爆炸 -> 輸出隨機。
+
+    ── 修法 ──
+    aiNNModel/GigaPathFunc.py 的 gigapath_apply_tome 在 tome.patch.timm(model)
+    之後 monkey-patch ToMeBlock.forward 補回 self.ls1 / self.ls2。
+
+    ── 驗證 ──
+    r=0 cos=1.000000 (sanity), r=2/4/8 分別 0.970/0.903/0.779（合理遞減，
+    對照修前皆 ~0.015）。ToMe 首次在 GigaPath 上產出有語意的壓縮嵌入。
+
+    ── 影響 ──
+    - 為 BenchMarkV2 的 9.4x ALL config 進 production 開路
+      （之前 ALL 之中的 ToMe 分支產生的其實是隨機嵌入，速度快但精度歸零）
+    - upstream tome 的 timm patch 對所有 DINOv2/ViT-g/OpenCLIP-ViT-H 都會踩雷
+    - 可 PR 回 facebookresearch/ToMe（defensive getattr(self,'ls1',Identity())）
+
+[x] 2026-07-23 | bench_gigapath_accuracy.py — 精度分析框架（L1 + L2）
+    新腳本 utilities/test_modules/bench_gigapath_accuracy.py + jobscripts/AccuracyV1.sh
+    Sampling：1 SVS + 1 MRXS，HEST tissue mask (ds=32)，TileSampler 每 level
+              抽 tissue-covered tiles，total N 分散給 N_WSI × level_count
+    Configs ：baseline fp32 / fp16 / ToMe r=8 / fp16+ToMe r=8 + ToMe r sweep {1,2,3,4,8}
+    Level 1 ：每 config vs baseline 逐 patch cos-sim 分布（mean/std/p1/p5/p50/p95/p99）
+              + 疊加 histogram
+    Level 2 ：N×N pairwise cos matrix，Spearman + top-K neighbor overlap
+              (K ∈ {1,5,10,50}) + rank shift 分布
+    NaN 防護：encode 每 config 都會檢查 NaN/Inf 並印警告；L1 用 nanmean/
+              nanpercentile；L2 遇到壞 row 歸零並警告；save_cos_hist 過濾
+              NaN 才畫。
+    輸出：result/AccuracyV1/{summary.txt, cos_hist.png, tome_sweep.png}
+          log/tmp/{tiles/*.json, embeddings.pt}（副產物）
+    ⚠ 還未真的跑完整 sweep + 下決策 → 見「精度驗證」區未完成 TODO
+
+[x] 2026-07-23 | TissuesRegionsMask.from_wsi — adaptive tiled inference
+    問題：Ki67 MRXS 在 ds=32 選到的 level 是 ~8500x9200 (~78M px)，
+          DeepLabV3 一次吃 -> 84 GB VRAM 需求 -> H200 也 OOM。
+    修法：from_wsi 新增 max_pixels + overlap 參數：
+          - Adaptive halving: while (H//n_h)*(W//n_w) > max_pixels, 對半
+            切較長邊。grid 是 2^i x 2^j (1x1/1x2/2x2/2x4/4x4/...)
+          - 每 tile 加 overlap px 邊 -> method(tile) -> trim overlap -> 拼回
+          - 只有 max_pixels != None 且圖超過 budget 才啟動，否則走原路徑
+            （backward compat）
+    默認 max_pixels=4M (~5 GB VRAM)，overlap=128 (>DeepLabV3 ASPP 感受野)。
+    這是 model-agnostic 的（不綁 HEST），任何 method(img) 都通用。
+
+[x] 2026-07-23 | 專案輸出路徑統一：result/<SLURM_JOB_NAME> + log/tmp
+    - _paths.py 加 job_result_dir(default_name) helper：讀 SLURM_JOB_NAME
+      env var（SLURM 自動設定），否則用 script-level default
+    - 8 支 test_modules 腳本改用 job_result_dir(...)：test_tissues_regions_mask
+      / test_patch_info_coords / test_patchgrid_index / test_sift_ransac /
+      test_tissue_patch_container / test_gigapath_knn_esti_mpp /
+      test_gigapath_slide_win_sim / bench_gigapath_accuracy
+    - result/ 專門放最終產出，log/ 專門放 SLURM stdout/stderr + tmp/ 副產物
 
 [x] 2026-07-22 | 加速技術驗證與決策（BenchMarkV2 gating）
     對 ★/★★ 級每項優化，透過 bench 決定是否進 production：

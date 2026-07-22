@@ -1,0 +1,298 @@
+================================================================================
+  LocaScope — Milestone Log
+  記錄重大進展，每個里程碑代表一個有意義的能力躍升
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+  M1 | 2026-07-19 | Pipeline 骨架成形
+────────────────────────────────────────────────────────────────────────────────
+  完整的三階段定位 pipeline 首次能夠端對端執行：
+
+  - Stage 1  GigaPathKnnEstiMpp   — query image MPP 自動估算（KNN on GigaPath features）
+  - Stage 2  GigaPathSlideWinSim  — WSI 滑動視窗相似度搜尋（unfold + cosine sim）
+  - Stage 3  SiftRansacLocalizer  — SIFT + RANSAC sub-tile 精定位
+
+  支撐基礎設施：
+  - PatchingLib（973 行）：PatchGrid / FeaturesMap / QueryPatchContainer / WsiTissuesContainer
+  - TissuesRegionsMask：WSI 組織遮罩 + 座標系
+  - TileSampler：WSI tile 隨機採樣
+  - query_sim：顯微鏡照片物理模擬（lens / field / capture 三層效果）
+  - aiNNModel：GigaPath + HEST 兩個模型封裝
+
+  初次 git init 並推送至 GitHub（Avanti-MH/LocaScope）。
+
+────────────────────────────────────────────────────────────────────────────────
+  M2 | 2026-07-21 | 組織分割介面統一 + 安全修復
+────────────────────────────────────────────────────────────────────────────────
+  - from_wsi 改用 ds / level 精確控制解析度（告別 get_thumbnail 座標偏差）
+  - make_hest_method 讓 DeepLab DL segmentation 與 HSV 共用同一介面
+  - SiftRansacResult.level 讓誤差報告顯示真實 level 編號
+  - HF token 移出程式碼，首次通過 GitHub push protection
+  - 完整 SLURM job scripts + Makefile + gitignore，專案可在叢集獨立重現
+
+────────────────────────────────────────────────────────────────────────────────
+  M3 | 2026-07-23 | ToMe x GigaPath (ViT-g) LayerScale 相容 bug 的挖掘與修復
+────────────────────────────────────────────────────────────────────────────────
+  背景（一句話）
+  ────────────
+  為驗證 BenchMarkV2 的 9.4x speedup 是否安全進 production，寫了一支
+  bench_gigapath_accuracy.py（cos-sim + top-K overlap 分析），順手把 HEST
+  大圖 OOM 用 adaptive tile-and-stitch 解掉。真正的重點來自第一次跑出的
+  結果一眼看不對，追查後發現 ToMe 對 GigaPath 這類「現代深層 ViT」根本
+  沒生效，並把它修好。
+
+  ═══════════════════════════════════════════════════════════════════════
+  症狀：一份完全不合理的表
+  ═══════════════════════════════════════════════════════════════════════
+
+  第一次真跑（512 patches on SVS+MRXS）的 Level 1 表：
+
+    fp16 only         mean=0.99999  std=0.00003    <- fp16 幾乎無損，合理
+    ToMe r=4          mean=0.01481  std=0.02007    <- cos ~ 0.015 = 隨機正交
+    ToMe r=8          mean=0.01481  std=0.02007    <- 三個 r 統計數字完全相同?
+    ToMe r=16         mean=0.01481  std=0.02007
+    fp16 + ToMe r=8   mean=nan      std=nan        <- NaN 崩掉
+
+  三個 r 完全不同，統計卻一模一樣；而且 cos ~ 0.015 表示嵌入跟 baseline
+  幾乎垂直（隨機方向）。這不是「ToMe 造成一點精度損失」，是「輸出根本
+  不是有意義的 embedding」。
+
+  ═══════════════════════════════════════════════════════════════════════
+  一步步找元兇：8 個假設的排除法
+  ═══════════════════════════════════════════════════════════════════════
+
+  ── [1] r 值有沒有真的傳進去? ──────────────────────────────────────────
+
+  假設：r=4/8/16 統計相同 -> r 沒生效，實際跑的是同一個 r。
+
+  驗證：檢查各 config 的 encode 時間
+    r=4 : 27.6s   r=8 : 22.5s   r=16 : 18.3s
+
+  結論：時間**明確**隨 r 遞減，ToMe 有在 merge token，r 有生效。
+        跟統計「一模一樣」矛盾。假設否決。
+
+  ── [2] 三個 config 的 embedding 是不是真的相同? ──────────────────────
+
+  假設：時間差可能只是 GPU warmup 噪聲，其實輸出 tensor 相同。
+
+  驗證：
+    torch.equal(emb_r=4, emb_r=8)  = False
+    torch.equal(emb_r=8, emb_r=16) = False
+
+  但三者 std 都是 0.025514。注意這個數字：
+    1 / sqrt(1536) = 0.025514...
+  這正是**1536 維 unit-normalized 隨機向量**的分量 std（中央極限定理）。
+
+  結論：三個 config 輸出的 embedding 各自不同，但**都是隨機方向的 unit
+        vector**。ToMe 有跑，只是產出全部被破壞成 noise。這是第一個決定性
+        線索：問題不是「r 有沒有生效」，是「forward 的輸出跟輸入根本沒關聯」。
+
+  ── [3] ToMe 的 API 我們用錯了嗎? ─────────────────────────────────────
+
+  假設：也許 model.r = r 沒被 forward 讀到，實際跑的 r 是初始的 0。
+
+  驗證：讀 tome/patch/timm.py 原始碼：
+
+    def apply_patch(model, ...):
+        model.__class__ = ToMeVisionTransformer   # monkey-patch class
+        model.r = 0
+        model._tome_info = {"r": model.r, ...}
+        for module in model.modules():
+            if isinstance(module, Block):
+                module.__class__ = ToMeBlock
+            elif isinstance(module, Attention):
+                module.__class__ = ToMeAttention
+
+    class ToMeVisionTransformer(transformer_class):
+        def forward(self, *args, **kw):
+            # 關鍵：每次 forward 開頭根據當下 self.r 重刷 r 表
+            self._tome_info["r"] = parse_r(len(self.blocks), self.r)
+            return super().forward(*args, **kw)
+
+  結論：我們 gigapath_apply_tome 裡 tome.patch.timm(model) 完後設
+        model.r = r，每次 forward 都會重新讀。API 用對，r 有生效
+        （這與 [1] 的時間差一致）。假設否決。
+
+  ── [4] GigaPath 用了 timm 標準 Block / Attention 嗎? ─────────────────
+
+  假設：tome 用 isinstance(module, timm.Block) 檢查是否要 patch。若
+        GigaPath 繼承出自己的 Block（有客製邏輯），tome 換成 ToMeBlock
+        就會**掉失客製邏輯** -> 隨機輸出。
+
+  驗證：
+    block[0].__class__ = timm.models.vision_transformer.Block
+    attn.__class__     = timm.layers.attention.Attention
+    isinstance(block[0], timm.Block)          = True
+    isinstance(block[0].attn, timm.Attention) = True
+
+  結論：GigaPath 用的是**純 timm 標準 Block + Attention**，沒繼承客製化。
+        假設否決。
+
+  ── [5] 是不是 QK-Norm 被 tome 繞掉? ───────────────────────────────────
+
+  假設：現代 timm Attention.forward 有 q_norm / k_norm（QK-Normalization，
+        DINOv2 訓練穩定用），tome 的舊版 ToMeAttention 是手寫 attention
+        沒實作 q_norm/k_norm。若 GigaPath 開了 QK-Norm，tome 換成
+        ToMeAttention -> 正規化被繞掉 -> attention 分布爆掉。
+
+  驗證：
+    attn.q_norm type          = Identity
+    attn.k_norm type          = Identity
+    attn.q_norm is nn.Identity = True
+
+  結論：GigaPath 的 q_norm / k_norm 是 Identity（沒開 QK-Norm）。
+        假設否決。
+
+  ── [6] 是不是 fused_attn vs 手寫 attention 累積 40 層漂移? ────────────
+
+  假設：GigaPath 用 fused_attn=True 走 F.scaled_dot_product_attention
+        （flash-attn 快徑），tome 的 ToMeAttention 強制手寫
+        q @ k.T -> softmax -> @ v。fp32 下數學等價但實際數值有 1e-6 級
+        差異 -> 疊 40 blocks 可能雪球累積。
+
+  驗證：寫個最小可重現腳本，分三 part 逐步判斷：
+
+    PART 1 | 單一 block[0] attention，同一個 x 輸入
+             timm fused 直接 forward   vs   tome patch 後手寫 attn forward
+             diff mean = 1.01e-6      diff max = 8.58e-6
+             cos = 1.000000
+             -> 單層來看，兩者實質等價（差在 fp32 底噪）
+
+    PART 2 | 完整 model 對照：
+             (a) 全部 block.attn.fused_attn = False 的原生 timm 走手寫 attn
+             (b) tome patch + r=0（也走手寫 attn，且 r=0 完全不 merge）
+             (a) vs (b) cos = 0.008219
+             -> 兩邊都走手寫 attention 且 r=0 沒 merge，結果卻正交!
+             -> 問題不在 attention，一定在 ToMeBlock 的其他地方
+
+    PART 3 | 原生 fused baseline 對比手寫、tome r=0：
+             原生 fused vs 手寫（fused=False） cos = 1.000000
+             原生 fused vs tome r=0            cos = 0.008219
+             -> 手寫 attention 完全沒問題；ToMe 的 ToMeBlock 才是元兇
+
+  結論：問題不在 attention 邏輯，也不在 fused vs 手寫。**在 ToMeBlock 的
+        forward 有東西不對**。這是第二個決定性線索：範圍縮小到 ToMeBlock。
+
+  ── [7] diff ToMeBlock.forward vs timm Block.forward ─────────────────
+
+  兩者對 look：
+
+    timm 現代 Block.forward:
+        x = x + self.drop_path1( self.ls1( self.attn(self.norm1(x)) ) )
+        x = x + self.drop_path2( self.ls2( self.mlp(self.norm2(x)) ) )
+
+    tome ToMeBlock.forward (tome/patch/timm.py:27):
+        x_attn, metric = self.attn(self.norm1(x), attn_size)
+        x = x + self._drop_path1( x_attn )                      # <-- 少 self.ls1
+        r = self._tome_info["r"].pop(0)
+        if r > 0:
+            merge, _ = bipartite_soft_matching(metric, r, ...)
+            x, self._tome_info["size"] = merge_wavg(merge, x, ...)
+        x = x + self._drop_path2( self.mlp(self.norm2(x)) )     # <-- 少 self.ls2
+
+  找到！tome 的 ToMeBlock **完全略過 self.ls1 / self.ls2（LayerScale）**。
+  drop_path、norm、attn、mlp 都在，就是漏了 LayerScale。
+
+  ── [8] 確認 GigaPath 真的有 LayerScale ───────────────────────────────
+
+    blocks[0].ls1 type         = LayerScale
+    blocks[0].ls1 is Identity  = False
+    blocks[0].ls1.gamma        shape=(1536,)  mean=0.000428  std=0.013287
+
+  gamma 平均 4.3e-4，1536 維每個 channel 有自己的 gamma。這就是元兇。
+
+  ═══════════════════════════════════════════════════════════════════════
+  原理：為什麼漏了 LayerScale 會讓 forward 直接崩掉
+  ═══════════════════════════════════════════════════════════════════════
+
+  LayerScale (Touvron et al. 2021, "Going deeper with image transformers")
+  是深 ViT 的必備零件：
+
+      y = x + LayerScale( F(x) )
+      LayerScale(z) = gamma * z         (element-wise，gamma 可學)
+
+  gamma 初始很小（~1e-4~1e-5），效果等同「residual branch 一開始幾乎不
+  貢獻，訓練期間慢慢學到有效權重」。這對 40 blocks 的 ViT-g 是穩定訓練
+  的關鍵：沒 LayerScale，40 層 residual 累積會讓 activation 指數爆炸。
+
+  GigaPath 是 prov-gigapath ViT-g，40 blocks，DINOv2 血統，一定用
+  LayerScale。實測 gamma 平均 4.3e-4 -> residual branch 應該只貢獻
+  ~0.04%。
+
+  tome ToMeBlock 略過 self.ls1 / self.ls2 -> residual branch 直接以**全
+  放大 2000 多倍**的幅度加回主幹 -> 幾個 block 內 activation 就爆炸 ->
+  最終 embedding 完全跟輸入無關 -> 隨機方向的 unit vector。
+
+  為什麼 tome 不處理 LayerScale？tome 論文 (Bolya et al. 2023) 出的時候
+  timm ViT 還沒普及 LayerScale（只有 CaiT 等少數用），upstream 也就沒
+  實作。現代 ViT-g / DINOv2 / OpenCLIP-ViT-H 全都用 LayerScale，這些
+  模型接 tome 都會踩雷，但 symptom 是「速度確實變快但下游任務精度異常
+  低」 -- 很容易誤診成「ToMe 對這模型精度損失就是這麼大」而不繼續追。
+
+  ═══════════════════════════════════════════════════════════════════════
+  修法：class-level monkey-patch ToMeBlock.forward
+  ═══════════════════════════════════════════════════════════════════════
+
+  aiNNModel/GigaPathFunc.py 的 gigapath_apply_tome 在 tome.patch.timm(model)
+  之後把 ToMeBlock.forward 換成加了 ls1/ls2 的版本：
+
+      def _forward_with_ls(self, x):
+          attn_size = self._tome_info['size'] if self._tome_info['prop_attn'] else None
+          x_attn, metric = self.attn(self.norm1(x), attn_size)
+          x = x + self._drop_path1( self.ls1(x_attn) )                       # <-- 補回 ls1
+          r_ = self._tome_info['r'].pop(0)
+          if r_ > 0:
+              merge, _ = bipartite_soft_matching(metric, r_,
+                          self._tome_info['class_token'],
+                          self._tome_info['distill_token'])
+              if self._tome_info['trace_source']:
+                  self._tome_info['source'] = merge_source(merge, x, self._tome_info['source'])
+              x, self._tome_info['size'] = merge_wavg(merge, x, self._tome_info['size'])
+          x = x + self._drop_path2( self.ls2(self.mlp(self.norm2(x))) )      # <-- 補回 ls2
+          return x
+
+      ToMeBlock.forward = _forward_with_ls
+
+  改的是 class 屬性（不是 instance），tome.patch.timm 之後每個 block 的
+  __class__ 都被指向 ToMeBlock，class 上一改 forward 全體生效。
+
+  ═══════════════════════════════════════════════════════════════════════
+  驗證
+  ═══════════════════════════════════════════════════════════════════════
+
+  修完在 4 張合成 patch 上實測（同一個 baseline 對比 tome 各 r）：
+
+    r=0    cos vs baseline = 1.000000    <- patch 無害，等同 baseline (sanity)
+    r=2    cos vs baseline = 0.970476    <- ~3% 損失
+    r=4    cos vs baseline = 0.903425    <- ~10% 損失
+    r=8    cos vs baseline = 0.779368    <- ~22% 損失，可用但邊緣
+
+  對照修**前** r=8 cos ~ 0.015（純隨機），修**後** 0.779 是真實可用的
+  壓縮嵌入。ToMe 首次在 GigaPath 上產出有語意的輸出。
+
+  ═══════════════════════════════════════════════════════════════════════
+  可以 PR 回 upstream
+  ═══════════════════════════════════════════════════════════════════════
+
+  這是 facebookresearch/ToMe 的相容 bug，可以貢獻回去。防禦式寫法：
+
+      ls1 = getattr(self, 'ls1', torch.nn.Identity())
+      ls2 = getattr(self, 'ls2', torch.nn.Identity())
+      x = x + self._drop_path1( ls1(x_attn) )
+      x = x + self._drop_path2( ls2(self.mlp(self.norm2(x))) )
+
+  舊版 timm（沒 ls1/ls2）走 Identity 不受影響，新版有 LayerScale 就正確
+  respect。
+
+  ═══════════════════════════════════════════════════════════════════════
+  順手完成（技術含量不高，一併記錄）
+  ═══════════════════════════════════════════════════════════════════════
+
+  - accuracy 分析框架 bench_gigapath_accuracy.py（L1 embedding fidelity
+    分布 + L2 pairwise ranking preservation top-K overlap + Spearman）。
+  - TissuesRegionsMask.from_wsi 加 max_pixels + overlap 參數，走 adaptive
+    halving（每步對半切較長邊直到每 tile <= max_pixels）+ 邊界 overlap
+    trim 拼回，解 HEST 對大 MRXS thumbnail 的 OOM。
+  - 專案輸出路徑統一為 result/<SLURM_JOB_NAME>；byproducts 到 log/tmp。
+
+================================================================================
