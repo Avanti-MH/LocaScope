@@ -98,47 +98,64 @@ class TileSampler:
         tissue_ratio: float = 0.5,
         max_tries: Optional[int] = None,
     ) -> List[TileInfo]:
-        """Sample n tiles from one WSI level. Pure helper; does not mutate self."""
+        """Sample n tiles from one WSI level via region-first sampling.
+
+        Applies filter_regions -> merge_overlapping -> filter_patchable to
+        self.mask for THIS level, samples tiles from the surviving regions,
+        then undoes the three mutations via self.mask.regions_undo() so the
+        next level starts from the same base regions (no cross-level
+        pollution).
+        """
         if max_tries is None:
-            max_tries = n * 20
+            max_tries = n * 5   # region-first hit rate is high
 
         ds = self.wsi.level_downsamples[level]
-        W_lv, H_lv = self.wsi.level_dimensions[level]
-
-        if W_lv < self.tile_size or H_lv < self.tile_size:
-            print(
-                f'  [SKIP] Level {level}: too small ({W_lv}x{H_lv}) '
-                f'for tile_size={self.tile_size}'
-            )
-            return []
-
         tile_size_l0 = int(self.tile_size * ds)
-        tiles: List[TileInfo] = []
-        tries = 0
 
-        while len(tiles) < n and tries < max_tries:
-            tries += 1
-            x_lv = int(self.rng.integers(0, W_lv - self.tile_size + 1))
-            y_lv = int(self.rng.integers(0, H_lv - self.tile_size + 1))
-            x0 = int(x_lv * ds)
-            y0 = int(y_lv * ds)
+        # Prep regions for THIS level (undone in the finally block)
+        self.mask.filter_regions(min_ratio=0.01)
+        self.mask.merge_overlapping()
+        self.mask.filter_patchable(tile_size=self.tile_size, ds=ds)
 
-            if self.mask.has_tissue_l0(x0, y0, tile_size_l0, tile_size_l0, tissue_ratio):
-                tiles.append(TileInfo(
-                    level=level,
-                    x=x0,       # using when read_tile (read_region)
-                    y=y0,       # using when read_tile (read_region)
-                    tile_size=self.tile_size,
-                    mpp=self.level_mpps[level],
-                ))
+        try:
+            if not self.mask.tissue_regions:
+                print(f'  [SKIP] Level {level}: no region fits '
+                      f'tile_size={self.tile_size}')
+                return []
 
-        if len(tiles) < n:
-            print(
-                f'  [WARN] Level {level}: only sampled {len(tiles)}/{n} '
-                f'after {tries} tries'
-            )
+            tiles: List[TileInfo] = []
+            tries = 0
 
-        return tiles
+            while len(tiles) < n and tries < max_tries:
+                tries += 1
+                region = self.rng.choice(self.mask.tissue_regions)
+                x0_picked = int(self.rng.integers(
+                    region.x, region.x + region.w - tile_size_l0 + 1))
+                y0_picked = int(self.rng.integers(
+                    region.y, region.y + region.h - tile_size_l0 + 1))
+
+                if self.mask.has_tissue_l0(x0_picked, y0_picked,
+                                            tile_size_l0, tile_size_l0,
+                                            tissue_ratio):
+                    tiles.append(TileInfo(
+                        level=level,
+                        x=x0_picked,       # using when read_tile (read_region)
+                        y=y0_picked,       # using when read_tile (read_region)
+                        tile_size=self.tile_size,
+                        mpp=self.level_mpps[level],
+                    ))
+
+            if len(tiles) < n:
+                print(f'  [WARN] Level {level}: only sampled {len(tiles)}/{n} '
+                      f'after {tries} tries')
+
+            return tiles
+        finally:
+            # Undo the three mutations so the next level starts from the
+            # same base tissue_regions.
+            self.mask.regions_undo()  # filter_patchable
+            self.mask.regions_undo()  # merge_overlapping
+            self.mask.regions_undo()  # filter_regions
 
     def sample(
         self,

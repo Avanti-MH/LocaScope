@@ -52,18 +52,56 @@ class TissuesRegionsMask:
         self.wsi_mpp_x = wsi_mpp_x
         self.wsi_mpp_y = wsi_mpp_y
         self.wsi_level_downsamples = list(wsi_level_downsamples)
+        # Undo stack for regions mutations (filter_regions / filter_patchable /
+        # merge_overlapping snapshot tissue_regions here before modifying).
+        self._regions_history: list[list[TissueRegion]] = []
 
     def __len__(self):
         return len(self.tissue_regions)
-    
+
     def __getitem__(self, index):
         return self.tissue_regions[index]
-    
+
     def __iter__(self):
         return iter(self.tissue_regions)
 
     def tissue_fraction(self) -> float:
         return float(self.main_mask.mean())
+
+    # ── Regions mutation history ─────────────────────────────────────────────
+
+    def _snapshot(self) -> None:
+        """Push a deep copy of tissue_regions onto the undo stack.
+
+        Deep-copying protects the history against any future code that
+        mutates a TissueRegion's fields in place — the snapshot stays
+        pristine regardless of what happens to the current list.
+        """
+        self._regions_history.append([
+            TissueRegion(r.x, r.y, r.w, r.h, r.index)
+            for r in self.tissue_regions
+        ])
+
+    def regions_resume(self) -> None:
+        """
+        Re-run _search_tissue_regions on main_mask, restoring the pristine
+        connected-component regions. Clears the undo history.
+        """
+        self.tissue_regions = self._search_tissue_regions(
+            self.main_mask, self.mask_ds_x, self.mask_ds_y
+        )
+        self._regions_history.clear()
+
+    def regions_undo(self) -> bool:
+        """
+        Undo the most recent mutation of tissue_regions (filter_regions,
+        filter_patchable, or merge_overlapping). Returns True if a snapshot
+        was popped, False if the history was empty (silent no-op).
+        """
+        if not self._regions_history:
+            return False
+        self.tissue_regions = self._regions_history.pop()
+        return True
 
     @staticmethod
     def _adaptive_apply(method: callable,
@@ -313,10 +351,12 @@ class TissuesRegionsMask:
 
         1. Regions with area < min_ratio * max_region_area
         2. Regions fully contained within another region
-        Modifies self.tissue_regions in place.
+        Modifies self.tissue_regions in place; pushes a snapshot onto the
+        undo stack (see regions_undo).
         '''
         if not self.tissue_regions:
             return
+        self._snapshot()
         max_area = max(r.w * r.h for r in self.tissue_regions)
         threshold = max_area * min_ratio
         kept = [r for r in self.tissue_regions if r.w * r.h >= threshold]
@@ -335,16 +375,87 @@ class TissuesRegionsMask:
         '''Remove tissue_regions that cannot produce even one tile at the given level.
 
         A region is patchable when both its level-0 width and height are >= tile_size * ds.
-        Modifies self.tissue_regions in place.
+        Modifies self.tissue_regions in place; pushes a snapshot onto the
+        undo stack (see regions_undo).
 
         Args:
             tile_size: patch size in level-N pixels
             ds:        downsample factor of the target level (level-0 px / level-N px)
         '''
+        self._snapshot()
         tile_l0 = tile_size * ds
         self.tissue_regions = [
             r for r in self.tissue_regions if r.w >= tile_l0 and r.h >= tile_l0
         ]
+
+    def merge_overlapping(self) -> None:
+        '''Merge tissue_regions whose bboxes partially overlap.
+
+        Criterion (partial overlap only):
+          - bbox intersect area > 0
+          - AND neither region's bbox fully contains the other
+        This means identical / nested cases are left alone (they are
+        already handled by filter_regions); only genuine partial overlaps
+        get merged.
+
+        Union-find propagates chained overlaps: if A overlaps B and
+        B overlaps C, all three collapse into one merged region.
+        Each merged region gets the union bbox of its members and a fresh
+        index 0..N-1. Modifies self.tissue_regions in place; pushes a
+        snapshot onto the undo stack (see regions_undo).
+        '''
+        regs = self.tissue_regions
+        n = len(regs)
+        if n < 2:
+            return
+        self._snapshot()
+
+        parent = list(range(n))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        def contains(A, B):
+            return (A.x <= B.x and A.y <= B.y
+                    and A.x + A.w >= B.x + B.w
+                    and A.y + A.h >= B.y + B.h)
+
+        def partial_overlap(A, B):
+            ix = max(0, min(A.x + A.w, B.x + B.w) - max(A.x, B.x))
+            iy = max(0, min(A.y + A.h, B.y + B.h) - max(A.y, B.y))
+            if ix * iy <= 0:
+                return False
+            return not contains(A, B) and not contains(B, A)
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if partial_overlap(regs[i], regs[j]):
+                    union(i, j)
+
+        groups = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(i)
+
+        new_regs = []
+        for k, members in enumerate(groups.values()):
+            xs  = [regs[i].x for i in members]
+            ys  = [regs[i].y for i in members]
+            xes = [regs[i].x + regs[i].w for i in members]
+            yes = [regs[i].y + regs[i].h for i in members]
+            x0, y0 = min(xs), min(ys)
+            x1, y1 = max(xes), max(yes)
+            new_regs.append(TissueRegion(
+                x=x0, y=y0, w=x1 - x0, h=y1 - y0, index=k,
+            ))
+        self.tissue_regions = new_regs
 
 
 # ── Internal mask functions ───────────────────────────────────────────────────
