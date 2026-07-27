@@ -246,23 +246,28 @@ Step 9  刪除 synth_fov_generator.py（若存在於 repo 內）
 
 ---
 
+## 命名說明
+
+`query_sim` 的 **query = 整個 LocaScope 專案的 FoV Picture**（顯微鏡下拍到的一張視野）。
+這裡的 query 跟 retrieval 語境的 query 是**同一件事**，不是兩個概念 → 名稱不改，
+`query_sim` = 「query（FoV picture）的 simulator」，語意正確。
+
+---
+
 ## 可討論的取捨
 
-1. **要不要 rename `query_sim/` → 更精確的名字？**
-   e.g. `microscope_sim/`、`fov_sim/`（現有名稱偏「query」，容易和 retrieval 的 query 混淆）
-
-2. **`generator.py` 用 iterator 還是 list？**
+1. **`generator.py` 用 iterator 還是 list？**
    iterator 省記憶體、可以 pipeline 串接；list 簡單直觀。batch 場景兩者都 OK。
 
-3. **`source/wsi_query.py` 要不要跟 `PatchingLib.WsiTissuesContainer` 整合？**
+2. **`source/wsi_query.py` 要不要跟 `PatchingLib.WsiTissuesContainer` 整合？**
    後者已有完整 WSI 讀取 + patching 邏輯，可能重複實作 WSI region 讀取。
    風險：兩邊 use case 不同（一個要 raw crop、一個要 grid patches），強行整合可能反而複雜。
 
-4. **`--seed` 統一入口**
+3. **`--seed` 統一入口**
    `random.seed / np.random.seed / torch.manual_seed` 統一設定，方便 reproduce。
    Config 也可加 `seed: Optional[int]` 欄位。
 
-5. **要不要支援多 WSI 混合輸出？**
+4. **要不要支援多 WSI 混合輸出？**
    例如 `--wsi wsi1.svs wsi2.svs --n 300` 平均產出。`FOVRecord.wsi` 已支援。
 
 ---

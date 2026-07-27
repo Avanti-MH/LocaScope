@@ -3,7 +3,9 @@ import numpy as np
 
 
 def apply_distortion(img, k1=0.2, k2=0.0):
-    """Barrel (k1>0) or pincushion (k1<0) lens distortion."""
+    """Barrel (k1>0) or pincushion (k1<0) lens distortion (cv2.remap, sub-pixel)."""
+    if k1 == 0.0 and k2 == 0.0:
+        return img
     h, w = img.shape[:2]
     cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
     Y, X = np.mgrid[0:h, 0:w].astype(np.float32)

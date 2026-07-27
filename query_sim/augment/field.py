@@ -14,6 +14,8 @@ def apply_field_mask(img, fill=255):
 
 def apply_vignette(img, strength=0.4):
     """Gaussian vignette: darkening toward edges."""
+    if strength == 0.0:
+        return img
     h, w = img.shape[:2]
     cx, cy = w / 2.0, h / 2.0
     Y, X = np.ogrid[:h, :w]
@@ -25,6 +27,8 @@ def apply_vignette(img, strength=0.4):
 
 def apply_stage_shift(img, max_shift=3):
     """Random sub-pixel stage mechanical jitter."""
+    if max_shift <= 0:
+        return img
     dx = np.random.randint(-max_shift, max_shift + 1)
     dy = np.random.randint(-max_shift, max_shift + 1)
     M = np.float32([[1, 0, dx], [0, 1, dy]])
