@@ -75,6 +75,13 @@ class GigaPathKnnEstiMpp:
 
     All intermediate state is stored on self for debugging and visualization.
     Stages that depend on earlier ones are built automatically if not called yet.
+
+    `seed` fixes the reference-tile draw. It defaults to a constant rather than
+    None because build_samples() only consults the mask -- it reads no pixels --
+    so a position that openslide cannot decode (a corrupt or unscanned MIRAX
+    tile) only surfaces later, in build_ref_features(). With an unseeded rng
+    that crash lands on a different tile every run and cannot be reproduced.
+    Pass seed=None for a fresh draw each run.
     '''
 
     def __init__(
@@ -85,6 +92,7 @@ class GigaPathKnnEstiMpp:
         tile_size: int = 256,
         samples_per_level: int = 40,
         k: int = 5,
+        seed: Optional[int] = 42,
     ):
         if isinstance(wsi, str):
             wsi = openslide.OpenSlide(wsi)
@@ -94,6 +102,7 @@ class GigaPathKnnEstiMpp:
         self.tile_size = tile_size
         self.samples_per_level = samples_per_level
         self.k = k
+        self.seed = seed
 
         # Intermediate state — inspect these at any stage for debugging
         self.sampler: Optional[TileSampler] = None
@@ -111,7 +120,8 @@ class GigaPathKnnEstiMpp:
         '''Sample n tiles per WSI level within tissue regions.'''
         if self.mask is None:
             self.mask = TissuesRegionsMask.from_wsi(self.wsi)
-        self.sampler = TileSampler(self.wsi, self.mask, tile_size=self.tile_size)
+        self.sampler = TileSampler(self.wsi, self.mask,
+                                   tile_size=self.tile_size, seed=self.seed)
         self.sampler.sample(n=self.samples_per_level)
         return self.sampler
 
