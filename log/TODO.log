@@ -148,11 +148,6 @@
   API 一致性
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] 2026-07-21 | aiNNModel/GigaPathFunc.py
-    make_gigapath_encoder(model, device, batch_size, dtype) → callable
-    與 make_hest_method 對稱，讓外部不需寫 lambda 就能取得 encoder callable。
-    ✓ 程式碼已寫入 GigaPathFunc.py，待實際執行驗證
-    完成後 test_gigapath_knn_esti_mpp.py 的 inline lambda 可換成這個
 
 ────────────────────────────────────────────────────────────────────────────────
   實作缺口
@@ -161,26 +156,30 @@
 [ ] 2026-07-21 | LocaScope.py
     LocaScope 主類別尚未實作（目前只有 LocaScope.md 設計文件）
 
-[ ] 2026-07-21 | 1_estimate_query_mpp/estimate_mpp_classic.py
+[x] 2026-07-21 | 1_estimate_query_mpp/estimate_mpp_classic.py
     Classic MPP 估算（非 GigaPath）尚未實作（空檔案）
+    ✅ 2026-07-29 實作其實一直存在，只是放錯位置——根目錄的
+       1_estimate_query_mpp.py（197 行）就是它，跟同名的 package 目錄撞名，
+       全專案無人 import。整理目錄時搬進來，根目錄那份刪除。
+       內容：倍率指紋（spectral centroid + autocorr length）比對 WSI 各層，
+       與位置無關，所以稀疏 sample 即可，不必命中 query 的真實位置。
+       estimate() 逐指紋報告 + log-mpp 內插；estimate_knn() 融合兩個指紋
+       做 2-D z-score 正規化後的距離加權 KNN，回傳估計 MPP。
+       未決：檔案含 print() 與 argparse __main__，違反「stage module 不含
+       CLI / print」。要拆的話純邏輯留原處、CLI 移到 1_estimate_query_mpp/cli/。
 
 [ ] 2026-07-21 | 2_retrieval/retrieval_gigapth.py
     Retrieval entry point 尚未實作（空檔案）
 
-[ ] 2026-07-22 | query_sim/ — 整合 synth_fov_generator + query_sim
-    合併兩個工具為一個統一 package
-    設計文件：query_sim/ARCHITECTURE.md
-    目標：保留兩邊最強實作
-      - query_sim: modular augment（cv2 精度）、MPP→level 邏輯、demo CLI
-      - synth_fov: 批量 + GT、tissue filter、region 分類、rotation + scale
-    三層 API: augment/ → pipeline.py → generator.py → cli/{demo,batch}.py
-    遷移 9 步詳見 ARCHITECTURE.md「遷移建議順序」
-    可討論取捨：
-      - rename query_sim/ 為更精確的名字（e.g. microscope_sim/）
-      - 是否跟 PatchingLib.WsiTissuesContainer 整合 WSI 讀取
-      - iterator vs list、seed 統一入口、多 WSI 混合輸出
+[ ] 2026-07-23 | query_sim/ — 後續
+    ● 是否跟 PatchingLib.WsiTissuesContainer 整合 WSI 讀取
+        風險：兩邊 use case 不同（raw crop vs grid patch），整合可能反而複雜
+    ✅ 多 WSI 混合輸出 — 已由 cli/multi_batch.py 完成（見 M4.3）
+      （--rotation-only 已由 Camera(cfg=...) 天然涵蓋：換 cfg 就是換相機）
 
-[ ] 2026-07-22 | 2_retrieval/ — rotation-aware retrieval
+[x] 2026-07-22 | 2_retrieval/ — rotation-aware retrieval
+    ✅ 2026-07-27 採方案 A，實作於 GigaPathSlideWinSimRot.py（見 M5）
+       尚待 bench 數據回答的兩個未決點見該 entry
     query 可能被旋轉 0 / 90 / 180 / 270（放片方向未知）
     需求：
       1. 在不知道旋轉方向的情況下仍能找到正確 WSI 位置
@@ -200,12 +199,165 @@
       - 對稱組織區（e.g. 均勻背景）4 個方向 score 可能接近 → 需 tie-break 策略
       - 需在 synth_fov / query_sim 產生旋轉 GT 資料集才能 benchmark
 
+[ ] 2026-07-27 | 2_retrieval/ — retrieval 信心度 (peak_z)，區分「pipeline 錯」與「這題無解」
+    現象（BenchLocaScopeSmoke / BRACS_1228_L0_syn00002）：
+      query 是大片空白玻璃 + 一條稀疏基質 + 脂肪，retrieval 跑到 12.3 mm 外
+        rot   0: 0.3450   rot  90: 0.3585 (真值)
+        rot 180: 0.3703 <-selected   rot 270: 0.3480
+      四個角度全距只有 0.025，真值排第二輸 0.0118；SIFT 只有 6/79 inliers
+      -> sim map 是平的，argmax 由雜訊決定。GigaPath 對「白底+細絲+脂肪」的
+         patch embedding 幾乎相同，這種 FoV 在外觀上本來就不可定位
+
+    這是 M4.3 移除 classify_region 時提到的底層現象重新浮現：
+      feature-sparse 的 FoV 不可定位。但事前分類 threshold 無法跨 slide 校準
+      （見 M4.3 的 6 片 WSI 實測），所以改成事後量信心度
+
+    提案：在 GigaPathSlidingWinSimRot.find_best() 記峰值突出程度
+      hm_mean 已經算出來了，順手多兩個統計量：
+        peak_z = (best_score - hm_mean.mean()) / hm_mean.std()
+      z 大 = 峰值遠高於整張 sim map 平均，可信
+      z 接近 0 = 峰值貼著平均，argmax 沒有意義
+    改動範圍：find_best() 多算兩個統計量 + SlideWinSimRotResult 加一欄
+              + bench metrics.csv 加一欄
+
+    用途：配合已有的 refine_inliers，把 shot 分成「可定位 / 不可定位」，
+      bench 誤差統計分開報。否則少數空白 FoV 會主宰 CDF 尾巴，
+      看不出 pipeline 在有內容的 query 上實際多準
+
+    未決：
+      - peak_z 的門檻要用實測分佈決定（不要再猜 threshold，見 M4.3 教訓）
+      - 是否也記 sim map 的 top1/top2 峰值比（另一種峰值銳利度指標）
+
 [ ] 2026-07-21 | training/models/mppResNet.py
     MPP 估算用的 ResNet 只有 stub（2 行），訓練邏輯尚未完成
 
 ────────────────────────────────────────────────────────────────────────────────
   已完成
 ────────────────────────────────────────────────────────────────────────────────
+
+[x] 2026-07-27 | LocaScope — 端到端三階段 bench (M5)
+    目標：量測 WSI -> Camera -> mpp est -> retrieval -> SIFT+RANSAC 每階段能力
+      1. mpp 估得多準  2. retrieval 找得多近  3. 與 GT 差幾個 pixel
+
+    ── 新檔 ──
+    utilities/LocaScopePipeline.py
+      三 stage 的 glue，per-WSI 一個物件：
+        build()            一次性：mask + GigaPathKnnEstiMpp 參考庫
+        _get_retriever(lv) lazy cache，每個 pyramid level 建一次 retriever
+        run(img)           stage1 -> level routing -> stage2 -> stage3
+      關鍵決策：retriever 用「est_mpp 決定的 level」而非 nominal_mpp
+        - WsiTissuesContainer._find_level 要求 mpp 精確對應 level（tol=1e-3），
+          est_mpp 帶 jitter 不可能 exact match
+        - 故用 wsi.get_best_level_for_downsample(est_mpp/base_mpp) 做 fuzzy snap，
+          retriever 則以「該 level 的 native mpp」建構
+        - 因為 level 是離散的（3-10 個），cache key 用 level 而非 mpp
+          -> 一片 WSI 最多建幾個 retriever，不會因連續 mpp 爆炸
+      LocaScopeShotResult 帶 est_mpp / routed_level / unusable_level /
+        retrieval / refine / error；三個 stage 各自 try/except，
+        後段失敗不吃掉前段結果
+      unusable_level：該 level 的 filter_patchable 清空 mask（tile 太大），
+        記 True 並讓 metric 為 None，不算 error
+      run(keep_objects=True) 額外保留 retriever / localizer / query_qc 供繪圖
+
+    2_retrieval/GigaPathSlideWinSimRot.py
+      rotation-aware retrieval（TODO 2026-07-22 的方案 A）
+        WSI features 只 encode 一次；query 轉 0/90/180/270 各 extract+encode
+        -> 4 組 sim_maps -> 取最高分的 (rotation, x, y)
+      SlideWinSimRotResult = 原欄位 + best_rotation + scores_by_rotation
+        main_*/overlap_* 取自「勝出 rotation」的 main/overlap winner
+      成本：query 端 4x（query patch 數遠少於 WSI，可負擔）
+
+    utilities/test_modules/bench_locascope.py
+      讀 multi_batch 的 gt.csv -> 逐 shot 跑 pipeline -> metrics + 圖
+      輸出 result/<job>/：metrics.csv / summary.txt / 3 張 stage CDF /
+        heatmap.png(WSI x level) / figures/*.png
+      --draw-figures N 對前 N 張存 4-panel 診斷圖（-1 = 全部）
+
+    utilities/test_modules/_sift_plot.py
+      把 test_sift_ransac.draw_figure 的 [1,:] 四格抽成可重用函式
+      （SIFT matches / summary / zoomed +-N tiles / homography）
+      test_sift_ransac.py 未動，避免破壞既有測試
+
+    ── 改檔 ──
+    3_localization/SIFT_RANSAC.py
+      SiftRansacResult 加 center_x / center_y / center_x0 / center_y0
+      estimate_homography 一次 perspectiveTransform 同時映射 (0,0) 與 query 中心
+      失敗 fallback 時中心由 retrieval footprint 推得，依 best_rotation 對調長寬
+
+    ── 為什麼要 centre metric ──
+    gt_x/gt_y 是「旋轉前」的 top-left；SIFT 回的是 shot 自己 (0,0) 的落點，
+    對 90/180/270 而言是不同的角 -> 兩者系統性差一個 FoV 尺寸。
+    旋轉是繞 FoV 中心做的（bounding square 與 FoV 同心），所以中心是旋轉不變量。
+      GT centre     = gt_x + (fov_width * nominal_mpp / base_mpp) / 2
+                      （用 nominal 不是 effective：scale 不移動中心）
+      retr centre   = best_x0 + W/2，W/H 在 rot in (90,270) 時對調
+      refine centre = SiftRansacResult.center_x0/y0（過 H，精確）
+    metrics.csv 兩組並存（*_err_px 是 rot-naive top-left，*_center_err_px 才是
+    真正該讀的），summary 另報 Rotation recall 與 SIFT success 率
+
+    ── 待驗 ──
+      - rotation recall（retr_rotation == gt_rot_deg 的比例）
+      - SiftRansacLocalizer.read_wsi_crop 用未旋轉 query 的 width/height 決定
+        視窗大小，但 retrieval 的 best_x/y 是以旋轉後 footprint 為準；
+        rot in (90,270) 時長寬對調，靠 padding=2 tiles 補。
+        看「rot_correct=True 但 refine_success=False」的比例判斷是否咬到
+      - 對稱組織區 4 個方向 score 接近時的 tie-break（原 TODO 未決點）
+
+[x] 2026-07-27 | query_sim/ — 移除 stratify + mpp jitter + 多相機語料 (M4.3)
+
+    ── 移除 classify_region / stratify 整條線 ──
+    起因：batch 生成常卡住，診斷後發現是 stratify 配額餓死。
+    classify_region 的 edge threshold 是為 512x512 tune 的，
+    放到 4000x3000 @ mpp=0.25 的 shot 上整體分佈左移 -> 幾乎全判 sparse。
+    改用 Canny edge fraction + mpp 正規化（縮到 ref_mpp=1.0）後，
+    寫了 cli/analyze_classify.py 掃 6 片 WSI x 每個 level 各 300 樣本，
+    結論：**單一 threshold 在 corpus 上不成立**
+      L0 中位數：ADH 0.19 / FEA 0.28 / DCIS 0.32 / Ki67 三片 0.16-0.31
+      同一 Ki67 dataset 內部就差 2 倍 -> 任何固定 threshold 都會在某片失效
+      （真要做得改 per-slide percentile 校準，成本 > 收益）
+    決策：region_type 這個概念對 12MP 級 FoV 沒有可靠定義，整條移除。
+      刪 source/tissue_filter.py、cli/analyze_classify.py
+      camera.py  移除 classify 呼叫與 CameraShot.region_type
+      record.py  移除 FOVRecord.region_type
+      generator.py 移除 _stratify_targets / stall 偵測 / give-up 整段
+      cli/batch.py 移除 --no-stratify
+    副作用修正：舊 give-up 是「全關」而非「只放行拿不到的類」，
+      導致已滿的類別在放棄後被無限補（12 張裡 sparse 拿到 8 張）。整段移除後不再發生。
+
+    ── mpp calibration jitter ──
+    config.py   加 query_mpp_jitter（0 = 關，預設關）
+    pipeline.py jitter > 0 時 scale 改從 (1-j, 1+j) 抽，**取代** scale_range；
+                params['effective_mpp'] = query_mpp / scale
+      語意：模擬「顯微鏡 mpp 標定不準」。QFW 仍以 nominal mpp 讀圖，
+      jitter 純粹是 augment 階段的空間 scale，對下游等價於「讀在 effective mpp」
+    record.py   加 nominal_mpp / effective_mpp（stage 1 的 GT 是後者）
+
+    ── gt.csv schema ──
+    record.py   wsi(basename) -> wsi_path(full path)：bench 要能直接開檔
+                加 level（來源 Camera 的 pyramid level）
+    generator._record_from_shot 相應改簽名，多收 level
+
+    ── cli/multi_batch.py（新）──
+    多 WSI x 每個 pyramid level 各一台 Camera，統一 out_dir + 單一 gt.csv
+      wsi_0 有 4 個 level 就 4 台，wsi_1 有 10 個就 10 台，合計 14 台
+      每台 query_mpp = 該 level 的 native mpp，共用同一 jitter 設定
+      檔名 images/<wsi_tag>_L<lvl>_syn00000.png
+      被 skip 的相機寫 skips.csv（帶原因）並自動畫診斷圖到 diag/
+
+    ── cli/diag_camera_skip.py（新）──
+    診斷「為什麼這台相機產不出東西」，畫 mask 四個 filter 階段的演變：
+      raw -> filter_regions -> merge_overlapping -> filter_patchable
+    diagnose_skip(cam, level, out_dir, ...) 直接吃 Camera（mask/tile_l0/cfg 都在上面）
+      進入時 while regions_undo() 歸零（不管 caller 留下什麼狀態），
+      結束時 undo x3 還原 -> 對 caller 的合約是「離開時必為 raw」
+      不重建 mask（main_mask 不被 filter 動到，只有 tissue_regions 會變）
+      -> MRXS 深層每片省數分鐘
+
+    兩種 skip 各自的成因（log 會標明）：
+      「filter_patchable 清空」= 形狀不夠大，region bbox < 需要的 tile
+      「Camera 產不出」      = 密度不夠，bbox 夠大但實際 tissue < tissue_ratio
+    典型：MRXS 深層 level 是前者（tile 到 11-23mm，沒有組織這麼大）；
+          大片稀疏 WSI 是後者（窗口愈大，平均 tissue 比例愈回歸全片值）
 
 [x] 2026-07-21 | TissuesRegionsMask.py
     from_wsi 重設計：thumb_size → ds + level（支援負數索引）
@@ -233,7 +385,9 @@
     gigapath_compile：torch.compile 封裝（mode='reduce-overhead'）
     make_gigapath_encoder：closure factory，對稱 make_hest_method
     gigapath_apply_tome：ToMe 封裝（tome 需先裝於 timm 之前）
-    ⚠ encode/compile/encoder/multi_gpu 程式碼已寫，待實際跑過驗證
+    ✓ encode / compile / encoder / multi_gpu 都已透過 BenchMarkV2 + AccuracyV1
+      實際跑過驗證，M3 補了 ToMe LayerScale 相容 fix
+    ✓ 07-23 test_gigapath_knn_esti_mpp.py inline lambda 換成 make_gigapath_encoder
 
 [x] 2026-07-21 | 環境
     flash-attn 2.5.8 安裝（wget wheel 繞開跨裝置問題）
@@ -369,6 +523,133 @@
       test_tissue_patch_container / test_gigapath_knn_esti_mpp /
       test_gigapath_slide_win_sim / bench_gigapath_accuracy
     - result/ 專門放最終產出，log/ 專門放 SLURM stdout/stderr + tmp/ 副產物
+
+[x] 2026-07-23 | query_sim/ — Camera abstraction + QueryFromWSI refactor (M4.2)
+    修 M4.1 (region-first sampling + QueryFromWSI 語意) 之後兩個痛點:
+    (a) QFW 需塞佔位 (x, y=0) 才能 init，之後迴圈手動改 x_top_left 再 load_query_image
+    (b) generator 的 _rect_size_l0 / _sample_position / _build_mask 邏輯散在外
+
+    QFW 大重寫 (source/wsi_query.py):
+      - __init__(wsi_or_path, wh_ratio, MPixels, mpp) — 拿掉 x/y
+      - __init__ 算一次並 cache: wsi / base_mpp / chosen_level / chosen_mpp /
+        output_w/h / rect_w_l0/rect_h_l0 (每次 crop 不再重算)
+      - crop(x, y) -> PIL | None (out-of-bounds 回 None，語意乾淨)
+      - 支援吃已開的 openslide handle (Camera / mask 共用一個 handle)
+      - 拿掉 x_top_left / y_top_left / load_query_image / change_query_*
+        (backward compat 不留；下方 3 個 test 檔已改用 crop)
+
+    Camera 新檔 (camera.py):
+      顯微鏡光學系統 = QFW + DomainGapConfig + RNG (+ 可選 mask)
+        Camera(wsi_or_path, cfg=DomainGapConfig(), mask=None, seed=None,
+               tissue_ratio=0.5, max_pos_tries=20)
+      定點:    capture(x, y) -> np.ndarray | None
+              capture_with_gt(x, y) -> (np.ndarray, dict) | (None, None)
+      隨機:    for shot in cam:  ← __iter__ 用 mask region-first 無限出片
+                                  yield CameraShot(image, gt_x, gt_y, region_type, params)
+      不同 cfg = 不同相機；不同 seed = 不同曝光；不同 mask = 不同視野區域
+
+    generator.py 簡化:
+      本體 loop 從 40 行縮到 ~15 行
+        for shot in cam:
+            stratify 檢查 → FOVRecord(shot, ...) → save
+      _rect_size_l0 / _sample_position 內移到 Camera + QFW；只留
+      _prep_mask_for_camera (mask 三步 prep) 和 _record_from_shot (dict -> FOVRecord)
+
+    cli/demo.py:
+      raw crop 走 QFW.crop(args.x, args.y)；「Camera.capture」panel 走 cam.capture(x, y)
+      → 圖直接展示「玻片切片 → 顯微鏡實拍」語意對比
+
+    3 個 test 檔改新 API:
+      test_gigapath_knn_esti_mpp / test_sift_ransac / test_gigapath_slide_win_sim
+        - QueryFromWSI(wsi, WH_ratio=..., x_top_left=X, y_top_left=Y).load_query_image()
+        + QueryFromWSI(wsi, wh_ratio=..., ...).crop(X, Y)
+
+    Bounding-square 讀入（旋角無需 margin_ratio）:
+      QFW 內建 bounding_square_side_l0 = ceil(sqrt(rect_w² + rect_h²))
+        (= FoV 對角線；任何旋角 FoV 均落在此正方形內)
+      QFW.crop_bounding_square(x, y) — 讀邊長 = FoV 對角的正方形 PIL
+      Camera capture / __iter__ 全走 crop_bounding_square → augment → _center_crop
+        到 (output_w, output_h)。任何 rotation (含 --rotation 45 之類極端角度)
+        都不需 tune 任何參數。
+      _sample_position 保留 pad_x_l0/pad_y_l0 = (square - rect)/2 邊界檢查，
+        保證 bounding square 讀不出 WSI/region。
+      generator._prep_mask_for_camera 用 cam.bounding_square_side_l0 濾 region。
+      額外讀入成本: ~2x 原 rect 像素（sq² / rect² for 4:3 12MP = 2.08x），
+      換取 rotation 無限制 + 免 tune margin。
+      region_protrusion_ratio 放寬 sample 邊界（預設 0.5）:
+        bounding square 可以突出 tissue region 邊界一定比例（依 padding 計算），
+        突出的部分會落在 blank glass / 非 tissue。FoV rect 本身仍由 has_tissue_l0
+        gate。cli/batch --region-protrusion 可調 0-1.
+        對非 90° 旋轉的少數 shot，corners 可能有 non-tissue；換到大幅提升 sample
+        接受率（region 邊緣可用）。cfg 隨機下大多 shot 是 90° lossless -> 免費。
+
+    Rotation override（Camera 決定 vs cfg 決定 拆開）:
+      pipeline.simulate_with_gt(img, cfg, rng, rotation=None) —
+        rotation is None → cfg-隨機（原本行為）
+        rotation float   → rot_deg = int(round(rotation)); jitter = rotation - rot_int
+                           兩者之和 = 精確 rotation，FOVRecord 反算無誤
+      Camera.capture(x, y, rotation=None) / capture_with_gt(x, y, rotation=None) 加 override
+      Camera.__iter__() 不變 —— 只走 cfg 隨機（batch dataset）
+      cli/demo.py 加 --rotation 讓「Camera.capture」panel 可指定固定旋角
+      用途：rotation-aware retrieval benchmark 產「同位置 x 4 旋角」對照資料，
+            直接 for angle in (0, 90, 180, 270): cam.capture(x, y, rotation=angle)
+
+[x] 2026-07-23 | query_sim/ — 整合 synth_fov_generator + query_sim (M4)
+    合併 web-claude 版 synth_fov_generator 的批量/GT/tissue/rotation+scale +
+    既有 query_sim 的 cv2 augment 精度為一個統一 package。命名保留 query_sim
+    （query = 整個專案的 FoV Picture，見 project_query_terminology memory）。
+
+    新目錄結構（三層 API + backward compat）:
+      query_sim/
+      ├── config.py                DomainGapConfig（所有 range 集中，__post_init__ 檢查）
+      ├── record.py                FOVRecord dataclass (per-FOV gt.csv row)
+      ├── source/
+      │   ├── wsi_query.py         (= 原 QueryFromWSI.py)
+      │   └── tissue_filter.py     is_tissue + classify_region (HSV sat / edge density)
+      ├── augment/
+      │   ├── color.py             apply_color / color_temp / brightness_contrast / jpeg
+      │   ├── field.py             (= 原 field.py)
+      │   ├── lens.py              (= 原 lens.py)
+      │   ├── geometry.py          apply_rotation + apply_scale (新)
+      │   └── noise.py             apply_noise (從原 capture.py 抽出)
+      ├── pipeline.py              simulate_microscope_photo(img, cfg=None)
+      │                            simulate_with_gt(img, cfg=None) -> (img, params_dict)
+      ├── generator.py             generate(...) + generate_iter(...)
+      │                            內含 sample-with-margin + tissue retry + stratify + CSV
+      ├── cli/
+      │   ├── __init__.py          bootstrap() + job_result_dir(default_name)
+      │   ├── demo.py              (= 原 simulate_microscope_photo.py 的 main 擴充)
+      │   └── batch.py             N 張 + gt.csv
+      ├── QueryFromWSI.py          SHIM -> source.wsi_query.QueryFromWSI
+      ├── simulate_microscope_photo.py  SHIM -> pipeline.simulate_microscope_photo
+      └── ARCHITECTURE.md          原設計文件
+
+    Augment 合併決策（按 ARCHITECTURE.md）:
+      color / brightness / contrast   query_sim cv2 HSV
+      color_temp / brightness_contrast synth_fov (query_sim 沒有)
+      vignette (Gaussian)             query_sim (比 r² polynomial 平滑)
+      field_mask / stage_shift        query_sim
+      lens distortion (cv2.remap)     query_sim (sub-pixel > synth_fov 的 int cast)
+      defocus / chromatic / jpeg      query_sim
+      rotation / scale                synth_fov 邏輯 + cv2 實作
+                                        - rotation: 90/180/270 走 lossless cv2.rotate
+                                                    其餘走 cv2.warpAffine + BORDER_REFLECT
+                                        - scale:    cv2.resize + centre crop/pad
+      noise                           兩邊等價，取現有
+
+    Backward compat（3 個 test 檔完全不改）:
+      test_gigapath_knn_esti_mpp / test_gigapath_slide_win_sim / test_sift_ransac
+      都是 setup_import_paths() 把 query_sim/ 加到 sys.path，然後
+      from QueryFromWSI import QueryFromWSI / from simulate_microscope_photo import ...
+      → 兩個 SHIM 檔還在原路徑，行為完全相容
+
+    輸出路徑一致性:
+      cli/__init__.py 內建 job_result_dir(default_name) 對齊 utilities/test_modules/_paths.py
+      demo    -> result/<SLURM_JOB_NAME or QuerySimDemo>/
+      batch   -> result/<SLURM_JOB_NAME or QuerySimBatch>/{images/, gt.csv}
+
+    Reference 檔 synth_fov_generator.py 不在 repo（web claude 提供），無需刪除。
+    舊檔清理（待跑）: rm query_sim/{capture,field,lens}.py（外部已無 import）
 
 [x] 2026-07-23 | AccuracyV1 跑完 -> production 決策
     Sampling: SVS BRACS_1228 + MRXS Ki67 (HEST ds=4, region-first sampling
