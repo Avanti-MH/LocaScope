@@ -53,7 +53,7 @@ conda activate gigapath
 # =============================================================================
 
 # ---------------- Parameters ----------------
-WSI=/work/u26130998/datasets/Ki67/S1151088,G7E,111220.mrxs
+WSI=/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs
 
 # --- Otsu baseline ---
 OTSU_DS=32                          # Otsu mask ds
@@ -66,7 +66,7 @@ SWEEP_LEVEL="-1,-2,-3"
 OPS_DS=4                            # ops baseline mask ds
 OPS_MIN_RATIO=0.01                  # filter_regions cutoff
 OPS_PATCH_TILE=256                  # filter_patchable tile_size
-OPS_PATCH_DS=64.0                   # filter_patchable target level ds
+OPS_PATCH_DS=1.0                    # filter_patchable target level ds
 
 # --- Tiling (adaptive halving) ---
 TILING_DS=64                        # tiling seam/grid mask ds
@@ -74,7 +74,7 @@ TILING_MAX_PIXELS="16M,4M,1M"       # tiling sweep budgets
 TILING_OVERLAP=128                  # per-tile margin px
 
 # --- HEST ---
-HEST_DS=64                          # HEST-only mask ds (bigger ds -> smaller image, safer)
+HEST_DS=16                          # HEST-only mask ds (bigger ds -> smaller image, safer)
 HEST_MAX_PIXELS=4M                  # HEST tile budget for hest-only / ops / sweep
 
 # --- Visualization ---

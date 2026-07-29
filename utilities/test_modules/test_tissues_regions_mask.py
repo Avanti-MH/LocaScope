@@ -606,44 +606,121 @@ def draw_tile_grid_overlay(ax, trm, n_h, n_w, overlap_px, max_pixels, title):
     ax.axis('off')
 
 
+# ── Scanned bounds (MIRAX padding) ───────────────────────────────────────────
+
+def wsi_bounds(wsi) -> tuple:
+    '''The actually-scanned rectangle in level-0 coords: (x, y, w, h).
+
+    MIRAX (.mrxs) reports a canvas far larger than the scanned area and
+    exposes the real extent as openslide.bounds-*. Outside it there is no
+    JPEG data at all: read_region returns transparent, which .convert('RGB')
+    turns into pure black, and openslide raises
+
+        OpenSlideError: Not a JPEG file: starts with 0x00 0x00
+
+    for some of it. from_wsi reads the WHOLE canvas, so a segmentation model
+    that calls that black field tissue puts tissue_regions where no pixels
+    exist. Formats without the property (SVS) fall back to full dimensions,
+    which makes every bounds check below a no-op.
+    '''
+    p = wsi.properties
+    W, H = wsi.dimensions
+    return (int(p.get('openslide.bounds-x', 0)),
+            int(p.get('openslide.bounds-y', 0)),
+            int(p.get('openslide.bounds-width',  W)),
+            int(p.get('openslide.bounds-height', H)))
+
+
+def region_outside_bounds(r, bounds: tuple) -> bool:
+    '''True when a tissue region reaches outside the scanned rectangle.'''
+    bx, by, bw, bh = bounds
+    return (r.x < bx or r.y < by
+            or r.x + r.w > bx + bw
+            or r.y + r.h > by + bh)
+
+
+def report_bounds(wsi, path: str) -> tuple:
+    '''Print the canvas / scanned / padding numbers. Returns the bounds tuple.'''
+    bx, by, bw, bh = bounds = wsi_bounds(wsi)
+    W, H = wsi.dimensions
+    mpp  = float(wsi.properties.get('openslide.mpp-x', 0)) or float('nan')
+    frac = (bw * bh) / (W * H)
+    print(f'\n[bounds] {os.path.basename(path)}')
+    print(f'  canvas  {W} x {H} px'
+          f'  ({W*mpp/1000:.1f} x {H*mpp/1000:.1f} mm)')
+    print(f'  scanned {bw} x {bh} px at ({bx}, {by})'
+          f'  ({bw*mpp/1000:.1f} x {bh*mpp/1000:.1f} mm)')
+    print(f'  scanned fraction = {frac*100:.1f}%'
+          f'   padding = {(1-frac)*100:.1f}% (no image data)')
+    return bounds
+
+
 # ── Figure ────────────────────────────────────────────────────────────────────
 
-def draw_mask_with_regions(ax, trm: TissuesRegionsMask, title: str,
-                           show_index: bool = True, linewidth: float = 1.5):
-    ax.imshow(trm.main_mask, cmap='gray', vmin=0, vmax=1)
+def _draw_regions(ax, trm: TissuesRegionsMask, show_index: bool,
+                  linewidth: float, bounds: tuple = None) -> int:
+    '''Draw region bboxes in mask coords; returns how many escape `bounds`.
+
+    Regions wholly inside the scanned area are red, ones reaching into the
+    padding are magenta -- those are the ones whose tiles cannot be read.
+    '''
+    n_out = 0
     for r in trm.tissue_regions:
-        # Convert level-0 bbox to mask coords
+        outside = bounds is not None and region_outside_bounds(r, bounds)
+        n_out  += int(outside)
         mx = r.x / trm.mask_ds_x
         my = r.y / trm.mask_ds_y
         mw = r.w / trm.mask_ds_x
         mh = r.h / trm.mask_ds_y
         ax.add_patch(mpatches.Rectangle(
-            (mx, my), mw, mh,
-            fill=False, edgecolor='red', linewidth=linewidth,
+            (mx, my), mw, mh, fill=False,
+            edgecolor='magenta' if outside else 'red',
+            linewidth=linewidth,
         ))
         if show_index:
             ax.text(mx + 2, my + 8, str(r.index), color='yellow', fontsize=7)
-    ax.set_title(f'{title}\n{len(trm.tissue_regions)} regions, '
-                 f'tissue={trm.tissue_fraction()*100:.1f}%', fontsize=9)
+    return n_out
+
+
+def _draw_bounds(ax, trm: TissuesRegionsMask, bounds: tuple, linewidth: float):
+    '''Outline the scanned rectangle in mask coords.'''
+    bx, by, bw, bh = bounds
+    ax.add_patch(mpatches.Rectangle(
+        (bx / trm.mask_ds_x, by / trm.mask_ds_y),
+        bw / trm.mask_ds_x,  bh / trm.mask_ds_y,
+        fill=False, edgecolor='cyan', linestyle='--',
+        linewidth=linewidth * 1.5,
+    ))
+
+
+def _panel_title(trm: TissuesRegionsMask, title: str,
+                 bounds: tuple, n_out: int) -> str:
+    line = (f'{title}\n{len(trm.tissue_regions)} regions, '
+            f'tissue={trm.tissue_fraction()*100:.1f}%')
+    if bounds is not None:
+        line += f'\n{n_out} region(s) outside scanned bounds'
+    return line
+
+
+def draw_mask_with_regions(ax, trm: TissuesRegionsMask, title: str,
+                           show_index: bool = True, linewidth: float = 1.5,
+                           bounds: tuple = None):
+    ax.imshow(trm.main_mask, cmap='gray', vmin=0, vmax=1)
+    n_out = _draw_regions(ax, trm, show_index, linewidth, bounds)
+    if bounds is not None:
+        _draw_bounds(ax, trm, bounds, linewidth)
+    ax.set_title(_panel_title(trm, title, bounds, n_out), fontsize=9)
     ax.axis('off')
 
 
 def draw_thumb_with_regions(ax, trm: TissuesRegionsMask, thumb: np.ndarray, title: str,
-                            show_index: bool = True, linewidth: float = 1.5):
+                            show_index: bool = True, linewidth: float = 1.5,
+                            bounds: tuple = None):
     ax.imshow(thumb)
-    for r in trm.tissue_regions:
-        rx = r.x / trm.mask_ds_x
-        ry = r.y / trm.mask_ds_y
-        rw = r.w / trm.mask_ds_x
-        rh = r.h / trm.mask_ds_y
-        ax.add_patch(mpatches.Rectangle(
-            (rx, ry), rw, rh,
-            fill=False, edgecolor='red', linewidth=linewidth,
-        ))
-        if show_index:
-            ax.text(rx + 2, ry + 8, str(r.index), color='yellow', fontsize=7)
-    ax.set_title(f'{title}\n{len(trm.tissue_regions)} regions, '
-                 f'tissue={trm.tissue_fraction()*100:.1f}%', fontsize=9)
+    n_out = _draw_regions(ax, trm, show_index, linewidth, bounds)
+    if bounds is not None:
+        _draw_bounds(ax, trm, bounds, linewidth)
+    ax.set_title(_panel_title(trm, title, bounds, n_out), fontsize=9)
     ax.axis('off')
 
 
@@ -729,6 +806,9 @@ def main():
                     help='(col-scale,row-scale) for figsize, e.g. "7,5"')
     ap.add_argument('--region-index', action=argparse.BooleanOptionalAction, default=True,
                     help='show region index labels on bounding boxes')
+    ap.add_argument('--bounds', action=argparse.BooleanOptionalAction, default=True,
+                    help='outline openslide.bounds-* (the scanned area) on every '
+                         'panel and flag regions that reach into MIRAX padding')
     ap.add_argument('--bbox-lw', type=float, default=1.5,
                     help='bounding box linewidth (default 1.5)')
 
@@ -813,10 +893,19 @@ def main():
             method=hest_method,
         )
 
+    # Scanned bounds -- read once, overlaid on every panel below
+    bounds = None
+    if args.bounds and args.wsi and os.path.exists(args.wsi):
+        import openslide
+        _w = openslide.OpenSlide(args.wsi)
+        bounds = report_bounds(_w, args.wsi)
+        _w.close()
+
     # Figure layout: one row per section
     PER_ROW = args.per_row
     si = args.region_index
     lw = args.bbox_lw
+    bd = bounds
 
     # Row 0: synthetic + Otsu (+thumb) + HEST (+thumb)
     row0_cells = 1 + (2 if real_trm is not None else 0) + (2 if hest_trm is not None else 0)
@@ -861,25 +950,25 @@ def main():
     col = 0
     draw_synthetic_figure(ax_all[0, col]); col += 1
     if real_trm is not None:
-        draw_mask_with_regions( ax_all[0, col], real_trm, f'Otsu mask ({wsi_name})', show_index=si, linewidth=lw);  col += 1
-        draw_thumb_with_regions(ax_all[0, col], real_trm, real_thumb, 'Otsu thumb',  show_index=si, linewidth=lw);  col += 1
+        draw_mask_with_regions( ax_all[0, col], real_trm, f'Otsu mask ({wsi_name})', show_index=si, linewidth=lw, bounds=bd);  col += 1
+        draw_thumb_with_regions(ax_all[0, col], real_trm, real_thumb, 'Otsu thumb',  show_index=si, linewidth=lw, bounds=bd);  col += 1
     if hest_trm is not None:
-        draw_mask_with_regions( ax_all[0, col], hest_trm, f'HEST mask ({wsi_name})', show_index=si, linewidth=lw); col += 1
-        draw_thumb_with_regions(ax_all[0, col], hest_trm, hest_thumb, 'HEST thumb',  show_index=si, linewidth=lw); col += 1
+        draw_mask_with_regions( ax_all[0, col], hest_trm, f'HEST mask ({wsi_name})', show_index=si, linewidth=lw, bounds=bd); col += 1
+        draw_thumb_with_regions(ax_all[0, col], hest_trm, hest_thumb, 'HEST thumb',  show_index=si, linewidth=lw, bounds=bd); col += 1
 
     # Sweep rows
     row_base = 1
     for i, (label, trm) in enumerate(sweep_results):
         r = row_base + i // PER_ROW
         c = i %  PER_ROW
-        draw_mask_with_regions(ax_all[r, c], trm, label, show_index=si, linewidth=lw)
+        draw_mask_with_regions(ax_all[r, c], trm, label, show_index=si, linewidth=lw, bounds=bd)
     row_base += n_sweep_rows
 
     # Ops rows
     for i, (label, trm) in enumerate(ops_results):
         r = row_base + i // PER_ROW
         c = i %  PER_ROW
-        draw_mask_with_regions(ax_all[r, c], trm, f'[ops] {label}', show_index=si, linewidth=lw)
+        draw_mask_with_regions(ax_all[r, c], trm, f'[ops] {label}', show_index=si, linewidth=lw, bounds=bd)
     row_base += n_ops_rows
 
     # Tiling rows: seam panels, grid overlay, sweep panels
@@ -895,7 +984,7 @@ def main():
             r = row_base + i // PER_ROW
             c = i %  PER_ROW
             if kind == 'mask':
-                draw_mask_with_regions(ax_all[r, c], payload, title, show_index=si, linewidth=lw)
+                draw_mask_with_regions(ax_all[r, c], payload, title, show_index=si, linewidth=lw, bounds=bd)
             else:
                 trm_g, n_h, n_w, ov, mp = payload
                 draw_tile_grid_overlay(ax_all[r, c], trm_g, n_h, n_w, ov, mp, title)

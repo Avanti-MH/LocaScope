@@ -2,6 +2,8 @@
 loading CUDA 12.6
 -----------------
 
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/transformers/utils/generic.py:441: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
 [PASS] constructor: all fields assigned correctly
 [PASS] tissue_fraction: 0%, 50%, 100% cases correct
 [PASS] _search_tissue_regions: 2 blobs found, coords correct, tiny filtered
@@ -10,28 +12,71 @@ loading CUDA 12.6
 [PASS] _levelCoordinate_converter: level-2 and level-0 correct
 [PASS] _mppCoordinate_converter: scalar and tuple mpp correct
 [PASS] loc / levelloc / mpploc: all return correct mask slices
-[PASS] from_wsi: tissue=0.8%, 389 regions, mask=(9192, 8504)
+[PASS] merge_overlapping: chain A-B-C merged; nested / isolated kept
 
-[sweep] WSI has 10 levels:
-  level 0: 272128×294144  ds=1.0
-  level 1: 136064×147072  ds=2.0
-  level 2: 68032×73536  ds=4.0
-  level 3: 34016×36768  ds=8.0
-  level 4: 17008×18384  ds=16.0
-  level 5: 8504×9192  ds=32.0
-  level 6: 4252×4596  ds=64.0
-  level 7: 2126×2298  ds=128.0
-  level 8: 1063×1149  ds=256.0
-  level 9: 531×574  ds=512.0
-  level=-1  : mask=531×574  ds_x=512.5  tissue=0.1%  regions=1
-  level=-2  : mask=1063×1149  ds_x=256.0  tissue=0.2%  regions=7
-  level=-3  : mask=2126×2298  ds_x=128.0  tissue=0.4%  regions=20
-  ds=4      : mask=68032×73536  ds_x=4.0  tissue=0.6%  regions=23009
-  ds=16     : mask=17008×18384  ds_x=16.0  tissue=0.9%  regions=1496
-  ds=32     : mask=8504×9192  ds_x=32.0  tissue=0.8%  regions=389
-  ds=64     : mask=4252×4596  ds_x=64.0  tissue=0.6%  regions=116
-  ds=128    : mask=2126×2298  ds_x=128.0  tissue=0.4%  regions=20
+[HEST] loading model on cuda
+[PASS] from_wsi: tissue=0.3%, 53 regions, mask=(9192, 8504)
+
+[HEST] seg  ds=16.0  max_pixels=4000000
+  tiled seg: 16x8 = 128 tiles at ~1149x2126 each (input 18384x17008, budget 4.0M px, overlap=128)
+  tissue=0.4%  45 regions  mask=(18384, 17008)
+
+[sweep HEST] WSI has 10 levels  max_pixels=4000000:
+  level 0: 272128x294144  ds=1.0
+  level 1: 136064x147072  ds=2.0
+  level 2: 68032x73536  ds=4.0
+  level 3: 34016x36768  ds=8.0
+  level 4: 17008x18384  ds=16.0
+  level 5: 8504x9192  ds=32.0
+  level 6: 4252x4596  ds=64.0
+  level 7: 2126x2298  ds=128.0
+  level 8: 1063x1149  ds=256.0
+  level 9: 531x574  ds=512.0
+  level=-1  : mask=531x574  ds_x=512.5  tissue=0.0%  regions=0
+  level=-2  : mask=1063x1149  ds_x=256.0  tissue=0.0%  regions=0
+  tiled seg: 2x1 = 2 tiles at ~1149x2126 each (input 2298x2126, budget 4.0M px, overlap=128)
+  level=-3  : mask=2126x2298  ds_x=128.0  tissue=0.3%  regions=1
+  tiled seg: 64x32 = 2048 tiles at ~1149x2126 each (input 73536x68032, budget 4.0M px, overlap=128)
+  ds=4      : mask=68032x73536  ds_x=4.0  tissue=1.1%  regions=443
+  tiled seg: 16x8 = 128 tiles at ~1149x2126 each (input 18384x17008, budget 4.0M px, overlap=128)
+  ds=16     : mask=17008x18384  ds_x=16.0  tissue=0.4%  regions=45
+  tiled seg: 8x4 = 32 tiles at ~1149x2126 each (input 9192x8504, budget 4.0M px, overlap=128)
+  ds=32     : mask=8504x9192  ds_x=32.0  tissue=0.3%  regions=4
+  tiled seg: 4x2 = 8 tiles at ~1149x2126 each (input 4596x4252, budget 4.0M px, overlap=128)
+  ds=64     : mask=4252x4596  ds_x=64.0  tissue=0.3%  regions=1
+  tiled seg: 2x1 = 2 tiles at ~1149x2126 each (input 2298x2126, budget 4.0M px, overlap=128)
+  ds=128    : mask=2126x2298  ds_x=128.0  tissue=0.3%  regions=1
 [PASS] from_wsi sweep: 8/8 configs ok
+  tiled seg: 64x32 = 2048 tiles at ~1149x2126 each (input 73536x68032, budget 4.0M px, overlap=128)
 
-Saved /work/u26130998/LocaScope/result/tissue_mask__regions.png
+[ops pipeline HEST] baseline: 443 regions
+  [1] filter_regions(0.01): 443 -> 12
+  [2] merge_overlapping: 443 -> 400
+  [3] filter_patchable(256, ds=2.0): 443 -> 31
+  pipeline [1]->[2]->[3]: 443 -> 6
+[PASS] ops pipeline: 5 states rendered
+
+[tiling HEST] seam test  ds=64.0  ref max_pixels=4.0M  overlap=128
+  no-tile  regions=1  tissue=0.3%
+  tiled seg: 4x2 = 8 tiles at ~1149x2126 each (input 4596x4252, budget 4.0M px, overlap=128)
+  tiled    regions=1  tissue=0.3%
+  pixel disagreement fraction = 0.012%
+  tile grid @ max=4M: 4x2 = 8 tiles
+[tiling HEST] max_pixels sweep ['16M', '4M', '1M']
+  tiled seg: 2x1 = 2 tiles at ~2298x4252 each (input 4596x4252, budget 16.0M px, overlap=128)
+  max=16M  grid=2x1  regions=1
+  tiled seg: 4x2 = 8 tiles at ~1149x2126 each (input 4596x4252, budget 4.0M px, overlap=128)
+  max=4M  grid=4x2  regions=1
+  tiled seg: 8x4 = 32 tiles at ~574x1063 each (input 4596x4252, budget 1.0M px, overlap=128)
+/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/torch/nn/modules/conv.py:456: UserWarning: Plan failed with a cudnnException: CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR: cudnnFinalize Descriptor Failed cudnn_status: CUDNN_STATUS_NOT_SUPPORTED (Triggered internally at ../aten/src/ATen/native/cudnn/Conv_v8.cpp:919.)
+  return F.conv2d(input, weight, bias, self.stride,
+  max=1M  grid=8x4  regions=1
+[PASS] tiling: 3 sweep configs
+
+[bounds] S1103037,G7E,110122.mrxs
+  canvas  272128 x 294144 px  (66.0 x 71.3 mm)
+  scanned 67328 x 189440 px at (35584, 24832)  (16.3 x 45.9 mm)
+  scanned fraction = 15.9%   padding = 84.1% (no image data)
+
+Saved /work/u26130998/LocaScope/result/TissueMaskTest/tissue_mask__regions.png
 All checks passed.
