@@ -30,6 +30,14 @@ class SiftRansacResult:
     region_index: int
     ds: float
     level: int
+    # Query CENTRE mapped through H. Rotation-invariant anchor: the query is
+    # rotated about its own centre, so this stays comparable to a ground-truth
+    # centre no matter which 90-degree step the query came in at. Prefer these
+    # over x/y when the query orientation is unknown.
+    center_x:  int = 0   # centre X @ level-n
+    center_y:  int = 0   # centre Y @ level-n
+    center_x0: int = 0   # centre X @ level-0
+    center_y0: int = 0   # centre Y @ level-0
 
 
 # ── Localizer class ───────────────────────────────────────────────────────────
@@ -130,6 +138,19 @@ class SiftRansacLocalizer:
         x1 = min(tpc.img.shape[1], local_x + win_w + pad * ts)
         y1 = min(tpc.img.shape[0], local_y + win_h + pad * ts)
 
+        if x1 <= x0 or y1 <= y0:
+            # best_x/best_y landed outside this region's image. That means the
+            # retrieval handed over a position it never actually scored — e.g.
+            # its (0, 0) sentinel when no window fit anywhere. Fail loudly here
+            # rather than letting cv2 report an empty-Mat assertion later.
+            raise ValueError(
+                f'empty WSI crop for region {self.location.best_region_index}: '
+                f'best=({self.location.best_x}, {self.location.best_y}) maps to '
+                f'local=({local_x}, {local_y}) in a {tpc.img.shape[1]}x'
+                f'{tpc.img.shape[0]} region image; window {win_w}x{win_h} '
+                f'+{pad} tiles gives x[{x0}:{x1}] y[{y0}:{y1}]'
+            )
+
         self.wsi_crop = tpc.img[y0:y1, x0:x1].copy()
         self.crop_origin_x = tpc.img_origin_x + x0   # level-n global
         self.crop_origin_y = tpc.img_origin_y + y0
@@ -176,6 +197,15 @@ class SiftRansacLocalizer:
         x_ln = self.location.best_x
         y_ln = self.location.best_y
 
+        # Query footprint at level-n. When the retrieval reports a rotation,
+        # the matched window is the ROTATED query, so width/height swap for
+        # the 90/270 steps — used for the fallback centre below.
+        h_q, w_q = self.query.img.shape[:2]
+        rot = getattr(self.location, 'best_rotation', 0)
+        w_eff, h_eff = (h_q, w_q) if rot in (90, 270) else (w_q, h_q)
+        cx_ln = x_ln + w_eff // 2
+        cy_ln = y_ln + h_eff // 2
+
         if n_matches >= 4:
             src_pts = np.float32(
                 [self.query_kps[m.queryIdx].pt for m in self.good_matches]
@@ -189,12 +219,15 @@ class SiftRansacLocalizer:
                 inliers = int(mask.sum())
                 success = inliers >= self.min_inliers
                 if success:
-                    # Map query top-left corner (0,0) through H → position in wsi_crop
-                    tl_in_crop = cv2.perspectiveTransform(
-                        np.array([[[0.0, 0.0]]], dtype=np.float32), H
-                    )[0, 0]
-                    x_ln = int(self.crop_origin_x + tl_in_crop[0])
-                    y_ln = int(self.crop_origin_y + tl_in_crop[1])
+                    # Map query top-left (0,0) and centre through H → wsi_crop px
+                    pts = np.array(
+                        [[[0.0, 0.0]], [[w_q / 2.0, h_q / 2.0]]], dtype=np.float32,
+                    )
+                    mapped = cv2.perspectiveTransform(pts, H).reshape(-1, 2)
+                    x_ln  = int(self.crop_origin_x + mapped[0][0])
+                    y_ln  = int(self.crop_origin_y + mapped[0][1])
+                    cx_ln = int(self.crop_origin_x + mapped[1][0])
+                    cy_ln = int(self.crop_origin_y + mapped[1][1])
 
         self.result = SiftRansacResult(
             x=x_ln,  y=y_ln,
@@ -206,5 +239,7 @@ class SiftRansacLocalizer:
             region_index=region_idx,
             ds=ds,
             level=level,
+            center_x=cx_ln, center_y=cy_ln,
+            center_x0=int(cx_ln * ds), center_y0=int(cy_ln * ds),
         )
         return self.result
