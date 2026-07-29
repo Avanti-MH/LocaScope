@@ -31,7 +31,7 @@ BATCH_SIZE=128
 TOME_R_SWEEP="0,1,2,3,4,8"
 
 # --out-dir defaults to result/$SLURM_JOB_NAME (set by SLURM automatically)
-# --tmp-dir defaults to log/tmp
+# --tmp-dir defaults to result/tmp
 # Override here only if you want a non-standard location.
 
 # ---------------- Run ----------------

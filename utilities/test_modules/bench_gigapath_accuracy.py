@@ -35,7 +35,7 @@ Outputs
     cos_hist.png      — L1 overlay histogram (main 4)
     tome_sweep.png    — mean cos sim vs ToMe r (fp32)
 
-  log/tmp/                  (byproducts — reproducibility + raw data)
+  result/tmp/               (byproducts — reproducibility + raw data)
     tiles/<wsi>.json  — sampled TileInfo per WSI
     embeddings.pt     — dict[cfg → (N, 1536) fp32 tensor]
 
@@ -298,7 +298,7 @@ def parse_args():
     default_svs  = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs'
     default_mrxs = '/work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs'
     default_out  = Path(job_result_dir('AccuracyV1'))
-    default_tmp  = Path(PROJECT_ROOT) / 'log' / 'tmp'
+    default_tmp  = Path(PROJECT_ROOT) / 'result' / 'tmp'
 
     p = argparse.ArgumentParser(description='GigaPath accuracy L1+L2')
     p.add_argument('--svs',  default=default_svs)
