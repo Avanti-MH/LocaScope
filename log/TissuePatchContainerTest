@@ -26,12 +26,35 @@ loading CUDA 12.6
 [PASS] TPC-case3 shapes: all 11 patches are (128,128,3)
 [PASS] TPC ds=4.0 level=2: 2 patches, x/y offset (64,96), ds/level in PatchInfo verified
 [PASS] TPC region y_offset=256: 4 patches verified
-[PASS] TPC PatchInfo meta: ds/level/mpp forwarded to all 25 patches
+[PASS] TPC PatchInfo meta: ds/level forwarded to all 25 patches
 [PASS] TPC overlap=False: 8 main patches, no overlap
 [PASS] TPC from_path: identical to direct constructor
 [PASS] TPC from_pil: identical to direct constructor
 [PASS] TPC from_array: identical to direct constructor
 [PASS] TPC errors: ValueError / RuntimeError / OOB IndexError
+[PASS] QPC crop grid+corners: 2x2, origin=(0,0), patches match, x/y stays global
+[PASS] QPC crop grid+size+pad: 2x2 after clamp
+[PASS] QPC crop pixel+size+roundup: 2x2 (bottom-right ceiled to tile boundary)
+[PASS] QPC crop pixel-pad (ceil to grid): 3x3
+[PASS] QPC crop errors: 6 invalid arg combos raise ValueError
+[PASS] TPC-case1 crop grid+corners: 2x2, origin=(0,0), patches match, x/y stays global
+[PASS] TPC-case1 crop grid+size+pad: 2x2 after clamp
+[PASS] TPC-case1 crop pixel+size+roundup: 2x2 (bottom-right ceiled to tile boundary)
+[PASS] TPC-case1 crop pixel-pad (ceil to grid): 3x3
+[PASS] TPC-case1 crop errors: 6 invalid arg combos raise ValueError
+[PASS] TPC-case2 crop grid+corners: 2x2, origin=(256,0), patches match, x/y stays global
+[PASS] TPC-case2 crop grid+size+pad: 2x2 after clamp
+[PASS] TPC-case2 crop pixel+size+roundup: 2x2 (bottom-right ceiled to tile boundary)
+[PASS] TPC-case2 crop pixel-pad (ceil to grid): 3x2
+[PASS] TPC-case2 crop errors: 6 invalid arg combos raise ValueError
+[PASS] TPC-case3 crop grid+corners: 2x2, origin=(256,0), patches match, x/y stays global
+[PASS] TPC-case3 crop grid+size+pad: 2x2 after clamp
+[PASS] TPC-case3 crop pixel+size+roundup: 2x2 (bottom-right ceiled to tile boundary)
+[PASS] TPC-case3 crop pixel-pad (ceil to grid): 3x2
+[PASS] TPC-case3 crop errors: 6 invalid arg combos raise ValueError
+[PASS] crop before extract: QPC / TPC both raise RuntimeError
+[PASS] TPC-case2 crop extra fields shallow-copied (tissue_region / img_ds / is_crop / at_level)
+[PASS] TPC-case3 crop extra fields shallow-copied (tissue_region / img_ds / is_crop / at_level)
 [PASS] real-query(2.bmp) shapes: all 32 patches are (256,256,3)
 [PASS] real-query iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
 [PASS] real-query main: 20 patches, 3 access methods verified
@@ -54,7 +77,7 @@ loading CUDA 12.6
 [PASS] from_openslide iterators: __iter__ / iter_main / iter_overlap / iter_batches OK
 [PASS] from_openslide overlap corner-pixel: 42 patches verified
 [PASS] from_openslide level=3 (1933x2205): 98 patches
-Saved /work/u26130998/LocaScope/result/tissue_patch_container_grid.png
-Saved /work/u26130998/LocaScope/result/tissue_patch_container_grid_reconstruction.png
+Saved /work/u26130998/LocaScope/result/patch_container__grid.png
+Saved /work/u26130998/LocaScope/result/patch_container__reconstruction.png
 
 All checks passed.
