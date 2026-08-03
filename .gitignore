@@ -41,3 +41,6 @@ result/
 # else
 Note
 .env
+
+# claude rules
+CLAUDE.md
