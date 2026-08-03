@@ -37,19 +37,19 @@ from config             import DomainGapConfig         # noqa: E402
 from camera             import Camera                  # noqa: E402
 
 
-def _draw(mask_snap, regions, title, ax, tile_l0, mask_ds_x, mask_ds_y):
-    ax.imshow(mask_snap, cmap='gray', aspect='equal')
+def _draw(mask, regions, title, ax, tile_l0):
+    """Regions come from `mask` but are passed separately: the stages are
+    snapshots taken at different points of the filter pipeline, while the
+    coordinate conversion belongs to the mask they all came from."""
+    ax.imshow(mask.main_mask, cmap='gray', aspect='equal')
     ax.set_title(f'{title}\nn_regions={len(regions)}', fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
     for r in regions:
-        rx = r.x / mask_ds_x
-        ry = r.y / mask_ds_y
-        rw = r.w / mask_ds_x
-        rh = r.h / mask_ds_y
+        rx, ry, rw, rh = mask.region_box(r)
         ax.add_patch(Rectangle((rx, ry), rw, rh,
                                linewidth=1.0, edgecolor='crimson', facecolor='none'))
-    tile_mask_side = tile_l0 / mask_ds_x
+    tile_mask_side = tile_l0 / mask.mask_ds_x
     ax.add_patch(Rectangle((5, 5), tile_mask_side, tile_mask_side,
                            linewidth=1.5, edgecolor='deepskyblue',
                            facecolor='none', linestyle='--'))
@@ -107,8 +107,7 @@ def diagnose_skip(
     try:
         fig, axes = plt.subplots(1, 4, figsize=(18, 5))
         for ax, (title, regions) in zip(axes, stages):
-            _draw(mask.main_mask, regions, title, ax, tile_l0,
-                  mask.mask_ds_x, mask.mask_ds_y)
+            _draw(mask, regions, title, ax, tile_l0)
 
         if verdict is None:
             n_final = len(stages[-1][1])

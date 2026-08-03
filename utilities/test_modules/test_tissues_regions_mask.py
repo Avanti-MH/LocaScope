@@ -52,9 +52,11 @@ def make_mask_with_blobs(H: int, W: int,
 
 def make_trm(mask: np.ndarray, mask_ds_x: float, mask_ds_y: float,
              level_downsamples: Optional[list] = None,
-             mask_mpp: float = 0.0) -> TissuesRegionsMask:
+             mask_mpp: float = 0.0,
+             origin_x: int = 0, origin_y: int = 0,
+             wsi_mpp: float = 0.0) -> TissuesRegionsMask:
     tissue_regions = TissuesRegionsMask._search_tissue_regions(
-        mask, mask_ds_x, mask_ds_y
+        mask, mask_ds_x, mask_ds_y, origin_x=origin_x, origin_y=origin_y
     )
     return TissuesRegionsMask(
         main_mask=mask,
@@ -62,11 +64,14 @@ def make_trm(mask: np.ndarray, mask_ds_x: float, mask_ds_y: float,
         mask_ds_y=mask_ds_y,
         mask_mpp=mask_mpp,
         tissue_regions=tissue_regions,
-        wsi_width=int(mask.shape[1] * mask_ds_x),
-        wsi_height=int(mask.shape[0] * mask_ds_y),
-        wsi_mpp_x=0.0,
-        wsi_mpp_y=0.0,
+        # The canvas extends beyond the mask when there is an origin offset.
+        wsi_width=int(mask.shape[1] * mask_ds_x) + origin_x,
+        wsi_height=int(mask.shape[0] * mask_ds_y) + origin_y,
+        wsi_mpp_x=wsi_mpp,
+        wsi_mpp_y=wsi_mpp,
         wsi_level_downsamples=level_downsamples or [1.0],
+        origin_x=origin_x,
+        origin_y=origin_y,
     )
 
 
@@ -272,6 +277,68 @@ def validate_loc_methods():
     print('[PASS] loc / levelloc / mpploc: all return correct mask slices')
 
 
+# ── 7b. origin offset (from_wsi(limit_bounds=True)) ──────────────────────────
+
+def validate_origin_offset():
+    """A mask that starts somewhere other than level-0 (0, 0).
+
+    This is the case a MIRAX crop produces, and every bug it can hide is silent:
+    regions land in the wrong place, a size gets shifted by the offset because a
+    length went through a position converter, or a rect lying entirely before
+    the origin becomes a negative-to-negative numpy slice that reads real data
+    from the far corner of the mask and reports tissue that is nowhere near.
+    """
+    # 20x20 mask at ds=2, covering level-0 [1000, 1040) x [500, 540).
+    # The blob is 10x12 = 120 mask px, over _search_tissue_regions min_area_px.
+    OX, OY, DS = 1000, 500, 2.0
+    mask = make_mask_with_blobs(20, 20, [(4, 6, 10, 12)])   # rows 4-13, cols 6-17
+    trm = make_trm(mask, DS, DS, level_downsamples=[1.0, 2.0],
+                   origin_x=OX, origin_y=OY, mask_mpp=1.0, wsi_mpp=0.5)
+
+    # 1. regions come back in ABSOLUTE level-0 coords, sizes unshifted
+    assert len(trm.tissue_regions) == 1, f'got {len(trm.tissue_regions)} regions'
+    r = trm.tissue_regions[0]
+    assert (r.x, r.y) == (OX + 6 * DS, OY + 4 * DS), \
+        f'region origin not absolute: got ({r.x}, {r.y})'
+    assert (r.w, r.h) == (12 * DS, 10 * DS), \
+        f'region size must not carry the offset: got ({r.w}, {r.h})'
+
+    # 2. to_mask_xy / region_box invert it
+    assert trm.to_mask_xy(r.x, r.y) == (6, 4)
+    assert trm.region_box(r) == (6, 4, 12, 10)
+
+    # 3. length converters must NOT subtract the origin
+    assert trm._levelLength_converter(r.w, r.h, 0) == (12, 10)
+    assert trm._mppLength_converter(4.0, 4.0, 1.0) == (4, 4)
+
+    # 4. position converters MUST. mask_mpp = wsi_mpp * mask_ds = 0.5 * 2.
+    assert trm._levelCoordinate_converter(r.x, r.y, 0) == (6, 4)
+    assert trm._mppCoordinate_converter(r.x, r.y, 0.5) == (6, 4)
+
+    # 5. has_tissue_l0 finds the blob at its absolute bbox and rejects the
+    #    mask's top-left corner, which holds only 36 of 120 px of tissue
+    assert trm.has_tissue_l0(r.x, r.y, r.w, r.h), 'blob not found at its own bbox'
+    assert not trm.has_tissue_l0(OX, OY, r.w, r.h), 'corner is 30% tissue, not 50%'
+
+    # 6. a rect ENTIRELY before the origin. Unclamped this is mask[-8:-4, -8:-4]
+    #    = mask[12:16, 12:16], a real slice of the far corner -- so put tissue
+    #    exactly there and require the answer to still be False.
+    far = make_mask_with_blobs(20, 20, [(12, 12, 4, 4)])
+    trm_f = make_trm(far, DS, DS, level_downsamples=[1.0],
+                     origin_x=OX, origin_y=OY)
+    assert not trm_f.has_tissue_l0(OX - 16, OY - 16, 8, 8), \
+        'negative mask index read tissue from the opposite corner'
+
+    # 7. zero origin reproduces the old behaviour exactly
+    trm0 = make_trm(mask, DS, DS, level_downsamples=[1.0])
+    r0 = trm0.tissue_regions[0]
+    assert (r0.x, r0.y) == (6 * DS, 4 * DS)
+    assert trm0.to_mask_xy(r0.x, r0.y) == (6, 4)
+
+    print('[PASS] origin offset: regions absolute, lengths unshifted, '
+          'no negative-index read from the far corner')
+
+
 def validate_merge_overlapping():
     """
     Synthetic test for merge_overlapping (partial overlap only + union-find).
@@ -342,7 +409,7 @@ def test_hest_seg(path: str, method: callable, ds: float = 64.0,
         wsi, ds=ds, method=method, max_pixels=max_pixels,
     )
     Ht, Wt = trm.main_mask.shape
-    thumb  = np.array(wsi.get_thumbnail((Wt, Ht)).convert('RGB'))
+    thumb  = trm.read_matching_rgb(wsi)
     wsi.close()
 
     print(f'  tissue={trm.tissue_fraction()*100:.1f}%  '
@@ -355,7 +422,7 @@ def test_real_wsi(path: str, ds: float = 32.0) -> tuple:
     wsi = openslide.OpenSlide(path)
     trm = TissuesRegionsMask.from_wsi(wsi, ds=ds)
     Ht, Wt = trm.main_mask.shape
-    thumb = np.array(wsi.get_thumbnail((Wt, Ht)).convert('RGB'))
+    thumb = trm.read_matching_rgb(wsi)
     wsi.close()
 
     assert trm.main_mask is not None
@@ -668,10 +735,7 @@ def _draw_regions(ax, trm: TissuesRegionsMask, show_index: bool,
     for r in trm.tissue_regions:
         outside = bounds is not None and region_outside_bounds(r, bounds)
         n_out  += int(outside)
-        mx = r.x / trm.mask_ds_x
-        my = r.y / trm.mask_ds_y
-        mw = r.w / trm.mask_ds_x
-        mh = r.h / trm.mask_ds_y
+        mx, my, mw, mh = trm.region_box(r)
         ax.add_patch(mpatches.Rectangle(
             (mx, my), mw, mh, fill=False,
             edgecolor='magenta' if outside else 'red',
@@ -685,9 +749,9 @@ def _draw_regions(ax, trm: TissuesRegionsMask, show_index: bool,
 def _draw_bounds(ax, trm: TissuesRegionsMask, bounds: tuple, linewidth: float):
     '''Outline the scanned rectangle in mask coords.'''
     bx, by, bw, bh = bounds
+    mx, my = trm.to_mask_xy(bx, by)
     ax.add_patch(mpatches.Rectangle(
-        (bx / trm.mask_ds_x, by / trm.mask_ds_y),
-        bw / trm.mask_ds_x,  bh / trm.mask_ds_y,
+        (mx, my), bw / trm.mask_ds_x, bh / trm.mask_ds_y,
         fill=False, edgecolor='cyan', linestyle='--',
         linewidth=linewidth * 1.5,
     ))
@@ -830,6 +894,7 @@ def main():
     validate_level_converter()
     validate_mpp_converter()
     validate_loc_methods()
+    validate_origin_offset()
     validate_merge_overlapping()
 
     # HEST model loaded once, shared across all sub-tests

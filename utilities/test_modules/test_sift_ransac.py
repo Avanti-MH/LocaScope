@@ -102,13 +102,13 @@ def draw_figure(
     ax = axes[0, 0]
     ax.imshow(thumb)
     for r in mask.tissue_regions:
+        mx, my, mw, mh = mask.region_box(r)
         ax.add_patch(mpatches.Rectangle(
-            (r.x / mask.mask_ds_x, r.y / mask.mask_ds_y),
-            r.w / mask.mask_ds_x, r.h / mask.mask_ds_y,
+            (mx, my), mw, mh,
             fill=False, edgecolor='red', linewidth=1.0,
         ))
     def to_thumb(x0, y0):
-        return x0 / mask.mask_ds_x, y0 / mask.mask_ds_y
+        return mask.to_mask_xy(x0, y0)
 
     gt_tx, gt_ty = to_thumb(gt_x, gt_y)
     ret_tx, ret_ty = to_thumb(retrieval.best_x0, retrieval.best_y0)
@@ -367,12 +367,11 @@ def main():
     print('\n[1] Cropping query from WSI...')
     t0 = time.perf_counter()
     qfwsi = QueryFromWSI(
-        args.wsi, WH_ratio=args.ratio, MPixels=args.mpixels,
-        mpp=args.mpp, x_top_left=args.x, y_top_left=args.y,
+        args.wsi, wh_ratio=args.ratio, MPixels=args.mpixels, mpp=args.mpp,
     )
-    query_pil = qfwsi.load_query_image()
+    query_pil = qfwsi.crop(args.x, args.y)
     if query_pil is None:
-        print('[FAIL] QueryFromWSI returned None')
+        print('[FAIL] QueryFromWSI.crop returned None')
         return
     query_np  = np.array(query_pil)
     query_qpc = QueryPatchContainer(query_np)
@@ -470,7 +469,7 @@ def main():
     # ── Figure ────────────────────────────────────────────────────────────────
     t0 = time.perf_counter()
     Ht, Wt = mask.main_mask.shape
-    thumb = np.array(wsi.get_thumbnail((Wt, Ht)).convert('RGB'))
+    thumb = mask.read_matching_rgb(wsi)
 
     # Zoomed crop for panel [1,2] — must read before wsi.close()
     zoom_pad  = 4

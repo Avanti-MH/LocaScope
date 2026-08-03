@@ -74,7 +74,7 @@ TILING_MAX_PIXELS="16M,4M,1M"       # tiling sweep budgets
 TILING_OVERLAP=128                  # per-tile margin px
 
 # --- HEST ---
-HEST_DS=16                          # HEST-only mask ds (bigger ds -> smaller image, safer)
+HEST_DS=4                           # HEST-only mask ds (bigger ds -> smaller image, safer)
 HEST_MAX_PIXELS=4M                  # HEST tile budget for hest-only / ops / sweep
 
 # --- Visualization ---

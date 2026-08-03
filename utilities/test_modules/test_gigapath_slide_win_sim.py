@@ -61,9 +61,8 @@ def build_sim_canvas(
                 for c in range(W_out):
                     x0 = region.x + c * cell_l0 + x_off
                     y0 = region.y + r * cell_l0 + y_off
-                    tx = int(x0 / mask.mask_ds_x)
-                    ty = int(y0 / mask.mask_ds_y)
-                    tw = max(1, int(cell_l0 / mask.mask_ds_x))
+                    tx, ty = mask.to_mask_xy(x0, y0)   # position: offset removed
+                    tw = max(1, int(cell_l0 / mask.mask_ds_x))   # length: no offset
                     th = max(1, int(cell_l0 / mask.mask_ds_y))
                     if tx < thumb_w and ty < thumb_h:
                         canvas[ty:min(ty+th, thumb_h), tx:min(tx+tw, thumb_w)] = heatmap[r, c]
@@ -128,19 +127,14 @@ def draw_figure(thumb, mask, query_img_np, query_qpc,
     ax = axes[0, 0]
     ax.imshow(thumb)
     for r in mask.tissue_regions:
-        rx = r.x / mask.mask_ds_x
-        ry = r.y / mask.mask_ds_y
-        rw = r.w / mask.mask_ds_x
-        rh = r.h / mask.mask_ds_y
+        rx, ry, rw, rh = mask.region_box(r)
         ax.add_patch(mpatches.Rectangle(
             (rx, ry), rw, rh, fill=False, edgecolor='red', linewidth=1.2))
     # Ground truth (cyan)
-    gt_tx = gt_x / mask.mask_ds_x
-    gt_ty = gt_y / mask.mask_ds_y
+    gt_tx, gt_ty = mask.to_mask_xy(gt_x, gt_y)
     ax.plot(gt_tx, gt_ty, '+', color='cyan', ms=14, mew=2.5, label='GT')
     # Best match (yellow)
-    est_tx = est_x / mask.mask_ds_x
-    est_ty = est_y / mask.mask_ds_y
+    est_tx, est_ty = mask.to_mask_xy(est_x, est_y)
     ax.plot(est_tx, est_ty, 'x', color='yellow', ms=14, mew=2.5, label='Best match')
     ax.legend(fontsize=8, loc='upper right')
     ax.set_title(f'WSI + GT vs Best match\n{wsi_name}\nerror={error_um:.1f} µm')
@@ -318,15 +312,13 @@ def main():
     t0 = time.perf_counter()
     qfwsi = QueryFromWSI(
         args.wsi,
-        WH_ratio=args.ratio,
+        wh_ratio=args.ratio,
         MPixels=args.mpixels,
         mpp=args.mpp,
-        x_top_left=args.x,
-        y_top_left=args.y,
     )
-    query_pil = qfwsi.load_query_image()
+    query_pil = qfwsi.crop(args.x, args.y)
     if query_pil is None:
-        print('[FAIL] QueryFromWSI returned None')
+        print('[FAIL] QueryFromWSI.crop returned None')
         return
     query_np = np.array(query_pil)
     query_qpc = QueryPatchContainer(query_np)
@@ -441,7 +433,7 @@ def main():
     # ── Figure ────────────────────────────────────────────────────────────────
     t0 = time.perf_counter()
     Ht, Wt = mask.main_mask.shape
-    thumb = np.array(wsi.get_thumbnail((Wt, Ht)).convert('RGB'))
+    thumb = mask.read_matching_rgb(wsi)
 
     # zoomed crop around best-match (read before wsi.close)
     pad = 4

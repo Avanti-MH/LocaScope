@@ -408,9 +408,10 @@ def bench_wsi(model, device, wsi_path, levels, overlaps, batch_sizes, dtypes, wa
             continue
         ds = ds_list[level]
 
-        mask.tissue_regions = TissuesRegionsMask._search_tissue_regions(
-            mask.main_mask, mask.mask_ds_x, mask.mask_ds_y
-        )
+        # regions_resume re-runs the connected-component search and, unlike a
+        # bare _search_tissue_regions call, carries mask.origin_* so the boxes
+        # come back in absolute level-0 coordinates on a cropped mask.
+        mask.regions_resume()
         mask.filter_patchable(tile_size=256, ds=ds)
         if len(mask.tissue_regions) < n_all:
             print(f'  filter_patchable: {n_all} → {len(mask.tissue_regions)} regions at ds={ds:.2f}')

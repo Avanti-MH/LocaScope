@@ -41,7 +41,8 @@ class TissuesRegionsMask:
                  mask_mpp: float, tissue_regions: list[TissueRegion],
                  wsi_width: int, wsi_height: int,
                  wsi_mpp_x: float, wsi_mpp_y: float,
-                 wsi_level_downsamples: list[float]):
+                 wsi_level_downsamples: list[float],
+                 origin_x: int = 0, origin_y: int = 0):
         self.main_mask = main_mask
         self.mask_ds_x = mask_ds_x
         self.mask_ds_y = mask_ds_y
@@ -52,6 +53,19 @@ class TissuesRegionsMask:
         self.wsi_mpp_x = wsi_mpp_x
         self.wsi_mpp_y = wsi_mpp_y
         self.wsi_level_downsamples = list(wsi_level_downsamples)
+        # Level-0 coordinate of main_mask[0, 0]. Non-zero when from_wsi read a
+        # sub-rect instead of the whole canvas (MIRAX openslide.bounds-*), where
+        # the scanned area can be a sixth of the canvas and the rest holds no
+        # image at all. Zero for SVS and for any whole-canvas read, which makes
+        # every conversion below reduce to what it was before.
+        #
+        # Invariant: TissueRegion.x/y stay ABSOLUTE level-0 coordinates, so every
+        # consumer outside this class (WsiTissuesContainer, TileSampler, SIFT)
+        # is unaffected by the crop. Only indexing into main_mask needs the
+        # offset removed -- use to_mask_xy() / region_box() rather than dividing
+        # by mask_ds_* by hand.
+        self.origin_x = int(origin_x)
+        self.origin_y = int(origin_y)
         # Undo stack for regions mutations (filter_regions / filter_patchable /
         # merge_overlapping snapshot tissue_regions here before modifying).
         self._regions_history: list[list[TissueRegion]] = []
@@ -66,7 +80,44 @@ class TissuesRegionsMask:
         return iter(self.tissue_regions)
 
     def tissue_fraction(self) -> float:
+        """Tissue as a fraction of what the mask covers.
+
+        Note the denominator follows the mask, not the slide: when from_wsi
+        cropped to openslide.bounds-* this is a fraction of the scanned area,
+        not of the canvas, so the number jumps versus an uncropped run of the
+        same slide. That makes it comparable across slides, but not against
+        older logs.
+        """
         return float(self.main_mask.mean())
+
+    # ── level-0 <-> mask coordinates ─────────────────────────────────────────
+
+    def to_mask_xy(self, x0: float, y0: float) -> tuple[int, int]:
+        """Absolute level-0 (x, y) -> column/row in main_mask."""
+        return (int((x0 - self.origin_x) / self.mask_ds_x),
+                int((y0 - self.origin_y) / self.mask_ds_y))
+
+    def region_box(self, r: TissueRegion) -> tuple[int, int, int, int]:
+        """A region bbox in mask coords: (x, y, w, h). For drawing."""
+        mx, my = self.to_mask_xy(r.x, r.y)
+        return (mx, my,
+                int(r.w / self.mask_ds_x), int(r.h / self.mask_ds_y))
+
+    def read_matching_rgb(self, wsi) -> np.ndarray:
+        """The slide image covering exactly what main_mask covers, same shape.
+
+        Use this instead of wsi.get_thumbnail(main_mask.shape) as a backdrop for
+        anything drawn in mask coordinates. get_thumbnail always spans the whole
+        canvas, so on a cropped mask it squeezes the entire slide into the frame
+        the mask uses for the scanned rectangle alone -- the picture looks
+        plausible and every overlay is wrong.
+        """
+        H, W = self.main_mask.shape
+        lv = wsi.get_best_level_for_downsample(self.mask_ds_x)
+        return np.array(
+            wsi.read_region((self.origin_x, self.origin_y), lv, (W, H))
+               .convert('RGB')
+        )
 
     # ── Regions mutation history ─────────────────────────────────────────────
 
@@ -88,7 +139,8 @@ class TissuesRegionsMask:
         connected-component regions. Clears the undo history.
         """
         self.tissue_regions = self._search_tissue_regions(
-            self.main_mask, self.mask_ds_x, self.mask_ds_y
+            self.main_mask, self.mask_ds_x, self.mask_ds_y,
+            origin_x=self.origin_x, origin_y=self.origin_y,
         )
         self._regions_history.clear()
 
@@ -200,8 +252,15 @@ class TissuesRegionsMask:
     @staticmethod
     def _search_tissue_regions(mask: np.ndarray,
                                mask_ds_x: float, mask_ds_y: float,
-                               min_area_px: int = 100) -> list[TissueRegion]:
-        """Find connected tissue blobs; return level-0 bounding boxes."""
+                               min_area_px: int = 100,
+                               origin_x: int = 0,
+                               origin_y: int = 0) -> list[TissueRegion]:
+        """Find connected tissue blobs; return ABSOLUTE level-0 bounding boxes.
+
+        origin_* is the level-0 position of mask[0, 0] and is added back so the
+        boxes stay in whole-slide coordinates even when the mask covers only a
+        sub-rect. Widths and heights are offset-free, being lengths.
+        """
         n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
             mask.astype(np.uint8), connectivity=8
         )
@@ -214,24 +273,41 @@ class TissuesRegionsMask:
             mw = int(stats[label, cv2.CC_STAT_WIDTH])
             mh = int(stats[label, cv2.CC_STAT_HEIGHT])
             regions.append(TissueRegion(
-                x=int(mx * mask_ds_x),
-                y=int(my * mask_ds_y),
+                x=int(mx * mask_ds_x) + origin_x,
+                y=int(my * mask_ds_y) + origin_y,
                 w=int(mw * mask_ds_x),
                 h=int(mh * mask_ds_y),
                 index=len(regions),
             ))
         return regions
 
-    def _mppCoordinate_converter(self, x: float, y: float, mpp: Union[float, tuple[float, float]]) -> tuple[int, int]:
-        if isinstance(mpp, tuple):
-            mpp_x, mpp_y = mpp
-        else:
-            mpp_x = mpp_y = mpp
-        return int(x * mpp_x / self.mask_mpp), int(y * mpp_y / self.mask_mpp)
+    # POSITION converters subtract origin_*; LENGTH converters must not, because
+    # a width is not anchored anywhere. has_tissue_l0 / levelloc / mpploc used to
+    # push both through the same function, which is harmless only while the mask
+    # starts at level-0 (0, 0). With a cropped mask it would shift every size by
+    # the crop offset, so the two cases are now named apart.
+
+    def _mppLength_converter(self, w: float, h: float,
+                             mpp: Union[float, tuple[float, float]]) -> tuple[int, int]:
+        mpp_x, mpp_y = mpp if isinstance(mpp, tuple) else (mpp, mpp)
+        return int(w * mpp_x / self.mask_mpp), int(h * mpp_y / self.mask_mpp)
+
+    def _mppCoordinate_converter(self, x: float, y: float,
+                                 mpp: Union[float, tuple[float, float]]) -> tuple[int, int]:
+        mpp_x, mpp_y = mpp if isinstance(mpp, tuple) else (mpp, mpp)
+        base_x = self.wsi_mpp_x or self.mask_mpp
+        base_y = self.wsi_mpp_y or self.mask_mpp
+        x0 = x * mpp_x / base_x        # -> absolute level-0 px
+        y0 = y * mpp_y / base_y
+        return self.to_mask_xy(x0, y0)
+
+    def _levelLength_converter(self, w: float, h: float, level: int) -> tuple[int, int]:
+        ds = self.wsi_level_downsamples[level]
+        return int(w * ds / self.mask_ds_x), int(h * ds / self.mask_ds_y)
 
     def _levelCoordinate_converter(self, x: float, y: float, level: int) -> tuple[int, int]:
-        return (int(x * self.wsi_level_downsamples[level] / self.mask_ds_x),
-                int(y * self.wsi_level_downsamples[level] / self.mask_ds_y))
+        ds = self.wsi_level_downsamples[level]
+        return self.to_mask_xy(x * ds, y * ds)
 
     # @classmethod
     # def from_wsi(cls, wsi: openslide.OpenSlide,
@@ -263,7 +339,8 @@ class TissuesRegionsMask:
                  level: int = None,
                  method: callable = None,
                  max_pixels: int = None,
-                 overlap: int = 128) -> 'TissuesRegionsMask':
+                 overlap: int = 128,
+                 limit_bounds: bool = True) -> 'TissuesRegionsMask':
         '''
         Args:
             ds:         Target downsample factor (level-0 px / output px).
@@ -287,6 +364,19 @@ class TissuesRegionsMask:
             overlap:    Per-tile margin (px), trimmed after inference to avoid
                         seam artifacts.  Only used when max_pixels is active.
                         Default 128 covers a typical DeepLabV3 receptive field.
+            limit_bounds: Read only openslide.bounds-* (the scanned rectangle)
+                        instead of the whole canvas.  A MIRAX canvas is the
+                        stage travel range, not the slide: on Ki67 the scanned
+                        area is 16 percent of it and the rest has no image data,
+                        which read_region returns as transparent and
+                        .convert('RGB') turns into pure black -- a segmentation
+                        model then has to tell that apart from dark tissue.
+                        Cropping removes the black entirely and cuts the work by
+                        the same factor.  Formats without the property (SVS) are
+                        unaffected: the crop becomes the full canvas.
+                        The mask array then starts at (bounds-x, bounds-y), kept
+                        in self.origin_*; tissue_regions stay in absolute
+                        level-0 coordinates regardless.
         '''
         wsi_width  = wsi.level_dimensions[0][0]
         wsi_height = wsi.level_dimensions[0][1]
@@ -299,8 +389,25 @@ class TissuesRegionsMask:
             lv = level if level >= 0 else n_levels + level
         else:
             lv = wsi.get_best_level_for_downsample(ds)
-        W, H     = wsi.level_dimensions[lv]
-        img      = np.array(wsi.read_region((0, 0), lv, (W, H)).convert('RGB'))
+
+        # Level-0 rect the mask will cover.
+        p = wsi.properties
+        if limit_bounds:
+            origin_x = int(p.get('openslide.bounds-x', 0))
+            origin_y = int(p.get('openslide.bounds-y', 0))
+            span_w   = int(p.get('openslide.bounds-width',  wsi_width))
+            span_h   = int(p.get('openslide.bounds-height', wsi_height))
+        else:
+            origin_x = origin_y = 0
+            span_w, span_h = wsi_width, wsi_height
+
+        # read_region takes a level-0 location but a level-lv size.
+        ds_lv = wsi_level_downsamples[lv]
+        rw = max(1, int(span_w / ds_lv))
+        rh = max(1, int(span_h / ds_lv))
+        img = np.array(
+            wsi.read_region((origin_x, origin_y), lv, (rw, rh)).convert('RGB')
+        )
 
         if method is None:
             method = _mask_hsv
@@ -309,10 +416,17 @@ class TissuesRegionsMask:
         else:
             mask = method(img)
         main_mask = mask.astype(bool)
-        mask_ds_x = wsi_width  / mask.shape[1]
-        mask_ds_y = wsi_height / mask.shape[0]
+        # The numerator has to be the level-0 span the mask actually covers, not
+        # the canvas: pairing the canvas width with a cropped mask width would
+        # inflate mask_ds by 1/crop_fraction and silently misplace everything.
+        # Without a crop span_* IS the canvas, so this is the old formula.
+        mask_ds_x = span_w / mask.shape[1]
+        mask_ds_y = span_h / mask.shape[0]
         mask_mpp  = (wsi_mpp_x + wsi_mpp_y) / 2 * (mask_ds_x + mask_ds_y) / 2
-        tissue_regions = cls._search_tissue_regions(main_mask, mask_ds_x, mask_ds_y)
+        tissue_regions = cls._search_tissue_regions(
+            main_mask, mask_ds_x, mask_ds_y,
+            origin_x=origin_x, origin_y=origin_y,
+        )
 
         return cls(main_mask=main_mask,
                    mask_ds_x=mask_ds_x,
@@ -323,28 +437,49 @@ class TissuesRegionsMask:
                    wsi_height=wsi_height,
                    wsi_mpp_x=wsi_mpp_x,
                    wsi_mpp_y=wsi_mpp_y,
-                   wsi_level_downsamples=wsi_level_downsamples)
+                   wsi_level_downsamples=wsi_level_downsamples,
+                   origin_x=origin_x,
+                   origin_y=origin_y)
 
     def loc(self, x: int, y: int, w: int, h: int) -> np.ndarray:
         return self.main_mask[y:y+h, x:x+w]
     
     def mpploc(self, x: int, y: int, w: int, h: int, mpp: Union[float, tuple[float, float]]) -> np.ndarray:
         x, y = self._mppCoordinate_converter(x, y, mpp)
-        w, h = self._mppCoordinate_converter(w, h, mpp)
+        w, h = self._mppLength_converter(w, h, mpp)
         return self.main_mask[y:y+h, x:x+w]
-    
+
     def levelloc(self, x: int, y: int, w: int, h: int, level: int) -> np.ndarray:
         x, y = self._levelCoordinate_converter(x, y, level)
-        w, h = self._levelCoordinate_converter(w, h, level)
+        w, h = self._levelLength_converter(w, h, level)
         return self.main_mask[y:y+h, x:x+w]
-    
+
     def has_tissue_l0(self, x: int, y: int, w: int, h: int, tissue_ratio: float = 0.5) -> bool:
         x, y = self._levelCoordinate_converter(x, y, 0)
-        w, h = self._levelCoordinate_converter(w, h, 0)
+        w, h = self._levelLength_converter(w, h, 0)
         return self.has_tissue(x, y, w, h, tissue_ratio)
 
     def has_tissue(self, x: int, y: int, w: int, h: int, tissue_ratio: float = 0.5) -> bool:
-        return w * h > 0 and self.main_mask[y:y+h, x:x+w].mean() >= tissue_ratio
+        """Tissue fraction of a rect given in MASK coords, clipped to the mask.
+
+        Clipping is not cosmetic. With a cropped mask a level-0 position left of
+        or above the crop converts to a negative mask coordinate, and
+        main_mask[y:y+h, x:x+w] would wrap around from the far edge and answer
+        about entirely the wrong part of the slide.
+
+        Area outside the mask counts as background rather than being dropped:
+        the inside-tissue count is divided by the FULL requested area, so a rect
+        hanging half off the scanned region cannot score 100 percent on the half
+        that happens to land on tissue.
+        """
+        if w <= 0 or h <= 0:
+            return False
+        H, W = self.main_mask.shape
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(W, x + w), min(H, y + h)
+        if x1 <= x0 or y1 <= y0:
+            return False
+        return float(self.main_mask[y0:y1, x0:x1].sum()) / (w * h) >= tissue_ratio
 
     def filter_regions(self, min_ratio: float = 0.05) -> None:
         '''Remove tissue_regions that are too small or fully contained by another.

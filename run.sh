@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=TissueMaskTest # Job name
+#SBATCH --job-name=WsiCoverage # Job name
 #SBATCH --partition=normal2               # Partition
 #SBATCH --time=24:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/TissueMaskTest # STDOUT
-#SBATCH -e ./log/TissueMaskTest # STDERR
+#SBATCH -o ./log/WsiCoverage # STDOUT
+#SBATCH -e ./log/WsiCoverage # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -18,40 +18,34 @@ ml load cuda/12.6
 # ---------------- Activate environment ----------------
 conda activate gigapath
 
-# ---------------- Run WSI ROI Thumbnail script ----------------
-# python utilities/test_modules/test_estimate_mpp.py \
-#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs \
-#   --x 31700 --y 33600\
-#   --tile 256 \
-#   --samples 100 \
-#   --k 11 \
-#   --mpixels 2
+# CORPUS=result/MultiBatch
+# BENCH=result/BenchLocaScope
 
-# python utilities/test_modules/test_tissue_patch_container.py \
-#   --wsi /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs --level 3
+# # ---------------- Step 1: generate the shot corpus ----------------
+# echo "======== [1/2] multi_batch: generate synthetic shots ========"
+# python query_sim/cli/multi_batch.py \
+#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs \
+#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_FEA/BRACS_1936.svs \
+#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_MT/Type_DCIS/BRACS_1476.svs \
+#   /work/u26130998/datasets/Ki67/S1151088,G7E,111220.mrxs \
+#   /work/u26130998/datasets/Ki67/S1104233,G7E,110208.mrxs \
+#   /work/u26130998/datasets/Ki67/S1104360,G7E,110208.mrxs \
+#   /work/u26130998/datasets/Ki67/S1137178,G7E,110926.mrxs \
+#   --per-camera 20 --jitter 0.05 \
+#   --out $CORPUS
 
-BASE_ARGS="--batch 4096"
+# # ---------------- Step 2: run the 3-stage pipeline over the whole corpus ----------------
+# echo ""
+# echo "======== [2/2] bench_locascope: 3-stage pipeline + metrics + plots ========"
+# python utilities/test_modules/bench_locascope.py \
+#   --gt-csv     $CORPUS/gt.csv \
+#   --images-dir $CORPUS/images \
+#   --out        $BENCH \
+#   --precision fp16 --batch-size 1024 \
+#   --draw-figures -1
 
-# echo "======== [1/4] overlap + filter ========"
-# python utilities/test_modules/test_gigapath_slide_win_sim.py \
-#   $BASE_ARGS --overlap --filter
 
-# echo "======== [2/4] overlap + no-filter ========"
-# python utilities/test_modules/test_gigapath_slide_win_sim.py \
-#   $BASE_ARGS --overlap --no-filter
-
-# echo "======== [3/4] no-overlap + filter ========"
-# python utilities/test_modules/test_gigapath_slide_win_sim.py \
-#   $BASE_ARGS --no-overlap --filter
-
-# echo "======== [4/4] no-overlap + no-filter ========"
-# python utilities/test_modules/test_gigapath_slide_win_sim.py \
-#   $BASE_ARGS --no-overlap --no-filter
-
-# echo "======== [5/5] SIFT+RANSAC (overlap + filter) ========"
-# python utilities/test_modules/test_sift_ransac.py \
-#   $BASE_ARGS --overlap --filter
-
-# python utilities/test_modules/test_tissue_patch_container.py \
-#   --wsi /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_FEA/BRACS_1936.svs
-python utilities/test_modules/test_tissues_regions_mask.py --sweep --no-region-index --wsi /work/u26130998/datasets/Ki67/S1151088,G7E,111220.mrxs
+mkdir -p result/DiagWsiCoverage
+python utilities/cli/diag_wsi_coverage.py \
+  "/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs" \
+  --hest --mask-ds 4 --grid 48 --out result/DiagWsiCoverage
