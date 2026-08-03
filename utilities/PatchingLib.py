@@ -1044,8 +1044,22 @@ class WsiTissuesContainer():
             self.tissue_regions = mask.tissue_regions
         
         self.tissue_patches: list[TissuePatchContainer] = []
-        for region in self.tissue_regions:
-            tissue_img = wsi.read_region((region.x, region.y), self.level, (int(region.w / self.ds), int(region.h / self.ds)))
+        for i, region in enumerate(self.tissue_regions):
+            size = (int(region.w / self.ds), int(region.h / self.ds))
+            try:
+                tissue_img = wsi.read_region((region.x, region.y), self.level, size)
+            except Exception as e:
+                # One read covers a whole region bbox, so a single MIRAX tile the
+                # scanner never acquired takes the entire region -- and openslide
+                # names neither the region nor the offset ("Not a JPEG file:
+                # starts with 0x00 0x00"). Say which of the N regions it was.
+                raise RuntimeError(
+                    f'{type(e).__name__}: {e} '
+                    f'[region {i + 1}/{len(self.tissue_regions)} '
+                    f'index={region.index} x={region.x} y={region.y} '
+                    f'w={region.w} h={region.h} level={self.level} '
+                    f'read_size={size[0]}x{size[1]}]'
+                ) from e
             tpc = TissuePatchContainer.from_pil(tissue_img, region=region, img_ds=self.ds, is_crop=True, at_level=self.level)
             self.tissue_patches.append(tpc.extract_all(tile_size=self.tile_size, overlap=overlap))
 

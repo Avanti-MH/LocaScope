@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / 'utilities'))
 sys.path.insert(0, str(ROOT / 'aiNNModel'))
 
 from PatchingLib import QueryPatchContainer, FeaturesMap
+from SafeSlide import SafeSlide
 from TissuesRegionsMask import TissuesRegionsMask
 from TileSampler import TileSampler
 from GigaPathFunc import gigapath_model, gigapath_encode
@@ -94,8 +95,11 @@ class GigaPathKnnEstiMpp:
         k: int = 5,
         seed: Optional[int] = 42,
     ):
+        # SafeSlide so a hole in a MIRAX cannot kill the handle mid-run; see
+        # utilities/SafeSlide.py. Only reached when constructed from a path --
+        # LocaScopePipeline passes an already-open slide.
         if isinstance(wsi, str):
-            wsi = openslide.OpenSlide(wsi)
+            wsi = SafeSlide(wsi)
         self.wsi = wsi
         self.encoder = encoder
         self.mask = mask

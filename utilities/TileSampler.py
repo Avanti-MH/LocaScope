@@ -196,9 +196,20 @@ class TileSampler:
 
     def read_tile(self, info: TileInfo) -> Image.Image:
         """Read one tile and return a PIL RGB image."""
-        return self.wsi.read_region(
-            (info.x, info.y), info.level, (info.tile_size, info.tile_size)
-        ).convert('RGB')
+        try:
+            return self.wsi.read_region(
+                (info.x, info.y), info.level, (info.tile_size, info.tile_size)
+            ).convert('RGB')
+        except Exception as e:
+            # _sample_level picks coordinates from the mask alone and reads no
+            # pixels, so a position the scanner never acquired only surfaces
+            # here. openslide's message ("Not a JPEG file: starts with
+            # 0x00 0x00") carries no coordinates -- attach them.
+            raise RuntimeError(
+                f'{type(e).__name__}: {e} '
+                f'[tile level={info.level} x={info.x} y={info.y} '
+                f'size={info.tile_size} mpp={info.mpp:.4f}]'
+            ) from e
 
     def read(self, index: int) -> Image.Image:
         """Read one sampled tile by index."""

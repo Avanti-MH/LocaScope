@@ -36,6 +36,7 @@ sys.path.insert(0, str(ROOT / 'aiNNModel'))
 
 import openslide                                                            # noqa: E402
 from PatchingLib          import QueryPatchContainer, WsiTissuesContainer, FeaturesMap    # noqa: E402
+from SafeSlide            import SafeSlide                                                # noqa: E402
 from TissuesRegionsMask   import TissuesRegionsMask                          # noqa: E402
 from GigaPathSlideWinSim  import SlidingWindowSimilarity                     # noqa: E402
 
@@ -94,8 +95,11 @@ class GigaPathSlidingWinSimRot:
         tile_size: int                          = 256,
         overlap:   bool                         = True,
     ):
+        # SafeSlide so a hole in a MIRAX cannot kill the handle mid-run; see
+        # utilities/SafeSlide.py. Only reached when constructed from a path --
+        # LocaScopePipeline passes an already-open slide.
         if isinstance(wsi, str):
-            wsi = openslide.OpenSlide(wsi)
+            wsi = SafeSlide(wsi)
         self.wsi       = wsi
         self.encoder   = encoder
         self.mask      = mask

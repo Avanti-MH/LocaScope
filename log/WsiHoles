@@ -1,0 +1,185 @@
+-----------------
+loading CUDA 12.6
+-----------------
+
+found 10 slides in /work/u26130998/datasets/Ki67
+  /work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs
+  /work/u26130998/datasets/Ki67/S1103520,G7E,110126.mrxs
+  /work/u26130998/datasets/Ki67/S1103627,G7E,110127.mrxs
+  /work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs
+  /work/u26130998/datasets/Ki67/S1104099,G7E,110207.mrxs
+  /work/u26130998/datasets/Ki67/S1104233,G7E,110208.mrxs
+  /work/u26130998/datasets/Ki67/S1104360,G7E,110208.mrxs
+  /work/u26130998/datasets/Ki67/S1137178,G7E,110926.mrxs
+  /work/u26130998/datasets/Ki67/S1140701,G7E,111018.mrxs
+  /work/u26130998/datasets/Ki67/S1151088,G7E,111220.mrxs
+
+======== read cost ========
+probing S1103037,G7E,110122.mrxs
+    size      ms/read       per 1M reads
+      64         0.04             0.7 min
+     128         0.02             0.3 min
+     256         0.06             1.0 min
+     512         0.23             3.8 min
+Traceback (most recent call last):
+  File "<stdin>", line 12, in <module>
+  File "/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/openslide/__init__.py", line 281, in read_region
+    region = lowlevel.read_region(
+  File "/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/openslide/lowlevel.py", line 442, in read_region
+    _read_region(slide, buf, x, y, level, w, h)
+  File "/home/u26130998/.conda/envs/gigapath/lib/python3.9/site-packages/openslide/lowlevel.py", line 288, in _check_error
+    raise OpenSlideError(err)
+openslide.lowlevel.OpenSlideError: Not a JPEG file: starts with 0x00 0x00
+
+======== scan: block=128 level-0 px, levels=0,1,2,3,4 ========
+
+S1103037,G7E,110122
+  canvas 272128 x 294144   bounds 67328 x 189440 at (35584, 24832)
+  grid 1480 x 526 = 778480 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken  4440/778480 =   0.57%   reopens=4440    377s
+  level 1 (ds=   2.0)  broken  6504/778480 =   0.84%   reopens=6504    415s
+  level 2 (ds=   4.0)  broken     0/778480 =   0.00%   reopens=0        11s
+  level 3 (ds=   8.0)  broken     0/778480 =   0.00%   reopens=0         9s
+  level 4 (ds=  16.0)  broken     0/778480 =   0.00%   reopens=0         8s
+
+S1103520,G7E,110126
+  canvas 272128 x 294144   bounds 97536 x 139520 at (13568, 76800)
+  grid 1090 x 762 = 830580 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/830580 =   0.00%   reopens=0       127s
+  level 1 (ds=   2.0)  broken     0/830580 =   0.00%   reopens=0        39s
+  level 2 (ds=   4.0)  broken     0/830580 =   0.00%   reopens=0        13s
+  level 3 (ds=   8.0)  broken     0/830580 =   0.00%   reopens=0         9s
+  level 4 (ds=  16.0)  broken     0/830580 =   0.00%   reopens=0         8s
+
+S1103627,G7E,110127
+  canvas 272128 x 294144   bounds 97536 x 191232 at (166144, 25088)
+  grid 1494 x 762 = 1138428 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/1138428 =   0.00%   reopens=0       171s
+  level 1 (ds=   2.0)  broken     0/1138428 =   0.00%   reopens=0        57s
+  level 2 (ds=   4.0)  broken     0/1138428 =   0.00%   reopens=0        17s
+  level 3 (ds=   8.0)  broken     0/1138428 =   0.00%   reopens=0        13s
+  level 4 (ds=  16.0)  broken     0/1138428 =   0.00%   reopens=0        11s
+
+S1104043,G7E,110207
+  canvas 272128 x 294144   bounds 67328 x 183040 at (32768, 30976)
+  grid 1430 x 526 = 752180 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/752180 =   0.00%   reopens=0       117s
+  level 1 (ds=   2.0)  broken     0/752180 =   0.00%   reopens=0        24s
+  level 2 (ds=   4.0)  broken     0/752180 =   0.00%   reopens=0        12s
+  level 3 (ds=   8.0)  broken     0/752180 =   0.00%   reopens=0         9s
+  level 4 (ds=  16.0)  broken     0/752180 =   0.00%   reopens=0         8s
+
+S1104099,G7E,110207
+  canvas 272128 x 294144   bounds 83456 x 178944 at (27648, 24832)
+  grid 1398 x 652 = 911496 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/911496 =   0.00%   reopens=0       147s
+  level 1 (ds=   2.0)  broken     0/911496 =   0.00%   reopens=0        42s
+  level 2 (ds=   4.0)  broken     0/911496 =   0.00%   reopens=0        14s
+  level 3 (ds=   8.0)  broken     0/911496 =   0.00%   reopens=0        10s
+  level 4 (ds=  16.0)  broken     0/911496 =   0.00%   reopens=0         9s
+
+S1104233,G7E,110208
+  canvas 272128 x 294144   bounds 97536 x 137472 at (166144, 79104)
+  grid 1074 x 762 = 818388 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/818388 =   0.00%   reopens=0        81s
+  level 1 (ds=   2.0)  broken     0/818388 =   0.00%   reopens=0        27s
+  level 2 (ds=   4.0)  broken     0/818388 =   0.00%   reopens=0        11s
+  level 3 (ds=   8.0)  broken     0/818388 =   0.00%   reopens=0         9s
+  level 4 (ds=  16.0)  broken     0/818388 =   0.00%   reopens=0         8s
+
+S1104360,G7E,110208
+  canvas 272128 x 294144   bounds 97792 x 191232 at (166144, 25088)
+  grid 1494 x 764 = 1141416 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/1141416 =   0.00%   reopens=0       154s
+  level 1 (ds=   2.0)  broken     0/1141416 =   0.00%   reopens=0        54s
+  level 2 (ds=   4.0)  broken     0/1141416 =   0.00%   reopens=0        17s
+  level 3 (ds=   8.0)  broken     0/1141416 =   0.00%   reopens=0        13s
+  level 4 (ds=  16.0)  broken     0/1141416 =   0.00%   reopens=0        11s
+
+S1137178,G7E,110926
+  canvas 272128 x 294144   bounds 83456 x 166656 at (13568, 49664)
+  grid 1302 x 652 = 848904 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken  3988/848904 =   0.47%   reopens=3988    269s
+  level 1 (ds=   2.0)  broken  7744/848904 =   0.91%   reopens=7744    380s
+  level 2 (ds=   4.0)  broken     0/848904 =   0.00%   reopens=0        11s
+  level 3 (ds=   8.0)  broken     0/848904 =   0.00%   reopens=0         9s
+  level 4 (ds=  16.0)  broken     0/848904 =   0.00%   reopens=0         8s
+
+S1140701,G7E,111018
+  canvas 272128 x 294144   bounds 80640 x 193536 at (16384, 24832)
+  grid 1512 x 630 = 952560 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/952560 =   0.00%   reopens=0       168s
+  level 1 (ds=   2.0)  broken     0/952560 =   0.00%   reopens=0        47s
+  level 2 (ds=   4.0)  broken     0/952560 =   0.00%   reopens=0        15s
+  level 3 (ds=   8.0)  broken     0/952560 =   0.00%   reopens=0        11s
+  level 4 (ds=  16.0)  broken     0/952560 =   0.00%   reopens=0        10s
+
+S1151088,G7E,111220
+  canvas 272128 x 294144   bounds 91904 x 191232 at (19200, 25088)
+  grid 1494 x 718 = 1072692 blocks of 128 lv0 px (0.03 mm)
+  level 0 (ds=   1.0)  broken     0/1072692 =   0.00%   reopens=0       185s
+  level 1 (ds=   2.0)  broken     0/1072692 =   0.00%   reopens=0        60s
+  level 2 (ds=   4.0)  broken     0/1072692 =   0.00%   reopens=0        17s
+  level 3 (ds=   8.0)  broken     0/1072692 =   0.00%   reopens=0        13s
+  level 4 (ds=  16.0)  broken     0/1072692 =   0.00%   reopens=0        11s
+
+slide                         lv       128       256       512      1024      2048
+S1103037,G7E,110122            0     0.57%     0.57%     0.74%     0.91%     1.24%
+S1103037,G7E,110122            1     0.84%     0.84%     0.90%     0.97%     1.04%
+S1103037,G7E,110122            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103037,G7E,110122            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103037,G7E,110122            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103520,G7E,110126            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103520,G7E,110126            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103520,G7E,110126            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103520,G7E,110126            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103520,G7E,110126            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103627,G7E,110127            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103627,G7E,110127            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103627,G7E,110127            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103627,G7E,110127            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1103627,G7E,110127            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104043,G7E,110207            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104043,G7E,110207            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104043,G7E,110207            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104043,G7E,110207            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104043,G7E,110207            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104099,G7E,110207            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104099,G7E,110207            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104099,G7E,110207            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104099,G7E,110207            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104099,G7E,110207            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104233,G7E,110208            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104233,G7E,110208            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104233,G7E,110208            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104233,G7E,110208            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104233,G7E,110208            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104360,G7E,110208            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104360,G7E,110208            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104360,G7E,110208            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104360,G7E,110208            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1104360,G7E,110208            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1137178,G7E,110926            0     0.47%     0.47%     0.55%     0.71%     0.95%
+S1137178,G7E,110926            1     0.91%     0.91%     0.97%     1.04%     1.16%
+S1137178,G7E,110926            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1137178,G7E,110926            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1137178,G7E,110926            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1140701,G7E,111018            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1140701,G7E,111018            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1140701,G7E,111018            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1140701,G7E,111018            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1140701,G7E,111018            4     0.00%     0.00%     0.00%     0.00%     0.00%
+S1151088,G7E,111220            0     0.00%     0.00%     0.00%     0.00%     0.00%
+S1151088,G7E,111220            1     0.00%     0.00%     0.00%     0.00%     0.00%
+S1151088,G7E,111220            2     0.00%     0.00%     0.00%     0.00%     0.00%
+S1151088,G7E,111220            3     0.00%     0.00%     0.00%     0.00%     0.00%
+S1151088,G7E,111220            4     0.00%     0.00%     0.00%     0.00%     0.00%
+
+Saved result/WsiHoles/holes_grid.png
+Saved result/WsiHoles/holes_sweep.png
+Saved result/WsiHoles/holes.csv
+
+======== done ========
+  result/WsiHoles/holes_grid.png    10 rows (slides) x levels
+  result/WsiHoles/holes_sweep.png   damage vs block size, derived by pooling
+  result/WsiHoles/holes.csv         every broken block, slide + level + level-0 xy
