@@ -27,7 +27,7 @@ setup_import_paths()
 from QueryFromWSI import QueryFromWSI
 from simulate_microscope_photo import simulate_microscope_photo
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
-from GigaPathFunc import gigapath_model, gigapath_encode
+from GigaPathFunc import gigapath_model, make_gigapath_encoder
 from TissuesRegionsMask import TissuesRegionsMask
 
 
@@ -152,9 +152,8 @@ def pct_error(estimated: float, ground_truth: float) -> float:
 
 
 def load_query(wsi_path: str, gt_mpp: float, x: int, y: int, mpixels: float):
-    qwsi = QueryFromWSI(wsi_path, MPixels=mpixels, mpp=gt_mpp,
-                        x_top_left=x, y_top_left=y)
-    img = qwsi.load_query_image()
+    qwsi = QueryFromWSI(wsi_path, MPixels=mpixels, mpp=gt_mpp)
+    img = qwsi.crop(x, y)
     if img is not None:
         img = simulate_microscope_photo(img)
     return img
@@ -193,8 +192,8 @@ def main():
     # ── Build encoder + estimator (ref bank built once) ───────────────────────
     print('\nLoading GigaPath model...')
     _model = gigapath_model(device)
-    encoder = lambda patches: gigapath_encode(
-        patches, _model, device, batch_size=args.batch_size
+    encoder = make_gigapath_encoder(
+        _model, device, batch_size=args.batch_size,
     )
 
     mask = TissuesRegionsMask.from_wsi(wsi)

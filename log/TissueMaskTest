@@ -17,9 +17,9 @@ loading CUDA 12.6
 [HEST] loading model on cuda
 [PASS] from_wsi: tissue=0.3%, 53 regions, mask=(9192, 8504)
 
-[HEST] seg  ds=16.0  max_pixels=4000000
-  tiled seg: 16x8 = 128 tiles at ~1149x2126 each (input 18384x17008, budget 4.0M px, overlap=128)
-  tissue=0.4%  45 regions  mask=(18384, 17008)
+[HEST] seg  ds=4.0  max_pixels=4000000
+  tiled seg: 64x32 = 2048 tiles at ~1149x2126 each (input 73536x68032, budget 4.0M px, overlap=128)
+  tissue=1.1%  443 regions  mask=(73536, 68032)
 
 [sweep HEST] WSI has 10 levels  max_pixels=4000000:
   level 0: 272128x294144  ds=1.0
@@ -52,7 +52,7 @@ loading CUDA 12.6
 [ops pipeline HEST] baseline: 443 regions
   [1] filter_regions(0.01): 443 -> 12
   [2] merge_overlapping: 443 -> 400
-  [3] filter_patchable(256, ds=2.0): 443 -> 31
+  [3] filter_patchable(256, ds=1.0): 443 -> 67
   pipeline [1]->[2]->[3]: 443 -> 6
 [PASS] ops pipeline: 5 states rendered
 

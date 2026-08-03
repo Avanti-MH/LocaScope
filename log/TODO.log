@@ -8,7 +8,141 @@
   TissuesRegionsMask
 ────────────────────────────────────────────────────────────────────────────────
 
-  （目前無 pending — 見已完成區 merge_overlapping / regions history entry）
+[ ] 2026-07-29 | TissuesRegionsMask.py / PatchingLib.py / TileSampler.py
+    MIRAX 破洞 — safe_read_region 提案（跨三個模組）
+
+    ── 現象 ──
+    S1103037,G7E,110122.mrxs 在 level 0 讀取時拋
+      OpenSlideError: Not a JPEG file: starts with 0x00 0x00
+    三個呼叫端都中過：
+      TileSampler.py:200        KNN 取樣（第一次遇到，mask_ds=4 時）
+      PatchingLib.py:1050       建 retriever（目前擋住 RealTest）
+      TissuesRegionsMask.py:303 建 mask（level 4 反而沒事，見下）
+
+    ── 根因 ──
+    MIRAX 掃描器先低倍預掃找出「哪裡有東西」，只對那些格子拍高倍照片，
+    其餘格子跳過不拍。`.dat` 裡沒有那些位置的 JPEG，openslide 讀到一串 0。
+
+    openslide.bounds-* 只是「所有已拍格子的外接矩形」，不是「這個矩形內
+    都有資料」的保證。矩形內部是鋸齒狀、有洞的。
+
+    openslide 對缺資料有兩種反應（這個區別很關鍵）：
+      ● 索引裡沒有這塊 tile        -> 填透明，不報錯
+      ● 索引說有、但位元組是 0     -> 試著解 JPEG -> 拋例外
+    金字塔各層分開存（Data0001~ 大小每層約 1/4），各層覆蓋狀況獨立。
+    實測後注意：**粗層比 level 0 還稀疏**，不是相反（見下面 2026-07-29 結果）。
+
+    ── 實測數字 ──
+    canvas   272128 x 294144 px  (66.0 x 71.3 mm)
+    bounds   67328 x 189440 at (35584, 24832)  (16.3 x 45.9 mm) = 畫布 15.9%
+             => 84.1% 是 padding，ds=16 時 128 個 HEST tile 有 95 個在跑純黑
+                ds=4 時 2048 個裡有 1670 個（81.5%）
+    L0 讀 bounds 全矩形 -> OpenSlideError（51 GB）
+    L0 讀整張畫布       -> OpenSlideError，97 秒（298 GiB，多半花在配置歸零）
+    兇手 region index=2  x=59264 y=30928 w=2816 h=2608（0.68 x 0.63 mm）
+             完全在 bounds 內，通過 filter_patchable（L0 可切 11x10 個 patch）
+
+    ── 已證偽的假設（別再走這兩條）──
+    ● 「幽靈 region 在 padding 裡」— 錯。TissueMaskTest 的 bounds 疊圖顯示
+      45 個 raw region 沒有任何一個伸出 bounds。洞在 bounds 內部。
+    ● 「index=2 有 93.4% 讀不到」— 這個數字無效，見下面的 handle 中毒。
+
+    ── handle 中毒（最不直覺的一點）──
+    openslide 的 C API 每次呼叫都檢查 error state。**一次讀取失敗之後，
+    該 handle 的所有後續呼叫都回傳同一個錯誤，永遠**——連 level_count /
+    level_downsamples 這種純 metadata 都不行。
+    證據：讀 bounds 失敗後，下一行 w.level_downsamples[lv] 直接拋同一個錯，
+          traceback 停在 lowlevel.get_level_count。
+    後果：任何共用一個 handle 的探測迴圈，第一次失敗之後全部誤報為讀不到。
+          先前 index=2 的「93.4% 破洞」正是這樣來的——ASCII 圖是
+          「........XXX」後全 X，那是單一次中毒事件的簽名，不是破洞分佈。
+    diag_wsi_coverage.py 的 probe_grid 原本有同樣的 bug，2026-07-29 已修
+    （SlideProbe 類別，失敗後 close + 重開，並計數 reopens）。
+
+    ── 提案：utilities/safe_read_region ──
+    簽名大致：
+      safe_read_region(path, location, level, size, min_chunk=256)
+        -> (np.ndarray uint8 RGB, np.ndarray bool valid)
+
+    ● 試一次整塊；成功就回傳，**快路徑零額外成本**
+      （SVS 和沒破洞的 MRXS 永遠只呼叫一次）
+    ● 失敗才切四塊遞迴重試，代價正比於破洞數量而非片子大小
+    ● 遞迴到 min_chunk 仍失敗的塊：填 **255（白）**，valid=False
+    ● 每次失敗後 close + 重開 handle（不然後面全滅）
+    ● 讀成功的塊直接用 RGBA 的 alpha 當 valid（現在 .convert('RGB') 丟掉了），
+      讀失敗的塊自己把 valid 設 0 -> 兩種情況統一輸出
+
+    ★ 一定要填白不能填 0：填 0 就是填黑，而「透明壓成黑 -> HEST 判成組織
+      -> 幽靈 region」正是這整條 bug 的起點。白色在三個下游都正確：
+        HSV/HEST 判 background、GigaPath 空白 embedding 贏不過真組織、
+        SIFT 白區沒有 keypoint。
+
+    三個呼叫端各自決定怎麼用 valid：
+      from_wsi              mask &= valid，幽靈 region 從源頭消失
+      TileSampler           valid.mean() 太低就重抽
+      WsiTissuesContainer   記錄每塊 region 的可讀率，太低的剔除
+
+    ➡ 有了這個就**不需要事先偵測**一張片子有沒有破洞（曾考慮開檔時先讀一次
+      bounds 當偵測器 —— 51 GB / 298 GiB，不可行，而且只得到 yes/no 不知位置）
+
+    ── 2026-07-29 diag_wsi_coverage 實測結果（S1103037, mask_ds=16, grid 48）──
+    ● 破洞稀疏：bounds 內 2304 個探測點只有 17 個讀不到（99.3% 可讀）
+    ● **沒有幽靈 region**：11 塊全部 >=92.6% 可讀，0/11 低於 50%
+        index=10  bbox 3.436e8  4.48x4.51 mm  100.0%   <- 先前疑為稀疏假影，是真組織
+        index=2   bbox 7.344e6  0.68x0.63 mm   92.6%   <- 兇手，只是有個小洞
+    ● 兩個先前的判斷因此作廢：
+        「index=2 有 93.4% 讀不到、跳過不算丟資料」-> 實際 92.6% 可讀，是真組織
+        「bbox 巨大的 outlier 是稀疏假影」        -> 100% 可讀的真組織
+      45 -> 2 的崩塌與破洞無關，純粹是 filter_regions(0.10) 用 bbox 面積被
+      一塊合法大組織定了尺規。min_ratio=0.01 就留下 11 塊。
+
+    ● ❌ alpha 方案否決（原提案想用 mask &= (alpha > 0)）
+        agree                       51.3%
+        alpha 說有資料、實際讀失敗   17    <- 17 個洞一個都沒抓到
+        alpha 說沒資料、實際讀得到  1104   <- 會誤殺近半真組織
+      原因：level 4 的 alpha 只覆蓋畫布 8.4%，而 bounds 佔 15.9%。
+      **粗層比 level 0 稀疏。** valid 只能來自實際讀取的成敗，不能來自 alpha。
+
+    ➡ 病因確認：99.3% 可讀、零幽靈 region，pipeline 仍掛，因為
+      PatchingLib.py:1050 一次讀整塊 region——index=2 只有 7.4% 是洞，但那
+      一次 2816x2608 的讀取碰到一個就全滅。safe_read_region 成立且便宜
+      （全片僅 17 處洞，遞迴細分幾乎不會被觸發）。
+
+    ── MRXS 建 mask 的 ds 選擇 ──
+    以後 MRXS 的 mask 用 **ds=4 或 ds=2**（level 2 / level 1），不要用 16。
+    理由：ds=16 是 level 4，該層 alpha 只覆蓋 8.4% 畫布，等於在一張有一半
+    是透明的影像上做分割。越靠近 level 0 覆蓋越完整。
+    代價：HEST tile 數 128（ds=16）-> 2048（ds=4）。所以「跳過不與 bounds
+    相交的 tile」那條（可省 81.5%）從優化變成必要，見下方 padding 條目。
+
+    ── 未決 ──
+    ● min_chunk 取多少（暴露面積 vs 呼叫次數），要量了才知道
+    ● filter_regions 用 bbox 面積（r.w * r.h）而非像素面積。這條現在確定
+      **不是**破洞造成的，是獨立問題：一塊合法的大組織就足以把門檻拉到
+      殺光其餘。_search_tissue_regions 其實已經從 connectedComponentsWithStats
+      拿到 CC_STAT_AREA 卻丟掉了，改用像素面積是現成的。
+      但相對門檻本身是否該留，要看實測分佈再決定（M4.3 的教訓）。
+
+[ ] 2026-07-29 | TissuesRegionsMask.py — _adaptive_apply 跳過 padding tile
+    from_wsi 讀 (0,0) 起整張畫布，MIRAX 有 84.1% 是 padding，_adaptive_apply
+    再把整張均勻切格，於是絕大多數 tile 是純黑，每一個都跑一次完整的
+    DeepLabV3 forward pass。
+
+    S1103037 實測（tile ~1149x2126，budget 4M px）：
+      ds=16   16x8  =  128 tile，碰得到 bounds 的  33（3 欄 x 11 列） -> 白跑 74%
+      ds=4    64x32 = 2048 tile，碰得到 bounds 的 378（9 欄 x 42 列） -> 白跑 81.5%
+
+    改法：from_wsi 已經知道 level lv 和 downsample，把 bounds-* 換算成 level
+    座標傳給 _adaptive_apply，讓它跳過不與 bounds 相交的 tile。result 本來
+    就是 np.zeros 預先配好的，跳過等於留 0。
+      ● 座標系完全不動（仍是整張畫布），下游零改動 —— 這是刻意的，改用
+        openslide 的 limit_bounds=True 會把原點移到 (bounds-x, bounds-y)，
+        LocaScope 要報絕對座標，全鏈路都得補償，風險遠高於省下的 I/O
+      ● SVS 沒有 bounds property -> fallback 成整張 -> 行為完全不變
+      ● 省的是 GPU，不是 openslide I/O（padding 沒有 tile 可解，讀取本身很便宜）
+
+    ➡ 2026-07-29 決定 MRXS 的 mask 改用 ds=4 / ds=2 之後，這條從優化變成必要：
+      tile 數 128 -> 2048，不跳過的話 HEST 有八成算力丟在純黑上。
 
 ────────────────────────────────────────────────────────────────────────────────
   PatchingLib
