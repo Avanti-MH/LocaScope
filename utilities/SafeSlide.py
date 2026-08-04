@@ -28,6 +28,16 @@ Two properties of that failure make it worse than an ordinary exception.
    openslide.background-color using alpha as the mask. read_region_rgb below
    does the same, and exists so that callers stop reaching for .convert('RGB').
 
+3. A FAILED READ USED TO COST THE WHOLE RECTANGLE. openslide fails the entire
+   requested rect when any tile inside it is missing, and WsiTissuesContainer
+   reads one rect per tissue region. On S1137178 that blanked a 32500x15232 px
+   region -- 7.9 x 3.7 mm of tissue -- at both level 0 and level 1, and since
+   retrieval scores windows on those features, it could never propose anywhere
+   inside it. None of that slide's 189 predictions land in that rectangle.
+   read_region now halves the rect and re-reads each side on failure, down to
+   `min_chunk`, so only the parts with genuinely no image come back blank. It
+   costs nothing on a slide without holes, because it is on the failure path.
+
 A blank returned because a read FAILED is alpha 0, exactly like a region
 openslide knew was never scanned. Downstream cannot tell those apart, which is
 correct: in both cases there is no image there.
@@ -40,11 +50,10 @@ Usage:
     ...
     print(wsi.hole_summary())
 
-SCOPE. This recovers from a failed read; it does not make the read smaller. One
-bad tile still costs the whole requested rect, so asking for a 2816x2608 region
-that contains a single hole returns 2816x2608 of blank. Reading in chunks and
-subdividing on failure is a separate concern for the caller -- see the
-safe_read_region entry in log/TODO.log.
+SCOPE. Subdividing bounds the DATA lost, not the memory used: the returned
+image is still the full requested rect, so a read too large to hold is still
+too large. Reading a region without ever materialising it whole is a separate
+concern for the caller.
 """
 
 from __future__ import annotations
@@ -89,6 +98,12 @@ class SafeSlide(openslide.OpenSlide):
             for real data is not something to do quietly.
         warn_limit: stop printing after this many, so one bad slide cannot bury
             a log. The totals stay available on hole_summary().
+        min_chunk: stop subdividing a failed read once its longer side is down
+            to this, and blank what is left. The floor is what bounds the cost:
+            every abandoned rect reopens the handle, and reopening a MIRAX
+            re-parses its index. Lower recovers more tissue and reopens more
+            often. 0 disables subdivision entirely, restoring the behaviour
+            where one bad tile blanks the whole requested rect.
 
     Attributes:
         reopens: how many times the handle had to be replaced, which equals the
@@ -98,13 +113,16 @@ class SafeSlide(openslide.OpenSlide):
     """
 
     def __init__(self, filename: Filename, record_holes: bool = True,
-                 warn: bool = True, warn_limit: int = 10) -> None:
+                 warn: bool = True, warn_limit: int = 10,
+                 min_chunk: int = 64) -> None:
         super().__init__(filename)
         self.reopens: int = 0
         self.holes: List[Tuple[int, int, int, int, int]] = []
         self._record_holes = record_holes
         self._warn = warn
         self._warn_limit = warn_limit
+        self._reports = 0
+        self._min_chunk = int(min_chunk)
 
     # ── recovery ─────────────────────────────────────────────────────────────
 
@@ -112,17 +130,21 @@ class SafeSlide(openslide.OpenSlide):
                 size: Size) -> None:
         """Say on stderr that real data was replaced by a blank.
 
-        Counted off self.reopens, which _heal has already incremented, so the
-        cap holds even when record_holes is off.
+        Called only where a rect is actually given up on -- a leaf of the
+        subdivision -- so the lines describe what was lost, not the path taken
+        to find out. Capped on its own counter rather than on reopens, because
+        subdividing reopens the handle many times per rect abandoned and the
+        cap would otherwise be spent before the first line printed.
         """
         if not self._warn:
             return
-        if self.reopens <= self._warn_limit:
+        self._reports += 1
+        if self._reports <= self._warn_limit:
             print(f'[WARN] SafeSlide: read failed, returning blank  '
                   f'level={level} x={location[0]} y={location[1]} '
                   f'size={size[0]}x{size[1]}  ({type(err).__name__}: {err})',
                   file=sys.stderr, flush=True)
-        if self.reopens == self._warn_limit:
+        if self._reports == self._warn_limit:
             print(f'[WARN] SafeSlide: {self._warn_limit} failures reported; '
                   f'further ones are silent -- see .hole_summary()',
                   file=sys.stderr, flush=True)
@@ -140,26 +162,73 @@ class SafeSlide(openslide.OpenSlide):
 
     def read_region(self, location: Location, level: int,
                     size: Size) -> Image.Image:
-        """As OpenSlide.read_region, but a failure yields a blank instead.
+        """As OpenSlide.read_region, but a failure costs a hole, not the rect.
 
-        The blank is fully transparent, so it is indistinguishable from the area
-        openslide returns for parts of the canvas the scanner never covered --
-        which is correct, because in both cases there is no image.
+        openslide fails the WHOLE requested rectangle when any tile inside it is
+        missing, so a single bad 128 px tile used to blank an entire tissue
+        region -- 32500x15232 px on one Ki67 slide, 7.9 x 3.7 mm of tissue that
+        retrieval could then never propose because its features were all blank.
+        On failure this splits the rect and re-reads each half, so only the
+        parts that genuinely have no image come back blank.
 
-        Each failure is reported on stderr, because silently swapping real data
-        for blank is exactly the kind of thing that should not happen quietly.
-        Output is capped at `warn_limit`: a slide can have hundreds of holes and
-        the totals are on `.hole_summary()` anyway.
+        Splitting happens only on the failure path: a slide with no holes never
+        pays for it, and 8 of the 10 Ki67 slides have none at any level.
+
+        Recursion goes back through this method rather than through
+        super().read_region, because each half needs the same healing: the
+        handle latches its error flag, so after one bad half every later read
+        would fail too. It stops when the rect is down to `min_chunk`, and that
+        floor is what bounds the cost -- each abandoned rect reopens the handle,
+        and reopening a MIRAX re-parses its index.
+
+        The blank is fully transparent, indistinguishable from the area
+        openslide returns for canvas the scanner never covered -- correct,
+        because in both cases there is no image there.
         """
         try:
             return super().read_region(location, level, size)
         except OpenSlideError as e:
             self._heal()
+            if self._min_chunk and max(int(size[0]), int(size[1])) > self._min_chunk:
+                return self._read_halved(location, level, size)
             self._report(e, location, level, size)
             if self._record_holes:
                 self.holes.append((int(location[0]), int(location[1]),
                                    int(level), int(size[0]), int(size[1])))
             return Image.new('RGBA', (int(size[0]), int(size[1])), (0, 0, 0, 0))
+
+    def _read_halved(self, location: Location, level: int,
+                     size: Size) -> Image.Image:
+        """Split the longer side in two and re-read each half.
+
+        Halving the longer side rather than tiling on a fixed grid keeps the
+        two halves square-ish, so the descent narrows in on a hole from every
+        direction at once; it is also the shape TissuesRegionsMask._adaptive_apply
+        already uses for the same kind of problem.
+
+        The odd pixel goes to the first half so the two always sum back to the
+        requested size -- an off-by-one here would leave a one-pixel transparent
+        seam through otherwise good tissue.
+
+        `location` is level-0 while `size` and the offsets are level-n, so the
+        offset has to be scaled by the downsample on its way into location and
+        must NOT be on its way into paste(). Rounding rather than truncating,
+        because a MIRAX level_downsample is a float near but not equal to 2.
+        """
+        ds = self.level_downsamples[level]
+        w, h = int(size[0]), int(size[1])
+        out = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+        if w >= h:
+            parts = ((0, 0, w - w // 2, h), (w - w // 2, 0, w // 2, h))
+        else:
+            parts = ((0, 0, w, h - h // 2), (0, h - h // 2, w, h // 2))
+        for ox, oy, pw, ph in parts:
+            if pw <= 0 or ph <= 0:
+                continue
+            loc = (int(location[0]) + int(round(ox * ds)),
+                   int(location[1]) + int(round(oy * ds)))
+            out.paste(self.read_region(loc, level, (pw, ph)), (ox, oy))
+        return out
 
     # ── reading without the .convert('RGB') trap ─────────────────────────────
 
