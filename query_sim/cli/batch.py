@@ -7,7 +7,7 @@ TileSampler); crop shape is QueryFromWSI (wh_ratio + MPixels + query_mpp).
 Usage:
     python query_sim/cli/batch.py <wsi_path> \\
         [--n 300] [--wh-ratio 4:3] [--MPixels 12] [--mpp 0.25] [--seed 0]
-        [--tissue-ratio 0.5] [--mask-ds 32]
+        [--tissue-ratio 0.3] [--mask-ds 32]
         [--scale-min 0.9 --scale-max 1.15] [--no-distortion]
         [--no-geometric] [--no-photometric]
 
@@ -42,8 +42,8 @@ def main():
     ap.add_argument('--mpp',      type=float, default=0.25, help='Target um/px of the output FOV')
 
     # ── Sampling / tissue mask ────────────────────────────────────────────────
-    ap.add_argument('--tissue-ratio', type=float, default=0.5,
-                    help='Min mask fraction inside a candidate crop (default 0.5)')
+    ap.add_argument('--tissue-ratio', type=float, default=0.3,
+                    help='Min mask fraction inside a candidate crop (default 0.3)')
     ap.add_argument('--region-protrusion', type=float, default=0.5,
                     help='Fraction of bounding-square padding allowed to spill '
                          'past a tissue region edge (0=strict, 1=only FoV rect '

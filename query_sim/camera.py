@@ -56,9 +56,10 @@ class Camera:
         cfg:          Optional[DomainGapConfig]   = None,
         mask:         Optional[TissuesRegionsMask] = None,
         seed:         Optional[int]                = None,
-        tissue_ratio: float                        = 0.5,
+        tissue_ratio: float                        = 0.3,
         region_protrusion_ratio: float             = 0.5,
         max_pos_tries: int                        = 20,
+        max_consecutive_fail: int                 = 50,
     ):
         """
         `region_protrusion_ratio` (0.0 - 1.0): how far the bounding square is
@@ -70,6 +71,11 @@ class Camera:
         Non-rotation captures (0/90/180/270 are lossless) don't sample from the
         padding at all, so protrusion is free in that mode. Non-90-degree
         rotations pull from padding — protruded corners may show non-tissue.
+
+        `max_consecutive_fail`: stop iterating after this many rejected draws
+        in a row. Counted since the last successful shot, and reset by every
+        yield, so it measures "stuck", not "slow". 0 disables the fuse and
+        restores the old unbounded loop. See __iter__ for why this exists.
         """
         if not 0.0 <= region_protrusion_ratio <= 1.0:
             raise ValueError(f'region_protrusion_ratio must be in [0, 1]; got {region_protrusion_ratio}')
@@ -85,6 +91,7 @@ class Camera:
         self.tissue_ratio            = tissue_ratio
         self.region_protrusion_ratio = region_protrusion_ratio
         self.max_pos_tries           = max_pos_tries
+        self.max_consecutive_fail    = int(max_consecutive_fail)
 
         # Bounding-square padding in level-0 (used for _sample_position + mask
         # fit-check so the square read never falls off the WSI or region).
@@ -171,6 +178,29 @@ class Camera:
 
     # ── Random-exposure iterator (requires mask) ─────────────────────────────
     def __iter__(self) -> Iterator[CameraShot]:
+        """Yield shots forever, unless sampling gets stuck.
+
+        The two rejection tests here can both be unsatisfiable rather than
+        merely unlucky, and the loop used to have no way to say so. On a coarse
+        level the FoV rect grows with the level (4x per level on a 4x pyramid),
+        until a level-0 window of 23042x16385 is asked to be tissue_ratio
+        tissue on a slide that is 16 percent tissue overall -- no position can
+        pass, and one BRACS camera spun for hours before the job was killed.
+        The caller's own skip path could not fire either: it tests `not
+        records` AFTER the for loop, and the for loop only ends by break, which
+        needs a success. Both exits were shut at once.
+
+        So the fuse RETURNS rather than raises: a return ends the generator,
+        the caller's for loop finishes normally, and its existing `if not
+        records` branch writes skips.csv and draws the diagnosis figure with no
+        change on that side.
+
+        The counters reset on every yield, so this measures being stuck, not
+        being slow -- a camera that is producing shots can run as long as it
+        likes. They are kept separate because they fail for unrelated reasons:
+        pos_fail is about tissue content, crop_fail is about the bounding
+        square hitting the WSI edge, and the reason has to say which.
+        """
         if self.mask is None:
             raise RuntimeError(
                 'Camera.__iter__ needs a mask. Pass mask=TissuesRegionsMask.from_wsi(cam.wsi, ...) '
@@ -193,6 +223,13 @@ class Camera:
                     print(f'  [Camera warn] _sample_position None x{pos_fail} '
                           f'(no (x,y) passing region+has_tissue in {self.max_pos_tries} tries)',
                           flush=True)
+                if self.max_consecutive_fail and pos_fail >= self.max_consecutive_fail:
+                    print(f'  [Camera] GIVE UP after {pos_fail} consecutive position '
+                          f'failures: no (x,y) in {len(self.mask.tissue_regions)} region(s) '
+                          f'reaches tissue_ratio={self.tissue_ratio} with a '
+                          f'{self.qfw.rect_w_l0}x{self.qfw.rect_h_l0} level-0 rect',
+                          flush=True)
+                    return
                 continue
             x, y = pos
             raw = self.qfw.crop_bounding_square(x, y)
@@ -202,6 +239,12 @@ class Camera:
                     print(f'  [Camera warn] crop_bounding_square out-of-WSI x{crop_fail} '
                           f'(bounding square hitting WSI edge at last sampled (x,y))',
                           flush=True)
+                if self.max_consecutive_fail and crop_fail >= self.max_consecutive_fail:
+                    print(f'  [Camera] GIVE UP after {crop_fail} consecutive out-of-WSI '
+                          f'crops: every accepted (x,y) puts a '
+                          f'{self.qfw.bounding_square_side_l0}px bounding square off the '
+                          f'WSI edge', flush=True)
+                    return
                 continue
             arr, params = simulate_with_gt(raw, cfg=self.cfg, rng=self._py_rng)
             pos_fail = 0

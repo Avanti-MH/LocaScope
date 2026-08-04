@@ -94,6 +94,7 @@ class GigaPathKnnEstiMpp:
         samples_per_level: int = 40,
         k: int = 5,
         seed: Optional[int] = 42,
+        tissue_ratio: float = 0.5,
     ):
         # SafeSlide so a hole in a MIRAX cannot kill the handle mid-run; see
         # utilities/SafeSlide.py. Only reached when constructed from a path --
@@ -107,6 +108,7 @@ class GigaPathKnnEstiMpp:
         self.samples_per_level = samples_per_level
         self.k = k
         self.seed = seed
+        self.tissue_ratio = tissue_ratio
 
         # Intermediate state — inspect these at any stage for debugging
         self.sampler: Optional[TileSampler] = None
@@ -121,12 +123,23 @@ class GigaPathKnnEstiMpp:
     # ── Stage 1: sample reference tiles ──────────────────────────────────────
 
     def build_samples(self) -> TileSampler:
-        '''Sample n tiles per WSI level within tissue regions.'''
+        '''Sample n tiles per WSI level within tissue regions.
+
+        `tissue_ratio` is passed explicitly rather than left to TileSampler's
+        default, and kept strict at 0.5. query_sim samples at 0.3 because a
+        whole FoV at a coarse level is far too large to ever be half tissue --
+        do not copy that number here. This bank has the opposite requirement:
+        it is the reference every query's mpp is voted against, so a tile that
+        is mostly background carries no scale information and only adds a wrong
+        neighbour. The rects here are tile_size * ds, small enough for 0.5 to
+        stay reachable at every level.
+        '''
         if self.mask is None:
             self.mask = TissuesRegionsMask.from_wsi(self.wsi)
         self.sampler = TileSampler(self.wsi, self.mask,
                                    tile_size=self.tile_size, seed=self.seed)
-        self.sampler.sample(n=self.samples_per_level)
+        self.sampler.sample(n=self.samples_per_level,
+                            tissue_ratio=self.tissue_ratio)
         return self.sampler
 
     # ── Stage 2: encode reference tiles ──────────────────────────────────────

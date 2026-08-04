@@ -98,6 +98,7 @@ class LocaScopePipeline:
         knn_samples:         int   = 40,
         knn_k:               int   = 5,
         knn_seed:            Optional[int] = 42,
+        knn_tissue_ratio:    float = 0.5,
         retriever_overlap:   bool  = True,
         refiner_min_inliers: int   = 10,
         refiner_padding:     int   = 2,
@@ -121,6 +122,7 @@ class LocaScopePipeline:
         self.knn_samples         = knn_samples
         self.knn_k               = knn_k
         self.knn_seed            = knn_seed
+        self.knn_tissue_ratio    = knn_tissue_ratio
         self.retriever_overlap   = retriever_overlap
         self.refiner_min_inliers = refiner_min_inliers
         self.refiner_padding     = refiner_padding
@@ -151,7 +153,7 @@ class LocaScopePipeline:
             self.wsi, encoder=self.encoder, mask=self.mask,
             tile_size=self.tile_size,
             samples_per_level=self.knn_samples, k=self.knn_k,
-            seed=self.knn_seed,
+            seed=self.knn_seed, tissue_ratio=self.knn_tissue_ratio,
         )
         self.estimator.build_samples()
         self.estimator.build_ref_features()
