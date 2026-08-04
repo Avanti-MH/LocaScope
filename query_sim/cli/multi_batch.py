@@ -5,6 +5,11 @@ For each input WSI, opens it once, iterates pyramid levels, builds a Camera
 with query_mpp = level's native mpp, and generates `--per-camera` shots into
 a single unified out_dir + gt.csv.
 
+The tissue mask is built ONCE per WSI, not once per level: from_wsi plus
+filter_regions plus merge_overlapping depend only on the slide, and only
+filter_patchable depends on the level. The one mask object is then shared
+across the levels, so each level must leave it exactly as it found it.
+
 Cameras whose mask ends up with zero usable regions after all filters
 (filter_regions -> merge_overlapping -> filter_patchable) are skipped with a
 clear reason line. Use query_sim/cli/diag_camera_skip.py to visualise WHY a
@@ -14,13 +19,19 @@ Usage:
     python query_sim/cli/multi_batch.py <wsi1> [<wsi2> ...] \\
         [--per-camera 30] [--jitter 0.05] \\
         [--wh-ratio 4:3] [--MPixels 12] \\
-        [--tissue-ratio 0.5] [--region-protrusion 0.5] [--mask-ds 32] \\
+        [--tissue-ratio 0.3] [--region-protrusion 0.5] [--mask-ds 1.0] \\
+        [--hest] [--max-pixels 4000000] \\
         [--seed 0] [--out DIR]
 
 Outputs (in result/<SLURM_JOB_NAME or MultiBatch>/):
     images/<wsi_tag>_L<lvl>_syn00000.png ...
     gt.csv        one row per shot (wsi, level, nominal_mpp, effective_mpp, gt_x, gt_y, ...)
     skips.csv     one row per skipped Camera with reason
+
+Both csv files are appended as each camera finishes, not written at the end.
+A PNG whose gt row was never flushed carries no position, mpp or rotation, so
+a run that dies part-way would otherwise leave every image it produced
+unusable.
 """
 
 from __future__ import annotations
@@ -29,6 +40,7 @@ import argparse
 import csv
 import os
 import sys
+import time
 from dataclasses import asdict
 from typing import List, Optional
 
@@ -38,20 +50,48 @@ from PIL import Image
 # ── query_sim/ + utilities/ onto sys.path ─────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))                                # query_sim/
-_UTILITIES = os.path.abspath(os.path.join(_HERE, '..', '..', 'utilities'))
-if _UTILITIES not in sys.path:
-    sys.path.insert(0, _UTILITIES)
+_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
+for _d in ('utilities', 'aiNNModel'):
+    _p = os.path.join(_ROOT, _d)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+from SafeSlide          import SafeSlide                # noqa: E402
+from TissuesRegionsMask import TissuesRegionsMask       # noqa: E402
+from _memprobe          import mem_line                 # noqa: E402
 from cli       import job_result_dir                    # noqa: E402
 from config    import DomainGapConfig                   # noqa: E402
 from record    import FOVRecord                         # noqa: E402
 from camera    import Camera                            # noqa: E402
-from generator import _prep_mask_for_camera, _record_from_shot   # noqa: E402
+from generator import _build_base_mask, _record_from_shot   # noqa: E402
 from cli.diag_camera_skip import diagnose_skip          # noqa: E402
 
 
 def _slide_tag(wsi_path: str, max_len: int = 20) -> str:
     return os.path.splitext(os.path.basename(wsi_path))[0][:max_len]
+
+
+def _append_rows(path: str, rows: list, fieldnames: list, started: bool) -> bool:
+    """Append dict rows to a CSV, writing the header on the first call.
+
+    Written per camera rather than once at the end because the end is not
+    guaranteed to arrive: an OOM kill during the fifth slide's mask build used
+    to throw away four slides of images, since every gt row was still in a list
+    in memory. A PNG without its gt row carries no position, mpp or rotation --
+    it is unrecoverable, not merely unlabelled.
+
+    The first call truncates, so re-running a job name replaces its csv instead
+    of appending a second corpus onto the first.
+    """
+    if not rows:
+        return started
+    with open(path, 'a' if started else 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not started:
+            writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+    return True
 
 
 def _run_camera(
@@ -63,12 +103,18 @@ def _run_camera(
     cfg:            DomainGapConfig,
     tissue_ratio:   float,
     region_prot:    float,
-    mask_ds:        float,
+    base_mask:      TissuesRegionsMask,
     seed:           int,
     img_dir:        str,
     diag_dir:       str,
 ) -> tuple:
-    """Build one Camera at this (wsi, level). Return (records, skip_reason)."""
+    """Build one Camera at this (wsi, level). Return (records, skip_reason).
+
+    `base_mask` is built once per WSI by the caller and SHARED across every
+    level, so this function must hand it back exactly as it found it: it
+    pushes one snapshot (filter_patchable, the only level-dependent filter)
+    and the finally-block pops exactly that one.
+    """
     cam = Camera(slide, cfg=cfg, seed=seed,
                  tissue_ratio=tissue_ratio,
                  region_protrusion_ratio=region_prot)
@@ -78,9 +124,8 @@ def _run_camera(
           f'required_region_side_l0={cam.required_region_side_l0}',
           flush=True)
 
-    cam.mask = _prep_mask_for_camera(
-        cam, mask_ds=mask_ds, mask_method=None, min_region_ratio=0.01,
-    )
+    cam.mask = base_mask
+    cam.mask.filter_patchable(tile_size=cam.required_region_side_l0, ds=1.0)
     n_regions = len(cam.mask.tissue_regions)
     print(f'  mask: tissue_frac={cam.mask.tissue_fraction()*100:.1f}%  '
           f'usable_regions={n_regions}', flush=True)
@@ -88,10 +133,17 @@ def _run_camera(
     if n_regions == 0:
         reason = (f'filter_patchable emptied the mask: no tissue region can host '
                   f'required_region_side_l0={cam.required_region_side_l0} '
-                  f'(mask thumb ds={mask_ds}, tile too large for this level)')
+                  f'(mask ds={base_mask.mask_ds_x:.1f}, tile too large for this level)')
         print(f'  SKIP: {reason}', flush=True)
-        # diagnose_skip rewinds cam.mask to raw internally (the 3 snapshots
-        # from _prep_mask_for_camera are still in history at this point).
+        # diagnose_skip works on its own copy and leaves base_mask untouched,
+        # so undo filter_patchable here -- this early return skips the
+        # try/finally below that would otherwise have done it.
+        cam.mask.regions_undo()
+        # Bracketed by probes on purpose: _draw hands the whole main_mask to
+        # imshow, and at ds=1 that is a 6.6 Gpx bool per panel which matplotlib
+        # promotes to float to colour-map. It is the prime suspect for the
+        # ~25 GB that did not come back during the first run's level loop.
+        print(f'  {mem_line("before diag")}', flush=True)
         diagnose_skip(
             cam     = cam,
             level   = level,
@@ -99,6 +151,7 @@ def _run_camera(
             wsi_tag = wsi_tag,
             verdict = 'SKIP: filter_patchable emptied the mask',
         )
+        print(f'  {mem_line("after diag")}', flush=True)
         return [], reason
 
     records: List[FOVRecord] = []
@@ -116,17 +169,17 @@ def _run_camera(
             if len(records) % max(1, per_camera // 5) == 0 or len(records) == per_camera:
                 print(f'  [saved] {len(records)}/{per_camera}  {fname}', flush=True)
     finally:
+        # Exactly one: the shared base_mask arrived with filter_regions and
+        # merge_overlapping already applied and must leave with them intact.
         cam.mask.regions_undo()                          # filter_patchable
-        cam.mask.regions_undo()                          # merge_overlapping
-        cam.mask.regions_undo()                          # filter_regions
 
     if not records:
         reason = (f'Camera iterator yielded nothing (all sampled positions '
                   f'failed has_tissue check or bounding-square read went out-of-WSI)')
         print(f'  SKIP: {reason}', flush=True)
-        # try/finally above already undid the 3 filters; cam.mask is at raw
-        # (empty history). diagnose_skip's while-undo loop is a no-op; it
-        # then re-applies the 3 filters, plots, and undoes them again.
+        # diagnose_skip copies cam.mask before rewinding it, so base_mask keeps
+        # its two filters and the next level starts from the same state.
+        print(f'  {mem_line("before diag")}', flush=True)
         diagnose_skip(
             cam     = cam,
             level   = level,
@@ -134,7 +187,14 @@ def _run_camera(
             wsi_tag = wsi_tag,
             verdict = 'SKIP: Camera yielded nothing',
         )
+        print(f'  {mem_line("after diag")}', flush=True)
         return [], reason
+    if len(records) < per_camera:
+        # The camera gave up part-way: it produced usable shots, so this is not
+        # a skip and the rows belong in gt.csv, but per_camera silently became
+        # something smaller and that has to be visible in the log.
+        print(f'  [WARN] only {len(records)}/{per_camera} shots; the camera hit '
+              f'its consecutive-failure fuse after producing some', flush=True)
     return records, None
 
 
@@ -146,9 +206,23 @@ def main():
                     help='cfg.query_mpp_jitter fraction (0.05 = +/-5%%). 0 disables.')
     ap.add_argument('--wh-ratio',         default='4:3')
     ap.add_argument('--MPixels',          type=float, default=12.0)
-    ap.add_argument('--tissue-ratio',     type=float, default=0.5)
+    ap.add_argument('--tissue-ratio',     type=float, default=0.3)
     ap.add_argument('--region-protrusion',type=float, default=0.5)
-    ap.add_argument('--mask-ds',          type=float, default=32.0)
+    ap.add_argument('--mask-ds',          type=float, default=1.0)
+    ap.add_argument('--hest',             action='store_true',
+                    help='segment tissue with the HEST DeepLabV3 model instead '
+                         'of the default HSV threshold')
+    ap.add_argument('--max-pixels',       type=int,   default=4_000_000,
+                    help='tile budget for the segmentation forward pass; only '
+                         'used with --hest, where the whole level image would '
+                         'otherwise go through the model in one go')
+    ap.add_argument('--read-max-pixels',  type=int,   default=268_435_456,
+                    help='tile budget for READING the level (host RAM, as '
+                         'opposed to --max-pixels which is VRAM). Above this '
+                         'the level is read and segmented tile by tile and is '
+                         'never in memory whole. 0 restores the single read, '
+                         'which at --mask-ds 1.0 costs 16 bytes per level-0 '
+                         'pixel and OOMs on any large slide.')
     ap.add_argument('--seed',             type=int,   default=0)
     ap.add_argument('--out',              default=None)
     args = ap.parse_args()
@@ -164,23 +238,92 @@ def main():
     print(f'per-camera={args.per_camera}  jitter={args.jitter}  '
           f'wh={args.wh_ratio}  MP={args.MPixels}', flush=True)
 
-    all_records: List[FOVRecord] = []
-    skip_rows: List[dict] = []
+    # Segmentation method, chosen once for the whole job: loading DeepLabV3 is
+    # seconds of startup and the weights are the same for every WSI.
+    mask_method = None
+    if args.hest:
+        import torch
+        from HESTSegFunc import hest_seg_model, make_hest_method
+        _dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f'mask seg  -> HEST DeepLabV3 on {_dev}  '
+              f'(max_pixels={args.max_pixels})', flush=True)
+        mask_method = make_hest_method(hest_seg_model(_dev), _dev)
+    else:
+        print('mask seg  -> HSV threshold (default)', flush=True)
+
+    # Counts, not lists: the rows go to disk as they are produced, so keeping
+    # them here as well would only be a second copy waiting to be lost.
+    n_records = 0
+    n_skips   = 0
+    gt_started    = False
+    skips_started = False
+    SKIP_FIELDS   = ['wsi', 'level', 'mpp', 'reason']
 
     for wsi_path in args.wsi_paths:
         wsi_tag = _slide_tag(wsi_path)
         try:
-            slide = openslide.OpenSlide(wsi_path)
+            # SafeSlide, not OpenSlide. A MIRAX read that lands on a cell the
+            # scanner never wrote raises OpenSlideError, and that error latches
+            # on the handle -- every later call fails, metadata included. There
+            # is no except around _run_camera, so one hole used to take the
+            # whole job down. It matters most at a small --mask-ds: from_wsi
+            # reads the level in ONE read_region, and openslide fails the whole
+            # rect when any tile inside it is missing, so at ds=1 a single hole
+            # covers the entire slide. SafeSlide halves the rect on failure and
+            # only the genuinely missing leaves come back blank.
+            slide = SafeSlide(wsi_path)
         except Exception as e:
-            reason = f'openslide.OpenSlide failed: {type(e).__name__}: {e}'
+            reason = f'SafeSlide open failed: {type(e).__name__}: {e}'
             print(f'\n[{wsi_tag}] SKIP whole WSI: {reason}', flush=True)
-            skip_rows.append({'wsi': wsi_tag, 'level': -1,
-                              'mpp': -1, 'reason': reason})
+            skips_started = _append_rows(
+                skips_path, [{'wsi': wsi_tag, 'level': -1,
+                              'mpp': -1, 'reason': reason}],
+                SKIP_FIELDS, skips_started)
+            n_skips += 1
             continue
 
         base_mpp = float(slide.properties.get(openslide.PROPERTY_NAME_MPP_X, 0.25))
         print(f'\n===== {wsi_tag}  levels={slide.level_count}  base_mpp={base_mpp:.4f} =====',
               flush=True)
+
+        # Once per WSI, not once per level. from_wsi + filter_regions +
+        # merge_overlapping do not depend on the level; only filter_patchable
+        # does, and _run_camera applies that itself on the mask handed to it.
+        # This is also the one heavy step that can now fail on its own (a full
+        # level read, and with --hest a model forward pass), so it gets its own
+        # except and takes down just this WSI.
+        try:
+            print(f'  building base mask (ds={args.mask_ds}) ...', flush=True)
+            # Drop the previous slide's mask BEFORE allocating this one. The
+            # assignment below evaluates its right-hand side in full before it
+            # rebinds the name, so without this the old main_mask (1 byte/px,
+            # 18.7 GB on the largest slide here) is still alive throughout the
+            # new slide's read.
+            base_mask = None
+            _t0 = time.perf_counter()
+            base_mask = _build_base_mask(
+                slide, args.mask_ds, mask_method, 0.01,
+                max_pixels=args.max_pixels if mask_method is not None else None,
+                read_max_pixels=args.read_max_pixels or None,
+            )
+            # Timed because this is now the one per-WSI fixed cost, and at
+            # ds=1 with --hest it is the number that decides whether ds=1 is
+            # affordable at all. One line per WSI, comparable across slides.
+            print(f'  base mask: {base_mask.main_mask.shape}  '
+                  f'tissue_frac={base_mask.tissue_fraction()*100:.1f}%  '
+                  f'regions={len(base_mask.tissue_regions)}  '
+                  f'[{time.perf_counter() - _t0:.1f}s]', flush=True)
+            print(f'  {mem_line("after base mask")}', flush=True)
+        except Exception as e:
+            reason = f'base mask build failed: {type(e).__name__}: {e}'
+            print(f'[{wsi_tag}] SKIP whole WSI: {reason}', flush=True)
+            skips_started = _append_rows(
+                skips_path, [{'wsi': wsi_tag, 'level': -1,
+                              'mpp': round(base_mpp, 4), 'reason': reason}],
+                SKIP_FIELDS, skips_started)
+            n_skips += 1
+            slide.close()
+            continue
 
         for lvl in range(slide.level_count):
             ds        = slide.level_downsamples[lvl]
@@ -195,39 +338,51 @@ def main():
                 slide=slide, wsi_path=wsi_path, wsi_tag=wsi_tag, level=lvl,
                 per_camera=args.per_camera, cfg=cfg,
                 tissue_ratio=args.tissue_ratio, region_prot=args.region_protrusion,
-                mask_ds=args.mask_ds, seed=args.seed,
+                base_mask=base_mask, seed=args.seed,
                 img_dir=img_dir, diag_dir=diag_dir,
             )
             if skip_reason is not None:
-                skip_rows.append({
-                    'wsi':    wsi_tag,
-                    'level':  lvl,
-                    'mpp':    round(level_mpp, 4),
-                    'reason': skip_reason,
-                })
-            all_records.extend(recs)
+                skips_started = _append_rows(
+                    skips_path, [{'wsi':    wsi_tag,
+                                  'level':  lvl,
+                                  'mpp':    round(level_mpp, 4),
+                                  'reason': skip_reason}],
+                    SKIP_FIELDS, skips_started)
+                n_skips += 1
+            if recs:
+                gt_started = _append_rows(
+                    gt_path, [asdict(r) for r in recs],
+                    list(asdict(recs[0]).keys()), gt_started)
+                n_records += len(recs)
+            # Per level, so growth inside one slide is attributable to a level
+            # rather than only visible as a total at slide_done.
+            print(f'  {mem_line(f"L{lvl} done")}', flush=True)
 
+        # One line per WSI saying whether any read failed and where. The mask
+        # composites holes onto the background colour rather than gating on the
+        # validity plane, which is a bet that blank glass never reads as tissue.
+        # This is how the bet gets checked: SafeSlide.holes carries the level-0
+        # box of every failed read, so a mask that claims tissue there is
+        # visible after the fact instead of silently producing blank queries.
+        print(f'  reads: {slide.hole_summary()}  (reopens={slide.reopens})',
+              flush=True)
         slide.close()
+        # Paired with the line after the base mask build: the difference
+        # between the two is this slide's working set, and the difference
+        # between successive slides at THIS point is whatever did not come
+        # back. peak is the cgroup's exact high-water mark, so one run answers
+        # what --mem should have been without waiting for sacct to sample it.
+        print(f'  {mem_line("slide done")}', flush=True)
 
-    # gt.csv
-    if all_records:
-        with open(gt_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(asdict(all_records[0]).keys()))
-            writer.writeheader()
-            for r in all_records:
-                writer.writerow(asdict(r))
-        print(f'\ngt.csv    -> {gt_path}  ({len(all_records)} rows)', flush=True)
-
-    # skips.csv
-    if skip_rows:
-        with open(skips_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['wsi', 'level', 'mpp', 'reason'])
-            writer.writeheader()
-            for r in skip_rows:
-                writer.writerow(r)
-        print(f'skips.csv -> {skips_path}  ({len(skip_rows)} skipped cameras)', flush=True)
+    # Both files were written as the run went; this only reports the totals.
+    if gt_started:
+        print(f'\ngt.csv    -> {gt_path}  ({n_records} rows)', flush=True)
+    if skips_started:
+        print(f'skips.csv -> {skips_path}  ({n_skips} skipped cameras)', flush=True)
         print(f'To visualise a skip: python query_sim/cli/diag_camera_skip.py '
               f'<wsi_path> --level <lvl>', flush=True)
+
+    print(f'\n{mem_line("job end")}', flush=True)
 
 
 if __name__ == '__main__':

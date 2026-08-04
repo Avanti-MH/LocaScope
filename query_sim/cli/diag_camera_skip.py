@@ -17,6 +17,7 @@ Output: <out>/<wsi_tag>_L<lvl>_diag.png
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import sys
 from typing import Optional
@@ -37,24 +38,38 @@ from config             import DomainGapConfig         # noqa: E402
 from camera             import Camera                  # noqa: E402
 
 
+_DRAW_MAX_SIDE = 2000        # decimate the mask to about this before plotting
+
+
 def _draw(mask, regions, title, ax, tile_l0):
     """Regions come from `mask` but are passed separately: the stages are
     snapshots taken at different points of the filter pipeline, while the
-    coordinate conversion belongs to the mask they all came from."""
-    ax.imshow(mask.main_mask, cmap='gray', aspect='equal')
+    coordinate conversion belongs to the mask they all came from.
+
+    The mask is decimated first because imshow copies whatever it is handed
+    (safe_masked_invalid(A, copy=True)). At mask_ds=1 the full array is
+    61197x107568 bool = 6.6 GB, and four panels cost 26 GB that measurably did
+    not come back -- to fill a 4.5 inch panel that is about 630 px across. The
+    slice is a stride view, so nothing is copied until imshow sees the small
+    version. Every coordinate below is in mask pixels, so they all divide by
+    the same step; at the mask_ds=32 that most callers use, step is 1 and this
+    is the old function exactly.
+    """
+    step = max(1, int(max(mask.main_mask.shape) / _DRAW_MAX_SIDE))
+    ax.imshow(mask.main_mask[::step, ::step], cmap='gray', aspect='equal')
     ax.set_title(f'{title}\nn_regions={len(regions)}', fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
     for r in regions:
         rx, ry, rw, rh = mask.region_box(r)
-        ax.add_patch(Rectangle((rx, ry), rw, rh,
+        ax.add_patch(Rectangle((rx / step, ry / step), rw / step, rh / step,
                                linewidth=1.0, edgecolor='crimson', facecolor='none'))
-    tile_mask_side = tile_l0 / mask.mask_ds_x
+    tile_mask_side = tile_l0 / mask.mask_ds_x / step
     ax.add_patch(Rectangle((5, 5), tile_mask_side, tile_mask_side,
                            linewidth=1.5, edgecolor='deepskyblue',
                            facecolor='none', linestyle='--'))
     ax.text(5, 5 + tile_mask_side + 8,
-            f'req tile {tile_l0}px lv0\n= {tile_mask_side:.0f}px in mask',
+            f'req tile {tile_l0}px lv0\n= {tile_mask_side * step:.0f}px in mask',
             fontsize=7, color='deepskyblue')
 
 
@@ -68,11 +83,17 @@ def diagnose_skip(
 ) -> str:
     """Save a 4-panel figure showing cam.mask at each filter stage.
 
-    `cam` must have `cam.mask` set (any filter state — this function rewinds
-    to raw via regions_undo, snapshots the raw → filter_regions →
+    `cam` must have `cam.mask` set, in any filter state. This function does
+    NOT touch it: it works on a shallow copy with its own region list and undo
+    stack, rewinds that copy to raw, and replays raw → filter_regions →
     merge_overlapping → filter_patchable(tile=cam.required_region_side_l0)
-    chain, saves the plot, then undoes those 3 filters again so cam.mask
-    ends where diagnose_skip found it (raw state).
+    to snapshot each stage. `cam.mask` is left exactly as it was found.
+
+    The copy is not cosmetic. multi_batch builds one mask per WSI and shares it
+    across every pyramid level, so rewinding it here would silently strip
+    filter_regions and merge_overlapping from every later level. The copy is
+    shallow on purpose -- main_mask is large and read-only for our purposes,
+    only the two mutable lists need their own identity.
 
     `level` is used only for the filename + title (Camera doesn't carry a
     level attr — the level lives in cfg.query_mpp indirectly).
@@ -84,12 +105,15 @@ def diagnose_skip(
     if wsi_tag is None:
         wsi_tag = 'wsi'
 
-    mask      = cam.mask
+    mask = copy.copy(cam.mask)
+    mask.tissue_regions   = list(cam.mask.tissue_regions)
+    mask._regions_history = [list(h) for h in cam.mask._regions_history]
+
     tile_l0   = cam.required_region_side_l0
     level_mpp = cam.cfg.query_mpp
     base_mpp  = float(cam.wsi.properties.get(openslide.PROPERTY_NAME_MPP_X, level_mpp))
 
-    # Rewind mask to raw state, no matter what filter chain the caller applied.
+    # Rewind the COPY to raw, no matter what filter chain the caller applied.
     while mask.regions_undo():
         pass
 
@@ -104,8 +128,8 @@ def diagnose_skip(
     stages.append((f'filter_patchable(tile={tile_l0})',
                    list(mask.tissue_regions)))
 
+    fig, axes = plt.subplots(1, 4, figsize=(18, 5))
     try:
-        fig, axes = plt.subplots(1, 4, figsize=(18, 5))
         for ax, (title, regions) in zip(axes, stages):
             _draw(mask, regions, title, ax, tile_l0)
 
@@ -122,16 +146,14 @@ def diagnose_skip(
 
         out_path = os.path.join(out_dir, f'{wsi_tag}_L{level}_diag.png')
         fig.savefig(out_path, dpi=140, bbox_inches='tight')
-        plt.close(fig)
 
         print(f'  [diag] {wsi_tag} L{level}: '
               + ' -> '.join(f'{len(regs)}' for _, regs in stages)
               + f'   saved {out_path}', flush=True)
     finally:
-        # Leave mask in raw state for the caller (undo the 3 we just applied)
-        mask.regions_undo()   # filter_patchable
-        mask.regions_undo()   # merge_overlapping
-        mask.regions_undo()   # filter_regions
+        plt.close(fig)
+        # No regions_undo here: everything above happened on our own copy, so
+        # there is nothing of the caller's to restore.
 
     return out_path
 

@@ -212,7 +212,34 @@ class TissuesRegionsMask:
         the memory budget is sensible.
         """
         H, W = img.shape[:2]
+        return TissuesRegionsMask._tiled_apply(
+            method, H, W,
+            lambda y0, x0, y1, x1: img[y0:y1, x0:x1],
+            max_pixels, overlap, source='seg',
+        )
 
+    @staticmethod
+    def _tiled_apply(method:     callable,
+                     H:          int,
+                     W:          int,
+                     get_tile:   callable,
+                     max_pixels: int,
+                     overlap:    int,
+                     source:     str = 'seg') -> np.ndarray:
+        """`_adaptive_apply`'s grid, decoupled from where the pixels come from.
+
+        `get_tile(y0, x0, y1, x1) -> (h, w, 3) uint8` supplies one expanded
+        tile. Slicing an array already in memory is one implementation of that;
+        reading the rect straight off the WSI is the other, and the second is
+        what makes mask_ds=1 affordable -- from_wsi used to materialise the
+        whole level first, so the peak scaled with the slide (16 bytes per
+        level-0 pixel measured, 299 GB on the largest MRXS here) no matter how
+        small the segmentation budget was. --max-pixels only ever bounded the
+        GPU; nothing bounded the host until this split.
+
+        `source` only labels the log line, so a tiled read is distinguishable
+        from a tiled segmentation of an already-read image.
+        """
         n_h = n_w = 1
         while (H // n_h) * (W // n_w) > max_pixels:
             if H // n_h >= W // n_w:
@@ -222,7 +249,7 @@ class TissuesRegionsMask:
 
         tile_h = H // n_h
         tile_w = W // n_w
-        print(f'  tiled seg: {n_h}x{n_w} = {n_h * n_w} tiles at '
+        print(f'  tiled {source}: {n_h}x{n_w} = {n_h * n_w} tiles at '
               f'~{tile_h}x{tile_w} each (input {H}x{W}, budget '
               f'{max_pixels / 1e6:.1f}M px, overlap={overlap})', flush=True)
 
@@ -239,7 +266,7 @@ class TissuesRegionsMask:
                 y1e = min(H, y1 + overlap)
                 x1e = min(W, x1 + overlap)
 
-                tile_mask = method(img[y0e:y1e, x0e:x1e])
+                tile_mask = method(get_tile(y0e, x0e, y1e, x1e))
 
                 trim_t = y0 - y0e
                 trim_l = x0 - x0e
@@ -340,7 +367,8 @@ class TissuesRegionsMask:
                  method: callable = None,
                  max_pixels: int = None,
                  overlap: int = 128,
-                 limit_bounds: bool = True) -> 'TissuesRegionsMask':
+                 limit_bounds: bool = True,
+                 read_max_pixels: int = None) -> 'TissuesRegionsMask':
         '''
         Args:
             ds:         Target downsample factor (level-0 px / output px).
@@ -368,15 +396,35 @@ class TissuesRegionsMask:
                         instead of the whole canvas.  A MIRAX canvas is the
                         stage travel range, not the slide: on Ki67 the scanned
                         area is 16 percent of it and the rest has no image data,
-                        which read_region returns as transparent and
-                        .convert('RGB') turns into pure black -- a segmentation
-                        model then has to tell that apart from dark tissue.
-                        Cropping removes the black entirely and cuts the work by
-                        the same factor.  Formats without the property (SVS) are
+                        which read_region returns as transparent.  Passing a
+                        SafeSlide handle now composites that onto the background
+                        colour rather than leaving it black, so the crop is
+                        about cost rather than correctness -- but it still cuts
+                        the work by that same factor, and a plain OpenSlide
+                        handle keeps the old black.
+                        Formats without the property (SVS) are
                         unaffected: the crop becomes the full canvas.
                         The mask array then starts at (bounds-x, bounds-y), kept
                         in self.origin_*; tissue_regions stay in absolute
                         level-0 coordinates regardless.
+            read_max_pixels: If set and the level exceeds it, read the level in
+                        tiles instead of in one call, segmenting each tile as it
+                        arrives so the whole level is never in memory. This is
+                        the only bound on HOST memory: max_pixels caps the GPU
+                        per forward pass, but the read before it was one array
+                        whose size scaled with the slide -- 16 bytes per level-0
+                        pixel measured end to end, which is 299 GB on the
+                        largest MRXS here at ds=1. Tiling drops the peak to the
+                        mask itself plus one tile, and what is left is the
+                        connected-component pass at roughly 5 bytes/px.
+                        Default None keeps the single read, so every existing
+                        caller behaves exactly as before.
+                        NOT safe with a method that needs the whole image:
+                        _mask_otsu derives its threshold globally, and per tile
+                        it would threshold blank glass against its own noise.
+                        _mask_hsv is per-pixel and HEST is fully convolutional,
+                        so both are unaffected -- the same constraint
+                        _adaptive_apply already documents.
         '''
         wsi_width  = wsi.level_dimensions[0][0]
         wsi_height = wsi.level_dimensions[0][1]
@@ -405,16 +453,65 @@ class TissuesRegionsMask:
         ds_lv = wsi_level_downsamples[lv]
         rw = max(1, int(span_w / ds_lv))
         rh = max(1, int(span_h / ds_lv))
-        img = np.array(
-            wsi.read_region((origin_x, origin_y), lv, (rw, rh)).convert('RGB')
-        )
-
+        # read_region_rgb, not .convert('RGB'), whenever the handle offers it.
+        # convert() merely drops the alpha channel, and unphotographed pixels
+        # carry RGB 0, so every MIRAX hole and every never-scanned corner comes
+        # out pure black. HSV and Otsu happen to reject black -- sat 0 fails
+        # `sat > 15`, and _mask_otsu excludes gray <= 20 -- so this was harmless
+        # for as long as those were the only methods. A segmentation model has
+        # no such rule and will happily call a black field tissue, which puts
+        # tissue_regions over areas that have no image at all. Compositing onto
+        # openslide.background-color (white when unset) turns those pixels into
+        # what they physically are, blank glass, which all three methods reject.
+        #
+        # Only the alpha-aware read is taken here, not SafeSlide's stricter
+        # read_region_valid: at ds=1 the validity plane is another full-size
+        # array, and after compositing "no image" and "white glass" are the same
+        # thing as far as a tissue mask is concerned. If a hole surrounded by
+        # tissue ever does get bridged by a seg model, SafeSlide.holes already
+        # records where to check, and `main_mask &= valid` is the answer then.
         if method is None:
             method = _mask_hsv
-        if max_pixels is not None and img.shape[0] * img.shape[1] > max_pixels:
-            mask = cls._adaptive_apply(method, img, max_pixels, overlap)
+
+        def _read(y0: int, x0: int, y1: int, x1: int) -> np.ndarray:
+            """One (y0:y1, x0:x1) rect of level `lv`, as RGB.
+
+            read_region takes a LEVEL-0 location but a level-lv size, so the
+            tile offset is scaled on its way into the location and must not be
+            on its way into the size -- the same asymmetry SafeSlide._read_halved
+            documents. Rounding rather than truncating, because a MIRAX
+            level_downsample is a float near but not equal to 2 and a truncated
+            offset would drift the grid by a pixel every few tiles.
+            """
+            loc = (origin_x + int(round(x0 * ds_lv)),
+                   origin_y + int(round(y0 * ds_lv)))
+            size = (x1 - x0, y1 - y0)
+            if hasattr(wsi, 'read_region_rgb'):
+                return wsi.read_region_rgb(loc, lv, size)
+            return np.array(wsi.read_region(loc, lv, size).convert('RGB'))
+
+        if read_max_pixels and rw * rh > read_max_pixels:
+            # Never materialise the level. The budget is the smaller of the two
+            # constraints, which are not the same thing: max_pixels is VRAM per
+            # forward pass, read_max_pixels is host RAM per read. One grid
+            # serves both, so a heavy method just makes the tiles smaller.
+            budget = min(read_max_pixels, max_pixels) if max_pixels else read_max_pixels
+            mask = cls._tiled_apply(method, rh, rw, _read, budget, overlap,
+                                    source='read+seg')
         else:
-            mask = method(img)
+            img = _read(0, 0, rh, rw)
+            if max_pixels is not None and img.shape[0] * img.shape[1] > max_pixels:
+                mask = cls._adaptive_apply(method, img, max_pixels, overlap)
+            else:
+                mask = method(img)
+            # Explicitly, because the next steps are this function's memory
+            # peak: _search_tissue_regions hands cv2 a uint8 copy and cv2
+            # allocates an int32 label plane, 5 bytes/px between them. Carrying
+            # a dead 3 bytes/px through that is what made a 18.7 Gpx slide need
+            # 56 GB it had no use for. CPython frees on the last reference, and
+            # an array this size is mmap'd, so the del does return it to the OS.
+            del img
+
         main_mask = mask.astype(bool)
         # The numerator has to be the level-0 span the mask actually covers, not
         # the canvas: pairing the canvas width with a cropped mask width would
@@ -422,6 +519,7 @@ class TissuesRegionsMask:
         # Without a crop span_* IS the canvas, so this is the old formula.
         mask_ds_x = span_w / mask.shape[1]
         mask_ds_y = span_h / mask.shape[0]
+        del mask                     # shape is read above; main_mask is the copy we keep
         mask_mpp  = (wsi_mpp_x + wsi_mpp_y) / 2 * (mask_ds_x + mask_ds_y) / 2
         tissue_regions = cls._search_tissue_regions(
             main_mask, mask_ds_x, mask_ds_y,
