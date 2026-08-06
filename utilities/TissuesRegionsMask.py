@@ -26,6 +26,16 @@ import cv2
 import numpy as np
 import openslide
 
+# Ceiling on what may be handed to cv2.connectedComponentsWithStats in one call.
+# Above it the call does not raise, it segfaults: OpenSlide-sized masks made four
+# runs die at exit 139 with the fault inside _search_tissue_regions. The observed
+# boundary was between 8.40 Gpx (survived) and 12.34 Gpx (died), consistent with
+# a label table of total/4 entries sized in a signed int, so the real limit is
+# probably 2**33 pixels. 2**31 is used instead because that theory is inferred
+# from the boundary rather than read off OpenCV, and every candidate overflow is
+# proportional to rows*cols, so the lower ceiling is safe under all of them.
+_CC_MAX_PIXELS = 1 << 31
+
 class TissueRegion:
     """Bounding box of one tissue region, always in level-0 coordinates."""
     def __init__(self, x: int, y: int, w: int, h: int, index: int = -1):
@@ -156,69 +166,6 @@ class TissuesRegionsMask:
         return True
 
     @staticmethod
-    def _adaptive_apply(method: callable,
-                        img: np.ndarray,
-                        max_pixels: int,
-                        overlap: int) -> np.ndarray:
-        """
-        Tile-and-stitch wrapper so heavy segmentation models can run on WSI
-        thumbnails larger than the GPU can process in one pass.
-
-        Algorithm
-        ---------
-        1. Adaptive halving:
-             n_h = n_w = 1
-             while (H // n_h) * (W // n_w) > max_pixels:
-                 halve whichever current tile side is longer
-           Grid ends up as 2^i x 2^j — 1x1, 1x2, 2x2, 2x4, 4x4, 4x8, ...
-           A 6000x12000 image with max_pixels=4M lands on 4x8 = 32 tiles.
-
-        2. Per-tile inference with overlap:
-           Each tile's core rect is expanded by `overlap` pixels on every
-           side (clipped to image bounds) so `method` sees enough context
-           around the seam.  The expanded rect is passed to `method`.
-
-        3. Trim and stitch:
-           The `overlap` margin is trimmed from the returned mask before
-           writing the tile's core rect into the preallocated (H, W) result.
-           Adjacent tiles' cores meet exactly at the seam — no blending
-           needed for a binary class output.
-
-        Constraint
-        ----------
-        Only valid when `method` is spatially invariant: fully-convolutional
-        segmentation networks with no positional embedding (e.g. DeepLabV3
-        used by HEST).  A method that depends on absolute coordinates would
-        produce different outputs on tiled vs whole-image inference.
-
-        Args
-        ----
-        method:     img -> mask callable.  Same signature as passed to from_wsi.
-        img:        (H, W, 3) uint8 RGB level image read by from_wsi.
-        max_pixels: budget per tile (H_tile * W_tile <= max_pixels after halving).
-                    Trade-off: larger = fewer tiles, more GPU memory per pass.
-                    ~4M px keeps DeepLabV3 under ~5 GB VRAM.
-        overlap:    context margin (px) per tile side, trimmed after inference.
-                    Should exceed the model's receptive field to remove seams.
-                    128 covers DeepLabV3's ASPP receptive field.
-
-        Returns
-        -------
-        (H, W) uint8 mask, same shape as `img` spatially, values in {0, 1}.
-
-        Notes
-        -----
-        Prints the chosen tile grid before running so the caller can verify
-        the memory budget is sensible.
-        """
-        H, W = img.shape[:2]
-        return TissuesRegionsMask._tiled_apply(
-            method, H, W,
-            lambda y0, x0, y1, x1: img[y0:y1, x0:x1],
-            max_pixels, overlap, source='seg',
-        )
-
-    @staticmethod
     def _tiled_apply(method:     callable,
                      H:          int,
                      W:          int,
@@ -226,7 +173,7 @@ class TissuesRegionsMask:
                      max_pixels: int,
                      overlap:    int,
                      source:     str = 'seg') -> np.ndarray:
-        """`_adaptive_apply`'s grid, decoupled from where the pixels come from.
+        """Tile-and-stitch, decoupled from where the pixels come from.
 
         `get_tile(y0, x0, y1, x1) -> (h, w, 3) uint8` supplies one expanded
         tile. Slicing an array already in memory is one implementation of that;
@@ -277,6 +224,105 @@ class TissuesRegionsMask:
         return result
 
     @staticmethod
+    def _resolve_geometry(wsi, ds: float, level, limit_bounds: bool) -> tuple:
+        """Which level to read, and which rectangle of it.
+
+        Returns (lv, ds_lv, origin_x, origin_y, span_w, span_h, rw, rh).
+        origin_* and span_* are LEVEL-0; rw and rh are that span expressed at
+        level lv, which is also the shape of the mask that comes out. Keeping
+        the two apart is the whole reason this is its own function: a length in
+        one system silently used in the other is the bug class this module has
+        already paid for twice.
+        """
+        p = wsi.properties
+        w0, h0 = wsi.level_dimensions[0]
+
+        n_levels = len(wsi.level_dimensions)
+        if level is not None:
+            lv = level if level >= 0 else n_levels + level
+        else:
+            lv = wsi.get_best_level_for_downsample(ds)
+
+        if limit_bounds:
+            origin_x = int(p.get('openslide.bounds-x', 0))
+            origin_y = int(p.get('openslide.bounds-y', 0))
+            span_w   = int(p.get('openslide.bounds-width',  w0))
+            span_h   = int(p.get('openslide.bounds-height', h0))
+        else:
+            origin_x = origin_y = 0
+            span_w, span_h = w0, h0
+
+        ds_lv = wsi.level_downsamples[lv]
+        rw = max(1, int(span_w / ds_lv))
+        rh = max(1, int(span_h / ds_lv))
+        return lv, ds_lv, origin_x, origin_y, span_w, span_h, rw, rh
+
+    @classmethod
+    def _segment_plane(cls, wsi, lv: int, ds_lv: float,
+                       origin_x: int, origin_y: int, rw: int, rh: int,
+                       method, max_pixels, read_max_pixels, overlap) -> np.ndarray:
+        """The (rh, rw) uint8 mask of level `lv`, however it has to be got.
+
+        Two ways in, and the difference is only where the pixels come from:
+        read_max_pixels reads and segments tile by tile so the level is never in
+        memory whole, otherwise the level is read in one call first. _tiled_apply
+        takes a get_tile callable precisely so both are the same code.
+        """
+        def _read(y0: int, x0: int, y1: int, x1: int) -> np.ndarray:
+            """One (y0:y1, x0:x1) rect of level `lv`, as RGB.
+
+            read_region takes a LEVEL-0 location but a level-lv size, so the
+            offset is scaled on its way into the location and must NOT be on its
+            way into the size -- the same asymmetry SafeSlide._read_halved
+            documents. Rounding rather than truncating, because a MIRAX
+            level_downsample is a float near but not equal to 2 and a truncated
+            offset would drift the grid by a pixel every few tiles.
+
+            read_region_rgb, not .convert('RGB'), whenever the handle offers it.
+            convert() merely drops the alpha channel, and unphotographed pixels
+            carry RGB 0, so every MIRAX hole and every never-scanned corner comes
+            out pure black. HSV and Otsu happen to reject black -- sat 0 fails
+            `sat > 15`, and _mask_otsu excludes gray <= 20 -- so this was
+            harmless while those were the only methods. A segmentation model has
+            no such rule and will call a black field tissue, which puts
+            tissue_regions over areas that have no image at all. Compositing onto
+            openslide.background-color (white when unset) makes those pixels what
+            they physically are, blank glass, which all three methods reject.
+
+            SafeSlide's stricter read_region_valid is deliberately not used: at
+            ds=1 the validity plane is another full-size array, and after
+            compositing "no image" and "white glass" are the same thing to a
+            tissue mask. If a hole surrounded by tissue ever does get bridged by
+            a seg model, SafeSlide.holes records where to check and
+            `main_mask &= valid` is the answer then.
+            """
+            loc = (origin_x + int(round(x0 * ds_lv)),
+                   origin_y + int(round(y0 * ds_lv)))
+            size = (x1 - x0, y1 - y0)
+            if hasattr(wsi, 'read_region_rgb'):
+                return wsi.read_region_rgb(loc, lv, size)
+            return np.array(wsi.read_region(loc, lv, size).convert('RGB'))
+
+        if read_max_pixels and rw * rh > read_max_pixels:
+            # The budget is the smaller of two constraints that are not the same
+            # thing: max_pixels is VRAM per forward pass, read_max_pixels is host
+            # RAM per read. One grid serves both, so a heavy method just makes
+            # the tiles smaller -- at the cost of more seams, which is a design
+            # question this collapse currently hides.
+            budget = min(read_max_pixels, max_pixels) if max_pixels else read_max_pixels
+            return cls._tiled_apply(method, rh, rw, _read, budget, overlap,
+                                    source='read+seg')
+
+        # img is local to this function, so it is gone by the time the caller
+        # runs the connected-component pass; no del needed.
+        img = _read(0, 0, rh, rw)
+        if max_pixels is not None and img.shape[0] * img.shape[1] > max_pixels:
+            return cls._tiled_apply(method, rh, rw,
+                                    lambda y0, x0, y1, x1: img[y0:y1, x0:x1],
+                                    max_pixels, overlap, source='seg')
+        return method(img)
+
+    @staticmethod
     def _search_tissue_regions(mask: np.ndarray,
                                mask_ds_x: float, mask_ds_y: float,
                                min_area_px: int = 100,
@@ -287,18 +333,47 @@ class TissuesRegionsMask:
         origin_* is the level-0 position of mask[0, 0] and is added back so the
         boxes stay in whole-slide coordinates even when the mask covers only a
         sub-rect. Widths and heights are offset-free, being lengths.
+
+        Decimated first when the mask is too large for cv2 to index (see
+        _CC_MAX_PIXELS). The stride is derived, not fixed: a mask_ds=32 mask is
+        a few megapixels and gets stride 1, which is every caller that existed
+        before mask_ds=1, so their results do not move at all. At mask_ds=1 the
+        stride lands on 2 or 4, and a box then quantises to that many level-0
+        pixels -- against a required_region_side_l0 of 1602 to 51320 that is
+        four orders of magnitude below anything that reads these boxes.
+
+        Nothing is lost by it. The decomposition at mask_ds=1 is already far
+        finer than it is used at: HEST found 18035 raw blobs on BRACS_1228 and
+        filter_regions kept 15. Decimating also drops the int32 label plane
+        cv2 allocates from 4 bytes per pixel to 4/stride**2, which was the last
+        thing in from_wsi still scaling with the slide.
         """
+        step = 1
+        while (mask.shape[0] // step) * (mask.shape[1] // step) > _CC_MAX_PIXELS:
+            step *= 2
+        small = mask[::step, ::step]          # stride view; the copy is astype's
         n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
-            mask.astype(np.uint8), connectivity=8
+            small.astype(np.uint8), connectivity=8
         )
         regions = []
         for label in range(1, n_labels):      # 0 is background
-            if stats[label, cv2.CC_STAT_AREA] < min_area_px:
+            # stats are in `small` pixels: an area scales by step**2, a length
+            # by step. min_area_px stays in full-resolution mask pixels so the
+            # threshold means the same thing at every stride.
+            #
+            # int() BEFORE the multiply, not after. cv2 returns stats as int32,
+            # and a blob covering much of a mask_ds=1 plane has an area in the
+            # billions: times step**2 that wraps negative, every region then
+            # compares below min_area_px, and tissue_regions comes back empty.
+            # It surfaced as `torch.cat(): expected a non-empty list` two stages
+            # later, when the mpp bank had no tiles to encode. Python ints do
+            # not overflow, so the cast is the whole fix.
+            if int(stats[label, cv2.CC_STAT_AREA]) * step * step < min_area_px:
                 continue
-            mx = int(stats[label, cv2.CC_STAT_LEFT])
-            my = int(stats[label, cv2.CC_STAT_TOP])
-            mw = int(stats[label, cv2.CC_STAT_WIDTH])
-            mh = int(stats[label, cv2.CC_STAT_HEIGHT])
+            mx = int(stats[label, cv2.CC_STAT_LEFT])   * step
+            my = int(stats[label, cv2.CC_STAT_TOP])    * step
+            mw = int(stats[label, cv2.CC_STAT_WIDTH])  * step
+            mh = int(stats[label, cv2.CC_STAT_HEIGHT]) * step
             regions.append(TissueRegion(
                 x=int(mx * mask_ds_x) + origin_x,
                 y=int(my * mask_ds_y) + origin_y,
@@ -424,7 +499,7 @@ class TissuesRegionsMask:
                         it would threshold blank glass against its own noise.
                         _mask_hsv is per-pixel and HEST is fully convolutional,
                         so both are unaffected -- the same constraint
-                        _adaptive_apply already documents.
+                        _tiled_apply already documents.
         '''
         wsi_width  = wsi.level_dimensions[0][0]
         wsi_height = wsi.level_dimensions[0][1]
@@ -432,95 +507,26 @@ class TissuesRegionsMask:
         wsi_mpp_y  = float(wsi.properties.get('openslide.mpp-y', 0))
         wsi_level_downsamples = wsi.level_downsamples
 
-        n_levels = len(wsi.level_dimensions)
-        if level is not None:
-            lv = level if level >= 0 else n_levels + level
-        else:
-            lv = wsi.get_best_level_for_downsample(ds)
-
-        # Level-0 rect the mask will cover.
-        p = wsi.properties
-        if limit_bounds:
-            origin_x = int(p.get('openslide.bounds-x', 0))
-            origin_y = int(p.get('openslide.bounds-y', 0))
-            span_w   = int(p.get('openslide.bounds-width',  wsi_width))
-            span_h   = int(p.get('openslide.bounds-height', wsi_height))
-        else:
-            origin_x = origin_y = 0
-            span_w, span_h = wsi_width, wsi_height
-
-        # read_region takes a level-0 location but a level-lv size.
-        ds_lv = wsi_level_downsamples[lv]
-        rw = max(1, int(span_w / ds_lv))
-        rh = max(1, int(span_h / ds_lv))
-        # read_region_rgb, not .convert('RGB'), whenever the handle offers it.
-        # convert() merely drops the alpha channel, and unphotographed pixels
-        # carry RGB 0, so every MIRAX hole and every never-scanned corner comes
-        # out pure black. HSV and Otsu happen to reject black -- sat 0 fails
-        # `sat > 15`, and _mask_otsu excludes gray <= 20 -- so this was harmless
-        # for as long as those were the only methods. A segmentation model has
-        # no such rule and will happily call a black field tissue, which puts
-        # tissue_regions over areas that have no image at all. Compositing onto
-        # openslide.background-color (white when unset) turns those pixels into
-        # what they physically are, blank glass, which all three methods reject.
-        #
-        # Only the alpha-aware read is taken here, not SafeSlide's stricter
-        # read_region_valid: at ds=1 the validity plane is another full-size
-        # array, and after compositing "no image" and "white glass" are the same
-        # thing as far as a tissue mask is concerned. If a hole surrounded by
-        # tissue ever does get bridged by a seg model, SafeSlide.holes already
-        # records where to check, and `main_mask &= valid` is the answer then.
         if method is None:
             method = _mask_hsv
 
-        def _read(y0: int, x0: int, y1: int, x1: int) -> np.ndarray:
-            """One (y0:y1, x0:x1) rect of level `lv`, as RGB.
+        lv, ds_lv, origin_x, origin_y, span_w, span_h, rw, rh = \
+            cls._resolve_geometry(wsi, ds, level, limit_bounds)
 
-            read_region takes a LEVEL-0 location but a level-lv size, so the
-            tile offset is scaled on its way into the location and must not be
-            on its way into the size -- the same asymmetry SafeSlide._read_halved
-            documents. Rounding rather than truncating, because a MIRAX
-            level_downsample is a float near but not equal to 2 and a truncated
-            offset would drift the grid by a pixel every few tiles.
-            """
-            loc = (origin_x + int(round(x0 * ds_lv)),
-                   origin_y + int(round(y0 * ds_lv)))
-            size = (x1 - x0, y1 - y0)
-            if hasattr(wsi, 'read_region_rgb'):
-                return wsi.read_region_rgb(loc, lv, size)
-            return np.array(wsi.read_region(loc, lv, size).convert('RGB'))
-
-        if read_max_pixels and rw * rh > read_max_pixels:
-            # Never materialise the level. The budget is the smaller of the two
-            # constraints, which are not the same thing: max_pixels is VRAM per
-            # forward pass, read_max_pixels is host RAM per read. One grid
-            # serves both, so a heavy method just makes the tiles smaller.
-            budget = min(read_max_pixels, max_pixels) if max_pixels else read_max_pixels
-            mask = cls._tiled_apply(method, rh, rw, _read, budget, overlap,
-                                    source='read+seg')
-        else:
-            img = _read(0, 0, rh, rw)
-            if max_pixels is not None and img.shape[0] * img.shape[1] > max_pixels:
-                mask = cls._adaptive_apply(method, img, max_pixels, overlap)
-            else:
-                mask = method(img)
-            # Explicitly, because the next steps are this function's memory
-            # peak: _search_tissue_regions hands cv2 a uint8 copy and cv2
-            # allocates an int32 label plane, 5 bytes/px between them. Carrying
-            # a dead 3 bytes/px through that is what made a 18.7 Gpx slide need
-            # 56 GB it had no use for. CPython frees on the last reference, and
-            # an array this size is mmap'd, so the del does return it to the OS.
-            del img
+        mask = cls._segment_plane(wsi, lv, ds_lv, origin_x, origin_y, rw, rh,
+                                  method, max_pixels, read_max_pixels, overlap)
 
         main_mask = mask.astype(bool)
+        del mask          # 1 byte/px, and main_mask is the copy that is kept
+
         # The numerator has to be the level-0 span the mask actually covers, not
         # the canvas: pairing the canvas width with a cropped mask width would
         # inflate mask_ds by 1/crop_fraction and silently misplace everything.
         # Without a crop span_* IS the canvas, so this is the old formula.
-        mask_ds_x = span_w / mask.shape[1]
-        mask_ds_y = span_h / mask.shape[0]
-        del mask                     # shape is read above; main_mask is the copy we keep
+        mask_ds_x = span_w / main_mask.shape[1]
+        mask_ds_y = span_h / main_mask.shape[0]
         mask_mpp  = (wsi_mpp_x + wsi_mpp_y) / 2 * (mask_ds_x + mask_ds_y) / 2
+
         tissue_regions = cls._search_tissue_regions(
             main_mask, mask_ds_x, mask_ds_y,
             origin_x=origin_x, origin_y=origin_y,
@@ -692,6 +698,34 @@ class TissuesRegionsMask:
 
 
 # ── Internal mask functions ───────────────────────────────────────────────────
+
+def mask_all(rgb: np.ndarray) -> np.ndarray:
+    """Everything is tissue. One blob, so one region covering the whole plane.
+
+    For stage 2. The retriever scores a window by the mean cosine over the
+    query's tiles, so a window sitting on blank glass loses on its own merits;
+    the tissue mask there is an optimisation, not a correctness requirement.
+    Handing it a single region buys something back that the optimisation costs:
+    find_best takes a global maximum over every placement in every region, so a
+    region with an order of magnitude more placements wins comparisons on
+    sample count alone. Measured at about 0.016 of uniform uplift on S1137178,
+    enough to displace fifteen matches that SIFT had verified with 218 to 915
+    inliers. With one region there is nothing to compare across.
+
+    Public, unlike _mask_hsv and _mask_otsu, because it is meant to be passed
+    in by a caller: TissuesRegionsMask.from_wsi(wsi, method=mask_all).
+
+    Tiling-safe by construction -- no global statistic, no neighbourhood, no
+    dependence on position.
+
+    WASTEFUL, and knowingly so: from_wsi still reads every pixel of the level
+    to hand them to a function that ignores them. At mask_ds=1 that is twenty
+    minutes and a full-size array to produce a constant. A constructor that
+    fabricates the all-ones mask from the bounds properties alone would do the
+    same job with no I/O at all; see log/TODO.log.
+    """
+    return np.ones(rgb.shape[:2], dtype=bool)
+
 
 def _mask_hsv(rgb: np.ndarray, sat_thresh: int = 15,
               val_min: int = 30, val_max: int = 240) -> np.ndarray:

@@ -558,7 +558,7 @@ def test_operations_pipeline(path: str,
 # ── 11. Tiling (adaptive halving) effect ─────────────────────────────────────
 
 def _plan_tile_grid(H: int, W: int, max_pixels: int) -> tuple[int, int]:
-    '''Mirror TissuesRegionsMask._adaptive_apply's grid planning (for visualisation).'''
+    '''Mirror TissuesRegionsMask._tiled_apply's grid planning (for visualisation).'''
     n_h = n_w = 1
     while (H // n_h) * (W // n_w) > max_pixels:
         if H // n_h >= W // n_w:
