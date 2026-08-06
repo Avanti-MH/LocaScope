@@ -71,27 +71,29 @@ def _slide_tag(wsi_path: str, max_len: int = 20) -> str:
     return os.path.splitext(os.path.basename(wsi_path))[0][:max_len]
 
 
-def _append_rows(path: str, rows: list, fieldnames: list, started: bool) -> bool:
-    """Append dict rows to a CSV, writing the header on the first call.
+def _append_rows(path: str, rows: list, fieldnames: list) -> None:
+    """Append dict rows to a CSV, writing the header only into an empty file.
 
     Written per camera rather than once at the end because the end is not
-    guaranteed to arrive: an OOM kill during the fifth slide's mask build used
-    to throw away four slides of images, since every gt row was still in a list
-    in memory. A PNG without its gt row carries no position, mpp or rotation --
-    it is unrecoverable, not merely unlabelled.
+    guaranteed to arrive: an OOM kill during the fifth slide mask build used to
+    throw away four slides of images, since every gt row was still in a list in
+    memory. A PNG without its gt row carries no position, mpp or rotation -- it
+    is unrecoverable, not merely unlabelled.
 
-    The first call truncates, so re-running a job name replaces its csv instead
-    of appending a second corpus onto the first.
+    Emptiness rather than a first-call flag, because one process is no longer
+    the unit: under a job array each slide is its own process and each would
+    think it was first. main() truncates its own two files once at startup, so
+    a re-run still replaces rather than appends.
     """
     if not rows:
-        return started
-    with open(path, 'a' if started else 'w', newline='') as f:
+        return
+    write_header = (not os.path.exists(path)) or os.path.getsize(path) == 0
+    with open(path, 'a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not started:
+        if write_header:
             writer.writeheader()
         for r in rows:
             writer.writerow(r)
-    return True
 
 
 def _run_camera(
@@ -225,6 +227,11 @@ def main():
                          'pixel and OOMs on any large slide.')
     ap.add_argument('--seed',             type=int,   default=0)
     ap.add_argument('--out',              default=None)
+    ap.add_argument('--append',           action='store_true',
+                    help='add to gt.csv and skips.csv instead of replacing '
+                         'them. For a caller that runs this once per slide in '
+                         'a loop, where every invocation after the first would '
+                         'otherwise wipe the ones before it.')
     args = ap.parse_args()
 
     out_dir  = args.out or job_result_dir('MultiBatch')
@@ -232,8 +239,23 @@ def main():
     diag_dir = os.path.join(out_dir, 'diag')
     os.makedirs(img_dir,  exist_ok=True)
     os.makedirs(diag_dir, exist_ok=True)
-    gt_path    = os.path.join(out_dir, 'gt.csv')
-    skips_path = os.path.join(out_dir, 'skips.csv')
+    # Under a job array every task shares out_dir, so the csv files get the task
+    # id and are merged afterwards. Appending to one shared file would interleave
+    # rows: a few hundred at a time is far past the size an O_APPEND write is
+    # atomic at. images/ needs no such care, the names already carry wsi and level.
+    _task = os.environ.get('SLURM_ARRAY_TASK_ID')
+    _sfx  = f'_{_task}' if _task else ''
+    gt_path    = os.path.join(out_dir, f'gt{_sfx}.csv')
+    skips_path = os.path.join(out_dir, f'skips{_sfx}.csv')
+    # Truncate our own two files here, once. _append_rows writes a header into
+    # an empty file, so without this a re-run would append a second corpus onto
+    # the first. --append is for the caller that drives one slide per process:
+    # there the invocations are the loop, and only the loop knows where the
+    # corpus starts.
+    if not args.append:
+        for _p in (gt_path, skips_path):
+            if os.path.exists(_p):
+                os.remove(_p)
     print(f'Output    -> {out_dir}', flush=True)
     print(f'per-camera={args.per_camera}  jitter={args.jitter}  '
           f'wh={args.wh_ratio}  MP={args.MPixels}', flush=True)
@@ -255,9 +277,7 @@ def main():
     # them here as well would only be a second copy waiting to be lost.
     n_records = 0
     n_skips   = 0
-    gt_started    = False
-    skips_started = False
-    SKIP_FIELDS   = ['wsi', 'level', 'mpp', 'reason']
+    SKIP_FIELDS = ['wsi', 'level', 'mpp', 'reason']
 
     for wsi_path in args.wsi_paths:
         wsi_tag = _slide_tag(wsi_path)
@@ -275,10 +295,9 @@ def main():
         except Exception as e:
             reason = f'SafeSlide open failed: {type(e).__name__}: {e}'
             print(f'\n[{wsi_tag}] SKIP whole WSI: {reason}', flush=True)
-            skips_started = _append_rows(
-                skips_path, [{'wsi': wsi_tag, 'level': -1,
-                              'mpp': -1, 'reason': reason}],
-                SKIP_FIELDS, skips_started)
+            _append_rows(skips_path, [{'wsi': wsi_tag, 'level': -1,
+                                       'mpp': -1, 'reason': reason}],
+                         SKIP_FIELDS)
             n_skips += 1
             continue
 
@@ -317,10 +336,9 @@ def main():
         except Exception as e:
             reason = f'base mask build failed: {type(e).__name__}: {e}'
             print(f'[{wsi_tag}] SKIP whole WSI: {reason}', flush=True)
-            skips_started = _append_rows(
-                skips_path, [{'wsi': wsi_tag, 'level': -1,
-                              'mpp': round(base_mpp, 4), 'reason': reason}],
-                SKIP_FIELDS, skips_started)
+            _append_rows(skips_path, [{'wsi': wsi_tag, 'level': -1,
+                                       'mpp': round(base_mpp, 4),
+                                       'reason': reason}], SKIP_FIELDS)
             n_skips += 1
             slide.close()
             continue
@@ -342,17 +360,15 @@ def main():
                 img_dir=img_dir, diag_dir=diag_dir,
             )
             if skip_reason is not None:
-                skips_started = _append_rows(
-                    skips_path, [{'wsi':    wsi_tag,
-                                  'level':  lvl,
-                                  'mpp':    round(level_mpp, 4),
-                                  'reason': skip_reason}],
-                    SKIP_FIELDS, skips_started)
+                _append_rows(skips_path, [{'wsi':    wsi_tag,
+                                           'level':  lvl,
+                                           'mpp':    round(level_mpp, 4),
+                                           'reason': skip_reason}],
+                             SKIP_FIELDS)
                 n_skips += 1
             if recs:
-                gt_started = _append_rows(
-                    gt_path, [asdict(r) for r in recs],
-                    list(asdict(recs[0]).keys()), gt_started)
+                _append_rows(gt_path, [asdict(r) for r in recs],
+                             list(asdict(recs[0]).keys()))
                 n_records += len(recs)
             # Per level, so growth inside one slide is attributable to a level
             # rather than only visible as a total at slide_done.
@@ -375,9 +391,9 @@ def main():
         print(f'  {mem_line("slide done")}', flush=True)
 
     # Both files were written as the run went; this only reports the totals.
-    if gt_started:
+    if n_records:
         print(f'\ngt.csv    -> {gt_path}  ({n_records} rows)', flush=True)
-    if skips_started:
+    if n_skips:
         print(f'skips.csv -> {skips_path}  ({n_skips} skipped cameras)', flush=True)
         print(f'To visualise a skip: python query_sim/cli/diag_camera_skip.py '
               f'<wsi_path> --level <lvl>', flush=True)

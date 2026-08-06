@@ -1,15 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=MultiBatch1440        # Job name -> log/<name> and result/<name>/
+#SBATCH --job-name=MultiBatch1440     # -> log/<name> and result/<name>/
 #SBATCH --partition=normal               # Partition
-#SBATCH --time=12:00:00                  # Runtime (hh:mm:ss)
+#SBATCH --time=24:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --gpus-per-node=1                # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                # CPU cores per task
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH --mem=700G                       # see the note on ds=1 memory below
-#SBATCH -o ./log/MultiBatch1440          # STDOUT
-#SBATCH -e ./log/MultiBatch1440          # STDERR
+#SBATCH -o ./log/MultiBatch1440       # STDOUT
+#SBATCH -e ./log/MultiBatch1440       # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -19,105 +18,128 @@ ml load cuda/12.6
 # ---------------- Activate environment ----------------
 conda activate gigapath
 
-# ---------------- A synthetic corpus shaped like the real photographs --------
+# ---------------- One process per slide, written out ------------------------
 #
-# The real microscope photos are 1440x1024 32-bit BMP: 45:32, 1.475 MP. The
-# query_sim default is 4:3 at 12 MP, and result/MultiBatch/ was generated with
-# it -- every one of its 300 shots is 4000x3000. Tuning against that corpus is
-# tuning against a materially easier problem than the one the photographs pose.
+# 45:32 at 1.47456 MP, the shape of the real photographs (1440x1024), built as
+# seven python invocations rather than one process looping over seven slides.
 #
-# QueryFromWSI derives the output size as
-#     factor = (MPixels * 1e6 / (w_r * h_r)) ** 0.5
-#     w = int(factor * w_r);  h = int(factor * h_r)
-# (query_sim/source/wsi_query.py:50). 45:32 with 1.47456 MP lands on 1440.000 x
-# 1024.000 exactly, so nothing depends on how int() rounds. 1.475 also yields
-# 1440x1024, but by truncating 1440.215 -- prefer the exact value.
+# WHY ONE PROCESS PER SLIDE. It is no longer a workaround. Four runs died at
+# exit 139 while this corpus was being built, and the cause turned out to have
+# nothing to do with the process boundary: PYTHONFAULTHANDLER put the fault in
+# cv2.connectedComponentsWithStats, inside _search_tissue_regions, which was
+# being handed the whole mask in one call. It segfaults rather than raising
+# somewhere above 2**33 pixels -- 8.40 Gpx survived, 12.34 Gpx did not -- and
+# _search_tissue_regions now decimates until the input is safely under.
 #
-# WHAT THIS COSTS THE RETRIEVER. Area drops 8x, and the query tile grid with it:
-# 15x11 = 165 tiles becomes 5x4 = 20. A window's score is the mean cosine over
-# those tiles, so the same signal is now averaged over 8x fewer samples. The
-# correct-vs-random separation measured on the real photos was already only
-# 0.5687 vs 0.5408; expect the numbers here to get worse, and expect them NOT to
-# be comparable with anything measured on result/MultiBatch/. That is the point
-# of the run, not a defect in it.
+# Three hypotheses were wrong along the way, which is worth recording because
+# each looked well supported: a cudnn tile-shape problem (the warning is
+# printed at tile 1 and recovered from), accumulated process state (refuted
+# when a fresh process died on the same slide), and tile width (the crash is
+# after all the tiling, on the assembled mask).
 #
-# Same slides and same seed as the 12 MP corpus, so FoV shape is the only
-# variable that moved. Both datasets on purpose: BRACS SVS steps 4x per pyramid
-# level and Ki67 MRXS steps 2x, and the 2x spacing is what makes stage 1 confuse
-# adjacent levels. A corpus of one or the other would hide that.
+# What survives is that a slide should not be able to take the run down with
+# it. One process each means a crash costs one slide, any slide can be re-run
+# on its own, and the failure is attributable at a glance.
 #
-# MASK: --hest at --mask-ds 1.0, tiled at 4M pixels per forward pass. ds=1 is
-# the setting that makes the tissue mask agree with the level-0 geometry the
-# sampler works in, and HEST is the segmentation we are moving to. The mask is
-# built once per WSI now, so that cost is paid level_count times less than it
-# used to be.
+# The calls are spelled out one per line rather than driven by a loop or an
+# array so that a slide can be commented out, re-ordered or re-run by editing
+# exactly one line, and so the log reads in the same order as the file.
 #
-# --mem=700G, and it is not padding. from_wsi at ds=1 materialises the whole
-# level as one array, so memory scales with pixel count and nothing bounds it
-# (--max-pixels bounds the GPU, not the host). Two runs measured the host cost
-# at 16 bytes per level-0 pixel:
+# They run in sequence, so no two writers ever touch gt.csv and there is
+# nothing to merge. Every call carries --append; the rm below is what defines
+# where this corpus starts.
 #
-#   BRACS_1228   6.58 Gpx   105 GB   <- measured, the only slide that finished
-#   BRACS_1936  12.34 Gpx   197 GB   <- OOM killed here at 200G, twice
-#   S1104360    18.70 Gpx   299 GB   <- largest of the seven
+# A failing call does not stop the ones after it: there is no set -e, and
+# gt.csv already holds every camera that finished before the crash.
 #
-# The MRXS canvases are 80 Gpx each; the numbers above are after limit_bounds
-# crops to the scanned rectangle, which is the only reason they are affordable
-# at all. Roughly 25 GB per slide also failed to come back in the first run, so
-# 299 + 6 * 25 is the figure 700G is covering.
+# PYTHONFAULTHANDLER stays on. It is what turned three days of guessing into
+# one stack trace, and locate_photo and bench_locascope have not been through
+# a slide this large yet.
+#
+# THE SLIDES ARE THE ORIGINAL THREE. BRACS_1944 was only ever a stand-in for
+# BRACS_1936 while 1936 was crashing; with the cause fixed it goes back out, so
+# the BRACS side is one slide per type again -- ADH, FEA, DCIS -- and the same
+# slides and seed as the 12 MP corpus, which is what makes FoV shape the only
+# variable that moved between them.
+
+export PYTHONFAULTHANDLER=1
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
 KI67=/work/u26130998/datasets/Ki67
 
-WSIS=(
-  "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"
-  "$BRACS/Group_AT/Type_FEA/BRACS_1936.svs"
-  "$BRACS/Group_MT/Type_DCIS/BRACS_1476.svs"
-  "$KI67/S1104233,G7E,110208.mrxs"
-  "$KI67/S1104360,G7E,110208.mrxs"
-  "$KI67/S1137178,G7E,110926.mrxs"
-  "$KI67/S1151088,G7E,111220.mrxs"
-)
+# Tile budget for the segmentation forward pass, and for the read too since
+# from_wsi takes the smaller of the two budgets. It was dropped to 2M while the
+# segfault was thought to be about tile width; that turned out to be wrong, so
+# nothing forces the smaller value now.
+#
+# It is kept at 2M anyway, for a different and better-supported reason: the
+# budget changes the mask. Same slide, only the budget moved --
+#
+#   BRACS_1228 @ 4M   2048 tiles   tissue_frac 12.8%   regions 6
+#   BRACS_1228 @ 2M   4096 tiles   tissue_frac 13.0%   regions 4
+#
+# -- so overlap=128 does not fully isolate HEST's receptive field, and the two
+# corpora are not interchangeable. 2M is what the surviving slides of the last
+# run used, and staying on it keeps this corpus internally consistent. Changing
+# it is a decision about the mask, not about speed. The cost is real: the grid
+# doubles and the overlap is a larger share of a smaller tile, so the read
+# amplification goes from about 1.32x to 1.43x.
+MAX_PIXELS=2000000
 
-WH_RATIO=45:32        # real photos are 1440x1024
-MPIXELS=1.47456       # exactly 1440.000 x 1024.000, see the note above
-PER_CAMERA=100         # shots per (WSI, pyramid level)
-JITTER=0.05
-SEED=0
+# 45:32 with 1.47456 MP lands on 1440.000 x 1024.000 exactly, so nothing
+# depends on how int() rounds in QueryFromWSI (query_sim/source/wsi_query.py).
+# --read-max-pixels is not passed: its default of 256M already makes from_wsi
+# read tile by tile, and the grid is min(read_max_pixels, max_pixels), so the
+# tiles are MAX_PIXELS either way. It only earns a value of its own when there
+# is no model to bound the grid -- an HSV mask leaves max_pixels None, and then
+# read_max_pixels is the only thing standing between ds=1 and the whole level
+# in memory.
+ARGS="--wh-ratio 45:32 --MPixels 1.47456 --per-camera 100 --jitter 0.05"
+ARGS="$ARGS --mask-ds 1.0 --hest --max-pixels $MAX_PIXELS --seed 0 --append"
 
-echo "======== corpus: $WH_RATIO  ${MPIXELS}MP  (1440x1024) ========"
-printf '%s\n' "${WSIS[@]}"
-echo
+OUT="result/$SLURM_JOB_NAME"
+mkdir -p "$OUT"
+rm -f "$OUT/gt.csv" "$OUT/skips.csv"
 
-# --out is omitted on purpose: multi_batch falls back to
-# result/<SLURM_JOB_NAME>/, which keeps this run beside its own log and lets
-# `make clean-job JOB=MultiBatch1440` remove the pair.
-python query_sim/cli/multi_batch.py \
-  "${WSIS[@]}" \
-  --wh-ratio   $WH_RATIO \
-  --MPixels    $MPIXELS \
-  --per-camera $PER_CAMERA \
-  --jitter     $JITTER \
-  --mask-ds    1.0 \
-  --hest \
-  --max-pixels 4000000 \
-  --seed       $SEED
-RC=$?
-
-# The exit code has to be looked at. An OOM kill leaves the shell running, so
-# without this the script printed "done" and a command to check a gt.csv that
-# did not exist -- the tail of the log claimed success for a job that died on
-# its second slide.
+echo "======== corpus: 45:32  1.47456MP  (1440x1024) ========"
+echo "max-pixels : $MAX_PIXELS"
+echo "output     : $OUT"
 echo ""
-if [ $RC -ne 0 ]; then
-  echo "======== FAILED (exit $RC) -> result/MultiBatch1440/ ========"
-  echo "gt.csv holds whatever finished before the failure; it is written per"
-  echo "camera, so the images already on disk are still usable. Count them:"
-  echo "  wc -l result/MultiBatch1440/gt.csv"
-  echo "For an OOM, the [mem ...] lines give the high-water mark to set --mem from."
-  exit $RC
-fi
 
-echo "======== done -> result/MultiBatch1440/ ========"
+echo "################ 1/7  BRACS_1228 ################"
+python query_sim/cli/multi_batch.py "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs" $ARGS
+echo "exit=$?"
+
+echo "################ 2/7  BRACS_1936 ################"
+python query_sim/cli/multi_batch.py "$BRACS/Group_AT/Type_FEA/BRACS_1936.svs" $ARGS
+echo "exit=$?"
+
+echo "################ 3/7  BRACS_1476 ################"
+python query_sim/cli/multi_batch.py "$BRACS/Group_MT/Type_DCIS/BRACS_1476.svs" $ARGS
+echo "exit=$?"
+
+echo "################ 4/7  S1104233 ################"
+python query_sim/cli/multi_batch.py "$KI67/S1104233,G7E,110208.mrxs" $ARGS
+echo "exit=$?"
+
+echo "################ 5/7  S1104360 ################"
+python query_sim/cli/multi_batch.py "$KI67/S1104360,G7E,110208.mrxs" $ARGS
+echo "exit=$?"
+
+echo "################ 6/7  S1137178 ################"
+python query_sim/cli/multi_batch.py "$KI67/S1137178,G7E,110926.mrxs" $ARGS
+echo "exit=$?"
+
+echo "################ 7/7  S1151088 ################"
+python query_sim/cli/multi_batch.py "$KI67/S1151088,G7E,111220.mrxs" $ARGS
+echo "exit=$?"
+
+echo ""
+echo "======== done -> $OUT/ ========"
+echo "Any slide that died shows a non-zero exit above; 139 = SIGSEGV,"
+echo "137 = OOM kill. The others still ran, and gt.csv holds every camera"
+echo "that finished. Re-run one slide by running its line on its own."
+echo ""
 echo "Check the shape actually landed before benching on it:"
-echo "  python -c \"import csv,collections; print(collections.Counter((r['fov_width'],r['fov_height']) for r in csv.DictReader(open('result/MultiBatch1440/gt.csv'))))\""
+echo "  python -c \"import csv,collections; print(collections.Counter((r['fov_width'],r['fov_height']) for r in csv.DictReader(open('$OUT/gt.csv'))))\""
+echo "  wc -l $OUT/gt.csv"

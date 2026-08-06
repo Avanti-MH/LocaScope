@@ -10,9 +10,8 @@ import csv
 import os
 import sys
 from dataclasses import asdict
-from typing import Iterator, List, Optional, Tuple
+from typing import List, Optional
 
-import numpy as np
 from PIL import Image
 
 # ── utilities/ on sys.path so TissuesRegionsMask is importable ───────────────
@@ -189,44 +188,3 @@ def generate(
     print(f'\n{len(records)} synthetic FOVs -> {img_dir}')
     print(f'GT -> {gt_path}')
     return records
-
-
-def generate_iter(
-    wsi_path:     str,
-    n:            int,
-    cfg:          Optional[DomainGapConfig] = None,
-    seed:         int    = 0,
-    tissue_ratio: float  = 0.3,
-    region_protrusion_ratio: float = 0.5,
-    mask_ds:      float  = 32.0,
-    mask_method            = None,
-    min_region_ratio: float = 0.01,
-) -> Iterator[Tuple[np.ndarray, FOVRecord]]:
-    """In-memory streaming variant (no disk writes). Yields (image, FOVRecord)."""
-    cfg = cfg or DomainGapConfig()
-    cam = Camera(wsi_path, cfg=cfg, seed=seed,
-                 tissue_ratio=tissue_ratio,
-                 region_protrusion_ratio=region_protrusion_ratio)
-    cam.mask = _prep_mask_for_camera(
-        cam,
-        mask_ds=mask_ds,
-        mask_method=mask_method,
-        min_region_ratio=min_region_ratio,
-    )
-
-    slide_tag = _slide_tag(wsi_path)
-
-    idx = 0
-    try:
-        for shot in cam:
-            if idx >= n:
-                break
-            fname = f'{slide_tag}_syn{idx:05d}.png'
-            yield shot.image, _record_from_shot(
-                shot, fname, wsi_path, cfg, cam.output_w, cam.output_h,
-            )
-            idx += 1
-    finally:
-        cam.mask.regions_undo()
-        cam.mask.regions_undo()
-        cam.mask.regions_undo()
