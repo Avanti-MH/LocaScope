@@ -95,16 +95,6 @@ def _find_best(mask, sim_maps, ds, tile_size, use_overlap: bool):
     return best_x, best_y, best_score
 
 
-def best_match_l0(mask: TissuesRegionsMask, sim_maps: list,
-                  ds: float, tile_size: int) -> tuple[int, int, float]:
-    """Return (x_l0, y_l0, score) of the overall best window (main or overlap)."""
-    mx, my, ms = _find_best(mask, sim_maps, ds, tile_size, use_overlap=False)
-    ox, oy, os_ = _find_best(mask, sim_maps, ds, tile_size, use_overlap=True)
-    if os_ > ms:
-        return ox, oy, os_
-    return mx, my, ms
-
-
 # ── Visualization ─────────────────────────────────────────────────────────────
 
 def draw_figure(thumb, mask, query_img_np, query_qpc,

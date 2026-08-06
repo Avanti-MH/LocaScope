@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=RealTest              # Job name
-#SBATCH --partition=normal2               # Partition
+#SBATCH --partition=normal               # Partition
 #SBATCH --time=24:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
 #SBATCH --nodes=1                        # Number of nodes

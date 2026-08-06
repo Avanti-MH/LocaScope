@@ -477,6 +477,127 @@
     margin 0.0587、177.bmp 0.0636 一樣被搶走——那是拿各組中位數當成逐張
     規則來讀。真正的判別量是上面那個「最佳角漲幅 / 其他三角漲幅」。
 
+[ ] 2026-08-05 | 2_retrieval/ + utilities/test_modules/bench_locascope.py
+    top-K 排名量測與 SIFT 驗證 — 已實作，未提交，未執行過
+
+    ── 狀態 ──
+    程式碼都寫好了，躺在工作區沒有進 git，而且從來沒跑過：
+      result/BenchLocaScope/ 是 07-28 的，沒有 retr_hit_rank 也沒有
+      summary.txt；log/BenchLocaScope 不存在。
+
+    ── 它要回答的問題 ──
+    retrieval 選錯的時候，正確答案是「排在後面」還是「根本沒被提名」？
+    這兩件事要往相反方向修：前者加一道驗證就好，後者得去修特徵。
+    只看 winner 的 metric 分不出來。
+
+    ── 已經寫好的東西 ──
+    2_retrieval/GigaPathSlideWinSimRot.py
+      SlideWinSimCandidate + top_k(k, min_sep_px)
+        免費：compute_sim_maps 已經算出每一個分數，find_best 只是把它們
+        丟掉，不重新編碼任何東西。
+        min_sep_px 抑制同一旋轉角下距離過近的候選，否則一個強峰會用主
+        grid 和半 tile 位移 grid 兩個版本把名單灌滿。預設一個 tile。
+        五個 best_* alias（best_x / best_y / best_region_index /
+        best_rotation / ds）讓 candidate 可以直接餵給 SiftRansacLocalizer，
+        不用假造一個 result 物件。
+      視窗座標公式從 _find_best_in_grid 抽出成 _window_xy，格子平均抽出
+        成 _grid_means。驗證過是等價重構，find_best 的輸出逐位元不變。
+
+    utilities/test_modules/bench_locascope.py
+      --topk       記 retr_hit_rank：真值第一次出現在第幾名
+      --sift-topk  記 sift_hit_rank（對，用 GT 判）與 sift_verified_rank
+                   （被接受，只用 SIFT 自己的 inlier 數判）
+      verify_candidates()：把 K 個候選逐一送 SIFT
+    utilities/_locascope_plots.py
+      plot_recall_at_k + _recall_at_k / _sift_topk_lines / _picker_lines
+    jobscripts/BenchLocaScope.sh（新檔）
+
+    ── 為什麼現在特別重要 ──
+    這正好是上一條「retrieval 尺寸偏差」的解法。S1137178 上被 region 0
+    搶走的 15 張，舊答案有 218-915 個 inlier、新答案只有 2-6，SIFT 一比
+    就分得出來，而且不必先弄懂 retrieval 為什麼排錯。上一條估的天花板是
+    34.9% -> 42.9%，走這條路應該拿得到。
+
+    ── 兩個 rank 之間的差距才是重點 ──
+    sift_hit_rank 要 ground truth，真實照片沒有；sift_verified_rank 只
+    需要 inlier 數，真實照片有。summary.txt 的 accepted-and-correct 就是
+    在問「光看 inlier 數挑，挑對的比例多高」。
+      接近 100%  -> retrieval 提名 + SIFT 驗證的迴圈值得為真實照片建
+      不接近     -> 這個迴圈會有信心地鎖定一個錯位置，比現在單猜更糟
+
+    ── 下一步 ──
+    1. 跑一次 BenchLocaScope.sh（--sift-topk 不是免費的，每張照片多 K 次
+       SIFT，先估時間）
+    2. 看 accepted-and-correct
+    3. 決定要不要把這個迴圈接進 LocaScopePipeline / locate_photo
+    4. 提交（目前和更早 session 的其他改動混在同一個工作區）
+
+[ ] 2026-08-06 | aiNNModel/GigaPathFunc.py — _TRANSFORM 是多 GPU 的下一個瓶頸
+
+    gigapath_model(device, multi_gpu=True) 現在有人用了（bench_locascope 的
+    --multi-gpu，BenchLocaScope.sh 開 4 張卡）。但 gigapath_encode 的前處理
+    是單執行緒的：
+
+      GigaPathFunc.py:151
+        batch = torch.stack(
+            [_TRANSFORM(_to_pil(img)) for img in images[start:start+batch_size]]
+        ).to(device)
+
+    一個 list comprehension 在主執行緒上跑 resize + normalize，四張卡共用它。
+    GPU 吞吐乘四，CPU 這一側沒有變，所以 speedup 大概率遠低於 4x。
+
+    ── 要先量，不要先修 ──
+    bench_gigapath_infer.py:145 已經有一個判斷式在算 GPU/DataLoader 的比例
+    （ratio < 0.3 -> 'GPU bottleneck'）。先用它在 1 卡和 4 卡各跑一次，看
+    speedup 實際是多少。如果接近 4x 就不必動。
+
+    ── 真的要修的話 ──
+    A. torch DataLoader + num_workers：前處理搬到子行程，和 GPU 重疊。
+       改動最大，但這是它存在的目的。
+    B. 前處理搬上 GPU：_to_pil + _TRANSFORM 換成對 uint8 tensor 直接做
+       resize/normalize。省掉 PIL 往返，但 tile 尺寸不一時要小心。
+    C. 只放大 batch_size：治標，CPU 仍然是序列的。
+
+    ── 附帶 ──
+    DataParallel 會把一個 batch 切給各卡，所以 --batch-size 要跟著放大，
+    不然每張卡拿到的比單卡時還少。BenchLocaScope.sh 已經從 2048 調到 8192。
+
+[ ] 2026-08-06 | 2_retrieval/ + utilities/PatchingLib.py
+    stage 2 改用「整張圖一個 region」— 機制已備，但讀取會 OOM
+
+    ── 為什麼要這樣 ──
+    retriever 用 query tile 的平均餘弦給視窗打分，坐在空白玻璃上的視窗本來
+    就會輸，所以組織遮罩在 stage 2 是最佳化而不是正確性需求。而它的代價是
+    上一條「retrieval 尺寸偏差」：find_best 取全域最大值，位置多的 region
+    光靠取樣數就贏。只有一個 region 就沒有跨 region 的比較，偏差消失。
+
+    順帶還省掉 stage 2 的整個 mask 建構（ds=1 + HEST 是每片 10-90 分鐘）。
+
+    ── 已經做好的 ──
+    TissuesRegionsMask.mask_all(rgb) -> 全 True。
+      from_wsi(wsi, method=mask_all) 就會得到一個涵蓋整個 bounded 矩形的
+      region。逐像素、無全域統計，切塊安全。
+
+    ── 阻擋：WsiTissuesContainer 一個 region 一次 read_region ──
+      PatchingLib.py:1049
+        tissue_img = wsi.read_region((region.x, region.y), self.level, size)
+
+    單一 region = 整個 bounded 矩形。在 level 0 對 S1104360 是 18.7 Gpx
+    x 14 bytes/px = 262 GB，立刻 OOM —— 正是 from_wsi 這輪才修掉的同一個病。
+    要走這條路，WsiTissuesContainer 得先拿到同樣的分塊讀（_tiled_apply 已經
+    把「格子」和「像素從哪來」解耦了，可以重用）。
+
+    ── 還沒量的 ──
+    編碼量會變多少倍。這批語料的 tissue_frac 是 1.4% 到 17.1%，但 region 是
+    bounding box 不是組織本身，所以真正的比例是 sum(region 面積) / bounded
+    面積，沒有數字。1.4% 那幾片如果 bounding box 也只蓋掉一小部分，整張編碼
+    可能貴上一個數量級。
+
+    ── 順帶：mask_all 走 from_wsi 是浪費的 ──
+    它會把整層讀進來，只為了交給一個忽略像素的函式。一個從 bounds 屬性直接
+    捏出全 True mask 的 constructor（TissuesRegionsMask.whole_slide(wsi, ds)）
+    可以零 I/O 做同一件事，大約 15 行。
+
 [ ] 2026-07-21 | training/models/mppResNet.py
     MPP 估算用的 ResNet 只有 stub（2 行），訓練邏輯尚未完成
 
