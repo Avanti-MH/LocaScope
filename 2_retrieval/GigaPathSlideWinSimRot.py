@@ -16,10 +16,12 @@ Usage:
     r.build_query_features(shot_img)
     r.compute_sim_maps()
     result = r.find_best()    # SlideWinSimRotResult with .best_rotation
+    cands  = r.top_k(20)      # the same ranking, truncated instead of collapsed
 """
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +72,56 @@ class SlideWinSimRotResult:
     overlap_region_index: int
     # Per-rotation winning scores (for debugging / picking margins)
     scores_by_rotation: Dict[int, float]
+
+
+@dataclass(frozen=True)
+class SlideWinSimCandidate:
+    """One scored window from top_k, in the same coordinates as the result.
+
+    Geometry and score only -- no notion of being right; ranking a candidate
+    against a truth is the caller's business. Rank 1 carries the same x/y/x0/y0
+    and score find_best returns.
+
+    win_w0 and win_h0 come from the ROTATED query's tile grid, so they are
+    already transposed for the 90 and 270 steps and want no further swap. They
+    are a whole number of tiles and therefore not the query footprint, which is
+    not; a caller that knows the true footprint should prefer its own.
+
+    The best_* aliases below make a candidate usable directly as
+    SiftRansacLocalizer's `location`. That refiner reads exactly five
+    attributes -- best_region_index, best_x, best_y, ds, best_rotation
+    (SIFT_RANSAC.py:125-204, the last one via getattr) -- and already accepts
+    either result type by duck typing, so verifying a candidate is a matter of
+    handing it over rather than of building a fake result around it.
+    """
+    rank:          int        # 1-based, by descending score
+    score:         float
+    rotation:      int        # 0 / 90 / 180 / 270
+    from_overlap:  bool       # main grid or the half-tile-shifted one
+    region_index:  int
+    x:             int        # top-left @ level-n
+    y:             int
+    x0:            int        # top-left @ level-0
+    y0:            int
+    win_w0:        int        # window footprint @ level-0, rotated query grid
+    win_h0:        int
+    ds:            float      # level-n downsample, as on the result
+
+    @property
+    def best_x(self) -> int:
+        return self.x
+
+    @property
+    def best_y(self) -> int:
+        return self.y
+
+    @property
+    def best_region_index(self) -> int:
+        return self.region_index
+
+    @property
+    def best_rotation(self) -> int:
+        return self.rotation
 
 
 # ── Pipeline class ────────────────────────────────────────────────────────────
@@ -178,35 +230,131 @@ class GigaPathSlidingWinSimRot:
         return self.sim_maps_by_rot
 
     # ── Stage 3b: helpers reused across rotations ────────────────────────────
-    def _find_best_in_grid(
+    def _window_xy(self, region, r: int, c: int,
+                   use_overlap: bool) -> tuple[int, int]:
+        """Top-left @ level-n of grid cell (r, c) inside `region`.
+
+        The overlap grid is the main grid shifted half a tile on both axes;
+        that offset is the only difference between them. It lives here alone
+        because the same formula written out twice is how one code path ends up
+        reporting a position half a tile from the other and nothing says so.
+        """
+        ds  = self.wsi_container.ds
+        off = self.tile_size // 2 if use_overlap else 0
+        return (int(region.x / ds) + c * self.tile_size + off,
+                int(region.y / ds) + r * self.tile_size + off)
+
+    def _grid_means(
         self,
         sim_maps:    list[tuple[torch.Tensor, torch.Tensor]],
         use_overlap: bool,
-    ) -> tuple[int, int, float, int]:
-        """(x @ level-n, y @ level-n, score, region_index) of the strongest window."""
-        ds   = self.wsi_container.ds
-        half = self.tile_size // 2
-        best_score = -float('inf')
-        best_x = best_y = 0
-        best_region_idx = 0
+        ):
+        """Yield (region_index, region, per-window mean-cosine grid).
+
+        The score of a window is the mean cosine over the query's tiles, so the
+        two trailing dims collapse and what is left is one score per placement.
+        Empty grids are skipped: a region smaller than the query produces none.
+        """
         for ri, (region, (main_sim, overlap_sim)) in enumerate(
             zip(self.mask.tissue_regions, sim_maps)
         ):
             hm = overlap_sim if use_overlap else main_sim
             if hm.numel() == 0:
                 continue
-            hm_mean = hm.mean(dim=(-2, -1))
+            yield ri, region, hm.mean(dim=(-2, -1))
+
+    def _find_best_in_grid(
+        self,
+        sim_maps:    list[tuple[torch.Tensor, torch.Tensor]],
+        use_overlap: bool,
+        ) -> tuple[int, int, float, int]:
+        """(x @ level-n, y @ level-n, score, region_index) of the strongest window."""
+        best_score = -float('inf')
+        best_x = best_y = 0
+        best_region_idx = 0
+        for ri, region, hm_mean in self._grid_means(sim_maps, use_overlap):
             idx = int(hm_mean.argmax())
             r, c = divmod(idx, hm_mean.shape[1])
             score = float(hm_mean[r, c])
             if score > best_score:
                 best_score = score
-                x_off = half if use_overlap else 0
-                y_off = half if use_overlap else 0
-                best_x = int(region.x / ds) + c * self.tile_size + x_off
-                best_y = int(region.y / ds) + r * self.tile_size + y_off
+                best_x, best_y = self._window_xy(region, r, c, use_overlap)
                 best_region_idx = ri
         return best_x, best_y, best_score, best_region_idx
+
+    def top_k(self, k: int = 20,
+              min_sep_px: Optional[float] = None) -> list[SlideWinSimCandidate]:
+        """The k best-scoring windows across every rotation, grid and region.
+
+        Free. compute_sim_maps already produced every score this reads and
+        find_best discards all but one of them; nothing is encoded again.
+
+        Exists to answer a question find_best cannot: when the winner is wrong,
+        is the truth further down the list or absent from it? Those two call for
+        opposite fixes -- verify K candidates geometrically, versus repair the
+        features so the right window scores higher at all.
+
+        min_sep_px suppresses a candidate whose top-left is within that many
+        LEVEL-0 pixels of one already kept AT THE SAME ROTATION. A strong peak
+        otherwise fills the list with itself, seen from the main grid and from
+        the half-tile-shifted one, so a nominal k of 5 can be two real places.
+        Suppression is per-rotation on purpose: the same spot at two
+        orientations is two hypotheses, not a duplicate, and this retriever's
+        rotation vote is exactly what is not trusted. Defaults to one tile at
+        level-0; pass 0 for the raw ranking.
+
+        Rank 1 is the find_best winner, recomputed here rather than read off
+        self.result so top_k does not depend on find_best having run.
+        """
+        if k <= 0:
+            return []
+        if not self.sim_maps_by_rot:
+            self.compute_sim_maps()
+
+        ds = self.wsi_container.ds
+        if min_sep_px is None:
+            min_sep_px = self.tile_size * ds
+
+        # topk per grid rather than over the union: a slide holds far more
+        # windows than fit in memory as a Python list, and only k of them can
+        # survive from any single grid anyway.
+        raw: list[tuple] = []
+        for rot, sim_maps in self.sim_maps_by_rot.items():
+            for use_overlap in (False, True):
+                for ri, region, hm_mean in self._grid_means(sim_maps, use_overlap):
+                    flat = hm_mean.reshape(-1)
+                    vals, idxs = torch.topk(flat, min(k, flat.numel()))
+                    n_cols = hm_mean.shape[1]
+                    for v, i in zip(vals.tolist(), idxs.tolist()):
+                        r, c = divmod(int(i), n_cols)
+                        x, y = self._window_xy(region, r, c, use_overlap)
+                        raw.append((float(v), rot, use_overlap, ri, x, y))
+        raw.sort(key=lambda t: -t[0])
+
+        out: list[SlideWinSimCandidate] = []
+        for score, rot, use_overlap, ri, x, y in raw:
+            x0, y0 = int(x * ds), int(y * ds)
+            if min_sep_px > 0 and any(
+                c.rotation == rot
+                and math.hypot(x0 - c.x0, y0 - c.y0) < min_sep_px
+                for c in out
+            ):
+                continue
+            grid = self.qc_by_rot[rot].grid
+            out.append(SlideWinSimCandidate(
+                rank         = len(out) + 1,
+                score        = score,
+                rotation     = rot,
+                from_overlap = use_overlap,
+                region_index = ri,
+                x = x, y = y, x0 = x0, y0 = y0,
+                win_w0 = int(grid.grid_cols * self.tile_size * ds),
+                win_h0 = int(grid.grid_rows * self.tile_size * ds),
+                ds     = ds,
+            ))
+            if len(out) == k:
+                break
+        return out
 
     def find_best(self) -> SlideWinSimRotResult:
         """Best match across (4 rotations) x (main + overlap grids)."""
