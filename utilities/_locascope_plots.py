@@ -28,7 +28,10 @@ import matplotlib.pyplot as plt
 _BOOL_COLS = {'unusable_level', 'rot_correct', 'refine_success'}
 _INT_COLS  = {'level', 'gt_x', 'gt_y', 'routed_level', 'gt_rot_deg',
               'retr_rotation', 'retr_x0', 'retr_y0', 'refine_x0', 'refine_y0',
-              'refine_inliers', 'refine_matches'}
+              'refine_inliers', 'refine_matches',
+              'retr_topk_n', 'retr_hit_rank', 'retr_hit_rank_strict',
+              'sift_topk_n', 'sift_hit_rank', 'sift_verified_rank',
+              'sift_best_inliers', 'sift_best_rank'}
 _STR_COLS  = {'filename', 'wsi_path', 'error'}
 
 
@@ -51,16 +54,229 @@ def load_metrics_csv(path: str) -> List[dict]:
                 for row in csv.DictReader(f)]
 
 
-def write_metrics_csv(metrics: List[dict], out_path: str) -> None:
-    with open(out_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=list(metrics[0].keys()))
-        writer.writeheader()
-        writer.writerows(metrics)
-    print(f'metrics.csv -> {out_path}  ({len(metrics)} rows)')
+def append_metrics_row(m: dict, out_path: str,
+                       fieldnames: Optional[List[str]] = None) -> List[str]:
+    """Append one row, writing the header into an empty file. Returns the
+    fieldnames to hand back on the next call.
+
+    Per shot rather than once at the end, because the end is not guaranteed to
+    arrive. A bench over a whole corpus is hours of retriever builds and query
+    encodes, and a crash at the last shot used to return nothing at all -- the
+    same way a batch that died on its fifth slide used to throw away four
+    slides of images. compute_metrics declares every field up front with None
+    defaults, so the first row fixes the columns and the rest align with it;
+    pass the returned list back so a later row cannot silently re-order them.
+    """
+    if fieldnames is None:
+        fieldnames = list(m.keys())
+    write_header = (not os.path.exists(out_path)) or os.path.getsize(out_path) == 0
+    with open(out_path, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(m)
+    return fieldnames
 
 
 def wsi_tag(m: dict) -> str:
     return os.path.splitext(os.path.basename(m['wsi_path']))[0]
+
+
+# ── stage 2 recall@K ──────────────────────────────────────────────────────────
+
+K_GRID = (1, 3, 5, 10, 20)
+
+
+def _recall_at_k(metrics: List[dict], key: str = 'retr_hit_rank') -> List[tuple]:
+    """[(K, hits, n, fraction), ...] over the shots that recorded a top-K.
+
+    A shot counts at K when the truth first appeared at rank K or better, so
+    the curve is monotone and recall@1 is exactly the retrieval accuracy the
+    winner-only metric already reports.
+
+    The denominator is every scored shot at every K, including shots that could
+    not enumerate K candidates at all -- a region barely larger than the query
+    offers only a handful of placements. For those, recall@20 is decided by the
+    few that exist, which is the honest reading of "was it in the top 20
+    proposed": there was nothing else to propose. Dropping the K instead would
+    let one small region delete a column for the whole corpus.
+    """
+    scored = [m for m in metrics if m.get('retr_topk_n')]
+    if not scored:
+        return []
+    n = len(scored)
+    out = []
+    for k in K_GRID:
+        hits = sum(1 for m in scored
+                   if m.get(key) is not None and m[key] <= k)
+        out.append((k, hits, n, hits / n))
+    return out
+
+
+def _recall_at_k_lines(metrics: List[dict]) -> List[str]:
+    curve = _recall_at_k(metrics)
+    if not curve:
+        return []
+    tol = next((m['retr_hit_tol_px'] for m in metrics
+                if m.get('retr_hit_tol_px') is not None), None)
+    depths = [m['retr_topk_n'] for m in metrics if m.get('retr_topk_n')]
+    lines = ['Stage 2 recall@K  (truth within '
+             f'{tol:.0f} px of a candidate centre, i.e. inside the crop SIFT '
+             'would search)',
+             f'  candidates enumerated per shot: min {min(depths)}, '
+             f'median {int(np.median(depths))}, max {max(depths)}']
+    for k, hits, n, frac in curve:
+        lines.append(f'  K={k:<3d} {hits:5d}/{n:<5d}  {100 * frac:5.1f}%')
+    strict = _recall_at_k(metrics, 'retr_hit_rank_strict')
+    if strict:
+        lines.append('  strict (window itself right, within one tile)')
+        for k, hits, n, frac in strict:
+            lines.append(f'    K={k:<3d} {hits:5d}/{n:<5d}  {100 * frac:5.1f}%')
+    # The gap between recall@20 and recall@1 is the whole argument for adding a
+    # verification pass; if it is small the features are the problem, not the
+    # ranking.
+    if len(curve) > 1:
+        gain = 100 * (curve[-1][3] - curve[0][3])
+        lines.append(f'  headroom from ranking: +{gain:.1f} points between '
+                     f'K=1 and K={curve[-1][0]}')
+    lines.append('')
+    lines.extend(_sift_topk_lines(metrics))
+    return lines
+
+
+def _sift_topk_lines(metrics: List[dict]) -> List[str]:
+    """SIFT run over the top-K candidates: the ceiling, and what is reachable.
+
+    Three numbers, and the third is the one that decides whether this design
+    survives contact with photographs that have no ground truth:
+
+      hit@K       SIFT localised some candidate correctly. The ceiling.
+      verified@K  SIFT accepted some candidate on its own inlier count. What a
+                  system without ground truth can actually reach.
+      agree       of the shots where it accepted one, how often that same
+                  candidate was the correct one. Below 1.0 means the loop would
+                  confidently return a wrong position.
+    """
+    scored = [m for m in metrics if m.get('sift_topk_n')]
+    if not scored:
+        return []
+    n = len(scored)
+    depth = max(m['sift_topk_n'] for m in scored)
+    lines = [f'Stage 2+3 SIFT over the top {depth} candidates  (n={n})']
+    for k in [k for k in K_GRID if k <= depth] or [depth]:
+        hit = sum(1 for m in scored
+                  if m.get('sift_hit_rank') and m['sift_hit_rank'] <= k)
+        ver = sum(1 for m in scored
+                  if m.get('sift_verified_rank') and m['sift_verified_rank'] <= k)
+        lines.append(f'  K={k:<3d} hit {100 * hit / n:5.1f}%   '
+                     f'verified {100 * ver / n:5.1f}%')
+    accepted = [m for m in scored if m.get('sift_verified_rank')]
+    if accepted:
+        agree = sum(1 for m in accepted
+                    if m.get('sift_hit_rank') == m['sift_verified_rank'])
+        lines.append(f'  accepted-and-correct: {agree}/{len(accepted)} '
+                     f'({100 * agree / len(accepted):.1f}%) -- the inlier count '
+                     f'picked the right candidate this often')
+    lines.append('')
+    lines.extend(_picker_lines(scored, depth))
+    return lines
+
+
+def _picker_lines(scored: List[dict], depth: int) -> List[str]:
+    """Does top-K beat rank-1, once something has to actually choose?
+
+    recall@K is a ceiling, not a result: it says the truth was somewhere in the
+    list, not that the system could tell which one it was. A deployable loop
+    has to commit to one candidate with no ground truth to consult, so it is
+    scored here against the baseline it would replace.
+
+      baseline        SIFT on rank 1, which is what the pipeline does today.
+      first accepted  scan by score, take the first candidate SIFT accepts.
+      most inliers    verify all K, take the highest inlier count.
+      ceiling         a perfect picker. The gap above the two real pickers is
+                      what a better verifier could still buy.
+
+    REGRESSIONS is the number that decides whether to ship it. A shot where
+    rank 1 was already right and the picker chose someone else is a case the
+    loop actively broke, and a net gain can hide a lot of them.
+    """
+    n = len(scored)
+    if not n:
+        return []
+
+    def correct(m, rank_key):
+        r = m.get(rank_key)
+        return r is not None and m.get('sift_hit_rank') == r
+
+    base    = sum(1 for m in scored if m.get('sift_hit_rank') == 1)
+    first   = sum(1 for m in scored if correct(m, 'sift_verified_rank'))
+    most    = sum(1 for m in scored if correct(m, 'sift_best_rank'))
+    ceiling = sum(1 for m in scored if m.get('sift_hit_rank') is not None)
+
+    lines = [f'Picker comparison over the top {depth}  (n={n})']
+    for label, hits in [('baseline  (rank 1 only)', base),
+                        ('first accepted        ', first),
+                        ('most inliers          ', most),
+                        ('ceiling  (perfect pick)', ceiling)]:
+        delta = ('' if hits == base
+                 else f'   {100 * (hits - base) / n:+.1f} pts vs baseline')
+        lines.append(f'  {label} : {hits:5d}/{n:<5d} {100 * hits / n:5.1f}%{delta}')
+
+    for label, key in [('first accepted', 'sift_verified_rank'),
+                       ('most inliers  ', 'sift_best_rank')]:
+        broke = sum(1 for m in scored
+                    if m.get('sift_hit_rank') == 1 and not correct(m, key))
+        lines.append(f'  regressions, {label}: {broke} shot(s) where rank 1 was '
+                     f'already correct and the picker did not choose it')
+    lines.append('')
+    return lines
+
+
+def plot_recall_at_k(metrics: List[dict], out_path: str) -> None:
+    """Recall@K overall and split by routed level.
+
+    The split matters more than the total: a level the mpp stage mis-routes
+    cannot be rescued by looking further down that level's ranking, and mixing
+    the two hides which of the two is failing.
+    """
+    curve = _recall_at_k(metrics)
+    if not curve:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    ks = [c[0] for c in curve]
+    axes[0].plot(ks, [100 * c[3] for c in curve], 'o-', label='in SIFT crop')
+    strict = _recall_at_k(metrics, 'retr_hit_rank_strict')
+    if strict:
+        axes[0].plot([c[0] for c in strict], [100 * c[3] for c in strict],
+                     's--', label='window exact')
+    axes[0].set_title(f'Stage 2 recall@K   (n={curve[0][2]})')
+    axes[0].legend()
+
+    by_level: Dict[int, List[dict]] = defaultdict(list)
+    for m in metrics:
+        if m.get('retr_topk_n') and m.get('routed_level') is not None:
+            by_level[m['routed_level']].append(m)
+    for lv in sorted(by_level):
+        sub = _recall_at_k(by_level[lv])
+        if sub:
+            axes[1].plot([c[0] for c in sub], [100 * c[3] for c in sub], 'o-',
+                         label=f'routed L{lv}  (n={sub[0][2]})')
+    axes[1].set_title('by routed level')
+    if by_level:
+        axes[1].legend()
+
+    for ax in axes:
+        ax.set_xlabel('K')
+        ax.set_ylabel('recall (%)')
+        ax.set_xticks(ks)
+        ax.set_ylim(0, 100)
+        ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    print(f'recall_at_k.png -> {out_path}')
 
 
 # ── summary.txt ───────────────────────────────────────────────────────────────
@@ -83,7 +299,16 @@ def write_summary(metrics: List[dict], out_path: str) -> None:
                      f'({100.0 * n_ok / len(rot_known):.1f}%) retr_rotation == gt_rot_deg')
     lines.append(f'SIFT success    : {sum(1 for m in metrics if m["refine_success"])}'
                  f'/{len(metrics)}')
+    ref = _ref_marker(metrics, 'retr_center_err_px', 'retr_tile_l0', '1 tile')
+    if ref:
+        _, frac, text = ref
+        n_scored = sum(1 for m in metrics
+                       if m.get('retr_center_err_px') is not None
+                       and m.get('retr_tile_l0'))
+        lines.append(f'Stage 2 <= 1 tile: {round(frac * n_scored)}/{n_scored} '
+                     f'({100 * frac:.1f}%)   [{text}]')
     lines.append('')
+    lines.extend(_recall_at_k_lines(metrics))
 
     for key, label, unit in [
         ('mpp_err_rel',          'Stage 1 (mpp err, relative)',                  ''),
@@ -120,7 +345,30 @@ def write_summary(metrics: List[dict], out_path: str) -> None:
 
 # ── CDF ───────────────────────────────────────────────────────────────────────
 
-def _plot_cdf_line(ax, sorted_vals: np.ndarray, xlabel: str) -> None:
+def _ref_marker(rows: List[dict], stage_key: str, ref_key: str,
+                label: str) -> Optional[tuple]:
+    """(x, fraction, label) for a per-shot reference width such as one tile.
+
+    The FRACTION is exact: every shot is compared against its own ref_key, so a
+    corpus spanning several pyramid levels is still counted correctly. The LINE
+    can only sit at one x, so it goes at the median and the label says so when
+    the shots disagree -- reading the line as the threshold would otherwise be
+    wrong for every shot not routed to the median level.
+    """
+    pairs = [(m[stage_key], m[ref_key]) for m in rows
+             if m.get(stage_key) is not None and m.get(ref_key)]
+    if not pairs:
+        return None
+    refs = [r for _, r in pairs]
+    frac = sum(1 for v, r in pairs if v <= r) / len(pairs)
+    med  = float(np.median(refs))
+    varies = max(refs) - min(refs) > 1e-6
+    text = (f'{label} (median {med:.0f} px)' if varies else f'{label} = {med:.0f} px')
+    return (med, frac, text)
+
+
+def _plot_cdf_line(ax, sorted_vals: np.ndarray, xlabel: str,
+                   ref: Optional[tuple] = None) -> None:
     n = sorted_vals.size
     ax.step(sorted_vals, np.arange(1, n + 1) / n, where='post', linewidth=1.4)
     ax.set_xlabel(xlabel)
@@ -140,19 +388,35 @@ def _plot_cdf_line(ax, sorted_vals: np.ndarray, xlabel: str) -> None:
         ax.text(p90, 0.03, f'p90={p90:.3g}', fontsize=7, color='gray',
                 rotation=90, va='bottom', ha='right')
 
+    if ref is not None:
+        ref_x, frac, text = ref
+        ax.axvline(ref_x, color='seagreen', linewidth=1.3, alpha=0.9)
+        ax.plot([ref_x], [frac], 'o', color='seagreen', ms=5, zorder=5)
+        ax.annotate(f'{text}\n{100 * frac:.1f}%',
+                    xy=(ref_x, frac), xytext=(6, -2),
+                    textcoords='offset points', fontsize=7.5,
+                    color='seagreen', va='top', ha='left')
+
 
 def plot_stage_cdfs(metrics: List[dict], stage_key: str, xlabel: str,
-                    title: str, out_path: str) -> None:
+                    title: str, out_path: str,
+                    ref_key: Optional[str] = None, ref_label: str = '') -> None:
+    """CDF of one stage's error, aggregate plus one panel per WSI.
+
+    ref_key names a per-shot width to mark on the curve -- retr_tile_l0 for
+    stage 2, so the plot answers "what percentile is one tile" directly instead
+    of leaving it to be eyeballed against the axis.
+    """
     all_vals = np.array(sorted(m[stage_key] for m in metrics
                                if m.get(stage_key) is not None), dtype=float)
     if all_vals.size == 0:
         print(f'  [skip plot] {stage_key}: no data')
         return
 
-    per_wsi: Dict[str, List[float]] = defaultdict(list)
+    per_wsi: Dict[str, List[dict]] = defaultdict(list)
     for m in metrics:
         if m.get(stage_key) is not None:
-            per_wsi[wsi_tag(m)].append(m[stage_key])
+            per_wsi[wsi_tag(m)].append(m)
 
     tags   = sorted(per_wsi)
     n_cols = min(max(len(tags), 1), 3)
@@ -161,15 +425,19 @@ def plot_stage_cdfs(metrics: List[dict], stage_key: str, xlabel: str,
     fig = plt.figure(figsize=(max(9, n_cols * 4.5), 3.5 + n_rows * 3.0))
     gs  = fig.add_gridspec(1 + n_rows, n_cols)
 
+    ref_all = _ref_marker(metrics, stage_key, ref_key, ref_label) if ref_key else None
     ax_all = fig.add_subplot(gs[0, :])
-    _plot_cdf_line(ax_all, all_vals, xlabel)
+    _plot_cdf_line(ax_all, all_vals, xlabel, ref=ref_all)
     note = '  (n<20: red ticks = raw samples)' if all_vals.size < 20 else ''
     ax_all.set_title(f'Aggregate  (n={all_vals.size}){note}')
 
     for i, tag in enumerate(tags):
         ax = fig.add_subplot(gs[1 + i // n_cols, i % n_cols])
-        _plot_cdf_line(ax, np.array(sorted(per_wsi[tag]), dtype=float), xlabel)
-        ax.set_title(f'{tag}  (n={len(per_wsi[tag])})', fontsize=10)
+        rows = per_wsi[tag]
+        vals = np.array(sorted(m[stage_key] for m in rows), dtype=float)
+        ref  = _ref_marker(rows, stage_key, ref_key, ref_label) if ref_key else None
+        _plot_cdf_line(ax, vals, xlabel, ref=ref)
+        ax.set_title(f'{tag}  (n={len(rows)})', fontsize=10)
 
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
@@ -390,9 +658,11 @@ def render_all(metrics: List[dict], out_dir: str) -> None:
     plot_stage_cdfs(metrics, 'retr_center_err_px',
                     xlabel='retrieval centre err  (level-0 pixels)',
                     title='Stage 2 — retrieval error (rotation-invariant centre)',
-                    out_path=os.path.join(out_dir, 'stage2_retr_cdf.png'))
+                    out_path=os.path.join(out_dir, 'stage2_retr_cdf.png'),
+                    ref_key='retr_tile_l0', ref_label='1 tile')
     plot_stage_cdfs(metrics, 'refine_center_err_px',
                     xlabel='refine centre err  (level-0 pixels)',
                     title='Stage 3 — SIFT+RANSAC error (rotation-invariant centre)',
                     out_path=os.path.join(out_dir, 'stage3_refine_cdf.png'))
     plot_heatmap(metrics, os.path.join(out_dir, 'heatmap.png'))
+    plot_recall_at_k(metrics, os.path.join(out_dir, 'recall_at_k.png'))
