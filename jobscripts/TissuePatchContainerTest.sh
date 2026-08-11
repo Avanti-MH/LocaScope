@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=TissuePatchContainerTest # Job name
+#SBATCH --job-name=TissuePatchContainerTest # Job name (legacy alias → PatchingLibTest containers)
 #SBATCH --partition=normal2               # Partition
 #SBATCH --time=24:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
@@ -10,15 +10,11 @@
 #SBATCH -o ./log/TissuePatchContainerTest # STDOUT
 #SBATCH -e ./log/TissuePatchContainerTest # STDERR
 
-# ---------------- Load modules ----------------
 ml purge
 ml load miniconda3/24.11.1
 ml load cuda/12.6
-
-# ---------------- Activate environment ----------------
 conda activate gigapath
 
-# ---------------- Parameters ----------------
 SIZE=128
 RSIZE=256
 QUERY=/work/u26130998/datasets/Ki67/S1103037_ki67/2.bmp
@@ -27,11 +23,7 @@ WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/T
 LEVEL=3
 OPENSLIDE_LEVEL=9
 
-python utilities/test_modules/test_tissue_patch_container.py \
-  --size $SIZE \
-  --rsize $RSIZE \
-  --query $QUERY \
-  --roi $ROI \
-  --wsi $WSI \
-  --level $LEVEL \
-  --openslide-level $OPENSLIDE_LEVEL
+python utilities/test_modules/test_patching_lib.py --only containers \
+  --size $SIZE --rsize $RSIZE \
+  --query "$QUERY" --roi "$ROI" --wsi "$WSI" \
+  --level $LEVEL --openslide-level $OPENSLIDE_LEVEL

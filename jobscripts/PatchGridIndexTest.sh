@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=PatchGridIndexTest     # Job name
+#SBATCH --job-name=PatchGridIndexTest     # Job name (legacy alias → PatchingLibTest grid)
 #SBATCH --partition=normal2               # Partition
 #SBATCH --time=01:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
@@ -10,16 +10,10 @@
 #SBATCH -o ./log/PatchGridIndexTest       # STDOUT
 #SBATCH -e ./log/PatchGridIndexTest       # STDERR
 
-# ---------------- Load modules ----------------
 ml purge
 ml load miniconda3/24.11.1
 ml load cuda/12.6
-
-# ---------------- Activate environment ----------------
 conda activate gigapath
 
-# ---------------- Parameters ----------------
 TILE=128
-
-python utilities/test_modules/test_patchgrid_index.py \
-  --tile $TILE
+python utilities/test_modules/test_patching_lib.py --only grid --tile $TILE --size $TILE
