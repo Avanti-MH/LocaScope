@@ -92,7 +92,7 @@ class LocaScopePipeline:
         tile_size:           int   = 256,
         mask_method:         Callable = None,
         mask_ds:             float = 4.0,
-        mask_seg_chunk_px:     int   = 4_000_000,
+        mask_seg_chunk_px:   int   = 4_000_000,
         mask_overlap:        int   = 128,
         min_region_ratio:    float = 0.01,
         knn_samples:         int   = 40,
@@ -116,7 +116,7 @@ class LocaScopePipeline:
         self.tile_size           = tile_size
         self.mask_method         = mask_method
         self.mask_ds             = mask_ds
-        self.mask_seg_chunk_px     = mask_seg_chunk_px
+        self.mask_seg_chunk_px   = mask_seg_chunk_px
         self.mask_overlap        = mask_overlap
         self.min_region_ratio    = min_region_ratio
         self.knn_samples         = knn_samples
