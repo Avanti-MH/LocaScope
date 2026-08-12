@@ -398,15 +398,15 @@ def validate_merge_overlapping():
 # ── 8. Real WSI test (Otsu) ──────────────────────────────────────────────────
 
 def test_hest_seg(path: str, method: callable, ds: float = 64.0,
-                  max_pixels: int = None) -> tuple:
+                  seg_chunk_px: int = None) -> tuple:
     '''Run HEST DeepLabV3 tissue segmentation via from_wsi(method=...).'''
     import openslide
 
-    print(f'\n[HEST] seg  ds={ds}  max_pixels={max_pixels}')
+    print(f'\n[HEST] seg  ds={ds}  seg_chunk_px={seg_chunk_px}')
 
     wsi = openslide.OpenSlide(path)
     trm = TissuesRegionsMask.from_wsi(
-        wsi, ds=ds, method=method, max_pixels=max_pixels,
+        wsi, ds=ds, method=method, seg_chunk_px=seg_chunk_px,
     )
     Ht, Wt = trm.main_mask.shape
     thumb  = trm.read_matching_rgb(wsi)
@@ -449,11 +449,11 @@ def test_from_wsi_params(path: str,
                          ds_list: list = None,
                          level_list: list = None,
                          method: callable = None,
-                         max_pixels: int = None) -> list:
+                         seg_chunk_px: int = None) -> list:
     '''
     Sweep from_wsi over the given level list and ds list.
     method=None -> HSV (default); method=<callable> -> HEST or custom.
-    max_pixels enables tiled inference when method is a heavy model.
+    seg_chunk_px enables tiled inference when method is a heavy model.
     Returns list of (label, trm).
     '''
     import openslide
@@ -465,7 +465,7 @@ def test_from_wsi_params(path: str,
 
     method_tag = 'HEST' if method is not None else 'HSV'
     print(f'\n[sweep {method_tag}] WSI has {n_levels} levels  '
-          f'max_pixels={max_pixels}:')
+          f'seg_chunk_px={seg_chunk_px}:')
     for lv in range(n_levels):
         W, H = wsi.level_dimensions[lv]
         print(f'  level {lv}: {W}x{H}  ds={wsi.level_downsamples[lv]:.1f}')
@@ -484,7 +484,7 @@ def test_from_wsi_params(path: str,
     for label, kwargs in configs:
         try:
             trm = TissuesRegionsMask.from_wsi(
-                wsi, method=method, max_pixels=max_pixels, **kwargs,
+                wsi, method=method, seg_chunk_px=seg_chunk_px, **kwargs,
             )
         except Exception as e:
             print(f'  {label:10s}: FAIL ({type(e).__name__}: {e})')
@@ -509,13 +509,13 @@ def test_operations_pipeline(path: str,
                              tile_size: int = 256,
                              ds_for_patchable: float = 4.0,
                              method: callable = None,
-                             max_pixels: int = None) -> list:
+                             seg_chunk_px: int = None) -> list:
     '''
     Ops pipeline: baseline mask -> each of filter_regions / filter_patchable /
     merge_overlapping in isolation -> all three combined.
 
     method=None -> HSV; method=<callable> -> HEST or custom (with tiled
-    inference if max_pixels is set).
+    inference if seg_chunk_px is set).
     Returns list of (label, trm) for figure rendering.
     '''
     import openslide
@@ -524,7 +524,7 @@ def test_operations_pipeline(path: str,
     method_tag = 'HEST' if method is not None else 'HSV'
     wsi = openslide.OpenSlide(path)
     base = TissuesRegionsMask.from_wsi(
-        wsi, ds=ds, method=method, max_pixels=max_pixels,
+        wsi, ds=ds, method=method, seg_chunk_px=seg_chunk_px,
     )
     wsi.close()
     n0 = len(base)
@@ -557,10 +557,10 @@ def test_operations_pipeline(path: str,
 
 # ── 11. Tiling (adaptive halving) effect ─────────────────────────────────────
 
-def _plan_tile_grid(H: int, W: int, max_pixels: int) -> tuple[int, int]:
+def _plan_tile_grid(H: int, W: int, seg_chunk_px: int) -> tuple[int, int]:
     '''Mirror TissuesRegionsMask._tiled_apply's grid planning (for visualisation).'''
     n_h = n_w = 1
-    while (H // n_h) * (W // n_w) > max_pixels:
+    while (H // n_h) * (W // n_w) > seg_chunk_px:
         if H // n_h >= W // n_w:
             n_h *= 2
         else:
@@ -569,7 +569,7 @@ def _plan_tile_grid(H: int, W: int, max_pixels: int) -> tuple[int, int]:
 
 
 def test_tiling_effect(path: str, ds: float = 32.0,
-                       max_pixels_list: tuple = (16_000_000, 4_000_000, 1_000_000),
+                       seg_chunk_px_list: tuple = (16_000_000, 4_000_000, 1_000_000),
                        overlap: int = 128,
                        method: callable = None) -> tuple:
     '''
@@ -578,11 +578,11 @@ def test_tiling_effect(path: str, ds: float = 32.0,
       (a) seam artifact: no-tile vs tiled at same ds (no-tile may OOM
           if method is heavy and ds too low -- catch and skip)
       (b) tile grid overlay: mask + tile boundary + overlap zone
-      (c) max_pixels sweep: several budgets -> different grids
+      (c) seg_chunk_px sweep: several budgets -> different grids
 
     Returns (seam_list, grid_pack, sweep_list).
     seam_list  = [(label, trm), ...]                              # 0-2 items
-    grid_pack  = (trm, n_h, n_w, overlap, max_pixels)             # or None
+    grid_pack  = (trm, n_h, n_w, overlap, seg_chunk_px)             # or None
     sweep_list = [(label, trm, n_h, n_w), ...]
     '''
     import openslide
@@ -590,10 +590,10 @@ def test_tiling_effect(path: str, ds: float = 32.0,
     method_tag = 'HEST' if method is not None else 'HSV'
     wsi = openslide.OpenSlide(path)
 
-    # (a) Seam: no-tile baseline vs tiled at the reference max_pixels
-    ref_mp = max_pixels_list[1] if len(max_pixels_list) > 1 else max_pixels_list[0]
+    # (a) Seam: no-tile baseline vs tiled at the reference seg_chunk_px
+    ref_mp = seg_chunk_px_list[1] if len(seg_chunk_px_list) > 1 else seg_chunk_px_list[0]
     print(f'\n[tiling {method_tag}] seam test  ds={ds}  '
-          f'ref max_pixels={ref_mp/1e6:.1f}M  overlap={overlap}')
+          f'ref seg_chunk_px={ref_mp/1e6:.1f}M  overlap={overlap}')
     seam_list = []
     try:
         trm_no = TissuesRegionsMask.from_wsi(wsi, ds=ds, method=method)
@@ -604,7 +604,7 @@ def test_tiling_effect(path: str, ds: float = 32.0,
         print(f'  no-tile  SKIP ({type(e).__name__}: {e})')
 
     trm_til = TissuesRegionsMask.from_wsi(
-        wsi, ds=ds, method=method, max_pixels=ref_mp, overlap=overlap,
+        wsi, ds=ds, method=method, seg_chunk_px=ref_mp, overlap=overlap,
     )
     H, W = trm_til.main_mask.shape
     if trm_no is not None:
@@ -623,18 +623,18 @@ def test_tiling_effect(path: str, ds: float = 32.0,
         ))
         print(f'  tiled    regions={len(trm_til)}  tissue={trm_til.tissue_fraction()*100:.1f}%')
 
-    # (b) Grid overlay: mask at ref max_pixels + tile boundary lines
+    # (b) Grid overlay: mask at ref seg_chunk_px + tile boundary lines
     n_h_ref, n_w_ref = _plan_tile_grid(H, W, ref_mp)
     print(f'  tile grid @ max={ref_mp/1e6:.0f}M: {n_h_ref}x{n_w_ref} = {n_h_ref*n_w_ref} tiles')
     grid_pack = (trm_til, n_h_ref, n_w_ref, overlap, ref_mp)
 
-    # (c) max_pixels sweep
-    print(f'[tiling {method_tag}] max_pixels sweep '
-          f'{[f"{mp/1e6:.0f}M" for mp in max_pixels_list]}')
+    # (c) seg_chunk_px sweep
+    print(f'[tiling {method_tag}] seg_chunk_px sweep '
+          f'{[f"{mp/1e6:.0f}M" for mp in seg_chunk_px_list]}')
     sweep_list = []
-    for mp in max_pixels_list:
+    for mp in seg_chunk_px_list:
         trm = TissuesRegionsMask.from_wsi(
-            wsi, ds=ds, method=method, max_pixels=mp, overlap=overlap,
+            wsi, ds=ds, method=method, seg_chunk_px=mp, overlap=overlap,
         )
         n_h, n_w = _plan_tile_grid(H, W, mp)
         sweep_list.append((
@@ -647,7 +647,7 @@ def test_tiling_effect(path: str, ds: float = 32.0,
     return seam_list, grid_pack, sweep_list
 
 
-def draw_tile_grid_overlay(ax, trm, n_h, n_w, overlap_px, max_pixels, title):
+def draw_tile_grid_overlay(ax, trm, n_h, n_w, overlap_px, seg_chunk_px, title):
     '''Draw mask + tile core boundaries (solid) + overlap zone edges (dashed).'''
     H, W = trm.main_mask.shape
     ax.imshow(trm.main_mask, cmap='gray', vmin=0, vmax=1)
@@ -838,7 +838,7 @@ def main():
     ap.add_argument('--ops', action=argparse.BooleanOptionalAction, default=False,
                     help='ops pipeline: filter_regions / filter_patchable / merge_overlapping')
     ap.add_argument('--tiling', action=argparse.BooleanOptionalAction, default=False,
-                    help='tiling effect: seam vs no-tile + grid overlay + max_pixels sweep')
+                    help='tiling effect: seam vs no-tile + grid overlay + seg_chunk_px sweep')
 
     # -- Value knobs (option C: all exposed) --
     # Otsu baseline
@@ -856,12 +856,12 @@ def main():
     ap.add_argument('--ops-patch-ds',   type=float, default=4.0)
     # Tiling
     ap.add_argument('--tiling-ds',         type=float, default=32.0)
-    ap.add_argument('--tiling-max-pixels', default='16M,4M,1M',
+    ap.add_argument('--seg-chunk-px-sweep', default='16M,4M,1M',
                     help='comma list of tile budgets, e.g. "16M,4M,1M"')
     ap.add_argument('--tiling-overlap',    type=int,   default=128)
     # HEST
     ap.add_argument('--hest-ds',         type=float, default=64.0)
-    ap.add_argument('--hest-max-pixels', default='4M',
+    ap.add_argument('--seg-chunk-px', default='4M',
                     help='HEST tile budget for hest-only / ops / sweep (single value)')
     # Visualization
     ap.add_argument('--per-row', type=int, default=4)
@@ -881,8 +881,8 @@ def main():
     # Parsed list/pixel values
     sweep_ds_list      = _parse_float_list(args.sweep_ds)
     sweep_level_list   = _parse_int_list(args.sweep_level)
-    tiling_max_pixels  = _parse_pixel_list(args.tiling_max_pixels)
-    hest_max_pixels    = _parse_pixel_count(args.hest_max_pixels)
+    seg_chunk_px_sweep  = _parse_pixel_list(args.seg_chunk_px_sweep)
+    seg_chunk_px    = _parse_pixel_count(args.seg_chunk_px)
     fig_col_s, fig_row_s = _parse_float_list(args.figure_scale)
 
     # Synthetic tests
@@ -921,7 +921,7 @@ def main():
     if hest_method is not None and args.wsi and os.path.exists(args.wsi):
         hest_trm, hest_thumb = test_hest_seg(
             args.wsi, method=hest_method,
-            ds=args.hest_ds, max_pixels=hest_max_pixels,
+            ds=args.hest_ds, seg_chunk_px=seg_chunk_px,
         )
 
     # from_wsi level/ds sweep (HEST if enabled, else HSV)
@@ -931,7 +931,7 @@ def main():
             args.wsi,
             ds_list=sweep_ds_list, level_list=sweep_level_list,
             method=hest_method,
-            max_pixels=hest_max_pixels if hest_method is not None else None,
+            seg_chunk_px=seg_chunk_px if hest_method is not None else None,
         )
 
     # ops pipeline (HEST if enabled, else HSV)
@@ -944,7 +944,7 @@ def main():
             tile_size=args.ops_patch_tile,
             ds_for_patchable=args.ops_patch_ds,
             method=hest_method,
-            max_pixels=hest_max_pixels if hest_method is not None else None,
+            seg_chunk_px=seg_chunk_px if hest_method is not None else None,
         )
 
     # tiling effect (HEST if enabled, else HSV)
@@ -953,7 +953,7 @@ def main():
         tiling_seam, tiling_grid, tiling_sweep = test_tiling_effect(
             args.wsi,
             ds=args.tiling_ds,
-            max_pixels_list=tiling_max_pixels,
+            seg_chunk_px_list=seg_chunk_px_sweep,
             overlap=args.tiling_overlap,
             method=hest_method,
         )

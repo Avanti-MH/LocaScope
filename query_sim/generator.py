@@ -36,8 +36,8 @@ def _build_base_mask(
     mask_ds:          float,
     mask_method,
     min_region_ratio: float,
-    max_pixels:       Optional[int] = None,
-    read_max_pixels:  Optional[int] = None,
+    seg_chunk_px:       Optional[int] = None,
+    read_chunk_px:  Optional[int] = None,
 ) -> TissuesRegionsMask:
     """The level-INDEPENDENT half of mask prep: build + filter_regions + merge.
 
@@ -49,8 +49,8 @@ def _build_base_mask(
     information. Pushes 2 snapshots onto the region undo stack.
     """
     mask = TissuesRegionsMask.from_wsi(wsi, ds=mask_ds, method=mask_method,
-                                       max_pixels=max_pixels,
-                                       read_max_pixels=read_max_pixels)
+                                       seg_chunk_px=seg_chunk_px,
+                                       read_chunk_px=read_chunk_px)
     mask.filter_regions(min_ratio=min_region_ratio)
     mask.merge_overlapping()
     return mask
@@ -61,7 +61,7 @@ def _prep_mask_for_camera(
     mask_ds:          float,
     mask_method,
     min_region_ratio: float,
-    max_pixels:       Optional[int] = None,
+    seg_chunk_px:       Optional[int] = None,
 ) -> TissuesRegionsMask:
     """Build mask + apply the three region-prep mutations. Caller undoes them.
 
@@ -73,7 +73,7 @@ def _prep_mask_for_camera(
     this.
     """
     mask = _build_base_mask(cam.wsi, mask_ds, mask_method, min_region_ratio,
-                            max_pixels=max_pixels)
+                            seg_chunk_px=seg_chunk_px)
     mask.filter_patchable(tile_size=cam.required_region_side_l0, ds=1.0)
     return mask
 

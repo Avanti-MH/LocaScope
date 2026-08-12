@@ -34,7 +34,7 @@ import openslide
 # probably 2**33 pixels. 2**31 is used instead because that theory is inferred
 # from the boundary rather than read off OpenCV, and every candidate overflow is
 # proportional to rows*cols, so the lower ceiling is safe under all of them.
-_CC_MAX_PIXELS = 1 << 31
+_CC_DECIMATE_ABOVE_PX = 1 << 31
 
 class TissueRegion:
     """Bounding box of one tissue region, always in level-0 coordinates."""
@@ -170,7 +170,7 @@ class TissuesRegionsMask:
                      H:          int,
                      W:          int,
                      get_tile:   callable,
-                     max_pixels: int,
+                     seg_chunk_px: int,
                      overlap:    int,
                      source:     str = 'seg') -> np.ndarray:
         """Tile-and-stitch, decoupled from where the pixels come from.
@@ -181,14 +181,14 @@ class TissuesRegionsMask:
         what makes mask_ds=1 affordable -- from_wsi used to materialise the
         whole level first, so the peak scaled with the slide (16 bytes per
         level-0 pixel measured, 299 GB on the largest MRXS here) no matter how
-        small the segmentation budget was. --max-pixels only ever bounded the
+        small the segmentation budget was. --seg-chunk-px only ever bounded the
         GPU; nothing bounded the host until this split.
 
         `source` only labels the log line, so a tiled read is distinguishable
         from a tiled segmentation of an already-read image.
         """
         n_h = n_w = 1
-        while (H // n_h) * (W // n_w) > max_pixels:
+        while (H // n_h) * (W // n_w) > seg_chunk_px:
             if H // n_h >= W // n_w:
                 n_h *= 2
             else:
@@ -198,7 +198,7 @@ class TissuesRegionsMask:
         tile_w = W // n_w
         print(f'  tiled {source}: {n_h}x{n_w} = {n_h * n_w} tiles at '
               f'~{tile_h}x{tile_w} each (input {H}x{W}, budget '
-              f'{max_pixels / 1e6:.1f}M px, overlap={overlap})', flush=True)
+              f'{seg_chunk_px / 1e6:.1f}M px, overlap={overlap})', flush=True)
 
         result = np.zeros((H, W), dtype=np.uint8)
         for i in range(n_h):
@@ -224,7 +224,8 @@ class TissuesRegionsMask:
         return result
 
     @staticmethod
-    def _resolve_geometry(wsi, ds: float, level, limit_bounds: bool) -> tuple:
+    def _resolve_geometry(wsi, ds: float, level, limit_bounds: bool,
+                          level_rule: str = 'best') -> tuple:
         """Which level to read, and which rectangle of it.
 
         Returns (lv, ds_lv, origin_x, origin_y, span_w, span_h, rw, rh).
@@ -240,8 +241,13 @@ class TissuesRegionsMask:
         n_levels = len(wsi.level_dimensions)
         if level is not None:
             lv = level if level >= 0 else n_levels + level
-        else:
+        elif level_rule == 'nearest':
+            lv = wsi.nearest_level_for_downsample(ds)
+        elif level_rule == 'best':
             lv = wsi.get_best_level_for_downsample(ds)
+        else:
+            raise ValueError(f"level_rule must be 'best' or 'nearest', "
+                             f'got {level_rule!r}')
 
         if limit_bounds:
             origin_x = int(p.get('openslide.bounds-x', 0))
@@ -260,11 +266,11 @@ class TissuesRegionsMask:
     @classmethod
     def _segment_plane(cls, wsi, lv: int, ds_lv: float,
                        origin_x: int, origin_y: int, rw: int, rh: int,
-                       method, max_pixels, read_max_pixels, overlap) -> np.ndarray:
+                       method, seg_chunk_px, read_chunk_px, overlap) -> np.ndarray:
         """The (rh, rw) uint8 mask of level `lv`, however it has to be got.
 
         Two ways in, and the difference is only where the pixels come from:
-        read_max_pixels reads and segments tile by tile so the level is never in
+        read_chunk_px reads and segments tile by tile so the level is never in
         memory whole, otherwise the level is read in one call first. _tiled_apply
         takes a get_tile callable precisely so both are the same code.
         """
@@ -303,23 +309,23 @@ class TissuesRegionsMask:
                 return wsi.read_region_rgb(loc, lv, size)
             return np.array(wsi.read_region(loc, lv, size).convert('RGB'))
 
-        if read_max_pixels and rw * rh > read_max_pixels:
+        if read_chunk_px and rw * rh > read_chunk_px:
             # The budget is the smaller of two constraints that are not the same
-            # thing: max_pixels is VRAM per forward pass, read_max_pixels is host
+            # thing: seg_chunk_px is VRAM per forward pass, read_chunk_px is host
             # RAM per read. One grid serves both, so a heavy method just makes
             # the tiles smaller -- at the cost of more seams, which is a design
             # question this collapse currently hides.
-            budget = min(read_max_pixels, max_pixels) if max_pixels else read_max_pixels
+            budget = min(read_chunk_px, seg_chunk_px) if seg_chunk_px else read_chunk_px
             return cls._tiled_apply(method, rh, rw, _read, budget, overlap,
                                     source='read+seg')
 
         # img is local to this function, so it is gone by the time the caller
         # runs the connected-component pass; no del needed.
         img = _read(0, 0, rh, rw)
-        if max_pixels is not None and img.shape[0] * img.shape[1] > max_pixels:
+        if seg_chunk_px is not None and img.shape[0] * img.shape[1] > seg_chunk_px:
             return cls._tiled_apply(method, rh, rw,
                                     lambda y0, x0, y1, x1: img[y0:y1, x0:x1],
-                                    max_pixels, overlap, source='seg')
+                                    seg_chunk_px, overlap, source='seg')
         return method(img)
 
     @staticmethod
@@ -335,7 +341,7 @@ class TissuesRegionsMask:
         sub-rect. Widths and heights are offset-free, being lengths.
 
         Decimated first when the mask is too large for cv2 to index (see
-        _CC_MAX_PIXELS). The stride is derived, not fixed: a mask_ds=32 mask is
+        _CC_DECIMATE_ABOVE_PX). The stride is derived, not fixed: a mask_ds=32 mask is
         a few megapixels and gets stride 1, which is every caller that existed
         before mask_ds=1, so their results do not move at all. At mask_ds=1 the
         stride lands on 2 or 4, and a box then quantises to that many level-0
@@ -349,7 +355,7 @@ class TissuesRegionsMask:
         thing in from_wsi still scaling with the slide.
         """
         step = 1
-        while (mask.shape[0] // step) * (mask.shape[1] // step) > _CC_MAX_PIXELS:
+        while (mask.shape[0] // step) * (mask.shape[1] // step) > _CC_DECIMATE_ABOVE_PX:
             step *= 2
         small = mask[::step, ::step]          # stride view; the copy is astype's
         n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
@@ -440,15 +446,16 @@ class TissuesRegionsMask:
                  ds: float = 32.0,
                  level: int = None,
                  method: callable = None,
-                 max_pixels: int = None,
+                 seg_chunk_px: int = None,
                  overlap: int = 128,
                  limit_bounds: bool = True,
-                 read_max_pixels: int = None) -> 'TissuesRegionsMask':
+                 read_chunk_px: int = None,
+                 level_rule: str = 'best') -> 'TissuesRegionsMask':
         '''
         Args:
             ds:         Target downsample factor (level-0 px / output px).
                         The closest WSI level with native downsample <= ds is
-                        selected via get_best_level_for_downsample and read in full.
+                        selected per `level_rule` and read in full.
                         Default 32 gives thumbnail-like resolution for Otsu/HSV.
                         Use a smaller value (e.g. 8) for deep-learning seg models
                         that need higher resolution.  Ignored when level is given.
@@ -458,15 +465,28 @@ class TissuesRegionsMask:
             method:     callable(img: np.ndarray) -> np.ndarray (uint8 or bool).
                         Receives the RGB level image; returns a binary tissue mask
                         of the same spatial size.  Defaults to HSV thresholding.
-            max_pixels: If set and the level image exceeds it, adaptively halve
+            seg_chunk_px: If set and the level image exceeds it, adaptively halve
                         the longer side of the current tile grid until every tile
-                        fits within max_pixels; apply `method` to each tile and
+                        fits within seg_chunk_px; apply `method` to each tile and
                         stitch.  Useful when `method` is a heavy seg model that
                         would OOM on the whole image (e.g. HEST on a large MRXS).
                         None = single call on the whole image (backward compat).
             overlap:    Per-tile margin (px), trimmed after inference to avoid
-                        seam artifacts.  Only used when max_pixels is active.
+                        seam artifacts.  Only used when seg_chunk_px is active.
                         Default 128 covers a typical DeepLabV3 receptive field.
+            level_rule: How `ds` picks a level. 'best' keeps openslide's
+                        get_best_level_for_downsample, whose rule is "the last
+                        level whose downsample does not exceed ds" -- a strict
+                        comparison, so a level reporting 4.00003 loses to a
+                        request for 4.0 and segmentation happens one level
+                        finer. On BRACS_1228 that is 6.58 Gpx instead of
+                        411 Mpx: 646 s instead of about 40.
+                        'nearest' picks the closest level by ratio instead.
+                        Default stays 'best' so existing results remain
+                        reproducible; new callers should pass 'nearest' and
+                        record which they used, because the two produce
+                        different region boundaries and the masks are not
+                        interchangeable.
             limit_bounds: Read only openslide.bounds-* (the scanned rectangle)
                         instead of the whole canvas.  A MIRAX canvas is the
                         stage travel range, not the slide: on Ki67 the scanned
@@ -482,10 +502,10 @@ class TissuesRegionsMask:
                         The mask array then starts at (bounds-x, bounds-y), kept
                         in self.origin_*; tissue_regions stay in absolute
                         level-0 coordinates regardless.
-            read_max_pixels: If set and the level exceeds it, read the level in
+            read_chunk_px: If set and the level exceeds it, read the level in
                         tiles instead of in one call, segmenting each tile as it
                         arrives so the whole level is never in memory. This is
-                        the only bound on HOST memory: max_pixels caps the GPU
+                        the only bound on HOST memory: seg_chunk_px caps the GPU
                         per forward pass, but the read before it was one array
                         whose size scaled with the slide -- 16 bytes per level-0
                         pixel measured end to end, which is 299 GB on the
@@ -511,10 +531,10 @@ class TissuesRegionsMask:
             method = _mask_hsv
 
         lv, ds_lv, origin_x, origin_y, span_w, span_h, rw, rh = \
-            cls._resolve_geometry(wsi, ds, level, limit_bounds)
+            cls._resolve_geometry(wsi, ds, level, limit_bounds, level_rule)
 
         mask = cls._segment_plane(wsi, lv, ds_lv, origin_x, origin_y, rw, rh,
-                                  method, max_pixels, read_max_pixels, overlap)
+                                  method, seg_chunk_px, read_chunk_px, overlap)
 
         main_mask = mask.astype(bool)
         del mask          # 1 byte/px, and main_mask is the copy that is kept

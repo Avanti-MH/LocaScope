@@ -20,7 +20,7 @@ Usage:
         [--per-camera 30] [--jitter 0.05] \\
         [--wh-ratio 4:3] [--MPixels 12] \\
         [--tissue-ratio 0.3] [--region-protrusion 0.5] [--mask-ds 1.0] \\
-        [--hest] [--max-pixels 4000000] \\
+        [--hest] [--seg-chunk-px 4000000] \\
         [--seed 0] [--out DIR]
 
 Outputs (in result/<SLURM_JOB_NAME or MultiBatch>/):
@@ -214,13 +214,13 @@ def main():
     ap.add_argument('--hest',             action='store_true',
                     help='segment tissue with the HEST DeepLabV3 model instead '
                          'of the default HSV threshold')
-    ap.add_argument('--max-pixels',       type=int,   default=4_000_000,
+    ap.add_argument('--seg-chunk-px',       type=int,   default=4_000_000,
                     help='tile budget for the segmentation forward pass; only '
                          'used with --hest, where the whole level image would '
                          'otherwise go through the model in one go')
-    ap.add_argument('--read-max-pixels',  type=int,   default=268_435_456,
+    ap.add_argument('--read-chunk-px',  type=int,   default=268_435_456,
                     help='tile budget for READING the level (host RAM, as '
-                         'opposed to --max-pixels which is VRAM). Above this '
+                         'opposed to --seg-chunk-px which is VRAM). Above this '
                          'the level is read and segmented tile by tile and is '
                          'never in memory whole. 0 restores the single read, '
                          'which at --mask-ds 1.0 costs 16 bytes per level-0 '
@@ -268,7 +268,7 @@ def main():
         from HESTSegFunc import hest_seg_model, make_hest_method
         _dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f'mask seg  -> HEST DeepLabV3 on {_dev}  '
-              f'(max_pixels={args.max_pixels})', flush=True)
+              f'(seg_chunk_px={args.seg_chunk_px})', flush=True)
         mask_method = make_hest_method(hest_seg_model(_dev), _dev)
     else:
         print('mask seg  -> HSV threshold (default)', flush=True)
@@ -322,8 +322,8 @@ def main():
             _t0 = time.perf_counter()
             base_mask = _build_base_mask(
                 slide, args.mask_ds, mask_method, 0.01,
-                max_pixels=args.max_pixels if mask_method is not None else None,
-                read_max_pixels=args.read_max_pixels or None,
+                seg_chunk_px=args.seg_chunk_px if mask_method is not None else None,
+                read_chunk_px=args.read_chunk_px or None,
             )
             # Timed because this is now the one per-WSI fixed cost, and at
             # ds=1 with --hest it is the number that decides whether ds=1 is

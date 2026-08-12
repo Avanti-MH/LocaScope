@@ -162,7 +162,7 @@ def main():
     ap.add_argument('wsi')
     ap.add_argument('--mask-ds', type=float, default=4.0,
                     help='ds for the mask, matching LocaScopePipeline.mask_ds')
-    ap.add_argument('--max-pixels', type=int, default=4_000_000,
+    ap.add_argument('--seg-chunk-px', type=int, default=4_000_000,
                     help='tile-and-stitch budget, only used with --hest')
     ap.add_argument('--hest', action='store_true',
                     help='segment with HEST DeepLabV3 instead of HSV (needs GPU)')
@@ -209,7 +209,7 @@ def main():
 
     base = TissuesRegionsMask.from_wsi(
         wsi, ds=args.mask_ds, method=method,
-        max_pixels=args.max_pixels if method is not None else None,
+        seg_chunk_px=args.seg_chunk_px if method is not None else None,
     )
     n_base = len(base.tissue_regions)
     print(f'  mask {base.main_mask.shape}  baseline regions = {n_base}')

@@ -90,7 +90,7 @@ def _load_model(device, tome_r):
 
 # ── Sampling ─────────────────────────────────────────────────────────────────
 
-def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, hest_max_pixels,
+def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
                hest_overlap, tile_size, tissue_ratio, seed, tile_json, resume):
     '''
     Open one WSI, build tissue mask, sample per-level tiles, save JSON.
@@ -104,10 +104,10 @@ def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, hest_max_pixels,
           flush=True)
 
     print(f'  building HEST tissue mask (ds={hest_ds}, '
-          f'max_pixels={hest_max_pixels/1e6:.1f}M) ...', flush=True)
+          f'seg_chunk_px={seg_chunk_px/1e6:.1f}M) ...', flush=True)
     mask = TissuesRegionsMask.from_wsi(
         wsi, ds=hest_ds, method=hest_method,
-        max_pixels=hest_max_pixels, overlap=hest_overlap,
+        seg_chunk_px=seg_chunk_px, overlap=hest_overlap,
     )
     print(f'  tissue_fraction={mask.tissue_fraction() * 100:.1f}%  '
           f'regions={len(mask)}', flush=True)
@@ -305,7 +305,7 @@ def parse_args():
     p.add_argument('--mrxs', default=default_mrxs)
     p.add_argument('--total-patches', type=int,   default=200)
     p.add_argument('--hest-ds',           type=float, default=32.0)
-    p.add_argument('--hest-max-pixels',   type=int,   default=4_000_000,
+    p.add_argument('--seg-chunk-px',   type=int,   default=4_000_000,
                    help='cap per-tile pixels for HEST inference (adaptive halving)')
     p.add_argument('--hest-overlap',      type=int,   default=128,
                    help='per-tile margin (px) trimmed after stitching')
@@ -356,7 +356,7 @@ def main():
         images += sample_wsi(
             wp, per_wsi, hest_method,
             hest_ds=args.hest_ds,
-            hest_max_pixels=args.hest_max_pixels,
+            seg_chunk_px=args.seg_chunk_px,
             hest_overlap=args.hest_overlap,
             tile_size=args.tile_size,
             tissue_ratio=args.tissue_ratio, seed=args.seed,

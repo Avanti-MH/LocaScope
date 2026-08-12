@@ -77,6 +77,11 @@ Size = Tuple[int, int]
 # Colour openslide itself falls back to when a slide declares no background.
 _DEFAULT_BACKGROUND = 'ffffff'
 
+# Pyramid downsamples are derived from rounded level dimensions, so a "4x" level
+# reports 4.00003 as readily as 4.0. Anything comparing a requested downsample
+# against them needs slack, or it lands a level away over a part in 1e5.
+_LEVEL_REL_TOL = 1e-3
+
 
 class SafeSlide(openslide.OpenSlide):
     """OpenSlide that replaces its own handle when a read fails.
@@ -238,6 +243,58 @@ class SafeSlide(openslide.OpenSlide):
         return '#' + self.properties.get(
             openslide.PROPERTY_NAME_BACKGROUND_COLOR, _DEFAULT_BACKGROUND
         )
+
+    # ── choosing a level ─────────────────────────────────────────────────────
+    #
+    # openslide offers one rule, get_best_level_for_downsample, and it answers
+    # only one of the questions this project asks. Its rule is "the last level
+    # whose downsample does not exceed the request", so it biases FINE, and it
+    # compares strictly:
+    #
+    #   BRACS_1228 level 1 reports downsample 4.00003. Asking for 4.0 therefore
+    #   returns level 0, and the tissue mask is segmented over 6.58 Gpx instead
+    #   of 411 Mpx -- 646 seconds instead of about 40, measured.
+    #
+    # The two below are named for what the caller wants, so the call site says
+    # why rather than passing a mode flag.
+
+    def nearest_level_for_downsample(self, downsample: float) -> int:
+        """Level whose downsample is closest to `downsample`, either side.
+
+        Closest by RATIO, not by difference: pyramid levels are geometric, so an
+        absolute metric would call 1-vs-4 nearer than 16-vs-64 though both are
+        one level apart.
+
+        For deciding where to segment or sample, where being a level out costs
+        resolution and time but not correctness.
+        """
+        ds = [float(d) for d in self.level_downsamples]
+        if downsample <= 0:
+            raise ValueError(f'downsample must be positive, got {downsample}')
+        return min(range(len(ds)),
+                   key=lambda i: abs(np.log(ds[i] / float(downsample))))
+
+    def coarser_level_for_downsample(self, downsample: float) -> int:
+        """Finest level that is at least as coarse as `downsample`.
+
+        Rounds UP in downsample where openslide rounds down. For routing a query
+        to a pyramid level, where the two directions are not symmetric:
+
+            one level COARSE  the window covers more area than the FoV, the truth
+                              still falls inside the crop SIFT reads, and stage 3
+                              recovers it -- 91.1% still land correctly
+            one level FINE    the window is smaller than the FoV footprint, so
+                              retrieval cannot frame it at all -- 15.7%
+
+        measured over 1398 shots. Six times the difference, so the rounding
+        direction is not a matter of taste. Falls back to the coarsest level when
+        the request is coarser than the whole pyramid.
+        """
+        ds = [float(d) for d in self.level_downsamples]
+        if downsample <= 0:
+            raise ValueError(f'downsample must be positive, got {downsample}')
+        thresh = float(downsample) * (1.0 - _LEVEL_REL_TOL)
+        return next((i for i, d in enumerate(ds) if d >= thresh), len(ds) - 1)
 
     def read_region_rgb(self, location: Location, level: int,
                         size: Size) -> np.ndarray:

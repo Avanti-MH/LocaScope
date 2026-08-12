@@ -84,25 +84,25 @@ KI67=/work/u26130998/datasets/Ki67
 # it is a decision about the mask, not about speed. The cost is real: the grid
 # doubles and the overlap is a larger share of a smaller tile, so the read
 # amplification goes from about 1.32x to 1.43x.
-MAX_PIXELS=2000000
+SEG_CHUNK_PX=2000000
 
 # 45:32 with 1.47456 MP lands on 1440.000 x 1024.000 exactly, so nothing
 # depends on how int() rounds in QueryFromWSI (query_sim/source/wsi_query.py).
-# --read-max-pixels is not passed: its default of 256M already makes from_wsi
-# read tile by tile, and the grid is min(read_max_pixels, max_pixels), so the
-# tiles are MAX_PIXELS either way. It only earns a value of its own when there
-# is no model to bound the grid -- an HSV mask leaves max_pixels None, and then
-# read_max_pixels is the only thing standing between ds=1 and the whole level
+# --read-chunk-px is not passed: its default of 256M already makes from_wsi
+# read tile by tile, and the grid is min(read_chunk_px, seg_chunk_px), so the
+# tiles are SEG_CHUNK_PX either way. It only earns a value of its own when there
+# is no model to bound the grid -- an HSV mask leaves seg_chunk_px None, and then
+# read_chunk_px is the only thing standing between ds=1 and the whole level
 # in memory.
 ARGS="--wh-ratio 45:32 --MPixels 1.47456 --per-camera 100 --jitter 0.05"
-ARGS="$ARGS --mask-ds 1.0 --hest --max-pixels $MAX_PIXELS --seed 0 --append"
+ARGS="$ARGS --mask-ds 1.0 --hest --seg-chunk-px $SEG_CHUNK_PX --seed 0 --append"
 
 OUT="result/$SLURM_JOB_NAME"
 mkdir -p "$OUT"
 rm -f "$OUT/gt.csv" "$OUT/skips.csv"
 
 echo "======== corpus: 45:32  1.47456MP  (1440x1024) ========"
-echo "max-pixels : $MAX_PIXELS"
+echo "seg-chunk-px: $SEG_CHUNK_PX"
 echo "output     : $OUT"
 echo ""
 
