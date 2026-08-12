@@ -3,17 +3,17 @@
 Wraps the three stage primitives into one WSI-scoped object:
 
     Stage 1 — mpp estimation    via GigaPathKnnEstiMpp
-    Stage 2 — retrieval         via GigaPathSlidingWinSim   (cached per level)
+    Stage 2 — retrieval         via GigaPathSlidingWinSimRot (cached per level)
     Stage 3 — SIFT+RANSAC       via SiftRansacLocalizer
 
 Design:
 
 * build() does the WSI-wide one-time work (mask + KNN reference bank).
 * The mask is always built through `from_wsi`'s tile-and-stitch path
-  (`mask_max_pixels`). A heavy `mask_method` such as HEST DeepLabV3 OOMs on a
+  (`mask_seg_chunk_px`). A heavy `mask_method` such as HEST DeepLabV3 OOMs on a
   whole MRXS level otherwise — at mask_ds=16 one slide's level image is
   ~313 MP, and a single ResNet layer1 activation on that is 18.6 GiB.
-  Pass mask_max_pixels=None to opt out and segment the level in one call.
+  Pass mask_seg_chunk_px=None to opt out and segment the level in one call.
 * A retriever is built lazily on first use for each pyramid level; est_mpp
   from stage 1 is fuzzy-snapped to a level via
   `wsi.get_best_level_for_downsample`. WsiTissuesContainer requires an exact
@@ -22,7 +22,7 @@ Design:
 * If a level's retriever build fails (e.g. filter_patchable emptied the mask
   because tiles are too big at that level), the shot is marked
   `unusable_level` and its stage 2 / 3 metrics are None.
-* Errors in any stage produce a LocaScopeShotResult with `.error` set;
+* Errors in any stage produce a LocaScopeQueryResult with `.error` set;
   earlier stages' results are preserved.
 
 Usage:
@@ -57,12 +57,12 @@ from PatchingLib             import QueryPatchContainer                         
 from SafeSlide               import SafeSlide                                          # noqa: E402
 from TissuesRegionsMask      import TissuesRegionsMask                                 # noqa: E402
 from GigaPathKnnEstiMpp      import GigaPathKnnEstiMpp                                 # noqa: E402
-from GigaPathSlideWinSimRot  import GigaPathSlidingWinSimRot, SlideWinSimRotResult     # noqa: E402
+from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot, SlideWinSimRotResult     # noqa: E402
 from SIFT_RANSAC             import SiftRansacLocalizer, SiftRansacResult              # noqa: E402
 
 
 @dataclass
-class LocaScopeShotResult:
+class LocaScopeQueryResult:
     """Per-shot pipeline output.
 
     Metrics that couldn't be computed are None; `error` carries the reason
@@ -92,7 +92,7 @@ class LocaScopePipeline:
         tile_size:           int   = 256,
         mask_method:         Callable = None,
         mask_ds:             float = 4.0,
-        mask_max_pixels:     int   = 4_000_000,
+        mask_seg_chunk_px:     int   = 4_000_000,
         mask_overlap:        int   = 128,
         min_region_ratio:    float = 0.01,
         knn_samples:         int   = 40,
@@ -116,7 +116,7 @@ class LocaScopePipeline:
         self.tile_size           = tile_size
         self.mask_method         = mask_method
         self.mask_ds             = mask_ds
-        self.mask_max_pixels     = mask_max_pixels
+        self.mask_seg_chunk_px     = mask_seg_chunk_px
         self.mask_overlap        = mask_overlap
         self.min_region_ratio    = min_region_ratio
         self.knn_samples         = knn_samples
@@ -143,7 +143,7 @@ class LocaScopePipeline:
         self.mask = TissuesRegionsMask.from_wsi(self.wsi,
                                                 ds=self.mask_ds,
                                                 method=self.mask_method,
-                                                max_pixels=self.mask_max_pixels,
+                                                seg_chunk_px=self.mask_seg_chunk_px,
                                                 overlap=self.mask_overlap,
                                                 )
         self.mask.filter_regions(min_ratio=self.min_region_ratio)
@@ -229,7 +229,7 @@ class LocaScopePipeline:
         return r
 
     # ── Per-shot end-to-end ───────────────────────────────────────────────────
-    def run(self, img_np: np.ndarray, keep_objects: bool = False) -> LocaScopeShotResult:
+    def run(self, img_np: np.ndarray, keep_objects: bool = False) -> LocaScopeQueryResult:
         """Run all 3 stages on one shot image.
 
         `keep_objects=True` attaches the retriever / localizer / query container
@@ -244,7 +244,7 @@ class LocaScopePipeline:
             r1 = self.estimator.estimate(img_np, overlap=True)
             est_mpp = float(r1.estimated_mpp)
         except Exception as e:
-            return LocaScopeShotResult(
+            return LocaScopeQueryResult(
                 None, None, False, None, None,
                 f'stage1 failed: {type(e).__name__}: {e}')
 
@@ -253,14 +253,14 @@ class LocaScopePipeline:
             ds_target = est_mpp / self.base_mpp
             level = self.wsi.get_best_level_for_downsample(ds_target)
         except Exception as e:
-            return LocaScopeShotResult(
+            return LocaScopeQueryResult(
                 est_mpp, None, False, None, None,
                 f'level routing failed: {type(e).__name__}: {e}')
 
         # Stage 2 — retrieve (cached retriever per level)
         retriever = self._get_retriever(level)
         if retriever is None:
-            return LocaScopeShotResult(
+            return LocaScopeQueryResult(
                 est_mpp, level, True, None, None,
                 self._retriever_reason.get(level, 'retriever unavailable'))
 
@@ -271,7 +271,7 @@ class LocaScopePipeline:
             retriever.compute_sim_maps()
             retrieval = retriever.find_best()
         except Exception as e:
-            return LocaScopeShotResult(
+            return LocaScopeQueryResult(
                 est_mpp, level, False, None, None,
                 f'stage2 failed: {type(e).__name__}: {e}')
 
@@ -287,11 +287,11 @@ class LocaScopePipeline:
             localizer.detect_and_match()
             refine = localizer.estimate_homography()
         except Exception as e:
-            return LocaScopeShotResult(
+            return LocaScopeQueryResult(
                 est_mpp, level, False, retrieval, None,
                 f'stage3 failed: {type(e).__name__}: {e}')
 
-        return LocaScopeShotResult(
+        return LocaScopeQueryResult(
             est_mpp, level, False, retrieval, refine, None,
             retriever = retriever if keep_objects else None,
             localizer = localizer if keep_objects else None,

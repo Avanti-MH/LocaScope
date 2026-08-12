@@ -3,7 +3,7 @@
 End-to-end pipeline test:
   1. QueryFromWSI      — crop a query at known (x, y, mpp) from the WSI
   2. estimate_mpp      — estimate the query MPP from GigaPath features
-  3. GigaPathSlideWinSim — sliding window similarity at estimated MPP
+  3. compute_gigapath_sliding_win_similarity — sliding window similarity at estimated MPP
   4. Verify            — best match should be near the ground-truth crop location
 
 Usage:
@@ -31,7 +31,7 @@ from PatchingLib import QueryPatchContainer
 from TissuesRegionsMask import TissuesRegionsMask
 from QueryFromWSI import QueryFromWSI
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
-from GigaPathSlideWinSim import GigaPathSlideWinSim
+from GigaPathSlidingWinSim import compute_gigapath_sliding_win_similarity
 from GigaPathFunc import gigapath_model, gigapath_encode
 
 
@@ -363,9 +363,9 @@ def main():
         print(f'  filter disabled — using all {len(mask.tissue_regions)} regions')
 
     # ── Step 4: Sliding window similarity ────────────────────────────────────
-    print('\n[4] Running GigaPathSlideWinSim...')
+    print('\n[4] Running compute_gigapath_sliding_win_similarity...')
     t0 = time.perf_counter()
-    sim_maps = GigaPathSlideWinSim(
+    sim_maps = compute_gigapath_sliding_win_similarity(
         query_qpc, wsi, mpp=mpp_est, 
         tile_size=args.tile, 
         overlap=args.overlap,
