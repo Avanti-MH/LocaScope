@@ -166,6 +166,78 @@ class Camera:
         )
         return self._center_crop_to_output(arr), params
 
+    # ── Where did this output pixel come from? ───────────────────────────────
+
+    def output_to_level0(
+        self, x: int, y: int, u: float, v: float,
+        rot_deg: float = 0.0, scale: float = 1.0,
+    ) -> Tuple[float, float]:
+        """Level-0 coordinate that output pixel (u, v) was taken from.
+
+        `x, y` is the level-0 top-left of the FoV rect that was passed to
+        `capture_with_gt`; `rot_deg` and `scale` come back in its params dict.
+
+        A shot is built as: read a bounding square centred on the FoV centre ->
+        rotate about that centre -> centre-crop to (output_w, output_h). Every
+        step is about the same centre, so inverting it is one rotation and one
+        scale about that point, with no translation bookkeeping:
+
+            C      = FoV centre at level 0
+            s      = rect_w_l0 / output_w      level-0 px per output px
+            (du,dv)= (u,v) - output centre     offset in the ROTATED frame
+            source = C + (s / scale) * R(-rot) . (du, dv)
+
+        Exact for rot in {0, 90, 180, 270}, which is what this experiment uses;
+        `angle_jitter` and lens distortion are NOT inverted here, so a caller
+        that leaves them on gets a position off by their magnitude rather than
+        an error. test_camera_output_to_level0.py pins the whole thing against
+        pixels rather than against this derivation -- the sign convention of
+        `R(-rot)` is the part most likely to be wrong, and a sign error is
+        invisible at 0 and 180.
+        """
+        import math
+
+        q = self.qfw
+        cx = float(x) + q.rect_w_l0 / 2.0
+        cy = float(y) + q.rect_h_l0 / 2.0
+        s = (q.rect_w_l0 / float(q.output_w)) / float(scale)
+
+        du = float(u) - q.output_w / 2.0
+        dv = float(v) - q.output_h / 2.0
+
+        th = math.radians(float(rot_deg))
+        cos_t, sin_t = math.cos(th), math.sin(th)
+        # R(+rot), not R(-rot), even though this inverts the augment's rotation.
+        # apply_rotation calls positive angles counter-clockwise per cv2, but
+        # image y points DOWN, so inverting in that frame flips one sign back and
+        # the two cancel. Determined by test_camera_output_to_level0.py, not by
+        # reading cv2's docs: the first version used R(-rot) and lost to the
+        # point-reflected candidate 40/40 times at 90 and 270 degrees (MAD 5.2 vs
+        # 47.5) while passing 0 and 180, where the two forms coincide.
+        du_s = cos_t * du - sin_t * dv
+        dv_s = sin_t * du + cos_t * dv
+
+        return cx + s * du_s, cy + s * dv_s
+
+    def output_tile_origins(
+        self, x: int, y: int, tile_size: int,
+        rot_deg: float = 0.0, scale: float = 1.0,
+    ):
+        """Every whole `tile_size` tile of one shot, with its level-0 centre.
+
+        Yields (row, col, u, v, cx_l0, cy_l0) where (u, v) is the tile's
+        top-left in output pixels. Partial tiles at the right/bottom edge are
+        skipped: a 1440x1024 output at 256 gives a clean 5x4.
+        """
+        q = self.qfw
+        for r in range(q.output_h // tile_size):
+            for c in range(q.output_w // tile_size):
+                u, v = c * tile_size, r * tile_size
+                cx, cy = self.output_to_level0(
+                    x, y, u + tile_size / 2.0, v + tile_size / 2.0,
+                    rot_deg=rot_deg, scale=scale)
+                yield r, c, u, v, cx, cy
+
     def _center_crop_to_output(self, arr: np.ndarray) -> np.ndarray:
         """Center-crop a bounding-square augment output back to (output_h, output_w)."""
         cw, ch = self.qfw.output_w, self.qfw.output_h
