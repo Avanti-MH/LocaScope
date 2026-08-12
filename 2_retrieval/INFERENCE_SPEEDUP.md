@@ -222,4 +222,4 @@ trtexec --onnx=gigapath.onnx --fp16 --saveEngine=gigapath.trt
 
 - `aiNNModel/GigaPathFunc.py` — `gigapath_encode`, `gigapath_model`
 - `utilities/test_modules/bench_gigapath_infer.py` — 速度 benchmark
-- `2_retrieval/GigaPathSlideWinSim.py` — encoder 傳遞點
+- `2_retrieval/GigaPathSlidingWinSim.py` — encoder 傳遞點

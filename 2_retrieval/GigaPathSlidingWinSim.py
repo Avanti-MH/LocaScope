@@ -61,7 +61,7 @@ def SlidingWindowSimilarity(
     return main_sim, overlap_sim
 
 
-def GigaPathSlideWinSim(
+def compute_gigapath_sliding_win_similarity(
     query: QueryPatchContainer,
     Wsi: Union[openslide.OpenSlide, WsiTissuesContainer],
     mpp: float,

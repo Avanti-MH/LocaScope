@@ -31,7 +31,7 @@ from PatchingLib import QueryPatchContainer
 from TissuesRegionsMask import TissuesRegionsMask
 from QueryFromWSI import QueryFromWSI
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
-from GigaPathSlideWinSim import GigaPathSlidingWinSim, SlideWinSimResult
+from GigaPathSlidingWinSim import GigaPathSlidingWinSim, SlideWinSimResult
 from SIFT_RANSAC import SiftRansacLocalizer, SiftRansacResult
 from GigaPathFunc import gigapath_model, gigapath_encode
 

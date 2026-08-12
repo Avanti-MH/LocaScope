@@ -40,7 +40,7 @@ import openslide                                                            # no
 from PatchingLib          import QueryPatchContainer, WsiTissuesContainer, FeaturesMap    # noqa: E402
 from SafeSlide            import SafeSlide                                                # noqa: E402
 from TissuesRegionsMask   import TissuesRegionsMask                          # noqa: E402
-from GigaPathSlideWinSim  import SlidingWindowSimilarity                     # noqa: E402
+from GigaPathSlidingWinSim  import SlidingWindowSimilarity                   # noqa: E402
 
 
 # ── Result dataclass (adds best_rotation vs the base module's result) ─────────

@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / 'utilities'))
 sys.path.insert(0, str(ROOT / '2_retrieval'))
 
 from PatchingLib import QueryPatchContainer, WsiTissuesContainer
-from GigaPathSlideWinSim import SlideWinSimResult
+from GigaPathSlidingWinSim import SlideWinSimResult
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
