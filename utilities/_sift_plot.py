@@ -7,8 +7,8 @@
     [2] Zoomed +-N tiles  green--=GT  yellow=main  orange=overlap  blue=SIFT
     [3] Homography        query boundary + patch grid + translation arrow
 
-Works with either SlideWinSimResult (2_retrieval/GigaPathSlideWinSim) or
-SlideWinSimRotResult (GigaPathSlideWinSimRot) — both expose the
+Works with either SlideWinSimResult (2_retrieval/GigaPathSlidingWinSim) or
+SlideWinSimRotResult (GigaPathSlidingWinSimRot) — both expose the
 best_*/main_*/overlap_* fields this module reads. When the result carries a
 `best_rotation`, it is shown in the summary panel.
 """
@@ -52,23 +52,40 @@ def match_img(query_img, query_kps, wsi_crop, crop_kps, matches,
     return canvas
 
 
+def read_anchored_crop(wsi, x0_l0: float, y0_l0: float, ds: float,
+                       tile_size: int, query_rows: int, query_cols: int,
+                       zoom_pad: int = 4):
+    """Read a (cols + 2*pad) x (rows + 2*pad) tile crop anchored at a level-0 point.
+
+    `ds` is the downsample the TILES are measured in (the retrieval level's),
+    which is not the same as `crop_ds`, the downsample of the level the pixels
+    are actually read from. Those two are separate on purpose: mixing them is
+    how a crop ends up the right size at the wrong scale.
+
+    Returns (crop_img, crop_x0, crop_y0, crop_ds) — all level-0 anchored.
+    """
+    tile_l0 = tile_size * ds
+    crop_x0 = max(0, int(x0_l0 - zoom_pad * tile_l0))
+    crop_y0 = max(0, int(y0_l0 - zoom_pad * tile_l0))
+    crop_level = wsi.get_best_level_for_downsample(ds)
+    crop_ds    = wsi.level_downsamples[crop_level]
+    crop_w = int((query_cols + zoom_pad * 2) * tile_size * ds / crop_ds)
+    crop_h = int((query_rows + zoom_pad * 2) * tile_size * ds / crop_ds)
+    crop_img = np.array(
+        wsi.read_region((crop_x0, crop_y0), crop_level, (crop_w, crop_h)).convert('RGB')
+    )
+    return crop_img, crop_x0, crop_y0, crop_ds
+
+
 def read_zoom_crop(wsi, retrieval, tile_size: int, query_rows: int,
                    query_cols: int, zoom_pad: int = 4):
     """Read the panel-[2] zoom crop around the retrieval best match.
 
     Returns (crop_img, crop_x0, crop_y0, crop_ds) — all level-0 anchored.
     """
-    tile_l0 = tile_size * retrieval.ds
-    crop_x0 = max(0, int(retrieval.best_x0 - zoom_pad * tile_l0))
-    crop_y0 = max(0, int(retrieval.best_y0 - zoom_pad * tile_l0))
-    crop_level = wsi.get_best_level_for_downsample(retrieval.ds)
-    crop_ds    = wsi.level_downsamples[crop_level]
-    crop_w = int((query_cols + zoom_pad * 2) * tile_size * retrieval.ds / crop_ds)
-    crop_h = int((query_rows + zoom_pad * 2) * tile_size * retrieval.ds / crop_ds)
-    crop_img = np.array(
-        wsi.read_region((crop_x0, crop_y0), crop_level, (crop_w, crop_h)).convert('RGB')
-    )
-    return crop_img, crop_x0, crop_y0, crop_ds
+    return read_anchored_crop(wsi, retrieval.best_x0, retrieval.best_y0,
+                              retrieval.ds, tile_size, query_rows, query_cols,
+                              zoom_pad)
 
 
 def _retrieval_center(retrieval, query_img, tile_size, query_rows, query_cols,
@@ -345,6 +362,84 @@ def draw_localization_row(
                      f'| top-left {sift_err:.0f}um (rot-naive)')
     else:
         ax.set_title('Homography failed')
+
+
+# ── recall-failure panels ─────────────────────────────────────────────────────
+
+def _box_in_crop(ax, cx_l0, cy_l0, w_l0, h_l0, crop_x0, crop_y0, crop_ds,
+                 colour, label):
+    """Draw a level-0 centred box in a crop's own pixel coordinates."""
+    if cx_l0 is None or cy_l0 is None:
+        return
+    x = (cx_l0 - w_l0 / 2.0 - crop_x0) / crop_ds
+    y = (cy_l0 - h_l0 / 2.0 - crop_y0) / crop_ds
+    ax.add_patch(mpatches.Rectangle((x, y), w_l0 / crop_ds, h_l0 / crop_ds,
+                                    fill=False, ec=colour, lw=2, label=label))
+    ax.plot((cx_l0 - crop_x0) / crop_ds, (cy_l0 - crop_y0) / crop_ds,
+            'x', color=colour, ms=9, mew=2)
+
+
+def draw_recall_row(
+    axes,                       # sequence of 4 matplotlib Axes
+    query_img:    np.ndarray,
+    gt_crop:      Optional[np.ndarray],
+    gt_anchor:    tuple,        # (crop_x0, crop_y0, crop_ds) of gt_crop
+    gt_center:    tuple,        # (cx, cy) @ level-0
+    pick_crop:    Optional[np.ndarray],
+    pick_anchor:  tuple,
+    pick_center:  Optional[tuple],
+    box_wh:       tuple,        # (w, h) @ level-0 of the FoV footprint
+    summary:      list,         # lines of text, assembled by the caller
+) -> None:
+    """Render the 4-panel RETRIEVAL diagnostic for one shot.
+
+    The stage-3 row answers "did SIFT finish the job". This one answers the
+    question before it: the truth was never proposed, so what does the place it
+    should have found look like next to the place retrieval preferred? Nothing
+    here comes from SIFT -- on a recall failure stage 3 was handed the wrong
+    window and its picture says nothing about why.
+
+        [0] query
+        [1] WSI at the TRUTH        green box
+        [2] WSI at retrieval's pick yellow box
+        [3] the numbers
+    """
+    w_l0, h_l0 = box_wh
+
+    ax = axes[0]
+    ax.imshow(query_img)
+    ax.set_title(f'query  {query_img.shape[1]}x{query_img.shape[0]}')
+    ax.axis('off')
+
+    ax = axes[1]
+    if gt_crop is not None:
+        ax.imshow(gt_crop)
+        _box_in_crop(ax, gt_center[0], gt_center[1], w_l0, h_l0,
+                     gt_anchor[0], gt_anchor[1], gt_anchor[2], 'lime', 'ground truth')
+        ax.legend(fontsize=7, loc='lower right', framealpha=0.65)
+        ax.set_title('WSI at the TRUTH  (never proposed)')
+    else:
+        ax.set_title('truth crop unavailable')
+    ax.axis('off')
+
+    ax = axes[2]
+    if pick_crop is not None:
+        ax.imshow(pick_crop)
+        _box_in_crop(ax, (pick_center or (None, None))[0],
+                     (pick_center or (None, None))[1], w_l0, h_l0,
+                     pick_anchor[0], pick_anchor[1], pick_anchor[2],
+                     'yellow', 'retrieval pick')
+        ax.legend(fontsize=7, loc='lower right', framealpha=0.65)
+        ax.set_title('WSI at what retrieval PREFERRED')
+    else:
+        ax.set_title('pick crop unavailable')
+    ax.axis('off')
+
+    ax = axes[3]
+    ax.axis('off')
+    ax.text(0.02, 0.98, '\n'.join(summary), va='top', ha='left',
+            family='monospace', fontsize=9, transform=ax.transAxes)
+    ax.set_title('numbers')
 
     for ax in axes:
         ax.axis('off')
