@@ -191,6 +191,7 @@ def main():
     by = int(p.get('openslide.bounds-y', 0))
     bw = int(p.get('openslide.bounds-width',  W0))
     bh = int(p.get('openslide.bounds-height', H0))
+    # mpp-x alone, NOT SafeSlide.base_mpp -- see scan_wsi_holes for why.
     mpp = float(p.get('openslide.mpp-x', 0)) or float('nan')
 
     print(f'{tag}')

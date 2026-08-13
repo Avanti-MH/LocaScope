@@ -195,7 +195,7 @@ class GigaPathKnnEstiMpp:
                 'No query features — call build_query_features() or pass query to estimate()'
             )
 
-        base_mpp = float(self.wsi.properties.get('openslide.mpp-x', 0))
+        base_mpp = self.wsi.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
         estimated_mpp = self.knn.predict(self.query_feats)
 
         self.result = GigapathKnnEstiMppResult(

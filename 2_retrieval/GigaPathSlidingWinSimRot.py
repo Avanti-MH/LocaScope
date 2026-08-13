@@ -39,7 +39,7 @@ sys.path.insert(0, str(ROOT / 'aiNNModel'))
 import openslide                                                            # noqa: E402
 from PatchingLib          import QueryPatchContainer, WsiTissuesContainer, FeaturesMap    # noqa: E402
 from SafeSlide            import SafeSlide                                                # noqa: E402
-from TissuesRegionsMask   import TissuesRegionsMask                          # noqa: E402
+from TissuesRegionsMask   import TissueRegion, TissuesRegionsMask            # noqa: E402
 from GigaPathSlidingWinSim  import SlidingWindowSimilarity                   # noqa: E402
 
 
@@ -159,8 +159,28 @@ class GigaPathSlidingWinSimRot:
         self.tile_size = tile_size
         self.overlap   = overlap
 
-        self.wsi_container: Optional[WsiTissuesContainer]                    = None
-        self.wsi_features:  Optional[list[FeaturesMap]]                      = None
+        # Scale of the CURRENT build. `mpp` above is what the caller asked for;
+        # these are what was actually used, and they are what everything
+        # downstream reads.
+        self.level:   Optional[int]                = None
+        self.ds:      Optional[float]              = None
+        self.regions: Optional[list[TissueRegion]] = None
+        self.wsi_container: Optional[WsiTissuesContainer] = None
+        self.wsi_features:  Optional[list[FeaturesMap]]   = None
+        #: {ds: (container, features)} for every scale built so far.
+        #:
+        #: The container is kept, not released after encoding. It holds each
+        #: region's pixels, which looks like the obvious thing to drop -- 19.7
+        #: GB for a level-0 BRACS region -- but stage 3 reads them:
+        #: SiftRansacLocalizer takes `retriever.wsi_container`
+        #: (LocaScopePipeline.py:264) and crops the matched window out of
+        #: `wsi_container[best_region_index].img` to run SIFT on it. Dropping
+        #: it hands stage 3 a None.
+        #:
+        #: Cached as a pair because the features, the region list and the
+        #: pixels all belong to one scale, and find_best zips the first two.
+        self._by_ds: Dict[float, tuple] = {}
+
         # Per-rotation state (dict keyed by rotation degree)
         self.qc_by_rot:            Dict[int, QueryPatchContainer]                                = {}
         self.query_features_by_rot: Dict[int, FeaturesMap]                                       = {}
@@ -168,16 +188,70 @@ class GigaPathSlidingWinSimRot:
         self.result: Optional[SlideWinSimRotResult]                                              = None
 
     # ── Stage 1: WSI features (single orientation) ───────────────────────────
-    def build_wsi_features(self, mpp: Optional[float] = None) -> list[FeaturesMap]:
-        mpp = mpp or self.mpp
-        if mpp is None:
-            raise ValueError('mpp must be provided in __init__ or build_wsi_features()')
+    def build_wsi_features(self, mpp: Optional[float] = None,
+                           ds: Optional[float] = None) -> list[FeaturesMap]:
+        """Encode every usable tissue region at one scale.
+
+        Two ways in, and the difference is only what gets recomputed:
+
+            first call     `mask` may be None, and then the tissue mask is
+                           segmented here -- about a minute, and by far the
+                           most expensive thing this method does.
+            later call     a different scale, given as `mpp` or `ds`. The
+                           segmentation is reused. The same scale a second
+                           time reuses the features too.
+
+        `self.mask` is the caller's mask and is never replaced. `from_ds` takes
+        a `regions_view()` of it and filters THAT, so every build starts from
+        the whole segmentation. It has to: filtering is monotone in ds, so a
+        build at 1.0 that narrowed the original in place would leave a later
+        build at 0.25 unable to see the regions the coarse pass dropped.
+        0.25 -> 1.0 -> 0.25 must return the same regions as a fresh 0.25.
+
+        `ds` must land on a level the slide actually has; a request between
+        levels is snapped to the nearest and reported (WsiTissuesContainer).
+        """
+        if mpp is None and ds is None:
+            mpp = self.mpp
+            if mpp is None:
+                raise ValueError('mpp must be provided in __init__ or build_wsi_features()')
+
+        # Resolve first: it is free, and it gives the cache key before anything
+        # is read or encoded.
+        self.level, self.ds = WsiTissuesContainer.resolve_scale(
+            self.wsi, mpp=mpp, ds=ds)
+        self.mpp = self.wsi.base_mpp * self.ds   # mpp/ds/level now say one thing
+
         if self.mask is None:
             self.mask = TissuesRegionsMask.from_wsi(self.wsi)
-        self.wsi_container = WsiTissuesContainer.from_mpp(
-            self.wsi, mpp, tile_size=self.tile_size, overlap=self.overlap, mask=self.mask,
-        )
-        self.wsi_features = [tp.to_features(self.encoder) for tp in self.wsi_container]
+            print(f'  [Rot] no mask given; segmented with TissuesRegionsMask '
+                  f'defaults, which are NOT what LocaScopePipeline uses '
+                  f'(no HEST model, default mask_ds, no filter_regions). '
+                  f'{len(self.mask.tissue_regions)} regions, '
+                  f'tissue {self.mask.tissue_fraction() * 100:.1f}%', flush=True)
+
+        if self.ds in self._by_ds:
+            self.wsi_container, self.wsi_features = self._by_ds[self.ds]
+        else:
+            self.wsi_container = WsiTissuesContainer.from_ds(
+                self.wsi, self.ds, tile_size=self.tile_size,
+                overlap=self.overlap, mask=self.mask)
+            self.wsi_features = [tp.to_features(self.encoder)
+                                 for tp in self.wsi_container]
+            self._by_ds[self.ds] = (self.wsi_container, self.wsi_features)
+        # `regions` is the container's list -- the FILTERED one the features and
+        # similarity maps line up with, not self.mask's. Kept as an attribute
+        # because find_best zips it and reaching two levels down to say so
+        # obscures which list is meant.
+        self.regions = self.wsi_container.tissue_regions
+
+        # Similarity maps are query features x WSI features, so they belong to
+        # the scale that produced them. compute_sim_maps() already rebuilds
+        # from scratch; the reason to empty this is find_best(), which only
+        # calls it when the dict is EMPTY and would otherwise pair last scale's
+        # maps with this scale's regions.
+        self.sim_maps_by_rot = {}
+        self.result = None
         return self.wsi_features
 
     # ── Stage 2: query features at 4 rotations ───────────────────────────────
@@ -239,7 +313,7 @@ class GigaPathSlidingWinSimRot:
         because the same formula written out twice is how one code path ends up
         reporting a position half a tile from the other and nothing says so.
         """
-        ds  = self.wsi_container.ds
+        ds  = self.ds          # the built level's own downsample
         off = self.tile_size // 2 if use_overlap else 0
         return (int(region.x / ds) + c * self.tile_size + off,
                 int(region.y / ds) + r * self.tile_size + off)
@@ -256,7 +330,11 @@ class GigaPathSlidingWinSimRot:
         Empty grids are skipped: a region smaller than the query produces none.
         """
         for ri, (region, (main_sim, overlap_sim)) in enumerate(
-            zip(self.mask.tissue_regions, sim_maps)
+            # self.regions, not self.mask.tissue_regions: the maps were
+            # computed over the FILTERED regions, and the caller's mask
+            # still holds all of them. Zipping the wrong one shifts every
+            # window onto a neighbouring region's coordinates.
+            zip(self.regions, sim_maps)
         ):
             hm = overlap_sim if use_overlap else main_sim
             if hm.numel() == 0:
@@ -311,7 +389,7 @@ class GigaPathSlidingWinSimRot:
         if not self.sim_maps_by_rot:
             self.compute_sim_maps()
 
-        ds = self.wsi_container.ds
+        ds = self.ds           # the built level's own downsample
         if min_sep_px is None:
             min_sep_px = self.tile_size * ds
 
@@ -361,7 +439,7 @@ class GigaPathSlidingWinSimRot:
         if not self.sim_maps_by_rot:
             self.compute_sim_maps()
 
-        ds = self.wsi_container.ds
+        ds = self.ds           # the built level's own downsample
 
         # Per-rotation main / overlap winners
         scores_by_rot: Dict[int, float] = {}

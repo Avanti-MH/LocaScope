@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
 End-to-end pipeline test:
+  0. _sim_tensors      — the window kernel's fast contraction against the
+                          original, scored on decoys. Pure tensors, no slide,
+                          no model; runs first because a failure invalidates
+                          every number below it.
   1. QueryFromWSI      — crop a query at known (x, y, mpp) from the WSI
   2. estimate_mpp      — estimate the query MPP from GigaPath features
   3. compute_gigapath_sliding_win_similarity — sliding window similarity at estimated MPP
@@ -8,6 +12,9 @@ End-to-end pipeline test:
   5. GigaPathSlidingWinSimRot — the rotation-aware retriever LocaScopePipeline
                           actually calls, checked against the same crop and a
                           decoy comparison against step 3's non-rotated result
+  6. build_wsi_features    — rebuilding at another scale: the features cache
+                          hits, and the similarity maps of the old scale do not
+                          survive into the new one. Stub encoder, ~1 second.
 
 Steps 1-4 are the base module's original test: one query, mpp estimated the way
 production would, a visual 8-panel figure, and a soft PASS/WARN print that was
@@ -86,7 +93,7 @@ import torch
 from _paths import job_result_dir, setup_import_paths
 setup_import_paths()
 
-from PatchingLib import QueryPatchContainer
+from PatchingLib import QueryPatchContainer, WsiTissuesContainer
 from TissuesRegionsMask import TissuesRegionsMask
 from QueryFromWSI import QueryFromWSI
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
@@ -102,6 +109,7 @@ ROTATIONS = (0, 90, 180, 270)
 
 def build_sim_canvas(
     mask: TissuesRegionsMask,
+    regions: list,
     sim_maps: list,
     ds: float,
     tile_size: int,
@@ -113,7 +121,11 @@ def build_sim_canvas(
     cell_l0 = tile_size * ds
     half_l0 = cell_l0 / 2
 
-    for region, (main_sim, overlap_sim) in zip(mask.tissue_regions, sim_maps):
+    # `regions` is the container's list, which from_mpp has already narrowed to
+    # what can host a tile at this ds; `mask` is still needed for to_mask_xy and
+    # mask_ds_*. They are different lists now and only the first lines up with
+    # sim_maps.
+    for region, (main_sim, overlap_sim) in zip(regions, sim_maps):
         for hm, x_off, y_off in ((main_sim, 0.0, 0.0), (overlap_sim, half_l0, half_l0)):
             if hm.numel() == 0:
                 continue
@@ -132,14 +144,21 @@ def build_sim_canvas(
     return canvas
 
 
-def _find_best(mask, sim_maps, ds, tile_size, use_overlap: bool):
-    """Return (x_l0, y_l0, score) for either the main or overlap grid."""
+def _find_best(regions, sim_maps, ds, tile_size, use_overlap: bool):
+    """Return (x_l0, y_l0, score) for either the main or overlap grid.
+
+    `regions` must be the list the sim_maps were computed over -- that is
+    `container.tissue_regions`, not `mask.tissue_regions`. from_mpp drops the
+    regions too small to host a tile, so the two differ, and pairing them the
+    wrong way puts every window on a neighbouring region's coordinates without
+    raising anything.
+    """
     best_score = -np.inf
     best_x = best_y = 0
     cell_l0 = tile_size * ds
     half_l0 = cell_l0 / 2
 
-    for region, (main_sim, overlap_sim) in zip(mask.tissue_regions, sim_maps):
+    for region, (main_sim, overlap_sim) in zip(regions, sim_maps):
         hm = overlap_sim if use_overlap else main_sim
         x_off = half_l0 if use_overlap else 0.0
         y_off = half_l0 if use_overlap else 0.0
@@ -157,15 +176,162 @@ def _find_best(mask, sim_maps, ds, tile_size, use_overlap: bool):
     return best_x, best_y, best_score
 
 
-# ── step 5: rotation-aware retriever ────────────────────────────────────────
+# ── step 0: _sim_tensors, the fast contraction against the original ─────────
 
 ROT_PASS, ROT_FAIL = [], []
+
+
+def run_sim_tensors_equivalence(seed: int = 0) -> None:
+    """Step 0. Does contracting D first give the same windows?
+
+    `_sim_tensors` used to write `windows * q` and sum afterwards, which
+    materialises [D, H, W, R_q, C_q] -- 2.62 GB for a 145x147 region against a
+    4x5 kernel, to produce 1.71 MB. It now contracts D first with einsum and
+    indexes the windows out. Same definition, different order, and matmul does
+    not reduce in the same order as an elementwise product, so the two answers
+    are close rather than equal.
+
+    Close is not a thing to assert against a number somebody chose. The
+    comparison is against DECOYS instead: the same computation with the query
+    rolled by one tile, and with the WSI rolled by one tile. If the rewrite is
+    right, its disagreement with the original is orders of magnitude below its
+    disagreement with either decoy. If it is wrong, the three land in the same
+    range and no threshold would have separated them.
+
+    Pure tensors, no model and no slide, so it runs first -- before the WSI is
+    opened or GigaPath is loaded. A failure here means every number the rest of
+    this file produces was computed with a broken kernel.
+    """
+    print('\n[0] _sim_tensors: einsum contraction vs the original unfold...')
+    from GigaPathSlidingWinSim import _sim_tensors, _sim_tensors_unfold
+
+    devices = [torch.device('cpu')]
+    if torch.cuda.is_available():
+        devices.append(torch.device('cuda'))
+        print(f'  torch.backends.cuda.matmul.allow_tf32 = '
+              f'{torch.backends.cuda.matmul.allow_tf32}   '
+              f'(True keeps 10 mantissa bits, so expect ~1e-3 not ~1e-7)')
+
+    R_w, C_w, R_q, C_q, D = 12, 11, 4, 5, 64
+    for device in devices:
+        generator = torch.Generator(device='cpu').manual_seed(seed)
+        wsi = torch.randn(R_w, C_w, D, generator=generator)
+        query = torch.randn(R_q, C_q, D, generator=generator)
+        wsi = (wsi / wsi.norm(dim=-1, keepdim=True)).to(device)
+        query = (query / query.norm(dim=-1, keepdim=True)).to(device)
+
+        fast = _sim_tensors(query, wsi)
+        reference = _sim_tensors_unfold(query, wsi)
+        rot_check(f'sim_tensors[{device.type}]: same shape',
+                  tuple(fast.shape) == tuple(reference.shape),
+                  f'{tuple(fast.shape)} vs {tuple(reference.shape)}')
+
+        gap = float((fast - reference).abs().max())
+        decoys = {
+            'query rolled one tile': _sim_tensors_unfold(
+                torch.roll(query, shifts=1, dims=0), wsi),
+            'wsi rolled one tile': _sim_tensors_unfold(
+                query, torch.roll(wsi, shifts=1, dims=0)),
+        }
+        for name, decoy in decoys.items():
+            spread = float((fast - decoy).abs().max())
+            rot_check(f'sim_tensors[{device.type}]: below the {name} decoy',
+                      spread > gap * 1000,
+                      f'gap {gap:.2e} vs decoy {spread:.2e} '
+                      f'({spread / max(gap, 1e-30):.0f}x)')
+
+        # The empty case is a contract, not an accident: a region smaller than
+        # the query kernel must come back as an empty tensor, which every
+        # caller tests with .numel().
+        small = _sim_tensors(query, wsi[:R_q - 1])
+        rot_check(f'sim_tensors[{device.type}]: region under the kernel is empty',
+                  small.numel() == 0, f'numel {small.numel()}')
+
+
+# ── step 5: rotation-aware retriever ────────────────────────────────────────
 
 
 def rot_check(label: str, condition: bool, detail: str = '') -> None:
     tag = 'ok  ' if condition else 'FAIL'
     print(f'  {tag}  {label}' + (f'   {detail}' if detail else ''))
     (ROT_PASS if condition else ROT_FAIL).append(label)
+
+
+def run_scale_switch_checks(wsi, mask, args) -> None:
+    """Step 6. Rebuilding at a different scale: what is reused, what expires.
+
+    `build_wsi_features` grew a second entrance -- give it a new mpp or ds and
+    it rebuilds without re-segmenting, and the same scale twice reuses the
+    features. Two things can go quietly wrong with that, and neither raises:
+
+        the cache misses     every scale change pays for a full re-encode,
+                             which is only a cost, but an invisible one
+        the maps survive     sim_maps_by_rot belongs to the scale that made it.
+                             find_best() only recomputes when the dict is
+                             EMPTY, so a stale dict pairs the previous scale's
+                             similarity maps with this scale's regions and
+                             returns a confident wrong location
+
+    No GigaPath here. The encoder is a counting stub: what is being tested is
+    bookkeeping, and a real forward pass would only make it slower and hide the
+    count. That also means this runs in about a second even though it builds
+    three times.
+    """
+    print('\n[6] build_wsi_features: cache and invalidation...')
+
+    calls = {'n': 0}
+
+    def counting_encoder(patches):
+        calls['n'] += 1
+        # 8 dims is plenty: nothing here looks at the values, and the sliding
+        # window never runs. L2-normalised so a FeaturesMap is well formed.
+        feats = torch.randn(len(patches), 8)
+        return feats / feats.norm(dim=-1, keepdim=True)
+
+    downsamples = [float(d) for d in wsi.level_downsamples]
+    if len(downsamples) < 2:
+        rot_check('scale switch: slide has two levels', False,
+                  f'only {len(downsamples)}')
+        return
+    # The two coarsest levels: the same code path as any other pair, and the
+    # cheapest possible read.
+    ds_a, ds_b = downsamples[-1], downsamples[-2]
+
+    r = GigaPathSlidingWinSimRot(wsi, counting_encoder, mask=mask,
+                                 tile_size=args.tile, overlap=True)
+    r.build_wsi_features(ds=ds_a)
+    after_a = calls['n']
+    regions_a, feats_a = r.regions, r.wsi_features
+    rot_check('scale switch: first build encodes', after_a > 0,
+              f'{after_a} encoder calls')
+    rot_check('scale switch: ds is the level\'s own', r.ds == ds_a,
+              f'asked {ds_a}, built {r.ds}')
+
+    r.build_wsi_features(ds=ds_b)
+    after_b = calls['n']
+    rot_check('scale switch: a new scale re-encodes', after_b > after_a,
+              f'{after_b - after_a} more calls')
+    rot_check('scale switch: regions follow the scale',
+              r.regions is not regions_a, f'{len(r.regions)} regions at ds={r.ds}')
+
+    # Plant a stale map and confirm the rebuild clears it. Without this,
+    # find_best() would skip compute_sim_maps and zip last scale's maps against
+    # this scale's regions.
+    r.sim_maps_by_rot = {0: ['stale']}
+    r.build_wsi_features(ds=ds_a)
+    rot_check('scale switch: rebuild empties sim_maps_by_rot',
+              r.sim_maps_by_rot == {}, f'got {list(r.sim_maps_by_rot)}')
+    rot_check('scale switch: returning to a built scale is free',
+              calls['n'] == after_b, f'{calls["n"] - after_b} extra calls')
+    rot_check('scale switch: the cache returns the same features',
+              r.wsi_features is feats_a and r.regions is regions_a)
+    rot_check('scale switch: the container comes back with them',
+              r.wsi_container is not None and r.wsi_container.ds == ds_a,
+              'stage 3 reads retriever.wsi_container for the pixels')
+
+    before = len(mask.tissue_regions)
+    rot_check('scale switch: the caller\'s mask is untouched',
+              len(mask.tissue_regions) == before, f'{before} regions')
 
 
 def run_rotation_checks(wsi, mask, query_np, encoder, args, base_mpp) -> None:
@@ -204,11 +370,14 @@ def run_rotation_checks(wsi, mask, query_np, encoder, args, base_mpp) -> None:
         photo = GigaPathSlidingWinSimRot._rotate_np(query_np, applied_rot)
         qc = QueryPatchContainer(photo)
         qc.extract_all(args.tile, overlap=True)
+        base_container = WsiTissuesContainer.from_mpp(
+            wsi, args.mpp, tile_size=args.tile, overlap=True, mask=mask)
+        base_regions = base_container.tissue_regions
         sim_maps = compute_gigapath_sliding_win_similarity(
-            qc, wsi, mpp=args.mpp, tile_size=args.tile, overlap=True,
-            mask=mask, encoder=encoder)
-        mx, my, m_score = _find_best(mask, sim_maps, ds, args.tile, use_overlap=False)
-        ox, oy, o_score = _find_best(mask, sim_maps, ds, args.tile, use_overlap=True)
+            qc, base_container, mpp=args.mpp, tile_size=args.tile,
+            overlap=True, encoder=encoder)
+        mx, my, m_score = _find_best(base_regions, sim_maps, ds, args.tile, use_overlap=False)
+        ox, oy, o_score = _find_best(base_regions, sim_maps, ds, args.tile, use_overlap=True)
         bx, by = (ox, oy) if o_score > m_score else (mx, my)
         base_err_um = dist_um(bx, by)
         rot_check(f'rot={applied_rot:>3}  base module misses (Rot exists for this)',
@@ -232,7 +401,7 @@ def draw_figure(thumb, mask, query_img_np, query_qpc,
                 out):
 
     Ht, Wt = mask.main_mask.shape
-    sim_canvas = build_sim_canvas(mask, sim_maps, ds, tile_size, Wt, Ht)
+    sim_canvas = build_sim_canvas(mask, regions, sim_maps, ds, tile_size, Wt, Ht)
     valid = ~np.isnan(sim_canvas)
     vmin = float(np.nanmin(sim_canvas)) if valid.any() else -1.0
     vmax = float(np.nanmax(sim_canvas)) if valid.any() else  1.0
@@ -408,6 +577,12 @@ def main():
     ap.add_argument('--filter', action=argparse.BooleanOptionalAction, default=True,
                     help='apply filter_regions to remove small/contained tissue regions')
     ap.add_argument('--batch',           type=int,   default=1024)
+    ap.add_argument('--precision', choices=['fp16', 'fp32'], default='fp16',
+                    help='encoder precision. fp16 is what production ships '
+                         '(log/TODO.log: cos 0.99995 against fp32, 5.5x '
+                         'faster) and is ignored on CPU. Output is fp32 '
+                         'either way -- autocast only changes the forward '
+                         'pass (GigaPathFunc.py:174).')
     ap.add_argument('--min-region-ratio',type=float, default=0.10,
                     help='Skip regions smaller than this fraction of the largest region (default 0.10)')
     ap.add_argument('--skip-rot', action='store_true',
@@ -424,6 +599,14 @@ def main():
     print(f'GT  : x={args.x}  y={args.y}  mpp={args.mpp}')
 
     timings: dict[str, float] = {}
+
+    # ── Step 0: _sim_tensors kernel ──────────────────────────────────────────
+    # Milliseconds, no slide, no model -- and if it fails, everything below was
+    # computed with a broken window kernel, so it goes first.
+    run_sim_tensors_equivalence()
+    if ROT_FAIL:
+        print('\n[0] FAILED -- not spending a GPU hour on top of a broken kernel')
+        return 1
 
     # ── Step 1: Crop query from WSI at known location ─────────────────────────
     print('\n[1] Cropping query from WSI...')
@@ -450,15 +633,25 @@ def main():
         return 1
 
     wsi      = qfwsi.wsi
-    base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
+    base_mpp = wsi.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
 
     # ── Step 0: Build encoder (shared for all stages) ────────────────────────
     print('\n[0] Loading GigaPath model...')
     t0 = time.perf_counter()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'  device={device}')
+    # Same rule as utilities/cli/locate_photo.py:442 -- fp16 on CUDA, fp32
+    # elsewhere, because autocast has nothing to offer on CPU. This file claims
+    # to exercise the path LocaScopePipeline takes, and the two callers that
+    # actually take it (locate_photo, bench_locascope) both hand it an fp16
+    # encoder. Running fp32 here left the 5e-5 between the two precisions
+    # untested by the one test that says it covers production.
+    dtype = (torch.float16
+             if args.precision == 'fp16' and device.type == 'cuda'
+             else torch.float32)
+    print(f'  device={device}  precision={str(dtype).replace("torch.", "")}')
     _model = gigapath_model(device)
-    encoder = lambda patches: gigapath_encode(patches, _model, device, batch_size=args.batch)
+    encoder = lambda patches: gigapath_encode(patches, _model, device,
+                                              batch_size=args.batch, dtype=dtype)
     timings['0. load model'] = time.perf_counter() - t0
 
     # ── Step 2: Estimate MPP ──────────────────────────────────────────────────
@@ -479,7 +672,15 @@ def main():
     before = len(mask.tissue_regions)
     if args.filter:
         mask.filter_regions(args.min_region_ratio)
-    mask.filter_patchable(tile_size=args.tile, ds=ds_est)
+
+    # No filter_patchable here. Steps 4 and 5 deliberately run at different
+    # scales -- the estimate and the ground truth -- and each one now narrows
+    # the mask itself, at the ds it actually resolves to
+    # (WsiTissuesContainer.from_ds). This line used to filter at ds_est alone,
+    # which let a region 256 level-0 px wide through and then handed step 5 a
+    # container with zero patches; the fix after that filtered at
+    # max(ds_est, ds_rot), which was still one caller guessing on behalf of
+    # two. Neither is needed once the filter lives where the ds is known.
     timings['3. tissue mask'] = time.perf_counter() - t0
     print(f'  {before} regions  tissue={mask.tissue_fraction()*100:.1f}%')
     if len(mask.tissue_regions) < before:
@@ -493,11 +694,16 @@ def main():
     # ── Step 4: Sliding window similarity ────────────────────────────────────
     print('\n[4] Running compute_gigapath_sliding_win_similarity...')
     t0 = time.perf_counter()
+    # Build the container here rather than letting the function do it, because
+    # its regions are the ones sim_maps line up with: from_mpp drops whatever
+    # cannot host a tile at this ds, so mask.tissue_regions is a longer list.
+    wsi_container = WsiTissuesContainer.from_mpp(
+        wsi, mpp_est, tile_size=args.tile, overlap=args.overlap, mask=mask)
+    regions = wsi_container.tissue_regions
     sim_maps = compute_gigapath_sliding_win_similarity(
-        query_qpc, wsi, mpp=mpp_est,
+        query_qpc, wsi_container, mpp=mpp_est,
         tile_size=args.tile,
         overlap=args.overlap,
-        mask=mask,
         encoder=encoder,
     )
     timings['4. slide win sim'] = time.perf_counter() - t0
@@ -517,8 +723,8 @@ def main():
     print('\n[4b] Verifying...')
     t0 = time.perf_counter()
 
-    mx, my, m_score = _find_best(mask, sim_maps, ds_est, args.tile, use_overlap=False)
-    ox, oy, o_score = _find_best(mask, sim_maps, ds_est, args.tile, use_overlap=True)
+    mx, my, m_score = _find_best(regions, sim_maps, ds_est, args.tile, use_overlap=False)
+    ox, oy, o_score = _find_best(regions, sim_maps, ds_est, args.tile, use_overlap=True)
 
     def dist_um(x, y):
         return math.sqrt((x - args.x) ** 2 + (y - args.y) ** 2) * base_mpp
@@ -551,6 +757,11 @@ def main():
     # ── Step 5: GigaPathSlidingWinSimRot ─────────────────────────────────────
     if not args.skip_rot:
         run_rotation_checks(wsi, mask, query_np, encoder, args, base_mpp)
+
+    # ── Step 6: rebuilding at another scale ──────────────────────────────────
+    # Runs on a stub encoder, so it costs a second and is worth having even
+    # when --skip-rot has turned the expensive half off.
+    run_scale_switch_checks(wsi, mask, args)
 
     # ── Figure ────────────────────────────────────────────────────────────────
     t0 = time.perf_counter()

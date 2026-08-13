@@ -18,6 +18,7 @@ ds_x and ds_y are stored separately to handle the case where the method
 returns a mask whose aspect ratio differs slightly from the WSI.
 """
 
+import copy
 import json
 import os
 from typing import Union
@@ -99,6 +100,32 @@ class TissuesRegionsMask:
         # Undo stack for regions mutations (filter_regions / filter_patchable /
         # merge_overlapping snapshot tissue_regions here before modifying).
         self._regions_history: list[list[TissueRegion]] = []
+
+        # One physical quantity, three fields. A mask pixel's size in um is
+        # both `mask_mpp` and `wsi_mpp * mask_ds`, and from_wsi DERIVES the
+        # first from the second two (see the mask_mpp line there) -- so they
+        # can only disagree on a hand-built mask, and then they disagree
+        # silently: `_mppCoordinate_converter` picks between them with
+        # `self.wsi_mpp_x or self.mask_mpp`, so which answer a caller gets
+        # depends on whether wsi_mpp_x happens to be truthy.
+        #
+        # Two test fixtures were 4x apart on this and nobody noticed, because
+        # the branch they contradicted was the one `or` never took. Checked
+        # rather than documented for the same reason WsiTissuesContainer now
+        # refuses a ds no level has: a relationship a caller is expected to
+        # maintain is one the code should be able to state.
+        #
+        # Skipped when either side is zero -- plenty of masks legitimately
+        # carry no mpp at all and use ds only.
+        if mask_mpp and wsi_mpp_x and wsi_mpp_y:
+            derived = (wsi_mpp_x + wsi_mpp_y) / 2 * (mask_ds_x + mask_ds_y) / 2
+            if abs(derived - mask_mpp) > 1e-6 * max(derived, mask_mpp):
+                raise ValueError(
+                    f'mask_mpp={mask_mpp} contradicts wsi_mpp '
+                    f'({wsi_mpp_x}, {wsi_mpp_y}) at mask_ds '
+                    f'({mask_ds_x}, {mask_ds_y}), which give {derived}. '
+                    f'A mask pixel has one size; pass mask_mpp=0 to leave it '
+                    f'unset.')
 
     def __len__(self):
         return len(self.tissue_regions)
@@ -184,6 +211,44 @@ class TissuesRegionsMask:
             return False
         self.tissue_regions = self._regions_history.pop()
         return True
+
+    def regions_view(self) -> 'TissuesRegionsMask':
+        """A copy that shares the raster but owns its mutable region state.
+
+        For a caller that needs to narrow the regions -- filter for one
+        pyramid level, say -- WITHOUT touching the mask it was handed. The
+        segmentation itself is read-only to them and is shared: `main_mask` is
+        22128x34859 on BRACS_1936 at mask_ds=4, so 771 MB, and `deepcopy`
+        would duplicate it for nothing.
+
+        The two lines below are not decoration. `copy.copy` leaves every
+        attribute pointing at the original's object, so what matters is HOW
+        each one gets modified:
+
+            tissue_regions     filter_* does `self.tissue_regions = [...]`,
+                               a REBIND. It writes only into this object's
+                               slot, so the original keeps its list. The copy
+                               here is belt and braces -- it makes the view's
+                               ownership true from the start rather than from
+                               the first filter.
+
+            _regions_history   `_snapshot()` does `.append()`, which mutates
+                               the shared list IN PLACE. Without a fresh one,
+                               a filter on the view pushes onto the caller's
+                               undo stack, and their next regions_undo() pops
+                               ours instead of theirs.
+
+        So the view is safe to filter, and the original stays whole -- which is
+        what lets a retriever rebuild at 0.25, then 1.0, then 0.25 again and
+        get the same regions back the third time. Filtering is monotone in ds:
+        derive each level from the ORIGINAL, never from the previous view, or
+        the coarse pass silently keeps the fine pass from ever seeing the
+        regions it dropped.
+        """
+        view = copy.copy(self)
+        view.tissue_regions   = list(self.tissue_regions)
+        view._regions_history = []
+        return view
 
     @staticmethod
     def _tiled_apply(method:     callable,
@@ -423,8 +488,21 @@ class TissuesRegionsMask:
     def _mppCoordinate_converter(self, x: float, y: float,
                                  mpp: Union[float, tuple[float, float]]) -> tuple[int, int]:
         mpp_x, mpp_y = mpp if isinstance(mpp, tuple) else (mpp, mpp)
-        base_x = self.wsi_mpp_x or self.mask_mpp
-        base_y = self.wsi_mpp_y or self.mask_mpp
+        # base is the LEVEL-0 pixel size, because the next step converts a
+        # level-0 coordinate. When the slide's own mpp is unknown, mask_mpp
+        # gives it: a mask pixel spans mask_ds level-0 pixels, so a level-0
+        # pixel is mask_mpp / mask_ds.
+        #
+        # The fallback used to be `or self.mask_mpp`, feeding a MASK pixel size
+        # where a level-0 one belongs, so `to_mask_xy` divided by mask_ds a
+        # second time and every position came out mask_ds times too small.
+        # `_mppLength_converter` right below has always used the correct
+        # `mpp / mask_mpp`, so a mask built without wsi mpp answered mpploc
+        # with the right SIZE at the wrong PLACE -- and no fixture exercised
+        # this branch, because every one of them set wsi_mpp_x and `or` never
+        # reached here.
+        base_x = self.wsi_mpp_x or (self.mask_mpp / self.mask_ds_x)
+        base_y = self.wsi_mpp_y or (self.mask_mpp / self.mask_ds_y)
         x0 = x * mpp_x / base_x        # -> absolute level-0 px
         y0 = y * mpp_y / base_y
         return self.to_mask_xy(x0, y0)

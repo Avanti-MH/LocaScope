@@ -364,9 +364,12 @@ def main():
     # gt.csv records gt_x/gt_y in level-0 px of THIS slide, and the FoV size in
     # px at the nominal mpp, so turning the pair into a centre needs the slide's
     # own level-0 mpp -- which only exists after build().
-    base_mpp = float(sws.wsi.properties.get('openslide.mpp-x', 0)) or None
+    try:                       # SafeSlide.base_mpp: mean of mpp-x/y, one definition
+        base_mpp = sws.wsi.base_mpp
+    except RuntimeError:
+        base_mpp = None
     if gt_map and base_mpp is None:
-        sys.exit('slide has no openslide.mpp-x; cannot place the gt.csv centre')
+        sys.exit('slide carries no mpp metadata; cannot place the gt.csv centre')
 
     bd = backdrop(sws) if draw else None
     rows = []

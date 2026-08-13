@@ -72,6 +72,7 @@ from _paths import setup_import_paths
 setup_import_paths()
 
 import openslide
+from SafeSlide import SafeSlide
 from PatchingLib import WsiTissuesContainer
 from TissuesRegionsMask import TissuesRegionsMask
 from GigaPathFunc import (
@@ -349,7 +350,7 @@ def bench_wsi_compare(device, wsi_path, tome_r, batch_sizes, level, overlap, war
           f'  {os.path.basename(wsi_path)}')
     print('=' * 72)
 
-    wsi  = openslide.OpenSlide(wsi_path)
+    wsi  = SafeSlide(wsi_path)
     ds   = wsi.level_downsamples[level]
     mask = TissuesRegionsMask.from_wsi(wsi)
     wtc  = WsiTissuesContainer(wsi, ds=ds, level=level,
@@ -388,8 +389,8 @@ def bench_wsi(model, device, wsi_path, levels, overlaps, batch_sizes, dtypes, wa
     print(f'  Part 2 — WSI Pipeline  {os.path.basename(wsi_path)}')
     print('=' * 72)
 
-    wsi      = openslide.OpenSlide(wsi_path)
-    base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
+    wsi      = SafeSlide(wsi_path)
+    base_mpp = wsi.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
     ds_list  = wsi.level_downsamples
     n_levels = len(ds_list)
 

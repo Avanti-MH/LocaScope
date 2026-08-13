@@ -8,6 +8,8 @@ Sections:
   1. PatchGrid — layout counts, flat/unified indexing, offset metadata
   2. PatchInfo — for_query/for_wsi, to_level0(), grid offset coordinates
   3. Containers — QueryPatchContainer & TissuePatchContainer extraction, crop, real data
+  4. Scale — resolve_scale / from_ds: which level, which downsample, which
+     regions survive it. No model needed; the first two checks need no WSI.
 
 Usage:
   python utilities/test_modules/test_patching_lib.py
@@ -1270,6 +1272,159 @@ def run_patchinfo_section(size: int, out_dir: str) -> None:
     print(f'Saved {out}')
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  4. Scale resolution — which level, and which regions survive it
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# `WsiTissuesContainer.from_ds` answers two questions that used to be answered
+# by whoever called it, in three places, differently:
+#
+#     which level does this ds mean, and what is that level's OWN downsample
+#     which regions can host a tile at that downsample
+#
+# Getting either wrong is quiet. A ds that is 0.04% off the level's real one --
+# BRACS_1228 level 1 reports 4.00003 -- turns `int(w / ds)` into one missing
+# tile for a region sized near a multiple of 256, and the region then reaches
+# the encoder with an empty batch and dies inside torch.cat naming neither the
+# region nor the level. Skipping the filter entirely does the same thing.
+#
+# None of the checks below need a model, and the first three need no WSI at
+# all, so the whole section runs in about a second.
+
+
+def _mask_with_regions(regions_wh, slide_w, slide_h):
+    """A mask whose regions are placed by hand, with a token raster.
+
+    NOT test_tissues_regions_mask.make_trm: that derives regions from the
+    raster, which would need one mask pixel per level-0 pixel of the slide --
+    40 GB for a 200k x 200k canvas. Here only `tissue_regions` is read, so the
+    raster exists purely because `regions_view` shares rather than copies it.
+    The rebind semantics that makes that safe is tested where it belongs, in
+    test_tissues_regions_mask.validate_regions_view_isolation.
+    """
+    from TissuesRegionsMask import TissuesRegionsMask
+    regions, x = [], 0
+    for i, (w, h) in enumerate(regions_wh):
+        regions.append(TissueRegion(x=x, y=0, w=w, h=h, index=i))
+        x += w + 1000
+    return TissuesRegionsMask(
+        main_mask=np.ones((16, 16), dtype=bool),
+        # mask_mpp=0: nothing here converts through mpp, and a non-zero
+        # value would have to satisfy wsi_mpp * mask_ds, which for a
+        # 16-pixel raster over a whole slide is a meaningless number.
+        mask_ds_x=slide_w / 16, mask_ds_y=slide_h / 16, mask_mpp=0.0,
+        tissue_regions=regions, wsi_width=slide_w, wsi_height=slide_h,
+        wsi_mpp_x=0.25, wsi_mpp_y=0.25,
+        wsi_level_downsamples=[1.0, 4.0, 16.0])
+
+
+def validate_resolve_scale(wsi) -> None:
+    """resolve_scale must return a real level and THAT level's own downsample."""
+    print('\n[scale] resolve_scale')
+    from PatchingLib import WsiTissuesContainer
+
+    for bad in ({}, {'mpp': 0.5, 'ds': 2.0}):
+        try:
+            WsiTissuesContainer.resolve_scale(wsi, **bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'resolve_scale({bad}) should have raised')
+
+    downsamples = [float(d) for d in wsi.level_downsamples]
+    for level, ds_true in enumerate(downsamples):
+        # Ask for something 0.04% off -- the size of the gap that broke
+        # filter_patchable against from_mpp -- and demand the level's own value.
+        got_level, got_ds = WsiTissuesContainer.resolve_scale(
+            wsi, ds=ds_true * 1.0004)
+        assert got_level == level, (
+            f'ds {ds_true * 1.0004:.5f} resolved to level {got_level}, '
+            f'expected {level}')
+        assert got_ds == ds_true, (
+            f'level {level} reported ds {got_ds!r}, expected the slide\'s own '
+            f'{ds_true!r}')
+    print(f'  ok   {len(downsamples)} levels, each returns its own downsample')
+
+
+def validate_ds_gate(wsi) -> None:
+    """A ds that is on no level must be refused, level given or not."""
+    print('\n[scale] constructor rejects a ds no level has')
+    from PatchingLib import WsiTissuesContainer
+
+    downsamples = sorted(float(d) for d in wsi.level_downsamples)
+    bogus = (downsamples[0] + downsamples[1]) / 2 if len(downsamples) > 1 else 3.7
+    for kwargs in ({'ds': bogus}, {'ds': bogus, 'level': 0}):
+        try:
+            WsiTissuesContainer(wsi, tile_size=256, overlap=True, **kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(
+            f'WsiTissuesContainer({kwargs}) was accepted; ds {bogus} is on no '
+            f'level, and with `level` given this used to pass silently because '
+            f'the two were only compared when _find_level found something')
+    print(f'  ok   ds={bogus:g} refused both with and without an explicit level')
+
+
+def validate_container_contract(wsi, tile: int, level: int) -> None:
+    """What from_ds promises: a real level, its own ds, and usable regions."""
+    print(f'\n[scale] from_ds contract at level {level}')
+    from PatchingLib import WsiTissuesContainer
+
+    ds = float(wsi.level_downsamples[level])
+    width, height = wsi.level_dimensions[0]
+    # One region comfortably above the tile, one just below it, one far below.
+    big = int(min(width, height, tile * ds * 6))
+    mask = _mask_with_regions(
+        [(big, big), (int(tile * ds) - 1, int(tile * ds) - 1), (16, 16)],
+        slide_w=width, slide_h=height)
+    kept_before = len(mask.tissue_regions)
+
+    container = WsiTissuesContainer.from_ds(
+        wsi, ds * 1.0004, tile_size=tile, overlap=True, mask=mask)
+
+    assert container.level == level, (
+        f'from_ds picked level {container.level}, expected {level}')
+    assert container.ds == ds, (
+        f'container.ds is {container.ds!r}, not the level\'s own {ds!r}')
+    assert len(container.tissue_patches) == len(container.tissue_regions), (
+        f'{len(container.tissue_patches)} patch containers against '
+        f'{len(container.tissue_regions)} regions -- callers zip these')
+    for i, (region, patches) in enumerate(
+            zip(container.tissue_regions, container.tissue_patches)):
+        assert int(region.w / container.ds) >= tile, (
+            f'region {i} is {region.w} level-0 px, which is '
+            f'{int(region.w / container.ds)} px at ds {container.ds} -- under '
+            f'one {tile} px tile, so it should have been filtered out')
+        assert len(patches) > 0, (
+            f'region {i} survived the filter and still yielded no patches; '
+            f'this is what reaches gigapath_encode as an empty batch')
+    assert len(mask.tissue_regions) == kept_before, (
+        'from_ds narrowed the caller\'s mask instead of a view of it')
+    print(f'  ok   level {container.level}  ds {container.ds:g}  '
+          f'{len(container.tissue_regions)}/{kept_before} regions kept, '
+          f'all patchable')
+
+
+def run_scale_section(args, out_dir: str) -> None:
+    # The mask-side half of this -- regions_view isolation and the
+    # fine/coarse/fine round trip -- lives in test_tissues_regions_mask.py,
+    # since it is filter_patchable's rebind semantics rather than anything
+    # about a container.
+    print('\n=== Scale resolution ===')
+    if not os.path.exists(args.wsi):
+        print(f'  [SKIP] WSI not found, container checks skipped: {args.wsi}')
+        return
+    from SafeSlide import SafeSlide
+    wsi = SafeSlide(args.wsi)
+    try:
+        print(f'  {os.path.basename(args.wsi)}  {wsi.mpp_summary()}')
+        validate_resolve_scale(wsi)
+        validate_ds_gate(wsi)
+        validate_container_contract(wsi, args.rsize, args.openslide_level)
+    finally:
+        wsi.close()
+
+
 def run_containers_section(args, out_dir: str) -> None:
     print('\n=== QueryPatchContainer / TissuePatchContainer ===')
     size = args.size
@@ -1437,8 +1592,9 @@ def run_containers_section(args, out_dir: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description='PatchingLib comprehensive tests')
-    ap.add_argument('--only', nargs='+', choices=['grid', 'coords', 'containers'],
-                    default=['grid', 'coords', 'containers'],
+    ap.add_argument('--only', nargs='+',
+                    choices=['grid', 'coords', 'containers', 'scale'],
+                    default=['grid', 'coords', 'containers', 'scale'],
                     help='which sections to run (default: all)')
     ap.add_argument('--size', type=int, default=128, help='tile size (synthetic + coords)')
     ap.add_argument('--tile', type=int, default=None, help='PatchGrid tile size (default: --size)')
@@ -1462,6 +1618,8 @@ def main() -> int:
         run_patchinfo_section(args.size, out_dir)
     if 'containers' in sections:
         run_containers_section(args, out_dir)
+    if 'scale' in sections:
+        run_scale_section(args, out_dir)
     print('\nAll checks passed.')
     return 0
 

@@ -68,7 +68,7 @@ class TileSampler:
         self.rng = np.random.default_rng(seed)
         self.tiles: List[TileInfo] = []
 
-        base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
+        base_mpp = wsi.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
         self.level_mpps = [
             base_mpp * wsi.level_downsamples[lv]
             for lv in range(wsi.level_count)

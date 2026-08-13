@@ -17,6 +17,7 @@ import argparse
 import numpy as np
 import cv2
 import openslide
+from SafeSlide import SafeSlide
 
 
 def _windowed(gray):
@@ -88,8 +89,8 @@ def interp_mpp(pairs, q_val):
 
 
 def estimate(wsi_path, query_path, tile=None, samples=40):
-    wsi = openslide.OpenSlide(wsi_path)
-    base_mpp = wsi.properties.get("openslide.mpp-x")
+    wsi = SafeSlide(wsi_path)
+    base_mpp = wsi.base_mpp   # one definition, see SafeSlide.base_mpp
     if not base_mpp:
         raise ValueError("WSI 沒有 openslide.mpp-x metadata,無法建對照曲線")
     base_mpp = float(base_mpp)
@@ -126,8 +127,8 @@ def estimate_knn(wsi_path, query_path, tile=None, samples=40, k=3):
     then use distance-weighted KNN in log-MPP space to estimate MPP.
     Returns the estimated MPP (float).
     """
-    wsi = openslide.OpenSlide(wsi_path)
-    base_mpp = wsi.properties.get("openslide.mpp-x")
+    wsi = SafeSlide(wsi_path)
+    base_mpp = wsi.base_mpp   # one definition, see SafeSlide.base_mpp
     if not base_mpp:
         raise ValueError("WSI 沒有 openslide.mpp-x metadata")
     base_mpp = float(base_mpp)

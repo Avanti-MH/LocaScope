@@ -19,6 +19,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import openslide
+from SafeSlide import SafeSlide
 import torch
 
 from _paths import job_result_dir, setup_import_paths
@@ -177,10 +178,8 @@ def main():
         else ('cuda' if torch.cuda.is_available() else 'cpu')
     )
 
-    wsi = openslide.OpenSlide(args.wsi_path)
-    base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
-    if base_mpp == 0:
-        sys.exit('Error: WSI has no openslide.mpp-x metadata.')
+    wsi = SafeSlide(args.wsi_path)
+    base_mpp = wsi.base_mpp   # SafeSlide.base_mpp: mean of mpp-x/y, one definition
 
     test_mpps = [base_mpp * ds for ds in wsi.level_downsamples]
 

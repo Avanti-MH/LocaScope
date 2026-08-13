@@ -153,8 +153,7 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
              min_std: float = 8.0, rots=(0, 90)) -> dict:
     slide = SafeSlide(wsi_path)
     stem = Path(wsi_path).stem
-    base_mpp = (float(slide.properties.get('openslide.mpp-x', 0.25))
-                + float(slide.properties.get('openslide.mpp-y', 0.25))) / 2
+    base_mpp = slide.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
     ds = float(slide.level_downsamples[level])
     level_mpp = base_mpp * ds
 

@@ -20,10 +20,21 @@ per-call hot path is `.crop(x, y)`.
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Optional, Union
 
 import openslide
 from PIL import Image
+
+# utilities/ so SafeSlide is importable when this module is used on its own.
+_UTILITIES = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                 'utilities'))
+if _UTILITIES not in sys.path:
+    sys.path.insert(0, _UTILITIES)
+
+from SafeSlide import SafeSlide                                   # noqa: E402
 
 
 class QueryFromWSI:
@@ -35,12 +46,27 @@ class QueryFromWSI:
         mpp:         float = 0.25,
     ):
         # Accept both a path and an already-open handle so callers can share.
+        # Opening goes through SafeSlide, not openslide.OpenSlide: it is a
+        # subclass, so every consumer that type-checks against OpenSlide is
+        # unaffected, and it brings two things this class's callers need --
+        # a read that survives a MIRAX hole, and `nearest_level_for_downsample`,
+        # which WsiTissuesContainer.resolve_scale asks of whatever slide it is
+        # handed. `test_gigapath_slide_win_sim` passes `qfw.wsi` straight into
+        # GigaPathSlidingWinSimRot, so a raw handle here would surface there.
         if isinstance(wsi_or_path, openslide.OpenSlide):
+            if not isinstance(wsi_or_path, SafeSlide):
+                raise TypeError(
+                    'QueryFromWSI needs a SafeSlide, not a bare '
+                    'openslide.OpenSlide. It reads `base_mpp` off the handle, '
+                    'and downstream (WsiTissuesContainer.resolve_scale) reads '
+                    '`nearest_level_for_downsample` -- neither exists on the '
+                    'base class. Open with SafeSlide(path); it subclasses '
+                    'OpenSlide, so nothing else about the handle changes.')
             self.wsi_path = getattr(wsi_or_path, '_filename', '<open-handle>')
             self.wsi      = wsi_or_path
         else:
             self.wsi_path = wsi_or_path
-            self.wsi      = openslide.OpenSlide(wsi_or_path)
+            self.wsi      = SafeSlide(wsi_or_path)
 
         self.wh_ratio = wh_ratio
         self.MPixels  = MPixels
@@ -53,14 +79,12 @@ class QueryFromWSI:
         self.output_h = int(factor * h_r)
 
         # ── WSI base MPP ──────────────────────────────────────────────────────
-        props = self.wsi.properties
-        mx = props.get('openslide.mpp-x')
-        my = props.get('openslide.mpp-y')
-        if (mx is None or my is None) and 'aperio.MPP' in props:
-            mx = my = props['aperio.MPP']
-        if mx is None or my is None:
-            raise RuntimeError(f'{self.wsi_path}: WSI has no openslide.mpp-x / aperio.MPP')
-        self.base_mpp = (float(mx) + float(my)) / 2
+        # SafeSlide.base_mpp is THE definition. This class used to carry its own
+        # copy -- the mean of x and y with an aperio fallback -- while
+        # LocaScopePipeline and WsiTissuesContainer each carried a different one
+        # that read mpp-x alone. Every slide here has mpp-x != mpp-y, so those
+        # two answers differed on every slide.
+        self.base_mpp = self.wsi.base_mpp
 
         # ── Nearest pyramid level (matches load-time selection heuristic) ─────
         chosen_lv:  Optional[int]   = None
@@ -137,6 +161,49 @@ class QueryFromWSI:
         ).convert('RGB')
         if img.size != (self.output_w, self.output_h):
             img = img.resize((self.output_w, self.output_h), Image.LANCZOS)
+        return img
+
+    def crop_padded(self, x: int, y: int,
+                    margin: int = 0) -> Optional[Image.Image]:
+        """The FoV rect grown by `margin` OUTPUT px on every side.
+
+        This is what a shot needs when it does not rotate. The bounding square
+        exists only so that a rotation about the FoV centre keeps the rectangle
+        inside it; at angle 0 that headroom is 2.12x the area for nothing, paid
+        on the read and again on every op that runs before the crop.
+
+        The margin is still real: `apply_defocus`, `apply_chromatic` and
+        `apply_distortion` read a neighbourhood, and without it the sensor's own
+        edge pixels would fall back on a border rule. `pipeline.SENSOR_MARGIN`
+        is what the Camera passes here.
+
+        Returns None if the padded rectangle would fall off the WSI, matching
+        `crop` and `crop_bounding_square` -- the caller treats all three the
+        same way.
+        """
+        if margin <= 0:
+            return self.crop(x, y)
+
+        scale_l0 = self.rect_w_l0 / self.output_w      # level-0 px per output px
+        margin_l0 = int(round(margin * scale_l0))
+        margin_n = int(round(margin * self._read_w / self.output_w))
+
+        wsi_w, wsi_h = self.wsi.dimensions
+        origin_x = int(x) - margin_l0
+        origin_y = int(y) - margin_l0
+        if (origin_x < 0 or origin_y < 0
+                or origin_x + self.rect_w_l0 + 2 * margin_l0 > wsi_w
+                or origin_y + self.rect_h_l0 + 2 * margin_l0 > wsi_h):
+            return None
+
+        img = self.wsi.read_region(
+            (origin_x, origin_y),
+            self.chosen_level,
+            (self._read_w + 2 * margin_n, self._read_h + 2 * margin_n),
+        ).convert('RGB')
+        target = (self.output_w + 2 * margin, self.output_h + 2 * margin)
+        if img.size != target:
+            img = img.resize(target, Image.LANCZOS)
         return img
 
     def crop_bounding_square(self, x: int, y: int) -> Optional[Image.Image]:

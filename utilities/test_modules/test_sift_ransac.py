@@ -380,7 +380,7 @@ def main():
     print(f'  {query_pil.width}×{query_pil.height}  patches={query_qpc.grid.grid_rows}×{query_qpc.grid.grid_cols}')
 
     wsi      = qfwsi.wsi
-    base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
+    base_mpp = wsi.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
 
     # ── Step 0: Load model ────────────────────────────────────────────────────
     print('\n[0] Loading GigaPath model...')

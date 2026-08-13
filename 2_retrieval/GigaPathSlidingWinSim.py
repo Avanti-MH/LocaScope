@@ -20,11 +20,10 @@ from SafeSlide import SafeSlide
 from TissuesRegionsMask import TissuesRegionsMask
 from GigaPathFunc import gigapath_model, gigapath_encode
 
-def _sim_tensors(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
-    '''
-    Core unfold similarity: [R_q, C_q, D] × [R_w, C_w, D] → [H_out, W_out, R_q, C_q].
-    Returns empty tensor when wsi is smaller than query.
-    '''
+def _sim_tensors_unfold(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
+    '''The original implementation, kept as the reference the fast one is
+    measured against (test_gigapath_slide_win_sim step 0). Not called in
+    production -- see `_sim_tensors` for why.'''
     R_q, C_q, _ = q_grid.shape
     R_w, C_w, _ = wsi_grid.shape
     if R_w < R_q or C_w < C_q:
@@ -33,6 +32,52 @@ def _sim_tensors(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
     windows = wsi.unfold(1, R_q, 1).unfold(2, C_q, 1)        # [D, H_out, W_out, R_q, C_q]
     q       = q_grid.permute(2, 0, 1)
     return (windows * q[:, None, None, :, :]).sum(dim=0)      # [H_out, W_out, R_q, C_q]
+
+
+def _sim_tensors(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
+    '''
+    Core unfold similarity: [R_q, C_q, D] × [R_w, C_w, D] → [H_out, W_out, R_q, C_q].
+    Returns empty tensor when wsi is smaller than query.
+
+    out[h, w, r, c] = the cosine between query tile (r, c) and WSI tile
+    (h + r, w + c). Which is a dot product over D, and D is contracted FIRST
+    here -- that is the whole difference from `_sim_tensors_unfold`.
+
+    That version writes `windows * q` before summing. `unfold` is a view and
+    costs nothing, but the multiply materialises [D, H, W, R_q, C_q]: each WSI
+    tile appears in up to R_q*C_q windows, and every copy still carries all D
+    channels. On BRACS_1228 L0 region 0, 145x147 windows against a 4x5 query
+    kernel, that is 2.62 GB for an output of 1.71 MB -- 1536x, and 7680x for
+    the concatenated multi-slot descriptors bench_slidewin_pooling builds.
+
+    Contracting D first gives every (WSI tile, query tile) dot product once,
+    which is R_w*C_w*R_q*C_q numbers -- 1.79 MB for the same case. The windows
+    are then pure indexing: no arithmetic, R_q*C_q slice copies.
+
+    NOT bit-identical. einsum dispatches to a matmul, whose reduction order
+    differs from an elementwise multiply-then-sum; fp32 puts the gap around
+    1e-7. On CUDA it also depends on `torch.backends.cuda.matmul.allow_tf32`,
+    which nothing in this project sets: TF32 keeps 10 mantissa bits, so with it
+    enabled the gap is ~1e-3 instead. Step 0 of
+    test_gigapath_slide_win_sim.py measures both against a decoy rather than a
+    tolerance, and prints the flag.
+    '''
+    R_q, C_q, _ = q_grid.shape
+    R_w, C_w, _ = wsi_grid.shape
+    if R_w < R_q or C_w < C_q:
+        return torch.empty(0)
+    H_out, W_out = R_w - R_q + 1, C_w - C_q + 1
+
+    # [R_w, C_w, R_q, C_q]: every WSI tile against every query tile, once.
+    sims = torch.einsum('rcd,ijd->rcij', wsi_grid, q_grid)
+    out = torch.empty(H_out, W_out, R_q, C_q,
+                      dtype=sims.dtype, device=sims.device)
+    for r in range(R_q):
+        for c in range(C_q):
+            # Window (h, w) puts query tile (r, c) over WSI tile (h+r, w+c),
+            # so one query tile's whole heat map is a shifted view of `sims`.
+            out[:, :, r, c] = sims[r:r + H_out, c:c + W_out, r, c]
+    return out
 
 
 def SlidingWindowSimilarity(
@@ -223,8 +268,13 @@ class GigaPathSlidingWinSim:
         best_x = best_y = 0
         best_region_idx = 0
 
+        # The container's regions, not self.mask's. from_mpp filters the mask
+        # down to what can host a tile at this ds, so the sim_maps are per
+        # SURVIVING region while self.mask still lists them all. Zipping the
+        # wrong one lands every window on a neighbouring region's coordinates
+        # and raises nothing.
         for ri, (region, (main_sim, overlap_sim)) in enumerate(
-            zip(self.mask.tissue_regions, self.sim_maps)
+            zip(self.wsi_container.tissue_regions, self.sim_maps)
         ):
             hm = overlap_sim if use_overlap else main_sim
             if hm.numel() == 0:

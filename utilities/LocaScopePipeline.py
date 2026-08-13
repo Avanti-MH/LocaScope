@@ -36,7 +36,6 @@ Usage:
 
 from __future__ import annotations
 
-import copy
 import sys
 import traceback
 from dataclasses import dataclass
@@ -127,9 +126,10 @@ class LocaScopePipeline:
         self.refiner_min_inliers = refiner_min_inliers
         self.refiner_padding     = refiner_padding
 
-        self.base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
-        if self.base_mpp == 0:
-            raise ValueError('WSI missing openslide.mpp-x metadata')
+        # SafeSlide.base_mpp: the mean of mpp-x and mpp-y, with an aperio
+        # fallback. This line used to read mpp-x alone, which disagreed with
+        # QueryFromWSI on every slide in use.
+        self.base_mpp = wsi.base_mpp   # raises if the slide carries no mpp
 
         self.mask:      Optional[TissuesRegionsMask] = None
         self.estimator: Optional[GigaPathKnnEstiMpp] = None
@@ -160,29 +160,15 @@ class LocaScopePipeline:
         return self
 
     # ── Lazy per-level retriever cache ────────────────────────────────────────
-    def _level_mask(self, level: int) -> TissuesRegionsMask:
-        """A per-level view of the mask keeping only regions that can host a tile.
-
-        `filter_regions` gates on AREA only, so a long thin region (say
-        5000x100 px) survives it while being too short to yield a single
-        256 px tile — `extract_all` then returns zero patches and the encoder
-        raises on an empty batch.
-
-        This returns a shallow copy with its own `tissue_regions` list rather
-        than mutating `self.mask`: each cached retriever keeps a reference to
-        its mask and re-reads `mask.tissue_regions` in `find_best()`, so
-        filtering the shared mask in place would desync already-built
-        retrievers from their similarity maps.
-        """
-        ds      = self.wsi.level_downsamples[level]
-        tile_l0 = self.tile_size * ds
-        lvl = copy.copy(self.mask)
-        lvl._regions_history = []
-        lvl.tissue_regions = [
-            r for r in self.mask.tissue_regions
-            if r.w >= tile_l0 and r.h >= tile_l0
-        ]
-        return lvl
+    #
+    # `_level_mask` used to live here: a per-level copy of the mask keeping only
+    # regions that can host a tile. It was TissuesRegionsMask.filter_patchable
+    # written out a second time, because that method mutates in place and this
+    # needed a copy. Both halves moved into the library -- `regions_view()` for
+    # the copy, and `WsiTissuesContainer.from_ds` for the filter -- so the
+    # retriever now narrows the mask itself, at the ds it is actually going to
+    # build at. Which is the point: this class did not know that ds, it only
+    # knew the one it was asking for.
 
     def _get_retriever(self, level: int) -> Optional[GigaPathSlidingWinSimRot]:
         """Return cached rotation-aware retriever for this level, or None if unusable."""
@@ -190,26 +176,23 @@ class LocaScopePipeline:
             return self._retrievers[level]
 
         level_mpp = self.base_mpp * self.wsi.level_downsamples[level]
-        lvl_mask  = self._level_mask(level)
-        n_all, n_ok = len(self.mask.tissue_regions), len(lvl_mask.tissue_regions)
-        print(f'  [retriever L{level}] mpp={level_mpp:.4f}  '
-              f'regions {n_ok}/{n_all} patchable', flush=True)
-
-        if n_ok == 0:
-            reason = (f'no tissue region can host a {self.tile_size}px tile '
-                      f'at level {level}')
-            print(f'  [retriever L{level}] UNUSABLE: {reason}', flush=True)
-            self._retrievers[level] = None
-            self._retriever_reason[level] = reason
-            return None
+        print(f'  [retriever L{level}] mpp={level_mpp:.4f}', flush=True)
 
         try:
             r = GigaPathSlidingWinSimRot(
-                self.wsi, encoder=self.encoder, mask=lvl_mask,
+                self.wsi, encoder=self.encoder, mask=self.mask,
                 mpp=level_mpp, tile_size=self.tile_size,
                 overlap=self.retriever_overlap,
             )
             r.build_wsi_features()
+            # How many regions survived is only knowable after the build now,
+            # because the retriever filters at the ds it resolved rather than
+            # at the one asked for. An empty feature list is the same condition
+            # the old n_ok == 0 check caught, one step later and for the same
+            # reason.
+            print(f'  [retriever L{level}] regions '
+                  f'{len(r.regions)}/{len(self.mask.tissue_regions)} patchable '
+                  f'at ds={r.ds:g}', flush=True)
             if not r.wsi_features:
                 reason = 'build_wsi_features produced no feature maps'
                 print(f'  [retriever L{level}] UNUSABLE: {reason}', flush=True)

@@ -244,6 +244,66 @@ class SafeSlide(openslide.OpenSlide):
             openslide.PROPERTY_NAME_BACKGROUND_COLOR, _DEFAULT_BACKGROUND
         )
 
+    # ── the slide's own scale ────────────────────────────────────────────────
+
+    @property
+    def base_mpp(self) -> float:
+        """Level-0 micrometres per pixel. The mean of x and y.
+
+        THE definition. It was written out four times with three different
+        formulas, and they disagree on every slide in this project:
+
+            query_sim/source/wsi_query.py   (mpp-x + mpp-y)/2, aperio fallback
+            utilities/LocaScopePipeline.py  mpp-x only, default 0
+            utilities/PatchingLib.py        mpp-x only, default 0
+            (and resolve_scale was about to add a fourth)
+
+        All seven slides in use have mpp-x != mpp-y, so `QueryFromWSI` and
+        `WsiTissuesContainer` have been disagreeing about the slide's scale
+        everywhere -- and ds = mpp / base_mpp, so a disagreement here becomes a
+        disagreement in ds, which `int(w / ds)` turns into a whole missing tile
+        at a region boundary. That is the same mechanism behind three separate
+        failures logged on 2026-08-13.
+
+        The mean wins over mpp-x for two reasons. It is what QueryFromWSI uses,
+        and the query is the thing whose physical field of view everything else
+        exists to match -- so the container is aligned to the query rather than
+        the other way round. And a single number is already an approximation
+        when the pixel is not square: WsiTissuesContainer sizes both axes with
+        one ds, `int(w / ds)` and `int(h / ds)`. Under that approximation the
+        mean is the honest choice; mpp-x is one axis pretending to be both.
+
+        `aperio.MPP` is the fallback because some slides carry it and no
+        openslide.mpp-*; the two mpp-x-only versions would raise on those.
+        """
+        properties = self.properties
+        mx = properties.get(openslide.PROPERTY_NAME_MPP_X)
+        my = properties.get(openslide.PROPERTY_NAME_MPP_Y)
+        if (mx is None or my is None) and 'aperio.MPP' in properties:
+            mx = my = properties['aperio.MPP']
+        if mx is None or my is None:
+            raise RuntimeError(
+                f'{self._filename}: no openslide.mpp-x / mpp-y / aperio.MPP')
+        return (float(mx) + float(my)) / 2
+
+    def mpp_summary(self) -> str:
+        """'x=0.2517 y=0.2521 base=0.2519 (+0.16%)' -- what the mean cost.
+
+        Printed once where the scale is first resolved. Every slide here has
+        anisotropic pixels, so the size of that anisotropy decides whether
+        results from before this unification are still comparable: 0.04% is
+        noise, 4% is a different experiment.
+        """
+        properties = self.properties
+        mx = properties.get(openslide.PROPERTY_NAME_MPP_X)
+        my = properties.get(openslide.PROPERTY_NAME_MPP_Y)
+        if mx is None or my is None:
+            return f'base={self.base_mpp:.4f} (from aperio.MPP)'
+        mx, my = float(mx), float(my)
+        base = (mx + my) / 2
+        return (f'x={mx:.4f} y={my:.4f} base={base:.4f} '
+                f'({abs(my - mx) / base * 100:+.2f}% anisotropy)')
+
     # ── choosing a level ─────────────────────────────────────────────────────
     #
     # openslide offers one rule, get_best_level_for_downsample, and it answers

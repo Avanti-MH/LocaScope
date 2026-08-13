@@ -218,25 +218,67 @@ def validate_level_converter():
 
 def validate_mpp_converter():
     """
-    mask_mpp=8.0. Input at mpp=2.0 (4× finer than mask).
-    x_at_mpp2=40 → x_at_mask = 40 * 2.0 / 8.0 = 10
+    wsi_mpp=0.5, mask_ds=4 -> a mask pixel is 2.0 um, so mask_mpp must be 2.0.
+    The fixture used to say 8.0, which is a mask pixel claiming two sizes at
+    once; the constructor refuses that now.
+
+    _mppCoordinate_converter goes via level-0 rather than straight to mask
+    coordinates, so the arithmetic is two steps:
+
+        x0   = 40 * 2.0 / 0.5 = 160    level-0 px
+        col  = 160 / 4.0      = 40     mask px
+
+    Both branches of `base_x = self.wsi_mpp_x or self.mask_mpp` are exercised:
+    the first with wsi_mpp set, the second with it zeroed, and they must agree
+    whenever mask_mpp is consistent -- which is the whole point of the
+    constructor's check.
     """
     mask = np.zeros((50, 50), dtype=bool)
     trm = TissuesRegionsMask(
-        main_mask=mask, mask_ds_x=4.0, mask_ds_y=4.0, mask_mpp=8.0,
+        main_mask=mask, mask_ds_x=4.0, mask_ds_y=4.0, mask_mpp=2.0,
         tissue_regions=[], wsi_width=200, wsi_height=200,
         wsi_mpp_x=0.5, wsi_mpp_y=0.5, wsi_level_downsamples=[1.0],
     )
     col, row = trm._mppCoordinate_converter(40.0, 24.0, mpp=2.0)
-    assert col == 10, f'col={col}'
-    assert row ==  6, f'row={row}'
+    assert col == 40, f'col={col}'
+    assert row == 24, f'row={row}'
 
-    # Tuple mpp
+    # Tuple mpp: y at 4.0 um/px is twice as far in level-0 as x at 2.0.
     col2, row2 = trm._mppCoordinate_converter(40.0, 24.0, mpp=(2.0, 4.0))
-    assert col2 == 10, f'col2={col2}'
-    assert row2 == 12, f'row2={row2}'
+    assert col2 == 40, f'col2={col2}'
+    assert row2 == 48, f'row2={row2}'
 
-    print('[PASS] _mppCoordinate_converter: scalar and tuple mpp correct')
+    # The `or` fallback, with no wsi mpp at all. It must land in the SAME
+    # place: mask_mpp / mask_ds is the level-0 pixel size, so the two routes
+    # differ only in where that number came from. This branch had no coverage
+    # whatsoever -- every fixture set wsi_mpp_x, so `or` never reached it --
+    # and it was wrong by exactly mask_ds, agreeing with _mppLength_converter
+    # on the size of a patch while disagreeing on its position.
+    fallback = TissuesRegionsMask(
+        main_mask=mask, mask_ds_x=4.0, mask_ds_y=4.0, mask_mpp=2.0,
+        tissue_regions=[], wsi_width=200, wsi_height=200,
+        wsi_mpp_x=0.0, wsi_mpp_y=0.0, wsi_level_downsamples=[1.0],
+    )
+    col3, row3 = fallback._mppCoordinate_converter(40.0, 24.0, mpp=2.0)
+    assert (col3, row3) == (col, row), (
+        f'fallback gave {(col3, row3)}, wsi branch gave {(col, row)}; '
+        f'the two describe one conversion and must agree')
+
+    # And the check itself: a mask pixel cannot be two sizes.
+    try:
+        TissuesRegionsMask(
+            main_mask=mask, mask_ds_x=4.0, mask_ds_y=4.0, mask_mpp=8.0,
+            tissue_regions=[], wsi_width=200, wsi_height=200,
+            wsi_mpp_x=0.5, wsi_mpp_y=0.5, wsi_level_downsamples=[1.0],
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('mask_mpp=8.0 with wsi_mpp 0.5 x ds 4.0 (=2.0) '
+                             'should have been refused')
+
+    print('[PASS] _mppCoordinate_converter: both branches agree, '
+          'inconsistent mask_mpp refused')
 
 
 # ── 7. loc / levelloc / mpploc ────────────────────────────────────────────────
@@ -248,10 +290,15 @@ def validate_loc_methods():
     """
     mask = np.zeros((20, 20), dtype=bool)
     mask[8:12, 8:12] = True
+    # wsi_mpp deliberately left at 0 so `base = self.wsi_mpp_x or self.mask_mpp`
+    # takes the mask_mpp branch, which is what the mpploc arithmetic below is
+    # written against. Setting both is what made this fixture ambiguous: with
+    # wsi_mpp_x=0.5 the converter went via level-0 and landed at column 32 on a
+    # 20-column mask, while the comment still described column 8.
     trm = TissuesRegionsMask(
         main_mask=mask, mask_ds_x=2.0, mask_ds_y=2.0, mask_mpp=4.0,
         tissue_regions=[], wsi_width=40, wsi_height=40,
-        wsi_mpp_x=0.5, wsi_mpp_y=0.5, wsi_level_downsamples=[1.0, 2.0],
+        wsi_mpp_x=0.0, wsi_mpp_y=0.0, wsi_level_downsamples=[1.0, 2.0],
     )
 
     # loc: direct mask coords
@@ -337,6 +384,92 @@ def validate_origin_offset():
 
     print('[PASS] origin offset: regions absolute, lengths unshifted, '
           'no negative-index read from the far corner')
+
+
+# ── 7c. regions_view: filtering without touching the caller's mask ───────────
+#
+# `regions_view()` exists because a per-level filter is a per-CALLER view, not
+# a change to the mask. WsiTissuesContainer.from_ds narrows the regions for the
+# level it is about to build, and the caller -- LocaScopePipeline, which hands
+# one mask to a retriever per level -- must get its mask back untouched.
+#
+# What makes the shallow copy safe is subtle enough to be worth pinning:
+#
+#   tissue_regions     filter_patchable does `self.tissue_regions = [...]`, a
+#                      REBIND. It writes into the view's slot only.
+#   _regions_history   _snapshot() does `.append()`, which mutates the shared
+#                      list IN PLACE, so regions_view must hand over a fresh one.
+#
+# The first is the load-bearing one, and it is load-bearing by accident of how
+# that line happens to be written. Turn it into `self.tissue_regions[:] = [...]`
+# and nothing raises -- some levels just quietly lose regions.
+
+
+def _sized_regions_mask(tile_l0_sizes):
+    """A mask whose regions are exactly the given square sizes in level-0 px.
+
+    mask_ds 1.0 makes mask pixels level-0 pixels, so a blob of side N becomes a
+    region of side N and the filter threshold can be reasoned about directly.
+    """
+    pitch = max(tile_l0_sizes) + 1000
+    width = pitch * len(tile_l0_sizes)
+    raster = make_mask_with_blobs(
+        max(tile_l0_sizes), width,
+        [(0, i * pitch, n, n) for i, n in enumerate(tile_l0_sizes)])
+    return make_trm(raster, 1.0, 1.0)
+
+
+def validate_regions_view_isolation(tile: int = 256):
+    """A filter on the view must leave the original's regions and undo stack."""
+    trm = _sized_regions_mask([300, 2000, 100])
+    before = [(r.x, r.y, r.w, r.h) for r in trm.tissue_regions]
+    history_before = len(trm._regions_history)
+
+    view = trm.regions_view()
+    view.filter_patchable(tile, 1.0)
+
+    after = [(r.x, r.y, r.w, r.h) for r in trm.tissue_regions]
+    assert after == before, (
+        f'the caller\'s regions changed: {len(before)} -> {len(after)}. '
+        f'filter_patchable must rebind tissue_regions, not mutate it in place')
+    assert len(trm._regions_history) == history_before, (
+        f'the caller\'s undo stack grew by '
+        f'{len(trm._regions_history) - history_before}; regions_view must give '
+        f'the view its own _regions_history, since _snapshot appends in place')
+    assert len(view.tissue_regions) == 2, (
+        f'at ds=1 the 300 and 2000 regions should survive a {tile} px tile, '
+        f'got {len(view.tissue_regions)}')
+    print('[PASS] regions_view: original regions and undo stack untouched')
+
+
+def validate_regions_view_roundtrip(tile: int = 256):
+    """fine -> coarse -> fine must return the fine answer.
+
+    Filtering is monotone in ds, so a coarse pass that reached the ORIGINAL
+    would leave the second fine pass unable to see what it dropped. This is the
+    check that fails the day the rebind above becomes an in-place edit.
+    """
+    trm = _sized_regions_mask([300, 2000, 100])
+
+    def survivors(ds):
+        view = trm.regions_view()
+        view.filter_patchable(tile, ds)
+        return sorted(r.w for r in view.tissue_regions)
+
+    # 300 clears ds=1 (needs 256) and fails ds=4 (needs 1024); 2000 clears both;
+    # 100 clears neither -- so the coarse pass is guaranteed to drop something,
+    # without which the round trip would prove nothing.
+    fine_first = survivors(1.0)
+    coarse     = survivors(4.0)
+    fine_again = survivors(1.0)
+
+    assert fine_first == [300, 2000], f'ds=1 kept {fine_first}'
+    assert coarse == [2000], f'ds=4 kept {coarse}'
+    assert fine_again == fine_first, (
+        f'ds=1 gave {fine_first} before the coarse pass and {fine_again} after; '
+        f'the coarse filter reached the original mask')
+    print(f'[PASS] regions_view round trip: ds1 {fine_first} -> ds4 {coarse} '
+          f'-> ds1 {fine_again}')
 
 
 def validate_merge_overlapping():
@@ -710,6 +843,7 @@ def report_bounds(wsi, path: str) -> tuple:
     '''Print the canvas / scanned / padding numbers. Returns the bounds tuple.'''
     bx, by, bw, bh = bounds = wsi_bounds(wsi)
     W, H = wsi.dimensions
+    # mpp-x alone, NOT SafeSlide.base_mpp: printed as a label, never computed with.
     mpp  = float(wsi.properties.get('openslide.mpp-x', 0)) or float('nan')
     frac = (bw * bh) / (W * H)
     print(f'\n[bounds] {os.path.basename(path)}')
@@ -896,6 +1030,8 @@ def main():
     validate_loc_methods()
     validate_origin_offset()
     validate_merge_overlapping()
+    validate_regions_view_isolation()
+    validate_regions_view_roundtrip()
 
     # HEST model loaded once, shared across all sub-tests
     hest_method = None

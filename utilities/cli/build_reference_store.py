@@ -219,7 +219,7 @@ def build_slide(wsi_path, args, cfg, model, spec, device, hest_method,
               f'({time.time() - t0:.0f}s)', flush=True)
 
         sampler = RS.ReferenceSampler(geoms, cfg, mask=mask, inherit=inherit)
-        base_mpp = float(slide.properties.get('openslide.mpp-x', 0))
+        base_mpp = slide.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
 
         for lv in sorted(geoms):
             g = geoms[lv]

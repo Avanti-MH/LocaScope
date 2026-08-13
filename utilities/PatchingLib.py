@@ -1018,23 +1018,81 @@ class TissuePatchContainer(PatchContainerBase):
 
 
 class WsiTissuesContainer():
+    '''Every tile of every usable tissue region, at ONE pyramid level.
+
+    What a finished container guarantees, and what callers may rely on:
+
+        .level            a level that exists on this slide
+        .ds               == float(wsi.level_downsamples[level]), the level's
+                             OWN downsample, never the one that was requested
+        .tissue_regions   every one can host at least one tile at .ds
+        .tissue_patches   parallel to .tissue_regions, same order
+
+    The third line is the one that moved. "Which regions are usable at this
+    scale" used to be the caller's job, and three callers got it wrong in
+    three different ways -- filtering at the estimated ds while building at the
+    ground-truth one, copying the filter's logic out of TissuesRegionsMask, or
+    forgetting it entirely and dying inside torch.cat on an empty batch. It is
+    answered here now, by `from_ds`, because this is the only object that knows
+    the ds for certain.
+
+    CURRENT LIMITATION: `ds` must be a level that exists on the slide. There is
+    no resampling, so a request between levels is snapped to the nearest one
+    (and said so in the log). `from_mpp_continuous` in log/TODO.log is the plan
+    for lifting this; it changes what a tile IS, so it is deliberately not part
+    of the scale work.
+    '''
+
+    @staticmethod
+    def resolve_scale(wsi, *, mpp: Optional[float] = None,
+                      ds: Optional[float] = None) -> Tuple[int, float]:
+        '''A requested scale -> (level, that level's own downsample).
+
+        Exactly one of `mpp` / `ds`. Accepting both would mean deciding which
+        wins, and a caller who passes two is telling you they are not sure --
+        that is a bug to surface, not an ambiguity to resolve.
+
+        No I/O, so a caller who wants the level before deciding whether to
+        build -- a features cache keyed on ds, say -- can ask cheaply.
+
+        Needs a SafeSlide: `nearest_level_for_downsample` and `base_mpp` are
+        both defined there, and both are things this project has previously
+        written out by hand in several places with several different answers.
+        '''
+        if (mpp is None) == (ds is None):
+            raise ValueError('give exactly one of mpp / ds')
+        if ds is None:
+            ds = mpp / wsi.base_mpp
+        level = wsi.nearest_level_for_downsample(ds)
+        return level, float(wsi.level_downsamples[level])
+
     def __init__(self, wsi: openslide.OpenSlide, ds: float = 1.0, level: int = None, tile_size: int = 256, overlap: bool = True, mask: Optional[TissuesRegionsMask] = None):
         self.wsi: openslide.OpenSlide = wsi
         self.ds: float = ds
         self.mask: Optional[TissuesRegionsMask] = mask
         self.tile_size: int = tile_size
-        
+
         if level is not None:
             self.level = level
             found = WsiTissuesContainer._find_level(wsi, ds)
-            if found is not None and found != level:
+            # `found is None` means the ds matches no level at all. That used to
+            # pass silently whenever `level` was given -- the two were only
+            # compared when both existed -- and then every size below was
+            # computed as int(region.w / ds) against a scale the slide does not
+            # have. Both halves of the contract are checked now.
+            if found is None:
+                raise ValueError(
+                    f'DS {ds} matches no level on this slide '
+                    f'(downsamples: {[float(d) for d in wsi.level_downsamples]}). '
+                    f'Use from_ds / from_mpp, which snap to a real level.')
+            if found != level:
                 raise ValueError(f'Level {level} does not match DS {ds} (found level {found})')
         else:
             found = WsiTissuesContainer._find_level(wsi, ds)
             if found is None:
                 raise ValueError(f'No level found for the given DS: {ds}')
             self.level = found
-        
+
         self.tissue_regions: list[TissueRegion] = []
         if mask is None:
             self.tissue_regions = [
@@ -1071,31 +1129,56 @@ class WsiTissuesContainer():
         return None
 
     @classmethod
+    def from_ds(cls, wsi: openslide.OpenSlide, ds: float, tile_size: int = 256,
+                overlap: bool = True,
+                mask: Optional[TissuesRegionsMask] = None,
+                verbose: bool = True):
+        '''Build at the level nearest `ds`, keeping only regions usable there.
+
+        The one place a requested scale turns into a level AND a region list,
+        so the two cannot disagree. Two things happen that a direct call to the
+        constructor does not do:
+
+          the level's OWN downsample replaces the requested one. They differ by
+          up to the 1e-3 that `_find_level` calls "close enough" -- BRACS_1228
+          level 1 reports 4.00003 -- and `int(w / ds)` turns that into a whole
+          missing tile for a region sized near a multiple of the tile.
+
+          the mask is narrowed to regions that can host a tile at that ds, on a
+          `regions_view()` so the caller's mask is untouched. Callers used to do
+          this themselves; when they filtered at a different ds the answer was a
+          region with zero patches, and `gigapath_encode` dies on an empty batch
+          inside torch.cat naming neither the region nor the level.
+
+        `filter_regions` and `merge_overlapping` are NOT applied. They depend on
+        geometry alone, not on ds, so they belong to whoever built the mask --
+        and merging must happen BEFORE this filter, since two fragments that are
+        each too small can merge into one region that is not.
+        '''
+        level, ds_actual = cls.resolve_scale(wsi, ds=ds)
+        if verbose and ds_actual != ds:
+            print(f'  [WsiTissues] ds {ds:.5f} -> level {level} '
+                  f'(ds {ds_actual:.5f})', flush=True)
+        view = None
+        if mask is not None:
+            view = mask.regions_view()
+            view.filter_patchable(tile_size, ds_actual)
+        return cls(wsi, ds=ds_actual, level=level, tile_size=tile_size,
+                   overlap=overlap, mask=view)
+
+    @classmethod
     def from_mpp(cls, wsi: openslide.OpenSlide, mpp: float, tile_size: int = 256, overlap: bool = True, mask: Optional[TissuesRegionsMask] = None):
-        # TODO: 目前要求 mpp 必須精確對應到某個 WSI level（透過 _find_level），不然丟 ValueError。
-        #   這使 pipeline 依賴 MPP 估測器輸出 level-bound 的離散值（如 GigaPathKnnEstiMpp）。
-        #   若未來使用能輸出連續 MPP 的估測器，需新增 from_mpp_continuous classmethod：
-        #
-        #     ds_target = mpp / base_mpp
-        #     level = wsi.get_best_level_for_downsample(ds_target)
-        #     ds_level = wsi.level_downsamples[level]
-        #     scale = ds_level / ds_target          # resize 比例：level-n px → target px
-        #
-        #     # 對每個 tissue region：
-        #     #   1. wsi.read_region((r.x, r.y), level, (int(r.w/ds_level), int(r.h/ds_level)))
-        #     #   2. cv2.resize(img, new_size, interpolation=INTER_AREA if scale<1 else INTER_LINEAR)
-        #     #   3. TissuePatchContainer(resized_img, region=r, img_ds=ds_target, is_crop=True)
-        #
-        #     resize 後 img_ds = ds_target，PatchGrid / SiftRansacLocalizer 的座標計算不需另外
-        #     校正，因為 img 已精確對應 target resolution。
-        base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
-        if base_mpp == 0:
-            raise ValueError('WSI has no openslide.mpp-x metadata.')
-        ds = mpp / base_mpp
-        level = cls._find_level(wsi, ds)
-        if level is None:
-            raise ValueError(f'No level found for the given MPP: {mpp}')
-        return cls(wsi, ds=ds, level=level, tile_size=tile_size, overlap=overlap, mask=mask)
+        '''`from_ds` with the scale given in micrometres per pixel.
+
+        mpp and ds are the same statement in different units, so this converts
+        and delegates rather than repeating the resolution. `wsi.base_mpp` is
+        the conversion -- the mean of mpp-x and mpp-y, which used to be written
+        out here as mpp-x alone and disagreed with QueryFromWSI on every slide
+        in this project.
+        '''
+        level, ds_actual = cls.resolve_scale(wsi, mpp=mpp)
+        return cls.from_ds(wsi, ds_actual, tile_size=tile_size,
+                           overlap=overlap, mask=mask)
 
 
     

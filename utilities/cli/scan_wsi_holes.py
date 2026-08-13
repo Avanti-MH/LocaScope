@@ -135,6 +135,9 @@ def slide_rect(path: str, whole_canvas: bool) -> tuple:
     wsi = openslide.OpenSlide(path)
     W0, H0 = wsi.dimensions
     p = wsi.properties
+    # mpp-x alone, NOT SafeSlide.base_mpp: this tool opens raw on purpose --
+    # it hunts holes, and SafeSlide exists to survive them -- and it wants nan
+    # rather than a raise when the slide carries no mpp.
     mpp = float(p.get('openslide.mpp-x', 0)) or float('nan')
     n_levels = wsi.level_count
     dss = [float(d) for d in wsi.level_downsamples]
