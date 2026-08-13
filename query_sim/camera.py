@@ -37,7 +37,7 @@ if _UTILITIES not in sys.path:
 from TissuesRegionsMask import TissuesRegionsMask   # noqa: E402
 
 from config           import DomainGapConfig      # noqa: E402
-from pipeline         import simulate_with_gt     # noqa: E402
+from pipeline         import simulate_with_gt, SENSOR_MARGIN   # noqa: E402
 from source.wsi_query import QueryFromWSI         # noqa: E402
 
 
@@ -155,16 +155,46 @@ class Camera:
         img, _ = self.capture_with_gt(x, y, rotation=rotation)
         return img
 
+    def _rotates(self, rotation: Optional[float]) -> bool:
+        """Will this exposure turn the slide at all?
+
+        Decided BEFORE the read, so it cannot look at the sampled `rot_deg` --
+        `_sample_params` has not run yet, and moving it earlier would only
+        replace one ordering question with another. It answers from what is
+        already fixed: an explicit `rotation` argument if there is one,
+        otherwise every angle the cfg could draw. Any jitter at all means the
+        angle is unknown, so the answer is yes.
+
+        Conservative on purpose. Saying "no" when the shot does rotate would
+        crop content away; saying "yes" when it does not only costs the wider
+        read, which is what every shot paid before.
+        """
+        if self.cfg.angle_jitter_deg:
+            return True
+        if rotation is not None:
+            return float(rotation) % 360.0 != 0.0
+        return any(float(a) % 360.0 != 0.0 for a in self.cfg.rotation_choices)
+
     def capture_with_gt(
         self, x: int, y: int, rotation: Optional[float] = None,
     ) -> Tuple[Optional[np.ndarray], Optional[dict]]:
-        raw = self.qfw.crop_bounding_square(x, y)
+        # The bounding square is headroom for rotating about the FoV centre --
+        # side = the rect's diagonal, so 2.12x its area. A shot that does not
+        # rotate needs none of it: the rect plus the sensor margin is the whole
+        # input, and both the read and every op before the crop shrink by that
+        # factor. bench_offgrid_score pins rotation at 0 for all 1089
+        # displacements of a grid point, so this is its entire input volume.
+        if self._rotates(rotation):
+            raw = self.qfw.crop_bounding_square(x, y)
+        else:
+            raw = self.qfw.crop_padded(x, y, margin=SENSOR_MARGIN)
         if raw is None:
             return None, None
         arr, params = simulate_with_gt(
             raw, cfg=self.cfg, rng=self._py_rng, rotation=rotation,
+            output_wh=(self.qfw.output_w, self.qfw.output_h),
         )
-        return self._center_crop_to_output(arr), params
+        return arr, params
 
     # ── Where did this output pixel come from? ───────────────────────────────
 
@@ -238,15 +268,16 @@ class Camera:
                     rot_deg=rot_deg, scale=scale)
                 yield r, c, u, v, cx, cy
 
-    def _center_crop_to_output(self, arr: np.ndarray) -> np.ndarray:
-        """Center-crop a bounding-square augment output back to (output_h, output_w)."""
-        cw, ch = self.qfw.output_w, self.qfw.output_h
-        h, w = arr.shape[:2]
-        if (w, h) == (cw, ch):
-            return arr
-        x0 = (w - cw) // 2
-        y0 = (h - ch) // 2
-        return arr[y0:y0 + ch, x0:x0 + cw]
+    # The centre crop used to live here and run after the whole augment chain.
+    # It now happens inside `pipeline._apply_params`, straight after the scene
+    # geometry, because the ops that follow measure their geometry against the
+    # frame they are handed -- the vignette's falloff and the lens distortion's
+    # normalisation were both being taken from the oversized bounding square
+    # rather than from the sensor. Camera passes the sensor size as `output_wh`
+    # and receives an image already cropped to it.
+    #
+    # Every crop involved is still centred on the FoV centre, so
+    # `output_to_level0` below is unaffected.
 
     # ── Random-exposure iterator (requires mask) ─────────────────────────────
     def __iter__(self) -> Iterator[CameraShot]:
@@ -304,12 +335,19 @@ class Camera:
                     return
                 continue
             x, y = pos
-            raw = self.qfw.crop_bounding_square(x, y)
+            # Same rule as capture_with_gt: the square is only read when the
+            # exposure rotates. `_sample_position` still reserves the square's
+            # padding either way, which merely rejects a few positions that the
+            # narrower read could have used -- conservative, never wrong.
+            if self._rotates(None):
+                raw = self.qfw.crop_bounding_square(x, y)
+            else:
+                raw = self.qfw.crop_padded(x, y, margin=SENSOR_MARGIN)
             if raw is None:
                 crop_fail += 1
                 if crop_fail % WARN_EVERY == 0:
-                    print(f'  [Camera warn] crop_bounding_square out-of-WSI x{crop_fail} '
-                          f'(bounding square hitting WSI edge at last sampled (x,y))',
+                    print(f'  [Camera warn] read out-of-WSI x{crop_fail} '
+                          f'(FoV read hitting WSI edge at last sampled (x,y))',
                           flush=True)
                 if self.max_consecutive_fail and crop_fail >= self.max_consecutive_fail:
                     print(f'  [Camera] GIVE UP after {crop_fail} consecutive out-of-WSI '
@@ -318,11 +356,13 @@ class Camera:
                           f'WSI edge', flush=True)
                     return
                 continue
-            arr, params = simulate_with_gt(raw, cfg=self.cfg, rng=self._py_rng)
+            arr, params = simulate_with_gt(
+                raw, cfg=self.cfg, rng=self._py_rng,
+                output_wh=(self.qfw.output_w, self.qfw.output_h))
             pos_fail = 0
             crop_fail = 0
             yield CameraShot(
-                image  = self._center_crop_to_output(arr),
+                image  = arr,
                 gt_x   = x,
                 gt_y   = y,
                 params = params,

@@ -27,7 +27,7 @@ from config           import DomainGapConfig                                    
 from camera           import Camera                                              # noqa: E402
 from source.wsi_query import QueryFromWSI                                        # noqa: E402
 from augment.color    import apply_color, apply_color_temp, apply_brightness_contrast, apply_jpeg  # noqa: E402
-from augment.field    import apply_field_mask, apply_vignette, apply_stage_shift                   # noqa: E402
+from augment.field    import apply_vignette, apply_stage_shift                                     # noqa: E402
 from augment.lens     import apply_distortion, apply_defocus, apply_chromatic                      # noqa: E402
 from augment.geometry import apply_rotation, apply_scale                         # noqa: E402
 from augment.noise    import apply_noise                                         # noqa: E402
@@ -67,8 +67,6 @@ def _print_capture_params(cfg, params: dict):
           f'| fixed cfg.noise_sigma={cfg.noise_sigma}')
     print(f'  jpeg_quality  = {params["jpeg_quality"]}      '
           f'| fixed cfg.jpeg_quality={cfg.jpeg_quality}')
-    print(f'  field_mask    = {params["field_mask"]}   '
-          f'| fixed cfg.field_mask={cfg.field_mask}')
     print(f'  saturation    = {params["saturation"]}     '
           f'| fixed cfg.saturation={cfg.saturation}')
 
@@ -115,7 +113,6 @@ def main():
         ('distortion',            apply_distortion(img.copy())),
         ('defocus',               apply_defocus(img.copy())),
         ('chromatic',             apply_chromatic(img.copy())),
-        ('field_mask',            apply_field_mask(img.copy())),
         ('vignette',              apply_vignette(img.copy())),
         ('stage_shift',           apply_stage_shift(img.copy())),
         ('color',                 apply_color(img.copy())),

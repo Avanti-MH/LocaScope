@@ -49,13 +49,15 @@ query_sim/
 │
 ├── augment/                   ← 個別 augmentation function 集合
 │   ├── color.py               ← color、color_temp、brightness / contrast、jpeg
-│   ├── field.py               ← vignette、field_mask、stage_shift
+│   ├── field.py               ← vignette、stage_shift
 │   ├── lens.py                ← distortion、defocus、chromatic
 │   ├── geometry.py            ← rotation (0/90/180/270 + jitter)、scale     ← 新
 │   └── noise.py               ← gaussian noise
 │
 ├── pipeline.py                ← simulate_microscope_photo(img, cfg) 串接所有 augment
-│                                simulate_with_gt(cfg) → (img, FOVRecord)
+│                                simulate_with_gt(cfg, output_wh) → (img, FOVRecord)
+│                                兩段式：場景階段決定什麼落到感測器上，裁切，
+│                                然後感測器階段。見下方「op 的順序」
 │
 ├── generator.py               ← 批量生成 loop（tissue retry、stratify、CSV 寫入）
 │
@@ -128,7 +130,6 @@ class DomainGapConfig:
 
     # Field
     vignette_range:  Tuple[float, float] = (0.15, 0.45)
-    field_mask:      bool                = False
     stage_shift_max: int                 = 3
 
     # Lens
@@ -153,7 +154,6 @@ class DomainGapConfig:
 | color / brightness / contrast | **query_sim** (`cv2` HSV) | HSV 空間合理 |
 | color_temp | **synth_fov** | query_sim 沒有 |
 | vignette | **query_sim** (Gaussian) | 比 r² polynomial 平滑 |
-| field_mask | **query_sim** | synth_fov 沒有 |
 | stage_shift | **query_sim** | synth_fov 沒有 |
 | lens distortion | **query_sim** (`cv2.remap`) | sub-pixel accurate |
 | defocus | **query_sim** (disk kernel) | 更真實 |
@@ -283,3 +283,69 @@ Step 9  刪除 synth_fov_generator.py（若存在於 repo 內）
 
 - `PatchingLib` crop() TODO(A/B) — sub-container 語義、overlap 對齊
 - retrieval rotation-aware TODO — 需要本 package 產出旋轉 GT 資料集才能 benchmark
+
+
+---
+
+## op 的順序，以及它為什麼是兩段
+
+`_apply_params` 把 12 個 op 分成兩段，分界是**裁切到感測器尺寸**。分在哪一段由
+一件事決定：這個 op 的幾何是以哪個畫面為基準量出來的。
+
+```
+── 場景階段：決定什麼落到感測器上 ────────────────
+   crop_bounding_square        讀 1767² = FoV 對角線見方
+   rotation                    旋轉需要畫面外的像素轉進來
+   scale
+   stage_shift                 載物台抖動 = 重新取景
+   ↓
+   裁切到 output + SENSOR_MARGIN
+   ↓
+── 感測器階段：光學與感測器對這張影像做了什麼 ──────
+   color / brightness / color_temp
+   distortion                  ┐ 讀鄰域，需要 margin
+   defocus                     │
+   chromatic                   ┘
+   ↓
+   裁切到精確的 output（丟掉 margin）
+   ↓
+   vignette                    逐像素，要拿到精確的感測器畫面
+   noise
+   jpeg                        8×8 區塊對齊交付的影像
+```
+
+**為什麼裁切要提前。** 以前裁切在最後一步，所有 op 都跑在 1767² 上。但
+`vignette` 的 σ、`distortion` 的正規化座標、`jpeg` 的區塊都是從「手上這個畫面」
+算出來的 —— 跑在過大的畫面上，等於用錯誤的基準。實際後果：輸出只看到暈影曲線
+的中央 53%，所以實際暈影比 `vignette_range` 說的弱。
+
+裁切提前同時讓 11 個 op 少處理 2.12 倍的像素，但那是附帶效果，不是動機。
+
+**`field_mask` 已移除。** 它的圓半徑是 `min(w,h)//2 = 883`，而 1440×1024 輸出
+的半對角線是 883.48 —— 正方形的內切圓恆等於矩形的外接圓，因為正方形的邊長就是
+矩形的對角線。所以它畫的圓正好把整個輸出框住，裁切之後貢獻 0 個像素。真實照片
+的視野本來就是矩形的。
+
+**`SENSOR_MARGIN = 64`，這個數字是推導出來的。** `defocus` 讀 `radius` px、
+`chromatic` 讀 `shift` px（兩者預設都是 2，可忽略）。真正決定 margin 的是
+`distortion`：枕形（k1 < 0）時 `remap` 往畫面外取樣，而 `src_x` 被 `np.clip`
+夾在畫面內，所以畫面太窄會把自己的角落抹開。
+
+輸出角落到中心的距離**與 margin 無關**，恆為 (719.5, 511.5) —— margin 移動的是
+中心，不是角落。不被夾的條件是
+
+```
+719.5 / factor + cx ≤ 2·cx      即   factor ≥ 719.5 / (719.5 + M)
+factor = 1 + k1·r2，最壞 k1 = -0.04（distortion_k1_range 的下界）
+```
+
+| M | factor | 需要 ≥ | x 餘裕 | 畫面 |
+|---|---|---|---|---|
+| 0 | 0.9200 | 1.0000 | −62.6 px | 1440×1024，1.47 Mpx |
+| 32 | 0.9279 | 0.9574 | −23.9 px | 1504×1088，1.64 Mpx |
+| 56 | 0.9331 | 0.9278 | +4.4 px | 1552×1136，1.76 Mpx |
+| **64** | **0.9347** | **0.9183** | **+13.7 px** | **1568×1152，1.81 Mpx** |
+
+舊順序從來不會踩到：畸變跑在 1767² 上，輸出角落的取樣點落在 1632，畫面邊界是
+1766，完全沒被夾。**是「裁切提前」讓 margin 變成承重結構的**，所以它必須撐得住
+正方形以前免費吸收掉的同一個最壞情況。

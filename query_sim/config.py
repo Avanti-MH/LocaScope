@@ -39,7 +39,6 @@ class DomainGapConfig:
 
     # ── Field ─────────────────────────────────────────────────────────────────
     vignette_range:  Tuple[float, float] = (0.15, 0.45)
-    field_mask:      bool                = False
     stage_shift_max: int                 = 3
 
     # ── Lens ──────────────────────────────────────────────────────────────────
