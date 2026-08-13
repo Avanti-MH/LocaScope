@@ -55,10 +55,11 @@ sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 sys.path.insert(0, str(_ROOT / '3_localization'))
 
 from _paths            import job_result_dir                            # noqa: E402
-from _sift_plot        import draw_localization_row, read_zoom_crop     # noqa: E402
+from _sift_plot        import (draw_localization_row, draw_recall_row,  # noqa: E402
+                               read_anchored_crop, read_zoom_crop)
 from _locascope_plots  import (append_metrics_row, load_metrics_csv,    # noqa: E402
                                render_all)
-from LocaScopePipeline import LocaScopePipeline, LocaScopeShotResult    # noqa: E402
+from LocaScopePipeline import LocaScopePipeline, LocaScopeQueryResult    # noqa: E402
 from TissuesRegionsMask import mask_all                                 # noqa: E402
 from SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
 from GigaPathFunc     import gigapath_model, make_gigapath_encoder      # noqa: E402
@@ -186,13 +187,13 @@ def verify_candidates(pl, retriever, qc, candidates: list, n: int,
     return out
 
 
-def compute_metrics(row: dict, result: LocaScopeShotResult, base_mpp: float,
+def compute_metrics(row: dict, result: LocaScopeQueryResult, base_mpp: float,
                     tile_l0: Optional[float] = None,
                     candidates: Optional[list] = None,
                     hit_tol_px: Optional[float] = None,
                     hit_tol_strict_px: Optional[float] = None,
                     sift_topk: Optional[dict] = None) -> dict:
-    """Build one metrics.csv row from a gt-row + LocaScopeShotResult.
+    """Build one metrics.csv row from a gt-row + LocaScopeQueryResult.
 
     Two families of position error are recorded:
 
@@ -351,8 +352,9 @@ def compute_metrics(row: dict, result: LocaScopeShotResult, base_mpp: float,
 
 
 def draw_shot_figure(
-    pl, row: dict, img: np.ndarray, result: LocaScopeShotResult,
+    pl, row: dict, img: np.ndarray, result: LocaScopeQueryResult,
     out_dir: str, zoom_pad: int = 4, metrics: Optional[dict] = None,
+    subdir: str = '',
 ) -> Optional[str]:
     """Render the 4-panel localization diagnostic for one shot.
 
@@ -407,9 +409,128 @@ def draw_shot_figure(
     )
     fig.tight_layout()
 
-    fig_dir = os.path.join(out_dir, 'figures')
+    fig_dir = os.path.join(out_dir, 'figures', subdir) if subdir \
+              else os.path.join(out_dir, 'figures')
     os.makedirs(fig_dir, exist_ok=True)
     out_path = os.path.join(fig_dir, os.path.splitext(row['filename'])[0] + '_diag.png')
+    fig.savefig(out_path, dpi=110, bbox_inches='tight')
+    plt.close(fig)
+    return out_path
+
+
+# ── failure classification ────────────────────────────────────────────────────
+#
+# "Failure" is not one thing here, and the categories need different pictures.
+# The first two are stage-3 questions and reuse the 4-panel row; no_recall is a
+# stage-2 question and gets its own, because on a recall failure SIFT was handed
+# the wrong window and its picture says nothing about why.
+#
+# Note the axes are independent: a shot can be no_recall AND still land correct
+# (the ruler retr_hit_rank uses is tighter than the crop SIFT actually reads),
+# so a shot may be filed under more than one category on purpose.
+
+FAILURE_MODES = ('confident-wrong', 'wrong', 'no-recall')
+
+_MODE_DIR = {
+    'confident-wrong': 'confident_wrong',
+    'wrong':           'wrong_abstained',
+    'no-recall':       'no_recall',
+}
+
+
+def classify_failure(m: dict, modes, tol_um: float) -> list:
+    """Which of the requested failure modes this shot belongs to.
+
+    `wrong` is reported as wrong_abstained so it never doubles up with
+    confident-wrong: a shot past tolerance is one or the other, never both.
+    """
+    if not modes:
+        return []
+    err  = m.get('refine_center_err_um')
+    past = err is not None and err > tol_um
+    succ = bool(m.get('refine_success'))
+    hit  = []
+    if past and succ and 'confident-wrong' in modes:
+        hit.append('confident-wrong')
+    if past and not succ and 'wrong' in modes:
+        hit.append('wrong')
+    if 'no-recall' in modes and m.get('retr_topk_n') and m.get('retr_hit_rank') is None:
+        hit.append('no-recall')
+    return hit
+
+
+def draw_recall_figure(
+    pl, row: dict, img: np.ndarray, result: LocaScopeQueryResult,
+    out_dir: str, m: dict, zoom_pad: int = 4,
+) -> Optional[str]:
+    """Render the RETRIEVAL diagnostic: the truth's window beside the chosen one.
+
+    Reads two crops at the SAME scale (the retrieval level's ds) so the two
+    panels are directly comparable; anchoring both through read_anchored_crop
+    keeps that arithmetic in one place.
+    """
+    if result.retrieval is None or result.retriever is None:
+        return None
+    gt_cx, gt_cy = m.get('gt_center_x'), m.get('gt_center_y')
+    if gt_cx is None or gt_cy is None:
+        return None
+
+    qc_win = result.retriever.qc_by_rot[result.retrieval.best_rotation]
+    q_rows, q_cols = qc_win.grid.grid_rows, qc_win.grid.grid_cols
+    ds = result.retrieval.ds
+    w_l0, h_l0 = _gt_footprint_wh(row, pl.base_mpp)
+
+    gt_crop, gx0, gy0, gds = read_anchored_crop(
+        pl.wsi, gt_cx - w_l0 / 2.0, gt_cy - h_l0 / 2.0, ds,
+        pl.tile_size, q_rows, q_cols, zoom_pad)
+    pk_crop, px0, py0, pds = read_anchored_crop(
+        pl.wsi, result.retrieval.best_x0, result.retrieval.best_y0, ds,
+        pl.tile_size, q_rows, q_cols, zoom_pad)
+
+    d_um = m.get('retr_center_err_um')
+    scores = getattr(result.retrieval, 'scores_by_rotation', None)
+    summary = [
+        f'{row["filename"]}',
+        '',
+        f'true level      L{row["level"]}',
+        f'routed level    L{result.routed_level}',
+        f'est_mpp         {result.est_mpp:.4f}',
+        f'nominal_mpp     {float(row["nominal_mpp"]):.4f}',
+        '',
+        f'retr_score      {result.retrieval.best_score:.4f}',
+        f'retr_region     {result.retrieval.best_region_index}',
+        f'retr_rot        {result.retrieval.best_rotation} deg'
+        f'   (gt {row["rot_deg"]} deg)',
+        f'top-K enumerated {m.get("retr_topk_n")}',
+        f'truth rank      {m.get("retr_hit_rank") or "NOT IN ANY CANDIDATE"}',
+        '',
+        f'pick -> truth   {d_um:,.0f} um' if d_um is not None else 'pick -> truth   n/a',
+        f'FoV footprint   {w_l0:.0f} x {h_l0:.0f} px @L0',
+        f'one tile        {pl.tile_size * ds:.0f} px @L0',
+    ]
+    if scores:
+        summary += ['', 'score by rotation'] + [
+            f'  {k:>3} deg      {v:.4f}' for k, v in sorted(scores.items())]
+
+    fig, axes = plt.subplots(1, 4, figsize=(30, 7))
+    draw_recall_row(
+        axes,
+        query_img   = img,
+        gt_crop     = gt_crop,  gt_anchor   = (gx0, gy0, gds),
+        gt_center   = (gt_cx, gt_cy),
+        pick_crop   = pk_crop,  pick_anchor = (px0, py0, pds),
+        pick_center = (m.get('retr_center_x'), m.get('retr_center_y')),
+        box_wh      = (w_l0, h_l0),
+        summary     = summary,
+    )
+    fig.suptitle(f'{row["filename"]}   RECALL FAILURE: the truth was never '
+                 f'proposed among {m.get("retr_topk_n")} candidates', fontsize=12)
+    fig.tight_layout()
+
+    fig_dir = os.path.join(out_dir, 'figures', _MODE_DIR['no-recall'])
+    os.makedirs(fig_dir, exist_ok=True)
+    out_path = os.path.join(fig_dir,
+                            os.path.splitext(row['filename'])[0] + '_recall.png')
     fig.savefig(out_path, dpi=110, bbox_inches='tight')
     plt.close(fig)
     return out_path
@@ -432,6 +553,22 @@ def main():
     ap.add_argument('--draw-figures', type=int, default=0, metavar='N',
                     help='Save the 4-panel localization diagnostic for the first '
                          'N shots into <out>/figures/. 0 = off, -1 = all.')
+    ap.add_argument('--draw-failures', nargs='+', default=[], metavar='MODE',
+                    choices=list(FAILURE_MODES),
+                    help='draw a figure for every shot that fails in one of '
+                         'these ways, on top of --draw-figures. Files go to '
+                         '<out>/figures/<category>/ so the categories stay '
+                         'apart. confident-wrong: SIFT claimed success and was '
+                         'past tolerance -- the only class a deployment cannot '
+                         'detect. wrong: past tolerance but SIFT abstained. '
+                         'no-recall: the truth was never proposed, which gets '
+                         'the retrieval figure instead, because on a recall '
+                         'failure the SIFT picture explains nothing.')
+    ap.add_argument('--fail-tol-um', type=float, default=100.0, metavar='UM',
+                    help='centre error above which --draw-failures counts a '
+                         'shot as wrong (default 100). The error distribution '
+                         'is bimodal by a factor of ~630, so anything from 50 '
+                         'to 20000 selects the same shots.')
     ap.add_argument('--zoom-pad',   type=int, default=4,
                     help='Zoom-crop padding in tiles for the diagnostic panel.')
     ap.add_argument('--topk',       type=int, default=20, metavar='K',
@@ -586,6 +723,7 @@ def main():
         metrics_fields = append_metrics_row(m, metrics_path, metrics_fields)
         return m
     n_drawn = 0
+    n_fail_drawn = 0
     t_start = time.time()
 
     for wsi_path, wsi_rows in by_wsi.items():
@@ -598,7 +736,7 @@ def main():
         except Exception as e:
             print(f'  [pipeline build failed] {type(e).__name__}: {e}', flush=True)
             for row in wsi_rows:
-                stub = LocaScopeShotResult(None, None, False, None, None,
+                stub = LocaScopeQueryResult(None, None, False, None, None,
                                            f'pipeline build failed: {type(e).__name__}: {e}')
                 record(compute_metrics(row, stub, 1.0))
             continue
@@ -611,7 +749,7 @@ def main():
             try:
                 img = np.array(Image.open(img_path).convert('RGB'))
             except Exception as e:
-                stub = LocaScopeShotResult(None, None, False, None, None,
+                stub = LocaScopeQueryResult(None, None, False, None, None,
                                            f'image read failed: {type(e).__name__}: {e}')
                 record(compute_metrics(row, stub, pl.base_mpp))
                 print(f'  [{i:4d}/{len(wsi_rows)}] {row["filename"]}  FAIL: image read', flush=True)
@@ -623,7 +761,10 @@ def main():
             # top_k reads the retriever's similarity maps, which only live on
             # the retriever object and only until the next shot overwrites
             # them, so it has to be kept and read here rather than later.
-            result = pl.run(img, keep_objects=want_fig or args.topk > 0)
+            # --draw-failures only knows the shot failed after the metrics
+            # exist, so the diagnostic objects have to be kept before that.
+            result = pl.run(img, keep_objects=(want_fig or args.topk > 0
+                                               or bool(args.draw_failures)))
             dt = time.time() - t0
 
             # One tile at level-0 says the window itself is right. The refiner's
@@ -666,6 +807,22 @@ def main():
                 except Exception as e:
                     print(f'      [fig failed] {type(e).__name__}: {e}', flush=True)
 
+            for mode in classify_failure(m, args.draw_failures, args.fail_tol_um):
+                try:
+                    if mode == 'no-recall':
+                        p = draw_recall_figure(pl, row, img, result, out_dir, m,
+                                               zoom_pad=args.zoom_pad)
+                    else:
+                        p = draw_shot_figure(pl, row, img, result, out_dir,
+                                             zoom_pad=args.zoom_pad, metrics=m,
+                                             subdir=_MODE_DIR[mode])
+                    if p:
+                        n_fail_drawn += 1
+                        print(f'      [fig {mode}] {p}', flush=True)
+                except Exception as e:
+                    print(f'      [fig {mode} failed] {type(e).__name__}: {e}',
+                          flush=True)
+
             print(f'  [{i:4d}/{len(wsi_rows)}] {row["filename"]:36s}  '
                   f'L={row["level"]:>2}  '
                   f'route=L{_fmt(m["routed_level"], "{:>1d}", "  ")}  '
@@ -685,6 +842,11 @@ def main():
 
     print(f'metrics.csv -> {metrics_path}  ({len(all_metrics)} rows)')
     render_all(all_metrics, out_dir)
+    if args.draw_failures:
+        print(f'\nFailure figures: {n_fail_drawn} written to '
+              f'{os.path.join(out_dir, "figures")}/<category>/'
+              f'   modes={" ".join(args.draw_failures)}  '
+              f'tol={args.fail_tol_um:g}um')
     print(f'\nRe-plot later without re-running the pipeline:\n'
           f'  python utilities/cli/plot_locascope_metrics.py '
           f'{os.path.join(out_dir, "metrics.csv")}')

@@ -1,5 +1,18 @@
 # LocaScope.py — v1 Design
 
+> **這份設計已經實作，只是名字不同。** 實作在 `utilities/LocaScopePipeline.py`
+> （見 MILESTONE M5）：
+>
+> | 本文件 | 實作 |
+> |---|---|
+> | `class LocaScope` | `class LocaScopePipeline` |
+> | `locate(query, mpp=None, ...)` | `run(img)` |
+> | `LocaScopeResult` | `LocaScopeQueryResult` |
+>
+> 實作另外多了本文件沒有的 level routing、per-level retriever cache、
+> `unusable_level`，以及三個 stage 各自 try/except。下面保留為當初的設計
+> 紀錄，不再同步更新；開放問題的現況見 `log/TODO.log`。
+
 ## Pipeline
 
 ```

@@ -47,7 +47,7 @@ set -u
 cd /work/u26130998/LocaScope
 
 # ---------------- Knobs, shared by both runs ----------------
-RUN_GOLDEN=1         # 1 = run the scored query_sim pass
+RUN_GOLDEN=0         # 1 = run the scored query_sim pass
 RUN_REAL=1           # 1 = run the real-photo pass afterwards
 PROBE=0              # 1 = time a sample of windows only; 0 = full scan
 PROBE_WINDOWS=300    # how many windows the probe samples, spread over the slide
@@ -134,8 +134,15 @@ fi
 # 1 until a figure has been looked at.
 if [ "$RUN_REAL" -eq 1 ]; then
   run_swsift real \
-    /work/u26130998/datasets/Ki67/S1103037_ki67/1.bmp \
-    "/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs" \
+    /work/u26130998/datasets/Ki67/S1103627_ki67/2.bmp \
+    "/work/u26130998/datasets/Ki67/S1103627,G7E,110127.mrxs" \
+    "" \
+    0 1
+fi
+if [ "$RUN_REAL" -eq 1 ]; then
+  run_swsift real \
+    /work/u26130998/datasets/Ki67/S1103627_ki67/1.bmp \
+    "/work/u26130998/datasets/Ki67/S1103627,G7E,110127.mrxs" \
     "" \
     0 1
 fi

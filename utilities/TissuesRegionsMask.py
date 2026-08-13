@@ -36,6 +36,26 @@ import openslide
 # proportional to rows*cols, so the lower ceiling is safe under all of them.
 _CC_DECIMATE_ABOVE_PX = 1 << 31
 
+#: Above this many mask pixels the summed-area table behind white_fractions is
+#: built on a decimated view. Deliberately the same shape as the ceiling above:
+#: both are the point at which a whole-mask array stops fitting comfortably, and
+#: both respond by losing resolution rather than by failing.
+#:
+#: 1 << 28 is 268 Mpx, so the int32 table stays near 1 GB. Without it this class
+#: would put back the last thing from_wsi got rid of -- an array that scales with
+#: the slide -- at four bytes per mask pixel: BRACS_1228's level 1 is 411 Mpx,
+#: and an MRXS level 1 is four times that again.
+#:
+#: Nothing measurable is lost. A background fraction is an average over a
+#: footprint of 256*ds level-0 pixels, which is tens to thousands of mask pixels
+#: across, so a stride of 2 or 4 moves it by far less than the segmentation's own
+#: error. int32 rather than float64 for the same reason it is exact: the mask is
+#: 0/1, so the running sum is an integer and float32 would silently lose
+#: precision past ~1.7e7 -- as a drift in every fraction at once, which is the
+#: kind of wrong that never raises.
+_INTEGRAL_DECIMATE_ABOVE_PX = 1 << 28
+
+
 class TissueRegion:
     """Bounding box of one tissue region, always in level-0 coordinates."""
     def __init__(self, x: int, y: int, w: int, h: int, index: int = -1):
@@ -604,6 +624,74 @@ class TissuesRegionsMask:
         if x1 <= x0 or y1 <= y0:
             return False
         return float(self.main_mask[y0:y1, x0:x1].sum()) / (w * h) >= tissue_ratio
+
+    def _summed_area_table(self) -> tuple:
+        """Cached (table, step) for white_fractions, padded so a rect is four
+        lookups.
+
+        The mask is decimated by `step` first when it is larger than
+        _INTEGRAL_DECIMATE_ABOVE_PX, and every lookup afterwards has to be in
+        decimated coordinates -- which is why the stride comes back with the
+        table instead of being recoverable from its shape alone.
+
+        The stride is derived from the mask, not fixed, so a small mask gets
+        stride 1 and nothing about the existing behaviour moves.
+        """
+        if getattr(self, '_integral_cache', None) is None:
+            step = 1
+            while ((self.main_mask.shape[0] // step)
+                   * (self.main_mask.shape[1] // step)
+                   > _INTEGRAL_DECIMATE_ABOVE_PX):
+                step *= 2
+            small = self.main_mask[::step, ::step]
+            table = np.zeros((small.shape[0] + 1, small.shape[1] + 1),
+                             dtype=np.int32)
+            table[1:, 1:] = small.astype(np.int32).cumsum(0).cumsum(1)
+            self._integral_cache = (table, step)
+        return self._integral_cache
+
+    def white_fractions(self, xy: np.ndarray, level: int,
+                        tile: int) -> np.ndarray:
+        """Background fraction of each tile's footprint, from the mask alone.
+
+        `xy` is [N, 2] level-0 top-left coordinates; the answer is [N] float32.
+
+        main_mask holds 1 where the segmenter found tissue, so background is its
+        complement. Area outside the mask counts as background rather than being
+        dropped -- the same choice has_tissue documents, and for the same reason:
+        a tile hanging half off the scanned region must not score as pure tissue
+        on the half that happens to land on some.
+
+        Vectorised through a summed-area table because "is this level even
+        fillable" has to be answerable before any pixel is read, and a level can
+        offer 200,000 candidates. has_tissue answers the same question one rect
+        at a time and returns a threshold verdict; this returns the fraction
+        itself for every candidate at once, which is what a quota needs.
+        """
+        S, step = self._summed_area_table()
+        H, W = S.shape[0] - 1, S.shape[1] - 1        # in DECIMATED mask pixels
+
+        mw, mh = self._levelLength_converter(tile, tile, level)
+        # Everything below is in decimated units. The step**2 that would scale
+        # both the tissue count and the requested area cancels in the ratio, so
+        # it never has to appear -- but the footprint does have to be at least
+        # one cell, or a tile smaller than the stride would divide by zero.
+        mw = max(1, mw // step)
+        mh = max(1, mh // step)
+
+        mx0 = np.empty(len(xy), dtype=np.int64)
+        my0 = np.empty(len(xy), dtype=np.int64)
+        for i, (x, y) in enumerate(xy):
+            cx, cy = self.to_mask_xy(int(x), int(y))
+            mx0[i], my0[i] = cx // step, cy // step
+
+        x0 = np.clip(mx0, 0, W)
+        y0 = np.clip(my0, 0, H)
+        x1 = np.clip(mx0 + mw, 0, W)
+        y1 = np.clip(my0 + mh, 0, H)
+
+        tissue = (S[y1, x1] - S[y0, x1] - S[y1, x0] + S[y0, x0])
+        return (1.0 - tissue / float(mw * mh)).astype(np.float32)
 
     def filter_regions(self, min_ratio: float = 0.05) -> None:
         '''Remove tissue_regions that are too small or fully contained by another.

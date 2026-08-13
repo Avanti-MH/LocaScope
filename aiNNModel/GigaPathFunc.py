@@ -119,13 +119,36 @@ def gigapath_compile(
 
 # ── Encode ───────────────────────────────────────────────────────────────────
 
-def build_transform() -> transforms.Compose:
-    return transforms.Compose([
+def build_transform(preprocess: str = 'none') -> transforms.Compose:
+    '''The tile -> tensor pipeline. `preprocess` is inserted before ToTensor.
+
+        'none'  RGB exactly as given. What production encodes, and the default,
+                so nothing moves unless a caller asks.
+        'grey'  luminance only, replicated back to three channels because the
+                model's patch embedding takes three. Colour is removed from the
+                problem entirely -- both sides of a comparison have to use it or
+                the two are not describing the same thing.
+
+    Note what Normalize does NOT do: its mean and std are fixed ImageNet
+    constants, the same numbers for every image, so it is a global affine map
+    and the colour DIFFERENCE between two tiles survives it untouched. It puts
+    the input where the model expects it; it does not align two images to each
+    other. Anything that wants to remove a colour shift between a photograph and
+    a slide has to happen here, above this line.
+    '''
+    steps = [
         transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(224),
+    ]
+    if preprocess == 'grey':
+        steps.append(transforms.Grayscale(num_output_channels=3))
+    elif preprocess != 'none':
+        raise ValueError(f"preprocess must be 'none' or 'grey', got {preprocess!r}")
+    steps += [
         transforms.ToTensor(),
         transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-    ])
+    ]
+    return transforms.Compose(steps)
 
 
 _TRANSFORM = build_transform()
@@ -140,6 +163,7 @@ def gigapath_encode(
     images,
     model: torch.nn.Module,
     device: torch.device,
+    transform=None,
     batch_size: int = 128,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
@@ -156,10 +180,12 @@ def gigapath_encode(
     ctx = (torch.autocast(device_type=device.type, dtype=dtype)
            if dtype != torch.float32 else nullcontext())
 
+    tf = transform if transform is not None else _TRANSFORM
+
     outputs = []
     for start in range(0, len(images), batch_size):
         batch = torch.stack(
-            [_TRANSFORM(_to_pil(img)) for img in images[start:start + batch_size]]
+            [tf(_to_pil(img)) for img in images[start:start + batch_size]]
         ).to(device)
         with ctx:
             feats = model(batch)
@@ -207,6 +233,7 @@ def gigapath_encode_tokens(
     images,
     model: torch.nn.Module,
     device: torch.device,
+    transform=None,
     batch_size: int = 128,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
@@ -248,10 +275,12 @@ def gigapath_encode_tokens(
     ctx = (torch.autocast(device_type=device.type, dtype=dtype)
            if dtype != torch.float32 else nullcontext())
 
+    tf = transform if transform is not None else _TRANSFORM
+
     outputs = []
     for start in range(0, len(images), batch_size):
         batch = torch.stack(
-            [_TRANSFORM(_to_pil(img)) for img in images[start:start + batch_size]]
+            [tf(_to_pil(img)) for img in images[start:start + batch_size]]
         ).to(device)
         with ctx:
             toks = m.fc_norm(m.forward_features(batch))

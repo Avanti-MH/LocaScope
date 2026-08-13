@@ -87,27 +87,6 @@ JITTER_OFFSETS = (
     (64, 256), (256, 64), (192, 256), (256, 192), (320, 320),
 )
 
-#: Above this many mask pixels the summed-area table is built on a decimated
-#: view. Named for what it does rather than for its unit, and deliberately in
-#: the same shape as TissuesRegionsMask._CC_DECIMATE_ABOVE_PX: both are the
-#: point at which a whole-mask array stops fitting comfortably, and both respond
-#: by losing resolution rather than by failing.
-#:
-#: 1 << 28 is 268 Mpx, so the int32 table stays near 1 GB. Without it this
-#: module would put back the last thing from_wsi got rid of -- an array that
-#: scales with the slide -- at four bytes per mask pixel: BRACS_1228's level 1
-#: is 411 Mpx, and an MRXS level 1 is four times that again.
-#:
-#: Nothing measurable is lost. A background fraction is an average over a
-#: footprint of 256*ds level-0 pixels, which is tens to thousands of mask
-#: pixels across, so a stride of 2 or 4 moves it by far less than the
-#: segmentation's own error. int32 rather than float64 for the same reason it is
-#: exact: the mask is 0/1, so the running sum is an integer and float32 would
-#: silently lose precision past ~1.7e7 -- as a drift in every fraction at once,
-#: which is the kind of wrong that never raises.
-_INTEGRAL_DECIMATE_ABOVE_PX = 1 << 28
-
-
 @dataclass(frozen=True)
 class SamplerConfig:
     """Everything that decides which tiles are chosen. Hashed into `sampler_id`.
@@ -260,69 +239,6 @@ class LevelPlan:
         return self.got < self.min_useful
 
 
-# ── white fraction over every candidate, in one pass ──────────────────────────
-
-def _integral(mask: np.ndarray) -> tuple:
-    """Summed-area table, padded so a rect is four lookups.
-
-    Returns (table, step). The mask is decimated by `step` first when it is
-    larger than _INTEGRAL_DECIMATE_ABOVE_PX, and every lookup afterwards has to
-    be in decimated coordinates -- which is why the stride comes back with the
-    table instead of being recoverable from its shape alone.
-
-    The stride is derived from the mask, not fixed, so a small mask gets stride
-    1 and nothing about the existing behaviour moves.
-    """
-    step = 1
-    while (mask.shape[0] // step) * (mask.shape[1] // step) > _INTEGRAL_DECIMATE_ABOVE_PX:
-        step *= 2
-    small = mask[::step, ::step]
-    s = np.zeros((small.shape[0] + 1, small.shape[1] + 1), dtype=np.int32)
-    s[1:, 1:] = small.astype(np.int32).cumsum(0).cumsum(1)
-    return s, step
-
-
-def white_fractions(mask, xy: np.ndarray, level: int, tile: int) -> np.ndarray:
-    """Background fraction of each tile's footprint, from the mask alone.
-
-    main_mask holds 1 where the segmenter found tissue, so background is its
-    complement. Area outside the mask counts as background rather than being
-    dropped -- the same choice has_tissue documents, and for the same reason: a
-    tile hanging half off the scanned region must not score as pure tissue on the
-    half that happens to land on some.
-
-    Vectorised through a summed-area table because "is this level even fillable"
-    has to be answerable before any pixel is read, and a level can offer 200,000
-    candidates.
-    """
-    if not hasattr(mask, '_ref_integral'):
-        mask._ref_integral = _integral(mask.main_mask)
-    S, step = mask._ref_integral
-    H, W = S.shape[0] - 1, S.shape[1] - 1        # in DECIMATED mask pixels
-
-    mw, mh = mask._levelLength_converter(tile, tile, level)
-    # Everything below is in decimated units. The step**2 that would scale both
-    # the tissue count and the requested area cancels in the ratio, so it never
-    # has to appear -- but the footprint does have to be at least one cell, or a
-    # tile smaller than the stride would divide by zero.
-    mw = max(1, mw // step)
-    mh = max(1, mh // step)
-
-    mx0 = np.empty(len(xy), dtype=np.int64)
-    my0 = np.empty(len(xy), dtype=np.int64)
-    for i, (x, y) in enumerate(xy):
-        cx, cy = mask.to_mask_xy(int(x), int(y))
-        mx0[i], my0[i] = cx // step, cy // step
-
-    x0 = np.clip(mx0, 0, W)
-    y0 = np.clip(my0, 0, H)
-    x1 = np.clip(mx0 + mw, 0, W)
-    y1 = np.clip(my0 + mh, 0, H)
-
-    tissue = (S[y1, x1] - S[y0, x1] - S[y1, x0] + S[y0, x0])
-    return (1.0 - tissue / float(mw * mh)).astype(np.float32)
-
-
 def assign_buckets(white: np.ndarray, cfg: SamplerConfig) -> np.ndarray:
     e0, e1, e2 = cfg.edges
     b = np.full(len(white), BUCKETS.index('mid'), dtype=np.int8)
@@ -358,7 +274,7 @@ def build_level_geoms(mask, levels: Sequence[int], downsamples: Sequence[float],
         if not xs:
             continue
         xy = np.array([xs, ys], dtype=np.int64).T
-        white = white_fractions(mask, xy, lv, cfg.tile)
+        white = mask.white_fractions(xy, lv, cfg.tile)
         out[lv] = LevelGeoms(
             level=lv, ds=ds, footprint_l0=int(cfg.tile * ds), xy=xy,
             region=np.array(regs, dtype=np.int32),
@@ -620,8 +536,8 @@ class ReferenceSampler:
                 consecutive_misses += 1
                 continue
 
-            displaced_white = float(white_fractions(
-                self.mask, np.array([[displaced_x, displaced_y]]),
+            displaced_white = float(self.mask.white_fractions(
+                np.array([[displaced_x, displaced_y]]),
                 level, self.cfg.tile)[0])
             if int(assign_buckets(np.array([displaced_white]),
                                   self.cfg)[0]) != bucket:
@@ -643,7 +559,7 @@ class ReferenceSampler:
 
         if self.inherit is not None and len(self.inherit.xy0):
             tl = self.inherit.at(g.ds, self.cfg.tile)
-            w = white_fractions(self.mask, tl, lv, self.cfg.tile)
+            w = self.mask.white_fractions(tl, lv, self.cfg.tile)
             # The bucket is recomputed, not carried over. A location chosen for
             # being tissue-dense at level 0 covers 4x or 64x the area here and
             # may well no longer be, and recording where it actually lands is

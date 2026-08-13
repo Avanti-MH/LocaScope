@@ -287,16 +287,45 @@ def write_summary(metrics: List[dict], out_path: str) -> None:
     lines.append(f'Stage errors    : {sum(1 for m in metrics if m["error"])}')
     lines.append(f'Unusable levels : {sum(1 for m in metrics if m["unusable_level"])}')
 
+    # Routing is reported with a SIGN, not as an equality, because the two
+    # directions do not cost the same. A window one level coarser than the
+    # query still contains the truth -- SIFT reads a crop at full resolution
+    # and absorbs the scale gap (L2 -> L3 retrieval centre err 5188 um vs
+    # L2 -> L2's 1670 um, yet 9.1 um vs 7.4 um after refine). A window one
+    # level finer covers LESS than the FoV, so no window can hold the truth
+    # and no amount of ranking recovers it. Reporting only `== level` scored
+    # 42.4% on a corpus whose wrongly-routed shots succeeded 60.3% of the
+    # time, which reads as a failure rate and is not one.
     routed = [m for m in metrics if m['routed_level'] is not None]
     if routed:
-        n_ok = sum(1 for m in routed if m['routed_level'] == m['level'])
-        lines.append(f'Level routing   : {n_ok}/{len(routed)} '
-                     f'({100.0 * n_ok / len(routed):.1f}%) routed_level == level')
-    rot_known = [m for m in metrics if m['rot_correct'] is not None]
+        n = len(routed)
+        finer   = sum(1 for m in routed if m['routed_level'] <  m['level'])
+        exact   = sum(1 for m in routed if m['routed_level'] == m['level'])
+        coarser = sum(1 for m in routed if m['routed_level'] >  m['level'])
+        lines.append(f'Level routing   : finer {finer} ({100.0 * finer / n:.1f}%)   '
+                     f'exact {exact} ({100.0 * exact / n:.1f}%)   '
+                     f'coarser {coarser} ({100.0 * coarser / n:.1f}%)   (n={n})')
+        lines.append('                  finer is the fatal direction; coarser is '
+                     'absorbed by SIFT')
+
+    # Derived from the raw columns rather than read off `rot_correct`, because
+    # that column was written by an equality that cannot hold: best_rotation is
+    # the rotation applied to the QUERY to bring it onto the reference, i.e. the
+    # inverse of the camera's. The correct answer therefore sits on the
+    # anti-diagonal -- gt 90 -> retr 270 (288 shots), gt 270 -> retr 90 (228) --
+    # and a direct comparison can only be true at gt 0 and 180, halving the
+    # figure by construction (34.5% reported vs 52.8% actual). Deriving it here
+    # also means every CSV already on disk reports the corrected number without
+    # being regenerated.
+    rot_known = [m for m in metrics
+                 if m.get('retr_rotation') is not None
+                 and m.get('gt_rot_deg') is not None]
     if rot_known:
-        n_ok = sum(1 for m in rot_known if m['rot_correct'])
+        n_ok = sum(1 for m in rot_known
+                   if int(m['retr_rotation']) == (360 - int(m['gt_rot_deg'])) % 360)
         lines.append(f'Rotation recall : {n_ok}/{len(rot_known)} '
-                     f'({100.0 * n_ok / len(rot_known):.1f}%) retr_rotation == gt_rot_deg')
+                     f'({100.0 * n_ok / len(rot_known):.1f}%) '
+                     f'retr_rotation == (-gt_rot_deg) mod 360')
     lines.append(f'SIFT success    : {sum(1 for m in metrics if m["refine_success"])}'
                  f'/{len(metrics)}')
     ref = _ref_marker(metrics, 'retr_center_err_px', 'retr_tile_l0', '1 tile')
@@ -627,7 +656,7 @@ def plot_stage_progression(metrics: List[dict], out_path: str) -> None:
     ax = axes[1]
     ax.bar(x - 0.2, r, width=0.4, label='retrieval', color='goldenrod')
     ax.bar(x + 0.2, s, width=0.4,
-           color=np.where(ok, 'dodgerblue', 'lightgray'),
+           color=np.where(ok, 'dodgerblue', '#8FA8C9'),
            label='refine (gray = SIFT failed)')
     ax.set_yscale('symlog', linthresh=10)
     ax.set_xlabel('shots (sorted by retrieval error)')

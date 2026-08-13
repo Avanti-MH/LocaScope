@@ -1,6 +1,16 @@
 ================================================================================
   LocaScope — Milestone Log
   記錄重大進展，每個里程碑代表一個有意義的能力躍升
+
+  編號規則
+    兩個檔案共用同一個 M 編號命名空間，M<n> 一律指本檔的條目。
+    本檔記「這個里程碑改變了什麼能力」，實作細節留在 TODO.log 已完成區：
+      M4    -> TODO.log :1142   整合 synth_fov_generator + query_sim
+      M4.1  -> TODO.log :1072   Camera abstraction + QueryFromWSI refactor
+      M4.2  -> TODO.log :851    移除 stratify + mpp jitter + 多相機 query
+      M5    -> TODO.log :780    端到端三階段 bench
+    行號會隨 TODO.log 增修而移動，對不上時以標題為準。
+    2026-08-08 原 M4.1 從缺，M4.2 / M4.3 依序上移為 M4.1 / M4.2。
 ================================================================================
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -10,7 +20,7 @@
 
   - Stage 1  GigaPathKnnEstiMpp   — query image MPP 自動估算（KNN on GigaPath features）
   - Stage 2  GigaPathSlideWinSim  — WSI 滑動視窗相似度搜尋（unfold + cosine sim）
-  - Stage 3  SiftRansacLocalizer  — SIFT + RANSAC sub-tile 精定位
+  - Stage 3  SiftRansacLocalizer  — sub-tile 定位（SIFT + RANSAC）
 
   支撐基礎設施：
   - PatchingLib（973 行）：PatchGrid / FeaturesMap / QueryPatchContainer / WsiTissuesContainer
@@ -296,7 +306,67 @@
   - 專案輸出路徑統一為 result/<SLURM_JOB_NAME>；byproducts 到 log/tmp。
 
 ────────────────────────────────────────────────────────────────────────────────
-  M6 | 2026-08-05 | 破洞修復讓真實照片定位率首次移動，並暴露 retrieval 的尺寸偏差
+  M4 | 2026-07-23 | 合成 query 的產生器統一為一個 package
+────────────────────────────────────────────────────────────────────────────────
+  把 synth_fov_generator 的批量 / GT / tissue / rotation+scale，與既有 query_sim
+  的 cv2 augment 精度，合併成單一 package，命名保留 query_sim。
+
+  - 三層 API：config + record -> source + augment -> pipeline + generator + cli
+  - 每個 augment 取兩邊較精確的實作：rotation 90/180/270 走 lossless cv2.rotate，
+    lens distortion 用 sub-pixel remap 而非 int cast
+  - 兩個 SHIM 檔讓三個既有 test 完全不必改
+
+  能力躍升：從「一次做一張示範圖」變成「能產出帶完整 GT 的合成 query 批次」。
+  → 實作細節：TODO.log :1142
+
+────────────────────────────────────────────────────────────────────────────────
+  M4.1 | 2026-07-23 | Camera 抽象：一台相機 = QFW + DomainGapConfig + RNG
+────────────────────────────────────────────────────────────────────────────────
+  - QueryFromWSI 重寫：拿掉佔位座標，改成 crop(x, y) -> PIL | None
+  - Camera 成為中心抽象：不同 cfg = 不同顯微鏡，不同 seed = 不同曝光
+  - Bounding-square 讀入（邊長 = FoV 對角線），任何旋角都不必 tune margin，
+    代價是約 2x 讀入像素
+  - generator 本體 loop 從 40 行縮到約 15 行
+
+  能力躍升：合成 query 的「相機」第一次成為可替換、可重現的物件。
+  → 實作細節：TODO.log :1072
+
+────────────────────────────────────────────────────────────────────────────────
+  M4.2 | 2026-07-27 | region_type 被實測否決，改出多相機混合的 query 批次
+────────────────────────────────────────────────────────────────────────────────
+  classify_region 的 edge threshold 掃過 6 片 WSI x 每個 level 300 樣本後確認，
+  單一 threshold 在整個 corpus 上不成立：
+
+    L0 中位數  ADH 0.19 / FEA 0.28 / DCIS 0.32 / Ki67 三片 0.16-0.31
+    同一個 Ki67 dataset 內部就差 2 倍
+
+  決策是把 region_type 整條移除，而不是重新校準——per-slide percentile 校準的
+  成本大於收益。這是 ClaudeRules 7「校準，不是猜測」的原始案例。
+
+  同時完成：
+  - query_mpp_jitter（模擬顯微鏡 mpp 標定不準），gt.csv 記 nominal / effective
+  - cli/multi_batch.py：多 WSI x 每個 pyramid level 各一台 Camera，統一 out_dir
+    與單一 gt.csv；被 skip 的相機寫 skips.csv 並自動畫診斷圖
+
+  → 實作細節：TODO.log :851
+
+────────────────────────────────────────────────────────────────────────────────
+  M5 | 2026-07-27 | 三階段端到端首次可量
+────────────────────────────────────────────────────────────────────────────────
+  - LocaScopePipeline：per-WSI 一個物件，build() 做一次性設定，run(img) 走完
+    stage 1 -> level routing -> stage 2 -> stage 3。三個 stage 各自 try/except，
+    後段失敗不吃掉前段結果
+  - rotation-aware retrieval 採方案 A（query 端轉 0/90/180/270 各自 encode），
+    WSI features 只 encode 一次
+  - 中心誤差取代左上角誤差：旋轉是繞 FoV 中心做的，中心才是旋轉不變量。
+    metrics.csv 兩組並存，讓 artefact 的大小保持可見。這是 ClaudeRules 8 的
+    原始案例。
+
+  能力躍升：三個 stage 的能力第一次可以分開量，而不是只看最終有沒有對。
+  → 實作細節：TODO.log :780
+
+────────────────────────────────────────────────────────────────────────────────
+  M6 | 2026-08-05 | 破洞修復讓真實照片高信心定位率首次移動，並暴露 retrieval 的尺寸偏差
 ────────────────────────────────────────────────────────────────────────────────
   SafeSlide.read_region 在失敗時對半細分再重讀，遞迴到 min_chunk=64 為止。
   openslide 只要矩形內有任一塊缺失就讓整個矩形失敗，而 WsiTissuesContainer
@@ -317,7 +387,7 @@
   10 片 Ki67 有 8 片任何層都沒有洞，完全不付代價。
 
   ═══════════════════════════════════════════════════════════════════════
-  對定位率的影響：+33 與 -15 是兩件不同的事
+  對高信心定位率的影響：+33 與 -15 是兩件不同的事
   ═══════════════════════════════════════════════════════════════════════
 
   S1137178，189 張真實照片，high 從 48 (25.4%) 到 66 (34.9%)。但淨 +18 是
@@ -361,6 +431,10 @@
 
   - high 是 SIFT inlier 給的信心標籤。真實照片沒有 ground truth，所以這是
     「更多照片被有把握地定位」，不是「更多照片定位對了」。
+  - confidence 其實是四級不是兩級：failed / low / medium / high，由
+    locate_photo.classify() 依 inlier 數切在 30 與 100，而那兩個門檻程式碼
+    自己註明是猜的、未經校準。S1137178 這片剛好一張 medium / low 都沒有，
+    上面的 2x2 才剛好成立；別片有（S1103520 就有 18 張），換片不能照抄。
   - 只有兩片有 baseline 可比。S1103037 也有洞但沒有大空白區，淨 -2
     （0 進 2 出）——反過來說明沒有大空白的片子 SafeSlide 幾乎不動它。
   - 歸因驗證過：兩次跑之間其他未提交改動都是等價重構（find_best 的

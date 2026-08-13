@@ -55,8 +55,22 @@ IMAGES=result/MultiBatch1440/images
 TOPK=20               # candidates enumerated per shot (free)
 SIFT_TOPK=5           # candidates SIFT actually verifies (K passes per shot)
 LIMIT=0               # 0 = every shot; set 30 for a costing run first
-RESUME=0              # 1 = keep the existing metrics.csv and skip what is in it
-DRAW_FIGURES=-1       # 4-panel diagnostics for the first N shots, -1 = all
+RESUME=1              # 1 = keep the existing metrics.csv and skip what is in it
+                      # RESUME=0 DELETES an existing metrics.csv, it does not
+                      # append to it. A resumed run is the only way to keep the
+                      # rows a walltime kill left behind.
+DRAW_FIGURES=0        # 4-panel diagnostics for the first N shots, -1 = all.
+                      # -1 on a 2500-shot corpus is ~6 GB of png; prefer
+                      # DRAW_FAILURES below, which draws only what went wrong.
+DRAW_FAILURES="confident-wrong wrong no-recall"
+                      # "" = off. Files land in figures/<category>/ :
+                      #   confident_wrong  SIFT claimed success and was past
+                      #                    tolerance -- the only class a
+                      #                    deployment cannot detect by itself
+                      #   wrong_abstained  past tolerance, SIFT abstained
+                      #   no_recall        truth never proposed; gets the
+                      #                    RETRIEVAL figure, not the SIFT one
+FAIL_TOL_UM=100       # centre error above which a shot counts as wrong
 
 if [ ! -f "$GT_CSV" ]; then
   echo "[abort] $GT_CSV not found -- run jobscripts/MultiBatch1440.sh first"
@@ -67,6 +81,8 @@ LIMIT_FLAG=""
 [ "$LIMIT" -gt 0 ] && LIMIT_FLAG="--limit $LIMIT"
 RESUME_FLAG=""
 [ "$RESUME" -eq 1 ] && RESUME_FLAG="--resume"
+FAIL_FLAG=""
+[ -n "$DRAW_FAILURES" ] && FAIL_FLAG="--draw-failures $DRAW_FAILURES --fail-tol-um $FAIL_TOL_UM"
 
 echo "======== gt=$GT_CSV  topk=$TOPK  sift-topk=$SIFT_TOPK ========"
 echo "shots: $(( $(wc -l < "$GT_CSV") - 1 ))"
@@ -83,7 +99,7 @@ python utilities/test_modules/bench_locascope.py \
   --multi-gpu \
   --precision fp16 --batch-size 8192 \
   --mask-all \
-  $LIMIT_FLAG $RESUME_FLAG
+  $LIMIT_FLAG $RESUME_FLAG $FAIL_FLAG
 
 echo ""
 echo "======== done -> result/BenchLocaScope/ ========"

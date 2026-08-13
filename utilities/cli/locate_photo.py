@@ -171,7 +171,7 @@ def _checkerboard(a: np.ndarray, b: np.ndarray, n: int = 8) -> np.ndarray:
 
 def build_row(slide_tag, photo_path, img, res, base_mpp, tile_size,
               t_total, retriever_built, reopens, level_mpp):
-    """Flatten a LocaScopeShotResult into one CSV row."""
+    """Flatten a LocaScopeQueryResult into one CSV row."""
     row = {k: '' for k in FIELDS}
     row.update(
         slide=slide_tag, photo=photo_path.name,

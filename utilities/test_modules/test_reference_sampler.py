@@ -33,6 +33,7 @@ for _d in ('utilities', 'utilities/test_modules'):
 import numpy as np                                                  # noqa: E402
 
 import ReferenceSampler as RS                                       # noqa: E402
+from TissuesRegionsMask import TissuesRegionsMask                   # noqa: E402
 from ReferenceSampler import (BUCKETS, InheritPlan, LevelGeoms,     # noqa: E402
                               ReferenceSampler, SamplerConfig)
 
@@ -80,6 +81,12 @@ class FakeMask:
         ds = self.wsi_level_downsamples[level]
         return int(w * ds / self.mask_ds_x), int(h * ds / self.mask_ds_y)
 
+    # Borrowed, not reimplemented: both only touch the four attributes above, so
+    # the stub runs the REAL code and cannot drift from it. Reimplementing them
+    # here would make the white-fraction tests below assert about the stub.
+    _summed_area_table = TissuesRegionsMask._summed_area_table
+    white_fractions = TissuesRegionsMask.white_fractions
+
 
 def _half_tissue_mask():
     """100x100, tissue in columns 0-49 only. Every fraction below is exact."""
@@ -95,7 +102,7 @@ def t_white_fraction_is_exact():
     fraction moves a little, every bucket boundary shifts, nothing raises."""
     mask = _half_tissue_mask()
     xy = np.array([[0, 0], [50, 0], [40, 0], [30, 0]], dtype=np.int64)
-    w = RS.white_fractions(mask, xy, level=0, tile=20)
+    w = mask.white_fractions(xy, level=0, tile=20)
 
     want = [0.0,      # entirely inside the tissue half
             1.0,      # entirely inside the background half
@@ -114,7 +121,7 @@ def t_outside_the_mask_counts_as_background():
     m[:, 90:] = 1                       # tissue only in the last ten columns
     mask = FakeMask(m)
 
-    w = float(RS.white_fractions(mask, np.array([[90, 0]]), level=0, tile=20)[0])
+    w = float(mask.white_fractions(np.array([[90, 0]]), level=0, tile=20)[0])
     assert abs(w - 0.5) < 1e-6, (
         f'white {w:.4f}; expected 0.5 (ten tissue columns inside, ten columns '
         f'off the mask). 0.0 means the clipped area was used as the denominator')
@@ -129,8 +136,8 @@ def t_white_fraction_scales_with_level():
     mask.wsi_level_downsamples = [1.0, 4.0]
     xy = np.array([[40, 0]], dtype=np.int64)
 
-    w0 = float(RS.white_fractions(mask, xy, level=0, tile=5)[0])   # cols 40-44
-    w1 = float(RS.white_fractions(mask, xy, level=1, tile=5)[0])   # cols 40-59
+    w0 = float(mask.white_fractions(xy, level=0, tile=5)[0])   # cols 40-44
+    w1 = float(mask.white_fractions(xy, level=1, tile=5)[0])   # cols 40-59
     assert abs(w0 - 0.0) < 1e-6, f'level 0 white {w0:.4f}, expected 0'
     assert abs(w1 - 0.5) < 1e-6, f'level 1 white {w1:.4f}, expected 0.5'
 
@@ -417,9 +424,11 @@ def t_mask_api_still_matches():
     """The stub above only stands in for a real mask while the real mask still
     looks like this. Without this check the whole file could keep passing after
     TissuesRegionsMask moved underneath it."""
-    from TissuesRegionsMask import TissuesRegionsMask
-
-    for name in ('to_mask_xy', '_levelLength_converter'):
+    # The first two the stub implements itself; the last two it BORROWS off the
+    # real class, so those cannot drift in behaviour -- but they can still
+    # disappear or be renamed, which this catches.
+    for name in ('to_mask_xy', '_levelLength_converter',
+                 '_summed_area_table', 'white_fractions'):
         assert callable(getattr(TissuesRegionsMask, name, None)), \
             f'TissuesRegionsMask has no {name}(); the FakeMask stub is stale'
 

@@ -5,16 +5,75 @@ End-to-end pipeline test:
   2. estimate_mpp      — estimate the query MPP from GigaPath features
   3. compute_gigapath_sliding_win_similarity — sliding window similarity at estimated MPP
   4. Verify            — best match should be near the ground-truth crop location
+  5. GigaPathSlidingWinSimRot — the rotation-aware retriever LocaScopePipeline
+                          actually calls, checked against the same crop and a
+                          decoy comparison against step 3's non-rotated result
+
+Steps 1-4 are the base module's original test: one query, mpp estimated the way
+production would, a visual 8-panel figure, and a soft PASS/WARN print that was
+never wired to the exit code. Step 5 is a harder, assertion-based check that
+started as a separate script and was folded back in here before it was ever
+committed on its own, because running two scripts that each crop the same
+query and load the same model was paying GPU + WSI cost twice for one fact.
+
+Why step 5 exists and what it checks
+-------------------------------------
+LocaScopePipeline (utilities/LocaScopePipeline.py) calls GigaPathSlidingWinSimRot
+exclusively -- never the base module steps 1-4 exercise. A regression in
+compute_sim_maps, find_best, or the rotation bookkeeping could ship unnoticed
+while this file stayed green, because green here only ever meant "the
+non-rotated path still works."
+
+Two things are checked, and the second is the reason Rot exists rather than the
+base module:
+
+    recovers a rotated query   the SAME crop is fed in at four synthetic
+                               "photo" rotations (0/90/180/270, via np.rot90 --
+                               the same operation GigaPathSlidingWinSimRot uses
+                               internally). find_best must land near the true
+                               crop location for all four, not just 0, which is
+                               all steps 1-4 ever ran.
+
+    beats the base module on the ones that need rotation   the base module
+                               places the query as given and never searches an
+                               orientation, so a 90/180/270 photo should
+                               mismatch its own un-rotated features and land far
+                               from the truth. If the base module recovers it
+                               too, Rot is not earning its 4x cost and that is
+                               worth knowing, not hiding. Reuses this file's own
+                               `_find_best` rather than a second copy of it.
+
+best_rotation is checked against a predicted value, not just its own
+consistency: GigaPathSlidingWinSimRot._rotate_np composes as np.rot90(img, k),
+and two np.rot90 calls compose by ADDING their k mod 4, so undoing a k-step
+photo needs a (4-k)-step search hit -- best_rotation should equal
+(360 - applied) % 360. That is discrete array-transpose composition, not a
+continuous-angle sign convention, so it does not carry the ambiguity that made
+Camera.output_to_level0's R(+/-rot) choice guessable rather than derivable
+(test_camera_output_to_level0.py) -- but it is still asserted against a real
+run rather than trusted on paper, because a wrong answer here would look
+exactly like the same kind of invisible-at-0/180 sign bug.
+
+Step 5 deliberately uses the KNOWN ground-truth mpp, not step 2's estimate:
+mpp estimation has its own test (test_gigapath_knn_esti_mpp.py), and conflating
+the two here would leave a step-5 failure unable to say which stage broke.
+Steps 1-4 keep using the estimate, unchanged, since that is closer to how a
+real shot actually reaches the base module's rotation-blind path when nothing
+else calls it directly.
+
+Step 5's checks drive the exit code; steps 1-4's PASS/WARN print stays
+informational, as it always has been.
 
 Usage:
-    python test_modules/test_gigapath_slide_win_sim.py
-    python test_modules/test_gigapath_slide_win_sim.py \\
+    python utilities/test_modules/test_gigapath_slide_win_sim.py
+    python utilities/test_modules/test_gigapath_slide_win_sim.py \\
         --wsi /path/to/slide.svs --x 10000 --y 20000 --mpp 0.5
 """
 
 import argparse
 import os
 import math
+import sys
 import time
 
 import matplotlib.cm as cm
@@ -32,8 +91,11 @@ from TissuesRegionsMask import TissuesRegionsMask
 from QueryFromWSI import QueryFromWSI
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
 from GigaPathSlidingWinSim import compute_gigapath_sliding_win_similarity
+from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot
 from GigaPathFunc import gigapath_model, gigapath_encode
 
+
+ROTATIONS = (0, 90, 180, 270)
 
 
 # ── Canvas builder ────────────────────────────────────────────────────────────
@@ -93,6 +155,70 @@ def _find_best(mask, sim_maps, ds, tile_size, use_overlap: bool):
             best_y = int(region.y + r * cell_l0 + y_off)
 
     return best_x, best_y, best_score
+
+
+# ── step 5: rotation-aware retriever ────────────────────────────────────────
+
+ROT_PASS, ROT_FAIL = [], []
+
+
+def rot_check(label: str, condition: bool, detail: str = '') -> None:
+    tag = 'ok  ' if condition else 'FAIL'
+    print(f'  {tag}  {label}' + (f'   {detail}' if detail else ''))
+    (ROT_PASS if condition else ROT_FAIL).append(label)
+
+
+def run_rotation_checks(wsi, mask, query_np, encoder, args, base_mpp) -> None:
+    """Step 5. Reuses the already-open wsi/mask/encoder from steps 0-3; crops
+    nothing new. Ground-truth mpp, not the step-2 estimate -- see module
+    docstring for why the two must not be conflated."""
+    print('\n[5] GigaPathSlidingWinSimRot -- rotation-aware retrieval...')
+    ds = args.mpp / base_mpp
+    tol_um = args.tile * ds * base_mpp
+
+    def dist_um(x0, y0):
+        return math.hypot(x0 - args.x, y0 - args.y) * base_mpp
+
+    retriever = GigaPathSlidingWinSimRot(wsi, encoder, mask=mask, mpp=args.mpp,
+                                         tile_size=args.tile, overlap=True)
+    retriever.build_wsi_features()
+
+    print('  recovers a rotated query')
+    for applied_rot in ROTATIONS:
+        photo = GigaPathSlidingWinSimRot._rotate_np(query_np, applied_rot)
+        retriever.build_query_features(photo)
+        retriever.compute_sim_maps()
+        result = retriever.find_best()
+
+        err_um = dist_um(result.best_x0, result.best_y0)
+        rot_check(f'rot={applied_rot:>3}  position within one tile',
+                  err_um <= tol_um, f'err={err_um:.0f}um  tol={tol_um:.0f}um')
+
+        expected_rot = (360 - applied_rot) % 360
+        rot_check(f'rot={applied_rot:>3}  best_rotation == {expected_rot}',
+                  result.best_rotation == expected_rot,
+                  f'got {result.best_rotation}')
+
+    print('  beats the non-rotated module on rotations it cannot search')
+    for applied_rot in (90, 180, 270):
+        photo = GigaPathSlidingWinSimRot._rotate_np(query_np, applied_rot)
+        qc = QueryPatchContainer(photo)
+        qc.extract_all(args.tile, overlap=True)
+        sim_maps = compute_gigapath_sliding_win_similarity(
+            qc, wsi, mpp=args.mpp, tile_size=args.tile, overlap=True,
+            mask=mask, encoder=encoder)
+        mx, my, m_score = _find_best(mask, sim_maps, ds, args.tile, use_overlap=False)
+        ox, oy, o_score = _find_best(mask, sim_maps, ds, args.tile, use_overlap=True)
+        bx, by = (ox, oy) if o_score > m_score else (mx, my)
+        base_err_um = dist_um(bx, by)
+        rot_check(f'rot={applied_rot:>3}  base module misses (Rot exists for this)',
+                  base_err_um > tol_um,
+                  f'base err={base_err_um:.0f}um  tol={tol_um:.0f}um')
+
+    total = len(ROT_PASS) + len(ROT_FAIL)
+    print(f'\n  [5] {len(ROT_PASS)}/{total} passed')
+    if ROT_FAIL:
+        print(f'      failed: {", ".join(ROT_FAIL)}')
 
 
 # ── Visualization ─────────────────────────────────────────────────────────────
@@ -284,12 +410,14 @@ def main():
     ap.add_argument('--batch',           type=int,   default=1024)
     ap.add_argument('--min-region-ratio',type=float, default=0.10,
                     help='Skip regions smaller than this fraction of the largest region (default 0.10)')
+    ap.add_argument('--skip-rot', action='store_true',
+                    help='skip step 5 (GigaPathSlidingWinSimRot checks)')
     ap.add_argument('--out',             default=None)
     args = ap.parse_args()
 
     if not os.path.exists(args.wsi):
         print(f'[SKIP] WSI not found: {args.wsi}')
-        return
+        return 0
 
     wsi_name = os.path.basename(args.wsi)
     print(f'WSI : {args.wsi}')
@@ -309,7 +437,7 @@ def main():
     query_pil = qfwsi.crop(args.x, args.y)
     if query_pil is None:
         print('[FAIL] QueryFromWSI.crop returned None')
-        return
+        return 1
     query_np = np.array(query_pil)
     query_qpc = QueryPatchContainer(query_np)
     query_qpc.extract_all(args.tile, overlap=args.overlap)
@@ -319,7 +447,7 @@ def main():
 
     if query_qpc.grid.grid_rows == 0 or query_qpc.grid.grid_cols == 0:
         print('[FAIL] Query too small for even one patch — use larger --mpixels or smaller --tile')
-        return
+        return 1
 
     wsi      = qfwsi.wsi
     base_mpp = float(wsi.properties.get('openslide.mpp-x', 0))
@@ -366,8 +494,8 @@ def main():
     print('\n[4] Running compute_gigapath_sliding_win_similarity...')
     t0 = time.perf_counter()
     sim_maps = compute_gigapath_sliding_win_similarity(
-        query_qpc, wsi, mpp=mpp_est, 
-        tile_size=args.tile, 
+        query_qpc, wsi, mpp=mpp_est,
+        tile_size=args.tile,
         overlap=args.overlap,
         mask=mask,
         encoder=encoder,
@@ -385,8 +513,8 @@ def main():
                 msg += (f'  |  overlap mean={hm_ov.mean():.4f}  max={hm_ov.max():.4f}')
             print(msg)
 
-    # ── Step 5: Verify ────────────────────────────────────────────────────────
-    print('\n[5] Verifying...')
+    # ── Step 4b: Verify ───────────────────────────────────────────────────────
+    print('\n[4b] Verifying...')
     t0 = time.perf_counter()
 
     mx, my, m_score = _find_best(mask, sim_maps, ds_est, args.tile, use_overlap=False)
@@ -405,7 +533,7 @@ def main():
     else:
         est_x, est_y, best_score, err_um = mx, my, m_score, m_um
 
-    timings['5. verify'] = time.perf_counter() - t0
+    timings['4b. verify'] = time.perf_counter() - t0
 
     print(f'  GT location   : ({args.x}, {args.y})')
     print(f'  Main best     : ({mx}, {my})  score={m_score:.4f}  dist={m_um:.1f} µm')
@@ -419,6 +547,10 @@ def main():
 
     status = 'PASS' if err_um <= tol_um else 'WARN'
     print(f'\n  [{status}] best error={err_um:.1f} µm  tol={tol_um:.1f} µm')
+
+    # ── Step 5: GigaPathSlidingWinSimRot ─────────────────────────────────────
+    if not args.skip_rot:
+        run_rotation_checks(wsi, mask, query_np, encoder, args, base_mpp)
 
     # ── Figure ────────────────────────────────────────────────────────────────
     t0 = time.perf_counter()
@@ -467,6 +599,8 @@ def main():
     print('─' * 42)
     print('\nDone.')
 
+    return 1 if ROT_FAIL else 0
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

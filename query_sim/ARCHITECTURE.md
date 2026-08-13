@@ -1,5 +1,12 @@
 # query_sim — Microscope FOV Simulator（整合設計）
 
+> **這是 M4 當初的整合計畫，不是現在的目錄結構。** `synth_fov_generator.py` 已
+> 不存在，`source/tissue_filter.py`（`is_tissue`/`classify_region`）從未落地——
+> 那條路線被 M4.2「`region_type` 被實測否決」推翻，見 `log/MILESTONE.log` 與
+> `log/TODO.log`。`camera.py`（M4.1 的 Camera 抽象）也是這份文件寫完之後才加的,
+> 不在下面的目錄結構裡。保留原文是因為被推翻的路線本身是負面結果,不是要重寫
+> 成看起來從一開始就對；要看現在實際長什麼樣,直接看 `query_sim/` 底下的檔案。
+
 整合 `query_sim/`（現有模組化 augmentation）與 `synth_fov_generator.py`（批量 + GT）為一個
 統一 package，同時保留兩者最強的部份：
 

@@ -1,6 +1,8 @@
 ================================================================================
   LocaScope — TODO Log
   格式：[ ] 未完成   [x] 已完成
+        [x] 就地保留在原分類下，用來記錄「這條為什麼不成立」；
+        檔尾的「已完成」區是按時序累積的施工紀錄，不再新增。
   新增 TODO 請附上日期與來源檔
 ================================================================================
 
@@ -121,7 +123,7 @@
       **不是**破洞造成的，是獨立問題：一塊合法的大組織就足以把門檻拉到
       殺光其餘。_search_tissue_regions 其實已經從 connectedComponentsWithStats
       拿到 CC_STAT_AREA 卻丟掉了，改用像素面積是現成的。
-      但相對門檻本身是否該留，要看實測分佈再決定（M4.3 的教訓）。
+      但相對門檻本身是否該留，要看實測分佈再決定（M4.2 的教訓）。
 
 [ ] 2026-07-29 | TissuesRegionsMask.py — _adaptive_apply 跳過 padding tile
     from_wsi 讀 (0,0) 起整張畫布，MIRAX 有 84.1% 是 padding，_adaptive_apply
@@ -202,9 +204,340 @@
     MPP 估算失敗時的 fallback 策略（目前 GigaPathKnnEstiMpp 一定給結果，
     但若信心不足是否需要 warning 或 raise？）
 
-[ ] 2026-07-21 | LocaScope.md 開放問題
+[x] 2026-07-21 | LocaScope.md 開放問題
     是否暴露 wsi_container、localizer 供外部 debug 用
     （方便 notebook 裡 introspect 中間結果）
+    ✅ 2026-08-08 已由 LocaScopePipeline.run(keep_objects=True) 解決：
+       額外保留 retriever / localizer / query_qc，供繪圖與 introspect。
+
+[ ] 2026-08-07 | bench_locascope.py verify_candidates — 挑選規則要換掉什麼
+    來源：result/BenchLocaScope/metrics.csv，963 筆（bench 仍在跑）
+
+    ── 名詞 ──
+    query = 一張 FoV 照片，真實或合成都算
+
+    需不需要 golden —— 決定一個量能不能用在真實 query 上
+      sift_verified_rank    不需要  只看 inlier 數，真實 query 也算得出來
+      sift_hit_rank         需要    要 GT 才知道哪個候選是對的
+      refine_center_err_um  需要    要 GT 才算得出誤差
+
+    挑選軸（需 golden）—— 問「五個候選裡挑對了嗎」，判準是名次
+      交出答案 = sift_verified_rank 非空（5 個候選裡有人 inlier >= 10）
+      交對     = 交的名次 == sift_hit_rank（SIFT 精修後真的對的第一個名次）
+      交錯     = 交了，但交的不是對的那個
+      棄權     = 5 個都沒過門檻
+      容差 hit_tol_px = refiner_padding * tile_size * ds（bench_locascope.py
+           :634-635），隨 routed level 放大，誤路由時尺規跟著膨脹，見本條
+           末尾的附帶。
+           另一個更合理的定義是「預測視窗中心到 golden 中心 <= 視窗格的
+           外接圓半徑」，但它比現行 hit_tol 寬容，先沿用現行的。
+
+    落點軸（需 golden）—— 問「最後停在哪」，判準是距離
+      落點準 / 落點偏 = refine_center_err_um <= / > 100 um
+      容差是固定物理量，與 level 無關。100 um 是
+      analyze_locascope_metrics.py 的 --tol-um 預設值（:317），不是 pipeline
+      常數；該腳本同時報 10/50/100/500/1000 五個點。
+
+    兩個軸以前都寫成「答對 / 答錯」：下面 min_inliers 那條的「答對」其實是
+    挑選軸的交對（1422 / 26 兩個數字與本條相同），本條的「答對」才是落點軸。
+
+    stage 3 是一個操作、兩個角色 —— read_wsi_crop -> detect_and_match ->
+    estimate_homography 這一串。LocaScopePipeline.py:286-288 與
+    bench_locascope.py:159 呼叫的是同一串，沒有獨立的 verify API。
+      精修 = 取 SiftRansacResult 的 center_x0/y0，拿位置，對應 refine_* 欄位
+      驗證 = 取 inlier_count，拿證據做取捨，對應 sift_verified_rank
+    同一次呼叫可以同時扮演兩個角色，差別只在取用哪個欄位。階段本身叫
+    localization。不要再用「精定位」「幾何驗證」。
+
+    ── 現況 ──
+    963 筆：交對 769、交錯 4、棄權 190
+    現在的挑法是「從第 1 名往下，第一個 inlier >= 10 的就交出去，停」
+
+    ── 量到的事實 ──
+    交錯那 4 筆交出去的候選 inlier = 10 / 18 / 20 / 24
+    交對那 769 筆，5 個候選裡最高的 inlier 最低是 26、中位 1422、最大 4458
+    → 兩組完全不重疊
+
+    這代表換成「取最大 inlier」也救不到這 4 筆：兩種挑法都會挑到同一個
+    低分候選，問題在它根本不該過門檻。min_inliers=10 比真實訊號低了兩個
+    數量級。
+
+    但 24 與 26 只差 2 個 inlier。把門檻訂成 30 是對這批樣本過擬合，不是
+    校準（ClaudeRules 7）。門檻要從原理來，不是從這個間隙來。
+
+    ── 三個候選做法，都不需要魔術數字 ──
+
+    A. inlier 佔比，不是絕對數 —— inliers / matches
+       大而有紋理的裁切圖本來就 match 多，佔比量的是幾何一致性而不是
+       豐富度。L6 那種小圖的絕對數低是必然的，佔比才可比。
+
+       已量（refine_inliers / refine_matches。1322 筆每一列都有記錄，跟
+       對錯無關，連 refine_success=False 的 358 筆也有，所以不必改 code
+       就能算。判定用「最終中心誤差 <= 100 um」）：
+
+         pipeline 宣稱 refine_success=True 的 964 筆
+           落點準 951   佔比 min 0.594  p5 0.824  p50 0.967
+           落點偏  13   佔比 min 0.196  max 0.565
+
+       0.565 與 0.594 之間沒有樣本，門檻放 0.57 到 0.59 都能全擋全留。
+
+       兩個限制，比上面那句「佔比才可比」重要：
+
+       (1) 佔比單獨用會漏。看全部 371 筆落點偏的（含 refine_success=False），
+           有 9 筆佔比 >= 0.9，而它們是 4/4 八筆、5/5 一筆 —— 4 個點正好
+           是 homography 的最低需求，RANSAC 必然擬合成完美一致，佔比在
+           match 數少時恆等於 1。佔比一定要配一個絕對下限才有意義。現在
+           那個下限剛好是 min_inliers=10，所以那 9 筆沒進到「宣稱成功」
+           那群，但這是巧合，不是設計。
+
+       (2) 那 13 筆落點偏全部是同一片 S1104233，而且 13/13 都是路由錯：
+           L2->L4 八筆、L0->L6 三筆、L1->L4 一筆、L1->L6 一筆。方向雖然
+           有兩種，成因只有一個 —— stage 1 在這片上把 mpp 估得太粗。
+           所以這是「一個失效模式被觀察十三次」，不是十三個獨立樣本。
+           0.565 到 0.594 的間隙是真的，但它只證明這一種失效模式的佔比
+           偏低。門檻不能從這裡校準（ClaudeRules 7）。要驗證得找別種
+           失效模式的負樣本，例如 SlideWinSift 的假陽性 —— 那些是暴力掃
+           在錯的位置湊出來的，不是誤路由。
+
+       可以現在就做的：refine_inliers / refine_matches 不需要正解，
+       所以它能當 LocaScopePipeline 的主路徑信心值輸出，真實照片同樣
+       適用。當「挑選規則」才需要補下面那個資料缺口。
+
+       ── 這幾個數字改過一次，成因值得記 ──
+       2026-08-07 第一版寫的是「落點準 696 min 0.620 / 落點偏 3」。那是分析
+       腳本的 bug：正確性判定寫成 (num(...) or 9e9) <= tol，而 Python 的
+       0.0 是 falsy，所以 refine_center_err_um 正好是 "0.0" 的 10 筆會走
+       進 or 的右邊變成 9e9，被判成落點偏。被誤判的正是定位最完美的 10 筆
+       （inliers 652 到 3846，誤差小於 0.05 um 才會四捨五入成 0.0），
+       混進「落點偏」組後把佔比上界從 0.565 拉到 0.999，一度看起來像是
+       「佔比根本分不開」。
+       修法見 utilities/cli/analyze_locascope_metrics.py 的 is_correct()：
+       用 e is not None 顯式判斷，不要用 or 給預設值。誤差這種欄位，0 是
+       最好的結果而不是缺值，正是 `x or default` 會出事的情形。
+
+    B. 空間投票（最有價值）—— top_k 刻意讓同一個地點以不同旋轉、不同
+       grid 重複出現，這個結構現在被當成雜訊。把 K 個候選精修後的中心做
+       群聚，同一個地點被幾個獨立候選指到就是幾票。
+
+       證據：190 筆裡「A 挑第 1 名、B 挑別的名次」的情況，B 那個候選的
+       inlier 沒有一次低於第 1 名，中位數 1.01 倍 —— 那是同一個地點的
+       多重投票。而交錯的 4 筆都是孤零零一個候選。四個視窗一起同意像
+       真的，一個孤立高分像巧合。utilities/SlideWinSift.py 的模組
+       docstring 為同一個現象寫了同一段話。
+
+    C. 相對邊際，不是絕對門檻 —— 只在「最佳 inlier >= C 倍的、位於不同
+       地點的次佳」時才接受。把絕對門檻換成相對的，跨層跨切片才守得住。
+
+    ── 擋路的資料缺口 ──
+    verify_candidates 只存 sift_best_inliers（5 個裡的最大值）和
+    sift_verified_rank（名次），沒有存「每個候選各自的 inlier 和精修後
+    中心」。A、B、C 三者都需要那兩個。先補這兩個欄位再重跑一次，三種
+    挑法就能離線比較，不必各跑一次 bench。
+
+    ── 附帶 ──
+    hit_tol 目前 = refiner_padding * tile_size * ds，而 ds 來自「路由到
+    的層」，所以尺規會跟著錯誤一起放大：L0 是 512 px，誤路由到 L6 就變
+    32768 px。容差該是照片的屬性（從它自己的 effective_mpp 算），不是
+    路由的屬性。違反 ClaudeRules 8。
+    影響範圍已量：sift@ 左 == 1 的 692 筆，用嚴格容差複判仍正確 691 筆，
+    只有 BRACS_1936_L1_syn00020（L1->L3）是靠膨脹的容差過關。所以結論
+    不受污染，但指標本身要修。
+
+    2026-08-08 追加：它還有第二個獨立的毛病 —— **少算了 win/2**。
+    SIFT 實際讀的範圍是 win/2 + padding * tile_size（win = query 在該層的
+    footprint），hit_tol 只有 padding * tile_size。
+    後果已量：retr_hit_rank 判定「真值不在任何候選裡」的 451 筆，其中
+    164 筆最終仍然落點準 —— 真值在 SIFT 構得到的範圍內，只是超出了 hit_tol。
+    這個指標系統性低估 retrieval 的可用性。
+
+    ── 建議：記兩欄，因為它們回答不同問題 ──
+      retr_reach_px = (win/2 + padding*tile_size) * ds_routed
+        「SIFT 實際上構不構得到」。會隨路由脹大，但那正是它要描述的東西。
+      retr_frame_px = hypot(win_w, win_h) / 2  在真實層算
+        「retrieval 有沒有框住它」= 預測視窗中心到 golden 中心是否在視窗的
+        外接圓內。比較嚴，但用真實層算所以對路由錯誤免疫，跨列可比
+        （ClaudeRules 8）。
+    兩欄並存，跟本檔 *_err_px / *_center_err_px 的作法一致。
+
+[ ] 2026-08-07 | min_inliers = 10 從來沒有被校準過，而且有四份拷貝
+
+    ── 查證結果 ──
+    git log -S"min_inliers: int = 10" -- 3_localization/SIFT_RANSAC.py
+      -> 6ec4a6d，commit 訊息只有一個字："init"
+
+    程式碼沒有註解說明為什麼是 10。3_localization/README.md 沒提。
+    TODO.log 和 MILESTONE.log 裡所有提到 min_inliers 的段落都是 2026-08-07
+    當天寫的，沒有一條是當初的理由。
+
+    也就是說：它是專案第一個 commit 就寫死的預設值，不是量出來的。
+
+    ── 四個地方各寫一次 ──
+      3_localization/SIFT_RANSAC.py:100    min_inliers: int = 10
+      utilities/LocaScopePipeline.py:103   refiner_min_inliers: int = 10
+      utilities/cli/locate_photo.py:466    refiner_min_inliers=10
+      utilities/SlideWinSift.py:150        min_inliers: int = 10
+
+    最後一個是 2026-08-07 新寫的模組抄過去的，同樣沒有理由。改的時候
+    漏掉其中一份，症狀會是「同一張照片在 bench 和 CLI 得到不同判定」，
+    而那從輸出看不出來 —— 這比「10 太小」更值得先修。
+
+    ── 10 的可能出處，以及它跟實際分布差多少 ──
+    cv2.findHomography 需要 4 個對應點，10 是「比最低需求多一點」的直覺
+    值。那是 SIFT/RANSAC 的通用起手式，不是針對病理切片量的。
+
+    實測（result/BenchLocaScope/metrics.csv，965 筆）：
+      交對的 inlier 中位數 1422、最低 26
+      交錯的 inlier        18 / 20 / 24
+    10 比真實訊號低兩個數量級，幾乎不擋任何東西。
+
+    這件事早就被看到過。TODO.log 的 2026-08-05 entry 已經寫了
+      「lost 那 15 張的舊答案有 218-915 個 SIFT inlier，新答案只有 2-6」
+    真答案幾百上千、冒牌貨個位數，當時就觀察到了，門檻沒跟著動。
+
+    ── 為什麼不能直接調高 ──
+    交錯的只有 3 筆，而且全部是 S1104233 誤路由到 L6 —— 一個失效
+    模式被觀察三次。24 與 26 之間那 2 個 inlier 的間隙是這批樣本的巧合，
+    不是分布的邊界。直接訂 30 就是過擬合（ClaudeRules 7）。
+
+    ── 該做的兩件事，順序不能反 ──
+    1. 先收斂成單一來源：LocaScopePipeline 傳給 SiftRansacLocalizer，
+       CLI 和 bench 都從 pipeline 拿，不要各自寫死。這一步不改行為。
+    2. 再校準：要別種失效模式的負樣本。SlideWinSift 的假陽性是現成的
+       來源（那些是暴力掃在錯的位置湊出來的，不是誤路由），而且它的
+       min_inliers 也是同一個沒理由的 10。
+
+[ ] 2026-08-08 | locate_photo.classify() — confidence 的 100/30 與 min_inliers
+    是同一個未校準的量
+
+    classify() 依絕對 inlier 數切 failed / low(<30) / medium(<100) / high。
+    門檻是猜的，程式碼自己註明過（locate_photo.py:93-96、:120-122）。
+
+    但上面「挑選規則要換掉什麼」那條已經量到：絕對 inlier 數在完整 bench 上
+    分不開對錯（交對與交錯的重疊區 26-198），而佔比 refine_inliers /
+    refine_matches 有乾淨空隙。confidence 用的正是被否決的那個量。
+
+    ➡ 三者共用同一個判準，該一起換，不是各修各的：
+        SIFT_RANSAC.min_inliers   接受門檻
+        verify_candidates         挑選規則
+        classify()                信心分級
+    ➡ 合成 query 有 GT，是唯一能校準這三者的資料來源；真實 query 沒有。
+    ➡ 等 bench 跑完再定值（ClaudeRules 7）。
+
+    附帶：failed / low / medium / high 是同一條軸（inlier 數）的四格，
+    failed 只是最低那一格，不是另一個軸。但名字不平行，讀起來像錯誤狀態，
+    換判準時順手改成一致的級名。
+
+[ ] 2026-08-08 | 自信答錯：一個吸引子吃掉十筆，而兩種失效模式的 ratio 訊號相反
+
+    來源：result/BenchLocaScope/metrics.csv（bench 仍在跑，當時 1401 筆、
+    1398 筆可用）＋ result/SlideWinSift/real/results.csv（1.bmp）
+
+    ── 定義 ──
+    自信答錯 = refine_success=True（找到 homography 且 inlier >= min_inliers）
+    但落點偏。「自信」那一半推論時看得到，真實 query 也有；「答錯」那一半
+    需要 golden。所以部署時你會拿到一個座標，沒有任何跡象說它有問題。
+
+    ── 規模，以及為什麼 --tol-um 不是調出來的 ──
+      自信答錯 14 / 1398 = 1.0%
+        誤差 22,093 - 29,710 um = 22-30 mm = 91,091 - 122,497 L0 px
+             = 真實層的 98 - 456 個 tile
+      落點準 998 筆
+        p50 3.0 um、p95 24 um、max 35 um = 0.12 個 tile
+    兩組差 630 倍，中間沒有任何樣本。所以 --tol-um 從 50 到 20000 都會得到
+    同一組答案 —— 這個容差不敏感，不是校準出來的。
+
+    ── 十筆錯誤其實是一筆 ──
+    13 筆 S1104233 裡有 10 筆的預測落在完全相同的像素 (191696, 97600)，
+    另 3 筆在 18,000 px 內；它們各自的真值卻散佈在 8,665 px。
+    來源涵蓋 L0 / L1 / L2 三種 level，路由到 L4 和 L6 兩個不同的層。
+    -> 玻片上有一個吸引子，只要路由往粗它就贏。
+
+    形狀與 M6 的 region 0 相似（一個地點吸走大量預測），但**機制未驗證**：
+    metrics.csv 沒有 region 欄位，無法確認這個座標落在哪一塊 region、那塊
+    有多大。要判定是不是同一個機制，得先把 retr_region 記進 metrics.csv。
+    在那之前不要把兩者當成同一件事（ClaudeRules 9）。
+
+    ── 兩種失效模式，ratio 往相反方向跑 ──
+      模式 A 弱匹配（bench，誤路由）   inlier 10-39    ratio 0.196-0.565
+      正確答案                          —              ratio 0.594-1.0 (p50 0.967)
+      模式 B 退化 H（SlideWinSift）     inlier 233-278  ratio 0.822-0.989
+
+    模式 A 在正確答案下方，零重疊 -> ratio 下限擋得住。
+    模式 B **落在正確答案的區間裡面** -> ratio 完全無效，而且不能改用上限，
+    因為正確答案的中位數就是 0.967。
+    原因：ratio 是「多少比例的 match 通過幾何檢查」，而幾何檢查是用 H 做的。
+    H 退化時所有點被映到一處，每個點都通過，ratio 趨近 1 量的是 H 壞掉的
+    程度而不是匹配品質。所以模式 B 只能用「變換本身合不合法」來擋。
+
+    ── 四層防線，由便宜到貴，前兩層不需要 golden ──
+    a. 拒絕重複的預測。同一片玻片、不同 query 回傳完全相同的座標 -> 假影。
+       上面 10/13 落在同一個像素。M6 已經寫過同一訊號的另一面（同一批照片
+       的預測應該連成軌跡）。
+    b. ratio 下限。14 筆全部 <= 0.565，998 筆正確的全部 >= 0.594，零重疊。
+       只擋模式 A。
+    c. 修路由捨入方向（見下一條）。處理 -1 那批，不處理這 13 筆。
+    d. 記 scale / det(H)。處理模式 B。metrics.csv 目前兩欄都沒有，所以
+       模式 B 在這份資料上根本無法驗證。
+    a + b 兩層在這份資料上會擋掉全部 14 筆。
+
+    ── 不要換 localization 方法 ──
+      餵對視窗時       604 / 604 全中，零失敗零誤判
+      正確答案誤差     p50 3.0 um、max 35 um（L0 約 12 px）
+      自信答錯 1.0%    其中 13/14 來自誤路由，10/13 來自同一個吸引子
+    SIFT 只要被指對就幾乎完美。換掉它不會改善 32% 的召回、24.5% 的排序、
+    10% 的路由 —— 那三塊佔了失敗的全部。
+    保留：以上全是合成 query。真實照片那邊 SIFT 確實產出過 278 inlier 的
+    退化匹配，形狀完全不同。但那也不是換方法能解決的，那個失效來自沒有
+    retrieval 篩選的暴力掃（50355 個視窗取極大值）。
+
+[ ] 2026-08-08 | LocaScopePipeline.py:254 — 誤路由是不對稱的，往粗的幾乎無害，
+    往細的幾乎全毀
+
+    來源：result/BenchLocaScope/metrics.csv（bench 仍在跑，當時 1401 筆、
+    1398 筆可用。落點準 = refine_center_err_um <= 100 um）
+
+    ── 量到的事實 ──
+      routed - true    n      落點準
+         -2 (更細)      2      0.0%
+         -1 (更細)    159     15.7%     <- 幾乎全毀
+         +1 (更粗)    485     91.1%     <- 幾乎無害
+         +2           82     76.8%
+         +3/+5/+6      5      0.0%
+
+    往粗差一層仍有 91% 答對，往細差一層只剩 16%。差六倍。
+
+    ── 機制 ──
+    路由決定 retrieval 的視窗有多大（視窗 = query 在該 level 的 footprint）。
+      往粗 -> 視窗覆蓋的實際面積比真實 FoV 大，真值仍落在 SIFT 的 padded
+              crop 裡，stage 3 救得回來
+      往細 -> 視窗比真實 FoV 小，真值的 footprint 根本裝不下，retrieval 從
+              一開始就框不住它，stage 3 沒有東西可救
+    所以這不是「差一層就是差一層」，兩個方向的後果性質不同。
+
+    ── 建議 ──
+    LocaScopePipeline.py:254 現在是
+
+        ds_target = est_mpp / self.base_mpp
+        level = self.wsi.get_best_level_for_downsample(ds_target)
+
+    openslide 這個函式回傳的是 downsample <= ds_target 的最大那層，也就是
+    它天生偏細。改成在 downsample 空間向上取整：
+
+        ds_list = self.wsi.level_downsamples
+        level = next((i for i, d in enumerate(ds_list) if d >= ds_target * 0.999),
+                     len(ds_list) - 1)
+
+    ── 它救得到什麼、救不到什麼（不要誤讀成萬靈丹）──
+    這是改捨入方向，不是加安全邊際。
+      救得到：-1 那 159 筆（目前 84% 失敗）
+      救不到：自信答錯那 13 筆。那些是 +2 / +3 / +4 的誤路由，是 stage 1 的
+              mpp 估計本身錯得離譜，捨入方向無關
+    而且 +3 以上落點準是 0%，所以也不能無腦往粗——只能改捨入，不能加偏移。
+
+    ── 未決 ──
+      - 偏粗要偏多少：只往粗捨入，還是在 est_mpp 上加一個安全邊際
+      - +2 仍有 76.8%，+3 以上歸零。安全區的上界在哪要量
+      - bench 未跑完，上面每個數字都會動
 
 ────────────────────────────────────────────────────────────────────────────────
   Inference 加速（2_retrieval/INFERENCE_SPEEDUP.md）
@@ -282,13 +615,40 @@
   API 一致性
 ────────────────────────────────────────────────────────────────────────────────
 
+  （目前無 pending — 見已完成區）
+
+  這一區沒有自己的條目，因為介面統一的工作一向記在「動到的那個模組」底下。
+  已完成的四件：
+    HESTSegFunc.py            make_hest_method factory，讓 DeepLab 接上
+                              from_wsi 的 method 介面
+    aiNNModel/GigaPathFunc.py make_gigapath_encoder closure factory，
+                              刻意對稱 make_hest_method
+    PatchingLib.py            crop() 把 (grid|pixel) x (bottom_right|size)
+                              四種輸入統一成一個介面
+    2_retrieval/              2026-08-12 統一 module 檔名的 Slide / Sliding：
+                              GigaPathSlidingWinSim.py 與
+                              GigaPathSlidingWinSimRot.py。舊 function 不能與
+                              class 同名，改成
+                              compute_gigapath_sliding_win_similarity()。
+                              Repo caller 與現行文件同步；較早 decision entries
+                              保留當時的實際檔名，不回寫歷史。
+  往後的介面統一一樣記在模組底下，這裡只留索引。
 
 ────────────────────────────────────────────────────────────────────────────────
   實作缺口
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] 2026-07-21 | LocaScope.py
+[x] 2026-07-21 | LocaScope.py
     LocaScope 主類別尚未實作（目前只有 LocaScope.md 設計文件）
+    ✅ 2026-08-08 早就實作了，只是換了名字。LocaScope.md 描述的設計就是
+       utilities/LocaScopePipeline.py（M5）：
+         class LocaScope    -> class LocaScopePipeline
+         locate(query, ...) -> run(img)
+         LocaScopeResult    -> LocaScopeQueryResult
+       實作還多了設計文件沒有的東西：level routing、per-level retriever
+       cache、unusable_level、三個 stage 各自 try/except。
+       根目錄的 LocaScope.py 是 07-08 留下的 0 byte 骨架，全專案無人 import，
+       已刪除。
 
 [x] 2026-07-21 | 1_estimate_query_mpp/estimate_mpp_classic.py
     Classic MPP 估算（非 GigaPath）尚未實作（空檔案）
@@ -302,13 +662,15 @@
        未決：檔案含 print() 與 argparse __main__，違反「stage module 不含
        CLI / print」。要拆的話純邏輯留原處、CLI 移到 1_estimate_query_mpp/cli/。
 
-[ ] 2026-07-21 | 2_retrieval/retrieval_gigapth.py
+[x] 2026-07-21 | 2_retrieval/retrieval_gigapth.py
     Retrieval entry point 尚未實作（空檔案）
+    ✅ 2026-08-08 entry point 是 GigaPathSlideWinSimRot，M5 起就在 production。
+       這個檔名還少一個 a（gigapth）。0 byte、07-08 建立、無人 import，已刪除。
 
 [ ] 2026-07-23 | query_sim/ — 後續
     ● 是否跟 PatchingLib.WsiTissuesContainer 整合 WSI 讀取
         風險：兩邊 use case 不同（raw crop vs grid patch），整合可能反而複雜
-    ✅ 多 WSI 混合輸出 — 已由 cli/multi_batch.py 完成（見 M4.3）
+    ✅ 多 WSI 混合輸出 — 已由 cli/multi_batch.py 完成（見 M4.2）
       （--rotation-only 已由 Camera(cfg=...) 天然涵蓋：換 cfg 就是換相機）
 
 [x] 2026-07-22 | 2_retrieval/ — rotation-aware retrieval
@@ -342,9 +704,9 @@
       -> sim map 是平的，argmax 由雜訊決定。GigaPath 對「白底+細絲+脂肪」的
          patch embedding 幾乎相同，這種 FoV 在外觀上本來就不可定位
 
-    這是 M4.3 移除 classify_region 時提到的底層現象重新浮現：
+    這是 M4.2 移除 classify_region 時提到的底層現象重新浮現：
       feature-sparse 的 FoV 不可定位。但事前分類 threshold 無法跨 slide 校準
-      （見 M4.3 的 6 片 WSI 實測），所以改成事後量信心度
+      （見 M4.2 的 6 片 WSI 實測），所以改成事後量信心度
 
     提案：在 GigaPathSlidingWinSimRot.find_best() 記峰值突出程度
       hm_mean 已經算出來了，順手多兩個統計量：
@@ -359,7 +721,7 @@
       看不出 pipeline 在有內容的 query 上實際多準
 
     未決：
-      - peak_z 的門檻要用實測分佈決定（不要再猜 threshold，見 M4.3 教訓）
+      - peak_z 的門檻要用實測分佈決定（不要再猜 threshold，見 M4.2 教訓）
       - 是否也記 sim map 的 top1/top2 峰值比（另一種峰值銳利度指標）
 
 [ ] 2026-08-05 | 2_retrieval/GigaPathSlideWinSimRot.py
@@ -382,7 +744,7 @@
         以前 failed   gained      33  stayed_failed 108
 
     high = 第三階段 SIFT/RANSAC inlier 數夠多。真實照片沒有 GT，所以
-    「幾何驗證通過」是手上最接近「對了」的東西。
+    「驗證通過」是手上最接近「對了」的東西。
 
     ── 機制 ──
     find_best 每個 region 算出一格一格的視窗分數 hm_mean，取 argmax，
@@ -452,7 +814,7 @@
     「可定位 / 不可定位」而提的，現在它有了第二個、量測過的動機，而且
     暗示它不該只當事後信心度，應該直接參與排名。
     注意：四個旋轉角共享同一個 region、同一批位置，差別只有方向，所以
-    每張照片自己就帶著基準線，不需要外部校準常數——避開 M4.3 那個
+    每張照片自己就帶著基準線，不需要外部校準常數——避開 M4.2 那個
     「猜門檻猜兩次都錯」的坑。
 
     ── 優先序建議：先做 top-K 驗證，不要先修偏差 ──
@@ -588,7 +950,7 @@
     把「格子」和「像素從哪來」解耦了，可以重用）。
 
     ── 還沒量的 ──
-    編碼量會變多少倍。這批語料的 tissue_frac 是 1.4% 到 17.1%，但 region 是
+    編碼量會變多少倍。這批 query 的 tissue_frac 是 1.4% 到 17.1%，但 region 是
     bounding box 不是組織本身，所以真正的比例是 sum(region 面積) / bounded
     面積，沒有數字。1.4% 那幾片如果 bounding box 也只蓋掉一小部分，整張編碼
     可能貴上一個數量級。
@@ -597,6 +959,192 @@
     它會把整層讀進來，只為了交給一個忽略像素的函式。一個從 bounds 屬性直接
     捏出全 True mask 的 constructor（TissuesRegionsMask.whole_slide(wsi, ds)）
     可以零 I/O 做同一件事，大約 15 行。
+
+[ ] 2026-08-08 | aiNNModel/ + 2_retrieval/ — 197 個 token 只用了 1 個，而視窗
+    分數又被平均掉
+
+    ── 兩個丟棄點 ──
+    (1) 編碼端。config.json 是 img_size 224 / patch_size 16 -> 14x14 = 196 個
+        patch token + 1 個 CLS = 197。timm 在 global_pool='token' 下取
+        x[:, 0]（timm/layers/pool1d.py 的 global_pool_nlc），所以每個 tile 只
+        留下 CLS 那一個 1536 維向量，196 個被丟掉。
+        易數錯的地方：架構名 vit_giant_patch14_dinov2 的 14 是 patch_size，
+        GigaPath 在 config 覆寫成 16，而 224/16 剛好也是 14 —— 兩個 14 不相干。
+        真的用 patch14 會是 16x16 = 256 個 patch token。
+    (2) 打分端。SlidingWindowSimilarity 回傳 [H_out, W_out, R_q, C_q]，後兩維
+        是視窗內逐 tile 的餘弦；_grid_means 取平均把它塌成純量。所以同一個
+        平均值可能來自「全部 0.6」或「一半 0.9 一半 0.3」，而後者正是假匹配
+        的形狀（某個角落強烈吻合，其餘靠平均拉抬）。
+
+    ── 池化候選 ──
+      CLS（現況）       1x    靠 4 旋轉暴力解        訓練出來的全域摘要
+      CLS || avgpool    2x    同 CLS                 平均紋理，與 CLS 互補
+      CLS || std        2x    旋轉不變               tile 內部異質性
+      環形池化 2-3 環   2-3x  旋轉不變               徑向結構，丟掉角度
+      2x2 網格          4x    90 倍數下為精確置換    真正的空間排列
+      全部 196 個       196x  602 KB/tile            不可行
+    取 patch token 不必改模型：forward_features 回傳全部 197 個，
+    num_prefix_tokens=1 就是切點（timm/models/vision_transformer.py:809-811）。
+
+    ── 旋轉約束，以及它的代價 ──
+    query_sim 的 angle_jitter_deg 預設 3.0（pipeline.py:59），實際角度是 90 的
+    倍數 +-3 度。3 度在 tile 邊緣（距中心 128 px）造成 128*sin(3) = 6.7 px 位移，
+    對 2x2（每格 128 px）是 5%，對 4x4（每格 64 px）是 10%。
+    決定：先設 jitter=0 只跑 90 的倍數，那時旋轉對 patch 網格是精確置換。
+    但這是在「空間池化最敏感的那個軸」上把語料變簡單，所以結果是上界。
+    bench 要掃 jitter（0 與 3）而不是固定成 0，讓約束變成資料而不是隱藏假設。
+
+    ── 實驗設計：tile 層級檢索，不跑 pipeline ──
+    每片玻片的每個 level 各編一份參考集。同一份 dump 支援兩種讀法 —— 排名只是
+    對相似度分數排序，所以混不混合是**分析階段的選擇，不是收資料階段的約束**，
+    兩者不需要額外編碼或儲存。
+
+    phase 1  不混合：查詢對三份參考集各比一次
+      查詢來自 L1  ->  vs ref(L0)  誤路由變細
+                       vs ref(L1)  路由正確
+                       vs ref(L2)  誤路由變粗
+      問的是「給定尺度下找不找得到」。對應 retrieval 在誤路由之後還能不能救，
+      可以直接跟已量到的 91.1% / 70.4% / 15.7% 對照。
+
+    phase 2  混合：候選池 = ref(L-1) ∪ ref(L) ∪ ref(L+1)，三種答案都算命中
+      問的是「descriptor 分不分得出尺度」。±1 層的 tile 是最難的干擾項——
+      同一塊組織的另一個尺度，而那正是 stage 1 的失效模式（CLAUDE.md 記著
+      2x 金字塔上相鄰層長得像、KNN 會把 L1 的 shot 路由到 L2）。
+      注意在混合池下，k/ds² 的取樣規則會讓 L1 查詢的池子有九成以上是 L0 的
+      tile，所以池子組成要跟結果一起報。
+
+    四個結果要分開報，不可合併成一個 correct：
+      recall@1 at L       正確尺度上找得到嗎
+      found at L+1        容忍變粗
+      found at L-1        容忍變細
+      confused L vs L±1   位置對、尺度錯   <- stage 1 混淆的直接量測
+    理由：已量到 routed +1 有 91.1% 落點準、routed -1 只有 15.7%，兩者後果
+    差六倍。合併會把這個已知的不對稱抹掉。
+
+    單位用縮放倍率不用「層」：BRACS SVS 每層 4x、Ki67 MRXS 每層 2x，「±1 層」
+    在兩種片子上是不同的尺度變化，用「層」當單位就不能跨片比較（ClaudeRules 8）。
+    記成 scale_ratio = 0.25 / 0.5 / 2.0 / 4.0。
+
+    答案 tile 是「答案」不是干擾，算名次時要先扣掉，否則「排第 2」可能是被
+    自己的另一個尺度或另一套格子擠下去的。
+
+    ── 參考集：格點座標，但逐 tile 讀 ──
+    參考 tile 必須落在 production 的格點上（主格 + 半格位移格），否則查詢與
+    參考之間的錯位就被實驗拿掉了 —— 而那個錯位正是要量的東西之一。
+    但 WsiTissuesContainer.from_mpp 會讀整塊 region 再切出所有 tile，mask_all
+    在 L0 上就是 18.7 Gpx、RSS 339 GB、跑三個多小時（2026-08-08 實測）。
+
+    格點幾何與像素是可以分開的：
+      PatchGrid.from_size(w, h, tile_size, overlap, x_offset, y_offset, ds, level)
+        純幾何，只吃尺寸，零讀取
+      _cut_patch(info)
+        這一行才碰像素
+    所以：建遮罩 -> 每塊 region 算出全部格點座標 -> 抽 k 個 -> 逐個
+    read_region 256x256。拿到與 production 相同的座標，不必把 region 讀進
+    記憶體。dump job 因此不需要 --mem=600G。
+
+    遮罩用組織遮罩，不用 mask_all：這個實驗不做視窗比較，而空白玻璃當干擾項
+    等於送分（空白與組織的餘弦差很遠）。
+
+    ── 查詢集：走 Camera，不要在 tile 尺度施加 domain gap ──
+    vignette / field_mask / lens distortion 三個都是 FoV 尺度的：
+      field.py:19-23  sigma = min(cx,cy)*0.8
+      field.py:7      mask 依 img.shape
+      lens.py:12-13   xn = (X-cx)/cx
+    套在 256 的 tile 上會變成「每個 tile 各自一套暗角與桶狀變形」，那是一個以
+    tile 為中心的徑向漸層 —— 正好是環形池化在量的東西，會直接污染池化比較。
+
+    所以查詢走完整 FoV：
+      1. 選 FoV 座標，Camera.capture_with_gt(x, y)   <- 增強在正確尺度上
+      2. 輸出 1440x1024，切 256 的格子 -> 5x4 = 20 個完整 tile
+      3. 每個 tile 的絕對座標由 FoV footprint + 旋轉（90 倍數是精確置換）算出
+      4. 答案 = 該座標最近的主格 tile 與最近的 overlap 格 tile（兩個，分開報）
+    答案是算出來的不是找出來的，而且必須由建構保證存在於參考集裡，否則會出現
+    「找不到是因為它不在池子裡」的假失敗。
+
+    δ（查詢到最近格點的距離）因此是**量到的共變量，不是掃描參數**。FoV 放在
+    任意位置，20 個 tile 自然分佈在 [0, 64] px（格點間距 tile/2 = 128，最遠 64）。
+    結果按 δ 分箱報告，順便回答「半格重疊實際救回多少」。
+    成本也更低：M=200 個查詢 tile 只要約 10 次 FoV 讀取，不是 1200 次個別讀取。
+
+    ── phase 1 關掉的軸，以及為什麼 ──
+      angle_jitter_deg = 0   只用 90 的倍數，旋轉對 patch 網格是精確置換。
+      scale_range = (1,1)    Camera 的 scale 會讓輸出 tile 對應到 256/s 個 WSI
+      query_mpp_jitter = 0   像素，疊加第二個錯位軸，就分不出敗給平移還是縮放。
+                             尺度容忍度本來就由 ±1 層那三個任務在量。
+      stage_shift            關掉，它在 tile 尺度上與 δ 重複，會讓實際偏移對不上
+                             記錄值。
+    保留 color / brightness / contrast / color_temp / noise / jpeg / defocus /
+    chromatic，以及所有 FoV 尺度的效應（因為走完整 FoV）。
+
+    ── 規模：一次到位存完整 token 網格，不做兩階段 ──
+    一個 tile 的 token 網格 = 197 * 1536 * 2 bytes = 605 KB
+      cls 只有 3 KB，差 197 倍
+      順帶對照：原始 tile 影像 192 KB，存 token 比存像素貴 3 倍
+      k = 5000 (L0)，其餘層 min(available, max(k/ds², 500))
+      實測可用數：BRACS_1228 L2 只有 689、BRACS_1936 L2 有 1,374
+                  -> 那一層直接取全部，於是實驗就是完整任務而非抽樣
+      參考集 約 53,700 tile = 32.5 GB
+    不做兩階段：存完整網格的唯一理由是「之後想試新的池化」，而候選清單在設計
+    期間已經變過一次（std 與環形池化是想清楚旋轉之後才出現的），它還會再變。
+    兩階段方案會把「想到新點子」變成「再排一次 job」。
+
+    參考點：真實任務的難度。SlideWinSift 那片平面 97536 x 191232，L0 有
+    (97536/256) x (191232/256) = 381 x 747 = 284,600 個 tile。所以 5000 個干擾
+    仍比真實簡單將近兩個數量級，那是儲存的硬限制；但三個子任務的相對比較不受
+    此影響，而那才是這個實驗要回答的。
+
+    ── 儲存格式（要能沿用到 pipeline 的 feature cache）──
+    result/cache/features/<stem>__L<n>__<pooling>__<cfg8>.safetensors
+      tensors   features [N, n, D] fp16   n=1 也用三維，讀取端不分支
+                x[N] y[N] region[N] grid_rc[N,2]
+                後四個讓讀檔就能重建 FeaturesMap，不必重跑 mask
+      metadata  pooling / slots / slot_layout   slot_layout 決定旋轉要不要重排
+                dim / token_grid / num_prefix   全部從模型讀，程式不得寫死
+                                                （DINOv2 的 _reg4 變體 num_prefix=5，
+                                                 tokens[:,1:] 會靜默取錯）
+                encoder_id / mask_id            進 cfg8 hash，不同設定並存
+                coverage 'all' | 'sample'       缺這個，pipeline 會把抽樣檔當完整
+                                                的用，只搜 2% 的玻片且不報錯
+                n_available / sample_seed / n_tiles / created_at
+    選 safetensors：單檔、safe_open 惰性讀取、mmap 零複製、內建 metadata，而且
+    環境裡已經有（huggingface_hub 帶進來）。
+
+    ── 模組規劃 ──
+      utilities/FeatureStore.py                   讀寫庫，bench 與 pipeline 共用
+      aiNNModel/GigaPathFunc.py                   gigapath_encode_tokens + pool_*
+                                                  （池化要 num_prefix 與 grid，
+                                                   那是模型知識）
+      utilities/test_modules/bench_gigapath_pooling.py    兩個 phase
+      utilities/cli/inspect_feature_store.py      印出 store 的身分與涵蓋範圍
+      jobscripts/PoolingBench.sh
+    重用不重寫：PatchGrid.from_size（格點）、TileSampler.read_tile（逐 tile 讀）、
+    query_sim 的 Camera（FoV + gap）、_paths.job_result_dir。
+    phase dump 需要 GPU；phase eval 不碰 GPU 也不碰 WSI，可在 login node 反覆跑
+    —— 與 _locascope_plots 那條「離線重畫」是同一個設計理由。
+
+    ── 指標不能用「與 CLS 的 top-K 重疊率」──
+    bench_gigapath_accuracy 的 L2 指標量的是「跟現況有多像」，拿來選池化會
+    直接偏向不改變。要用真值在干擾項中的名次。
+
+    ── 查詢數 M：每片 WSI 至少 1000 ──
+      BRACS 1000/3 層 約 333 每個 (slide, level)；MRXS 1000/4 層 = 250
+      7 片 >= 7,000 個查詢 tile，每個位置 2 種渲染（rot 0 與 rot 90）
+      = 14,000 tile = 8.5 GB。加參考集 32.5 GB，總計約 41 GB。
+      讀取：7,000/20 = 350 次 Camera.capture（每張 FoV 出 5x4 = 20 個 tile）
+
+    檢定力來自總數不是逐格：六種池化跑在同一批查詢上，所以配對比較可以把
+    7,000 個合在一起（9 成一致約 700 個不一致對，可分辨很小的差距）。逐格的
+    250-333 只需要夠做「一致性檢查」—— 同一種池化在 25 個組合裡是不是都贏。
+    那個檢查才是 M4.2 教訓要求的東西（classify_region 在單一尺度調好、換片就垮）。
+
+    免費的分層：5x4 的格子裡內部 6 個、邊緣 14 個，邊緣承受較強的暗角與畸變。
+    分層報告不必額外付成本，而且補回「關掉 tile 尺度增強」放棄的那個軸。
+
+    ── 未定 ──
+      - 主要指標是否用百分位名次（排在真值前面的干擾數 / 池子大小）。它對池子
+        大小免疫，所以 L0 的 5000 與 BRACS L2 的 689 可以直接比；用 recall@1
+        則兩者不可比，必須永遠附帶池子大小一起讀。
 
 [ ] 2026-07-21 | training/models/mppResNet.py
     MPP 估算用的 ResNet 只有 stub（2 行），訓練邏輯尚未完成
@@ -625,6 +1173,9 @@
       LocaScopeShotResult 帶 est_mpp / routed_level / unusable_level /
         retrieval / refine / error；三個 stage 各自 try/except，
         後段失敗不吃掉前段結果
+        ※ 2026-08-07 更名為 LocaScopeQueryResult：pipeline 吃的是一張
+          query，不是一次曝光。shot 保留給 Camera 側（CameraShot /
+          for shot in cam），那裡確實是曝光事件
       unusable_level：該 level 的 filter_patchable 清空 mask（tile 太大），
         記 True 並讓 metric 為 None，不算 error
       run(keep_objects=True) 額外保留 retriever / localizer / query_qc 供繪圖
@@ -673,7 +1224,7 @@
         看「rot_correct=True 但 refine_success=False」的比例判斷是否咬到
       - 對稱組織區 4 個方向 score 接近時的 tie-break（原 TODO 未決點）
 
-[x] 2026-07-27 | query_sim/ — 移除 stratify + mpp jitter + 多相機語料 (M4.3)
+[x] 2026-07-27 | query_sim/ — 移除 stratify + mpp jitter + 一批混多相機的 query (M4.2)
 
     ── 移除 classify_region / stratify 整條線 ──
     起因：batch 生成常卡住，診斷後發現是 stratify 配額餓死。
@@ -894,8 +1445,8 @@
       test_gigapath_slide_win_sim / bench_gigapath_accuracy
     - result/ 專門放最終產出，log/ 專門放 SLURM stdout/stderr + tmp/ 副產物
 
-[x] 2026-07-23 | query_sim/ — Camera abstraction + QueryFromWSI refactor (M4.2)
-    修 M4.1 (region-first sampling + QueryFromWSI 語意) 之後兩個痛點:
+[x] 2026-07-23 | query_sim/ — Camera abstraction + QueryFromWSI refactor (M4.1)
+    修好 region-first sampling + QueryFromWSI 語意之後的兩個痛點:
     (a) QFW 需塞佔位 (x, y=0) 才能 init，之後迴圈手動改 x_top_left 再 load_query_image
     (b) generator 的 _rect_size_l0 / _sample_position / _build_mask 邏輯散在外
 
@@ -1108,5 +1659,505 @@
         關鍵發現：WSI Pipeline bottleneck summary 顯示 encode 只佔 15–40%，
                  extract（openslide read_region）才佔 46–79%
         → 不採用 DataLoader；優化重心應轉向 extract（region caching / async read）
+
+================================================================================
+
+[x] 2026-08-10 | BenchLocaScope 全量 2500 張的統計，與由此決定的四項改動
+    25 個 (slide, level) 各 100 張，BRACS 3 片 x L0-L2、MRXS 4 片 x L0-L3。
+    以中心誤差 < 100 um 為正確：1581/2500 = 63.2%。
+
+    誤差分佈是二元的：<10 um 佔 53.2%、100-1000 um 只佔 0.7%、>1 mm 佔
+    35.9%。SIFT 一旦拿到含真值的視窗就收斂到微米級，所以瓶頸不在 stage 3，
+    失敗全部是「找錯地方」。依層 L0 67.4% / L1 42.0% / L2 84.7% / L3 55.5%。
+
+    ● 路由的代價嚴重不對稱（這一條決定了後面三項）
+        est/eff  0.25 -> 5.2%(n=77)   0.50 -> 25.9%(n=108)  1.00 -> 67.0%(n=1018)
+                 2.00 -> 78.9%(n=687) 4.00 -> 55.9%(n=490)
+        機制已用資料驗證，不是推測：L2->L3 的 retrieval 中心誤差 5188 um，
+        是 L2->L2 的 1670 um 的三倍，但 refine 後是 9.1 um vs 7.4 um。粗一層
+        的視窗仍然包住真值，SIFT 拿全解析度照片把尺度差吸收掉；細一層的視窗
+        涵蓋範圍小於 FoV，沒有任何視窗能包住真值，排序再好都救不回來。
+        L3 這一層最乾淨：L3->L4 是 218/218 = 100%，L3->L5 是 3/180 = 1.7%,
+        好壞分界剛好一層。
+
+        ❌「估粗比較好」不是通則。只有 L2 同時有兩種路由可做片內對照：
+           S1104360 ->L2 93.3% vs ->L3 98.8%（持平）
+           S1137178 ->L2 60.3% vs ->L3 53.1%（略差）
+           S1151088 ->L2  0.0% vs ->L3 74.4%（差 74 點，n=22 全滅）
+        整體那個 88.3% vs 48.3% 幾乎由 S1151088 一片撐起。能講的只有不對稱。
+
+    ● stage 1 是 median-of-medians，錯會整片一起錯
+        GigaPathKnnEstiMpp.py:53-62，每個 patch 取 k=5 鄰居標籤中位數，再對
+        ~20 個 patch 取一次中位數。2500 張只產生 35 個相異估計值，全部是兩個
+        金字塔的層 mpp 加少數鄰層平均。所以同一片會一致倒向同一邊：L3 上
+        S1104233 是 100/0、S1104360 是 0/100、S1137178 是 68/31、S1151088 是
+        50/49。沒有任何一片在 L3 估對過，差別只在估粗 2 倍還是 4 倍。
+        4 個 stage error 全是 est_mpp = 31.044（估計器飽和到最粗那格）。
+
+    ● L1 -> L0 的 203 張裡，只有 3 張是臨界四捨五入
+        est/eff ~0.25 有 76 張、~0.50 有 124 張、~1.00 只有 3 張。
+        ❌ 因此改 get_best_level_for_downsample 的取整方向只救得回 3 張，
+           這個便宜修法被資料否決。它跟 L3 是同一種病：整整差 2-4 倍。
+
+    ● refine_success 是近乎無損的閘門，內點佔比可以再把它推到 99.9%+
+        現況：接受 1597，其中正確 1581、錯誤 16，precision 98.998%，
+              而且沒有任何一個正確答案被拒（rejected & correct = 0）。
+        ratio = refine_inliers / refine_matches 幾乎完全分開兩者：
+              16 張自信答錯的最高只有 0.682；1581 張正確的 p01 = 0.733、
+              中位數 0.971。
+        門檻掃描  0.60 -> precision 99.937%，代價 4 張
+                  0.70 -> 觀察到 0 個錯，代價 9 張（0.6%）
+                  0.80 -> 觀察到 0 個錯，代價 46 張
+        ⚠ 門檻是在同一批資料上配出來的，0.682 與 0.733 之間只有 0.05 的間隙，
+          要用真實照片那批驗證才算數。誠實的說法是「觀察到 0 個」而不是
+          「precision 是 100%」。
+        ⚠ 16 張裡有 13 張是 S1104233，誤差全擠在 24.4-29.7 mm 近乎常數，
+          像是整片有重複結構被配過去，不是隨機的 SIFT 失敗。待查。
+
+    ● summary.txt 有兩個指標本身是錯的（已修，見下）
+
+    ---- 四項改動 ----
+
+    [x] 4a/4b  summary.txt 的兩個指標（_locascope_plots.py:write_summary）
+        rot_correct 的符號：best_rotation 是把 QUERY 轉到參考上的旋轉，是相機
+        的反向，正確答案在反對角線上（gt 90 -> retr 270 有 288 張、gt 270 ->
+        retr 90 有 228 張）。直接比對只可能在 gt 0/180 為真，先天砍半。
+        改成從 retr_rotation / gt_rot_deg 兩個原始欄位當場推導，不看存下來的
+        rot_correct 欄位 —— 這樣每一份既有 CSV 都直接得到修正值，不必重跑。
+            34.5% (860/2496)  ->  52.8% (1319/2496)
+        routing 改報有號三分，因為兩個方向代價不同（見上）：
+            42.4% routed_level == level
+            ->  finer 206 (8.2%)  exact 1061 (42.4%)  coarser 1233 (49.3%)
+        bench_locascope.py:300 存下來的 rot_correct 欄位仍是舊約定，但已經
+        沒有任何東西讀它。要修得等下次全跑才生效。
+
+    [ ] 1  閘門門檻落地
+        在 write_summary 由既有的 refine_inliers / refine_matches 推導 ratio，
+        報一組 gated 準確率。刻意不新增 CSV 欄位 —— 推導得出來的東西不落地，
+        舊 CSV 就一樣能用。需要 write_summary 加 tol_um / gate_ratio 兩個參數，
+        呼叫端 (_locascope_plots.py:650) 傳 args.fail_tol_um。
+
+    [ ] 2  層級 cascade（唯一動到 production 行為的一項）
+        在 L_est 檢索+refine，通過閘門就停；否則依序試 L_est-1、L_est+1。
+        順序由資料決定：-1 覆蓋 L3->L5 的 177、L1->L2 的 106、L0->L1 的 29
+        共 312 個失敗，+1 覆蓋 L1->L0 的 171。
+        閘門是這做法成立的前提 —— 沒有精確閘門，多試幾層只是多幾次自信答錯。
+        額外成本只落在目前失敗的 36%（通過就停），期望 ~1.4 倍 stage 2；
+        已經對的 shot 不可能被改壞，它們在第一層就通過並停止。
+        以各回退層實測成功率估計可回收 ~364/919，63.2% -> 約 78%。
+        ⚠ 這些回退成功率是在別批 shot 上量到的（stage 1 本來就路由對的那些），
+          不是失敗這批的隨機樣本。L3->L5 那列最穩，L1 兩列偏樂觀。
+        改 LocaScopePipeline __init__ 加 cascade_levels=0 / gate_inlier_ratio，
+        預設 0 完全維持現行行為；run() 的 stage2+3 包成迴圈。
+        ⚠ 相容性：levels_tried 不可存成 tuple（寫進 CSV 會變成帶逗號的引號
+          欄位，這檔案已經有 MRXS 檔名這種了，awk 會再壞一層）。拆成
+          accepted_level / levels_tried_n 兩個純量。gate_passed 必須同時加進
+          _locascope_plots.py:28 的 _BOOL_COLS，否則 _coerce 回傳字串而
+          bool("False") 是 True，每一列都會讀成通過 —— 靜默。
+
+    [ ] 3  stage 1 的 patch 票數診斷
+        last_patch_labels 已經留在 KnnClassifier 上，不用重算。記 5 個純量：
+        mpp_vote_n / top1_mpp / top1_n / second_mpp / second_n。
+        判讀是二選一的：S1104360 的 L3 若呈現接近平手 -> 病因是中位數不穩，
+        修法是平手時取較細的標籤（安全方向），不必動特徵；若 20:0 一面倒 ->
+        病因在特徵本身於粗尺度失真，得往編碼端修，跟 pooling 那條線合流。
+        需要一次完整重跑才有資料，搭下次全跑的便車，不單獨排 job。
+
+    [ ] 4c  命中判定改成 crop 的實際包含測試
+        bench_locascope.py:322-331 用 GT 的 footprint 算候選中心，路由到粗層
+        時視窗遠大於 GT footprint，中心就系統性偏掉。實算 BRACS_1936 L2->L3：
+        GT footprint 23040x16384，win 81920x65536，偏移 sqrt(29440^2+24576^2)
+        = 38352 > 容差 32768 -> 判定失敗。這就是那 97% 空白率的來源。
+        候選物件本來就帶了正確的 win_w0/win_h0（GigaPathSlideWinSimRot.py:106）。
+        新判準直接照抄 SIFT 讀的那塊 crop 的幾何（SIFT_RANSAC.py:133-139，
+        視窗四周各外擴 pad 個 tile），把圓形距離換成矩形包含：
+            pad0 = refiner_padding * tile_size * c.ds
+            ccx, ccy = c.x0 + c.win_w0/2, c.y0 + c.win_h0/2
+            strict = |gt-cc| <= win/2          （視窗本身就對）
+            hit    = |gt-cc| <= win/2 + pad0   （真值在 SIFT 會讀的 crop 裡）
+        ❌ 不要把 retr_hit_tol_px 改名：_locascope_plots.py:120 是硬取的，
+           一改名新舊 CSV 都會 KeyError。而且現在的 hit_tol 就等於新的 pad0，
+           值和名字都不用動，只有角色從半徑變成外擴量（:123 的敘述要改字）。
+        ⚠ 真正的風險是靜默的：這改的是 retr_hit_rank 的「定義」而名字不變，
+          而 bench_locascope.py:610 的 --resume 會把新列追加到舊檔，同一欄
+          混兩種定義，從檔案看不出來。擋法是加一欄 recall_def，resume 時檢查
+          全檔一致，舊 CSV 沒這欄就拒絕 —— 便宜的斷言擋在昂貴的跑之前。
+        影響：rank-1 36.6% / top-20 60.3% / 從未入列 39.7% 全部作廢重算，
+        那 280 張「不在名單卻答對」的矛盾會消失，先前為了繞過它而限制在
+        routed == level 的 1061 張也就不需要，1439 張可以重新納入。
+
+================================================================================
+
+[x] 2026-08-11 | MppEstimate：逐層分數曲線的三條負面結果
+    bench_mpp_estimate.py --phase curve，跑在 PoolingBench 既有的 23 個
+    (slide, level) store 上。CPU、不碰 WSI、不碰模型。問兩件事：分數的峰會不會
+    落在真值層，以及每層要幾張參考才夠。
+
+    ● 驗收先過，數字才值得看
+        decoy（同一批 tile，層標籤跨層隨機重排）落在 0.23-0.34，而且不隨參考量
+        上升。3 層亂猜 0.333、4 層 0.25，混合約 0.29 —— decoy 正好坐在那裡。
+        分數量到的是尺度，不是池子大小。
+
+    ● bank 汙染：機制證實，但不是主因
+        BRACS 三片 twin=0，cross_max 0.72-0.88。
+        MRXS 最高 S1151088 L2 的 12.97%，cross_max=1.0000001（位元相同），
+        twin_spread 0.707-1.2 格（連成一片）。
+        -> 破洞／未掃描畫布經 SafeSlide 填成純色，同一個常數影像在每一層編碼
+           成同一個向量。空白玻璃被排除（它帶感光雜訊，到不了 1.0）。
+        成因是 dump 用 grid_coords + PatchGrid 鋪滿 region bbox，**沒有 per-tile
+        組織檢查**；production 的 TileSampler 有（has_tissue_l0 ratio=0.5），
+        所以 production 的參考庫沒有這個問題。
+        ❌ 但它不解釋準確率：除以各自亂猜水準後，twin 6.3% 的 S1137178 是
+           2.06x，與 twin=0 的 BRACS_1936 的 2.03x 相同；twin 最少的 MRXS
+           反而勝過乾淨的 BRACS_1476。沒有相關。
+
+    ● 一個自己踩到的坑：跨 n 平均等於換族群
+        stdout 摘要顯示 n>80 後準確率下滑，是假的。complete 的組合數隨 n 遞減：
+        n<=80 是 23 個、n=160 剩 20、n>=320 只剩 MRXS 14 個、n=1280 只剩一片
+        4 個。不同的 n 是不同的玻片。
+        我內建了 complete 旗標卻仍在各 n 上跨組合平均。往後這類掃描一律先固定
+        族群再比。
+
+    ● 答案 1：knn_samples=40 已經飽和
+        固定族群重算，MRXS 14 個組合一路到 640：
+            n     argmax   knn5    decoy
+            10     0.471   0.483   0.234
+            40     0.485   0.494   0.257
+            160    0.485   0.509   0.282
+            640    0.500   0.521   0.309
+        16 倍的 build 成本換 2.7 個百分點。BRACS 從 n=20 之後就平了。
+        ❌ 我先前憑先驗猜 256-512，猜錯。調高 knn_samples 不是槓桿，這條關閉。
+
+    ● 答案 2：逐層 argmax 沒有穩定勝過 median-of-medians
+        n=40 逐片：BRACS_1476 +8.8、BRACS_1936 +3.4、BRACS_1228 -6.4、
+        MRXS 四片 -1 到 -2。平均 BRACS +3 / MRXS -1，但符號逐片翻轉。
+        原本的假設是「訊號一直都在，是 median-of-medians 把它丟掉」—— 資料
+        否決。把層分開算、把 margin 留著，都換不到穩定增益。
+        -> 瓶頸在描述子本身對尺度的分辨力，不在聚合方式。這支持 fine tune 或
+           後接新模型的方向，不支持改聚合。
+
+    ● 答案排除的對照（ClaudeRules 8：修正版與天真版並存）
+        n=40：clean argmax 0.538 vs all 0.519；knn5 兩者都 0.536。
+        排除仍然是對的（大 n 時會咬人），但在 production 尺度上這個假象 <=2 點。
+
+    ● ⚠ softmax 後取對數再相加，排名上恆等於直接相加 —— 這一條最該記
+        log p_i(L) = s_i(L)/T - logsumexp_L(s_i/T)
+        第二項只跟 i 有關、不隨候選 L 變，所以
+        sum_i log p_i(L) = sum_i s_i(L)/T - (與 L 無關的常數)
+        **任何 T 都成立。** 實測 bayes 欄與 argmax 欄每一列完全相同，即為此。
+        兩個提案因此作廢：
+          1. 這支 bench 的 'bayes' 聚合是 no-op。
+          2. retrieval 那邊我提的「逐 tile 轉後驗再加對數 = AND 型結合」**是錯
+             的**，它就是 mean 換個寫法。
+        真正能做出 AND 的必須對分數非線性：min / quantile(p25) / count(c>tau)。
+        z-mean（各自減均值除標準差再平均）確實不等於 mean —— 權重 1/sigma_i
+        逐單位不同，是按資訊量重新加權 —— 但它仍是加法，不是 AND。
+        往後看到「正規化後再相加」的提案，先檢查正規化項會不會隨候選改變；
+        不會的話它就是恆等式。
+
+    ● 範圍限制（寫在 module docstring 的 Scope）
+        - store 只有 L0-L2 或 L0-L3，production 走十層。最大的失敗格 L3->L5
+          在這裡不可能出現，準確率是 3-4 選一，會比 production 好看。
+        - dump 用 scale_range=(1,1)、query_mpp_jitter=0，query 的 mpp 恰好等於
+          某一層，永遠不落在兩層之間 —— 而那正是 production 最容易錯的情況。
+          （光度域差是有的：色溫／暈影／畸變／noise／JPEG 都套了。）
+        - bank 來自 retrieval 的格點取樣，不是 stage 1 的組織比例取樣。
+
+================================================================================
+
+[x] 2026-08-12 | 參考集取樣：從均勻抽樣改成背景配額
+    utilities/ReferenceSampler.py（新）+ utilities/cli/build_reference_store.py
+    （新）+ utilities/test_modules/test_reference_sampler.py（16 個測試）。
+    bench_gigapath_pooling.py 的 --phase dump 也改用它。
+
+    ● 動機是量出來的，不是假設
+        BRACS_1228 的 L0：組織區域內的格點，白色比例 p50 = 0.72、p75 = 1.00，
+        full 籃佔 73,958 / 162,159 = 46%。分佈是雙峰的（43% 貼近 0、46% 剛好
+        1.0，中間只有約 11%）。
+        原因是 PatchGrid 鋪的是 region 的「外接矩形」，而組織區域的外接矩形
+        大部分不是組織。
+        -> 均勻抽樣會讓參考集將近一半落在空白玻璃上。對 retrieval 而言那些是
+           永遠不會贏過答案的干擾項，所以名義 3000 的池子有效大小只有一半，
+           而且比例逐層不同 —— 逐層的 r@1 差異裡混著「描述子難度」和「池子
+           組成」兩件事。
+
+    ● 判準三級，不是二級
+        OK / SHORT（沒到 n_target 但 >= min_useful）/ UNUSABLE（< 200）。
+        SHORT 不是失敗：深層的格點總共就幾百個，而 40 張/層對 KNN 已經飽和
+        （見 2026-08-11 entry）。BRACS_1228 實測 L0=1000 L1=1000 L2=296(SHORT)
+        L3=49(UNUSABLE，跳過)。
+        min_useful 刻意不進 sampler_id —— 它只決定要不要抱怨，不改變選了哪些
+        tile，兩次只差這個門檻的執行必須共用檔名。
+
+    ● 一個修掉的靜默錯誤：位移 tile 的背景比例
+        位移偏移量刻意做成零重疊（每組至少有一個分量是整塊 tile），所以位移
+        出來的 tile 內容跟母體是不同的東西。原本抄母體的 white_frac，等於
+        「要一張背景 <15% 的 tile，移開一整格，不檢查就記成 <15%」——配額在
+        紙面上滿足而實際填進了相反的東西，而且不會 raise。
+        改成在落點重算，落在別的籃就退回並計為一次 miss。
+
+    ● ❌ 否決：QUOTA_FLOOR_LT15=0 不等於均勻抽樣
+        設 0 時配置邏輯會把 90% 倒進背景籃，比均勻還空。均勻是「按可用量的
+        比例」，而 plan_level 的配額形狀寫死，目前沒有設定能表達「按比例」。
+        後果：**沒有辦法用舊行為重新 dump**，所以「配額 vs 均勻」的對照只能
+        靠既有的 46 個 store。它們一旦刪除，那個對照就永久做不出來。
+
+    ● 命名重構：四個東西都叫 max pixels
+        max_pixels        -> seg_chunk_px            每次分割餵幾像素 -> VRAM
+        read_max_pixels   -> read_chunk_px           每次讀取抓幾像素 -> host RAM
+        _CC_MAX_PIXELS    -> _CC_DECIMATE_ABOVE_PX   超過就抽稀連通元件輸入
+        (新增)             _INTEGRAL_DECIMATE_ABOVE_PX
+        字尾承載語意：_chunk_px = 切塊，輸出不變；_DECIMATE_ABOVE_PX = 超過就
+        降解析度，輸出會變。原本四個名字共用同一個字尾卻藏著兩種相反語意。
+        12 個檔案，含兩支 jobscript。
+        代價是真的：build_reference_store 的 --mask-max-pixels 預設寫成 6e8，
+        而 LocaScopePipeline.py:95 對同一個旋鈕早就用 4_000_000。差 150 倍，
+        結果 HEST 被要求配置 110 GiB。命名沒能讓人認出那是同一個東西。
+
+    ● sampler_id 進了 _IDENTITY_FIELDS，附帶一個沒修的疤
+        取樣規則原本完全不在 store 的身分裡，換配額或換種子會寫到同一個檔名。
+        加了之後兩批並存、互不覆蓋，_one() 守衛會在查詢命中兩批時 raise。
+        ⚠ 但即使值是空字串，`sampler_id=` 這個鍵仍然進雜湊，所以舊 store 重算
+          的 cfg_hash 不等於它檔名上的值。沒有東西比對這兩者（find 比欄位、
+          eval_all 只需自洽）所以不會壞，但用相同設定重跑舊行為會產生不同名
+          的檔案。修法是「空值不進雜湊」，決定不修（舊 store 要刪掉）。
+
+    ● 未完成
+        - ✎ 訂正（2026-08-12 晚）：「dump 的新路徑從未執行」是錯的。
+          inspect_feature_store --sampling 顯示 44 個 store 全帶 sampler_id、
+          7 個含 jitter tile —— 配額取樣跑過，這批 store 就是它產的。
+          沒跑過的是「後來」加的破洞過濾與座標鍵 where，兩者的指紋是 extras
+          裡有沒有 valid_frac。原本那句把兩批改動當成同一批。
+        - smoke test 沒跑過（指上述後加的部分），py_compile 只驗語法。
+          做法：PoolingBench.sh 頂部設 K=200 K_FLOOR=200 QUERIES=40
+          ONLY_WSI=BRACS_1228 ONLY_LEVELS=2 OUT=result/cache/smoke。
+          挑 L2 是因為它的 lt15 籃填不滿，會走到位移那條新路徑。
+        - 最該看的是 --pairs 那道閘門：where 從格點索引改成座標鍵，錯了的話
+          store 看起來完全正常，只表現成「這批 query 永遠答錯」——讀起來是個
+          發現而不是錯誤。
+        - RefStore.sh 也還沒跑過完整版（只跑過 dry-run）。
+
+================================================================================
+
+[ ] 2026-08-12 | FeatureSubspaceDecomposition：1536 維裡尺度佔哪幾維
+    終極任務：手上有 k 種 mpp 的 tile 各 N 張，要猜一張 query 屬於哪一種。
+    現行做法是把整片 query grid 拿去對這 k x N 張做 KNN。這個案子先不改
+    KNN，而是問「這 1536 個數字裡，尺度是哪幾個方向」——如果只有幾維，那
+    KNN 就該在那幾維裡做，而不是在 1536 維這個條件極差的空間裡做。
+
+    五個步驟，由描述往判決走：
+
+        [x] 1  怎麼提主成分、有幾個、怎麼表示        七片完成
+        [x] 2  哪些成分屬於 mpp                      七片完成
+        [ ] 3  不同 pooling 之間比                   資料齊，不需 GPU
+        [ ] 4  不同 WSI 之間比（同染色 / 跨染色）    資料齊，3 H&E + 4 Ki67
+        [ ] 5  用尺度子空間跑 KNN                    唯一會改變 pipeline 的一步
+
+    第 3、4 步刻意排在第 5 步之後做：它們產出的是相關係數，而「這個子空間
+    有沒有用」始終沒被回答。第 5 步一旦說「r=5 不輸全維」，第 3、4 步的
+    「更好」才有定義；若說輸很多，那兩步就省下了。
+
+    ● 第 1-2 步的實作
+        utilities/test_modules/bench_feature_axes.py（新）+ FeatureAxes.sh。
+        五個指標，每個都配一個 null——這是刻意的上限，前一版 bench 因為指標
+        太多而被砍掉重寫：
+            n_significant  勝過 parallel analysis（每維各自洗牌，保留邊際分佈
+                           而摧毀維間相關）的成分數。這是一個計數，scree 的
+                           拐點是一個判斷。
+            var_between    trace(S_B)/trace(S_T)，變異量裡有多少是層而非組織。
+            corr_logmpp    各成分跟 log mpp 的相關。
+            corr_white     各成分跟「背景比例」的相關。組織區域內的格點中位數
+                           有 72% 是背景，所以「這是尺度成分」跟「這是空白
+                           成分」極易混淆，而只有一個值得追。
+            r2(r)          前 r 個成分解釋 log mpp 的比例，對照組是 r 個隨機
+                           方向。正交成分下 R2(r) = 相關平方的累積和，不必配適。
+        輸出全部落 CSV（axes_summary / components / r2_decoy / projection /
+        extremes），圖只是 CSV 的函數，可離線重畫。
+
+    ● 結果（result/FeatureAxes/，七片，pooling=cls）
+        wsi          n_sig  var_btw  尺度PC  |corr|  該PC的corr_white  R2@1   r_90%
+        BRACS_1228     45    0.262    PC1    0.893      0.018          0.798    5
+        BRACS_1476     47    0.319    PC1    0.910     -0.048          0.829    2
+        BRACS_1936     54    0.160    PC1    0.914      0.100          0.835    5
+        S1104233       60    0.137    PC2    0.874     -0.075          0.141    2
+        S1104360       64    0.159    PC1    0.821     -0.020          0.674   10
+        S1137178       60    0.153    PC1    0.786      0.049          0.618    6
+        S1151088       62    0.173    PC2    0.784     -0.494          0.153    7
+
+    ● 尺度是低維的
+        1536 維裡只有 45-64 個方向勝過 null，而 log mpp 的 90% 只要 2 到 10
+        維就解釋完。隨機 r 維的對照在 r=1 只有 0.106-0.156（std 約 0.14-0.18），
+        所以不是「任何幾維都行」。
+
+    ● 但「一根軸」只在 H&E 上成立
+        三片 BRACS 的尺度都在 PC1、R2@1 約 0.8。兩片 Ki67（S1104233、
+        S1151088）掉到 PC2，R2@1 只剩 0.14-0.15——PC1 被別的東西佔走了。
+        這是「不同 WSI 的主成分會不會不一樣」的第一個證據，而且分界看起來
+        落在染色上。第 4 步要測的就是這件事，證據已經先到了。
+
+    ● S1151088 的尺度軸有一半是空白：corr_white = -0.494
+        其他六片都在 ±0.1 內。corr_white 這個指標就是為了抓這種混淆才放進去
+        的，第一次跑就叫了。往下走之前這片要單獨看——若那根軸其實是「玻璃
+        佔比軸」，拿它做 KNN 會在乾淨的切片上崩掉。
+
+    ● ⚠ 一個限制，寫在前面免得日後把相關讀成別的意思
+        corr_logmpp 是對每片 2-4 個離散 mpp 值算的（金字塔就那麼多層），
+        所以「相關 0.89」比較接近三群的判別方向，不是連續回歸的相關。
+        它的意思是「這個方向分得開這幾層」，不是「這個方向線性編碼了 mpp」。
+        跟終極任務對得上（KNN 本來就在離散標籤上分類），但別外推。
+
+    ────────────────────────────────────────────────────────────────────────
+    目前狀態（2026-08-12 深夜）
+    ────────────────────────────────────────────────────────────────────────
+
+        1  主成分：幾個、怎麼表示      [x] 七片
+        2  哪些成分屬於 mpp            [x] 七片
+        3  跨 pooling 比較             [ ] 未開始
+        4  跨 WSI 比較                 [ ] 設計討論過，未寫程式
+        5  用子空間跑 KNN              [~] 一片跑完兩輪，七片在跑
+
+    ● 第 5 步：utilities/test_modules/bench_subspace_knn.py + SubspaceKnn.sh
+        全部只讀 store，不碰 GPU、WSI、模型。四個設定：
+
+            production   x                 未置中、全維。閘門釘到 KnnClassifier
+            centred      V^T (x - mu)      全成分、減平均
+            variance     V_r^T (x - mu)    變異量前 r、減平均
+            uncentred    V_r^T x           同樣的方向，不減平均
+
+        variance 與 uncentred 選的是「同一組方向」，所以兩者的差距只能是
+        置中，不可能是別的。三道閘門：pinned（== KnnClassifier.predict）、
+        full_rank（uncentred 取全成分 == production，唯一檢查投影算術的）、
+        shuffled（打亂標籤掉到亂猜）。BRACS_1228 三道全過，差 0.0。
+
+    ● 以下七條都是 BRACS_1228 一片、arm B 只有 75 個 FoV 的觀察。
+        寫成「看到什麼 -> 推出什麼」，七片跑完可能被推翻。
+
+        看到 variance 在每個 r 都不輸 scale（r=2 是 0.933 對 0.794，r=10 是
+        0.997 對 0.966）
+        -> 照 |corr(成分, log mpp)| 挑成分這條規則死了。機制在 selected.csv：
+           投影後重新正規化讓每個方向等權，於是規則排第 2 挑的成分變異量只有
+           0.038，投票權卻跟 PC1 的 0.228 相同；排第 3 挑的成分 corr_white
+           = 0.618，是背景偵測器。
+
+        看到 production（未置中、1536 維）在乾淨 tile 上是 0.990
+        -> ★ 案子的前提本身是錯的。「幾千張 tile 放在 1536 維，對最近鄰是條件
+           很差的地方」——根本沒有那個病態條件問題等著被修。這句話只有真的去
+           跑 KNN 才問得出來，第 3、4 步再做多少相關係數都問不到。
+
+        看到 centred（全 1530 個成分都留、維度完全不動）在 arm B 從 0.680
+        掉到 0.400
+        -> 禍首是置中，不是降維。用 ref 的平均去減 query 並沒有把 query 置中,
+           減掉的是一個錯的向量；L2 正規化過的深度特徵有一個很大的共同分量,
+           未置中的餘弦主要由它主導，而那正是域差破壞不掉的部分。
+
+        看到 uncentred r=2 是 0.693、production 是 0.680，配對計數 8 對 7
+        -> 兩維追平 1536 維。「更好」沒有證據——15 個分歧案例裡的一次擲硬幣。
+
+        看到參考庫換成 white<0.15 之後 production 掉到 0.600 而 uncentred r=2
+        還是 0.693，配對計數 8 對 1（雙尾精確 p ≈ 0.04）
+        -> 可能 production 的 1536 維裡有靠背景吃飯的方向，庫一乾淨那些鄰居
+           就沒了，而那兩維不靠它。⚠ 假說。n=75、一片、做了兩次比較。
+
+        看到每一種規則的 r=1 都剛好是亂猜 0.333
+        -> 不是「一維不夠」，是一維的餘弦只剩正負號：L2 正規化一個純量就是
+           ±1，每個 query 塌成兩個值。掃描的第一個點在建構上就沒有意義。
+
+        看到 uncentred r=2 用的是 PC1 + PC2，而 PC2 跟 log mpp 的相關排不進
+        前 50 名（selected.csv 裡根本沒有它）
+        -> 有用的那兩維不是「兩根尺度軸」，是「PC1 加上一個幾乎不相關的第二維,
+           好讓餘弦有東西可以比」。
+
+    ● ✎ 七片跑完，上面七條不成立：BRACS_1228 是特例，不是通則
+        result/SubspaceKnn/ 七片全跑完，42 道閘門（7 片 x 2 子集 x 3 道）全過，
+        量測本身可信。但上面那七條全部只在 BRACS_1228 成立，不能外推：
+
+        centred 崩潰只有 BRACS_1228 有：0.680 -> 0.400（arm B, subset=all）。
+        另外六片 centred 大多貼著 production，BRACS_1476 甚至反過來
+        （0.520 對 0.507）。「置中是禍首」是這一片特有的現象。
+
+        uncentred r=2 對 production 的配對勝負（wins/losses, subset=all）：
+            BRACS_1476    +0/-5   production 明顯贏
+            S1104233      +1/-10  production 明顯贏
+            S1137178      +5/-12  production 明顯贏
+            BRACS_1936    +6/-1   uncentred 贏
+            S1104360      +16/-11 uncentred 略贏
+            BRACS_1228    +8/-7   打平
+            S1151088      +6/-8   打平
+        七片裡三片 production 明顯贏、兩片 uncentred 贏、兩片打平。沒有一致
+        的優勢。background-matched 子集（--white-max）對 uncentred 友善一些
+        （4/7 打平或贏），但那是操控過背景比例的對照組不是部署條件，而且
+        S1137178 在那裡仍然是 production 贏（+3/-5）。
+
+        結論：FeatureSubspaceDecomposition 第 5 步，七片版本是負面結果。
+        子空間方法對 1536 維基準沒有可靠的優勢，案子不重開。單片時「置中是
+        唯一問題、降維本身沒事」的故事，是把一片的特例讀成了通則——這正是
+        FeatureAxes 案子一開始就在防的事（「不同 WSI 的主成分會不會不一
+        樣」），這次連第 5 步自己的結論也栽在同一個坑裡。
+
+    ● 第 4 步已經想清楚但沒寫
+        4a 單層結構比較（不依賴第 5 步）：WSI_1 的 L0 的 PC1 跟 WSI_2 的 L0 的
+           PC1 是不是同一個。單層裡 mpp 是常數，尺度整個被排除，剩下純粹是
+           「兩片的特徵空間結構一不一樣」。
+           要三個參考點，缺一個就讀不出來：隨機兩條方向的 |cos| ≈ 1/√1536 ≈
+           0.026（無關長什麼樣）、同一片分半重抽（取樣噪音的地板，n≈1000 而
+           d=1536，PC1 光是重抽就會晃）、跨片（要測的）。
+           比子空間用主角度 SVD(V_A^T V_B)，不逐軸比——符號任意、序號不是身分、
+           特徵值相近時拆分是雜訊，這三件事主角度一次免疫。
+           同染色（3 片 H&E）與跨染色（4 片 Ki67）分開報。
+           另加「意思一樣嗎」：兩片的 PC1 各自跟 white_frac 相關多少。
+        4b 跨片轉移（功能檢定）：用 A 片的基底投影 B 片。角度小是關聯，轉移
+           成功才是檢定。轉移什麼要等第 5 步的結論。
+
+    ● 順手撈到、不屬於這個案子的兩件事
+        arm B 的偏細偏差：production 0.680，24 個錯誤「全部」往細的方向，一個
+        偏粗的都沒有。標籤已排除（query_mpp=level_mpp、scale_range=(1,1)、
+        query_mpp_jitter=0）。嫌疑犯兩個，方向都對得上：參考庫的背景梯度
+        （query 被 std>=min_std 篩過是組織豐富的，而深層庫 29% 是空白，最近鄰
+        會跑到淺層）、雜訊與 JPEG 的高頻。散焦模糊方向相反，已排除。
+        七片這一發的背景配對版會分掉一半嫌疑。依 BenchLocaScope 的代價不對稱,
+        偏細是致命的那一邊。
+
+        44 個 store 的身世問完了：全部帶 sampler_id、7 個含 jitter tile ->
+        配額取樣跑過，這批 store 就是它產的。工具是這次加的
+        inspect_feature_store --sampling（只讀 header 加幾個 [N] 向量）。
+
+================================================================================
+
+[x] 2026-08-13 | TEMP-DIAG 找到答案：3h43m 的靜默不在 extract_all，在 read_region
+    utilities/_tempdiag.py 加的 Heartbeat 計時器，動機是一次 resume 的
+    BenchLocaScope 跑到 S1104360 的 L0 retriever 建置時靜默 3h43m，py-spy 連不上
+    （hgpn44 的 ptrace_scope=1），_tempdiag.py 自己的 docstring 當時猜「narrows
+    it to extract_all or _TRANSFORM」。
+
+    ● 證據：log/BenchLocaScope 裡兩次異常
+        每個 [diag] read r1/1 是一次 wsi.read_region() 讀整個 region（mask_all
+        下一片只有一個 region，等於整片）。多數與像素數成正比：97792x191232
+        花 120.4s，91904x191232 另一次花 121.5s，一致。
+        兩次不成比例：
+            S1104360 L0   83456x166656 px   4083.0s（同尺寸「應該」~120s）
+            S1137178 L1   41728x83328 px    2323.5s（像素數只有前者 1/4，還是
+                                              慢 20 倍）
+        cut_patch（31.0s / 6.5s）和 encode（352.6s / 皆與 tile 數成正比）兩次
+        都正常，只有 read 爆掉。
+
+    ● 機制：SafeSlide 的破洞救援機制
+        兩次異常前都有 `SafeSlide: read failed ... Empty JPEG image (DNL not
+        supported)` 警告（S1104360 那次緊鄰 6 筆；全域計數在 10 筆封頂後轉靜默
+        [SafeSlide.py:154]，S1137178 的洞大概率是撞到封頂後的靜默重試）。
+        SafeSlide.read_region 對失敗的讀取遞迴對半細分直到 min_chunk=64，才能
+        只把真正缺圖的小塊標成空白 [SafeSlide.py:168-197]。一片掃描器沒拍到的
+        JPEG tile 散佈得夠開，就把一次 read_region 變成一連串細分重試——時間
+        燒在這裡，不在 extract_all 或 _TRANSFORM。
+
+    ● 結論：原本的假設是錯的，真正的瓶頸高一層
+        TEMP-DIAG 量的兩個目標（PatchingLib 的 cut_patch/extract、GigaPathFunc
+        的 encode）全部正常。答案落在它們兩個都沒有量到的地方——呼叫 extract_all
+        之前那一次 wsi.read_region()。問題已解，_tempdiag.py 依照自己開頭寫的
+        「delete when the question is answered」移除，改動見同一批 commit。
+
+    ● 未決：這算不算需要修
+        目前只是「找到瓶頸在哪」，還沒有決定要不要修 SafeSlide 的細分重試策略
+        （例如破洞密集時改用更粗的 min_chunk，或先用低解析度掃一次抓出洞的範圍
+        再精讀）。破洞多的切片會持續付這個代價，留給下次要不要處理。
 
 ================================================================================
