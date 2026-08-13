@@ -410,7 +410,7 @@ def scan_point(slide, camera, encoders, x, y, level, ds, anchor_white,
     if offsets[-1] != HALF_TILE:
         offsets.append(HALF_TILE)
 
-    base_mpp = float(slide.properties.get('openslide.mpp-x', 0))
+    base_mpp = slide.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
     rows = []
     for dy in offsets:
         for dx in offsets:
@@ -519,7 +519,7 @@ def analyse_slide(wsi_path, args, encoders, hest_method, rng) -> list:
         if not mask.tissue_regions:
             return []
 
-        base_mpp = float(slide.properties.get('openslide.mpp-x', 0.25))
+        base_mpp = slide.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
         levels = args.levels if args.levels else range(slide.level_count)
         for level in levels:
             if level >= slide.level_count:

@@ -40,6 +40,7 @@ import numpy as np                                          # noqa: E402
 import openslide                                            # noqa: E402
 
 from camera import Camera                                   # noqa: E402
+from SafeSlide import SafeSlide                             # noqa: E402
 from config import DomainGapConfig                          # noqa: E402
 from augment.geometry import apply_rotation                 # noqa: E402
 
@@ -105,7 +106,7 @@ def main() -> int:
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args()
 
-    wsi = openslide.OpenSlide(args.wsi)
+    wsi = SafeSlide(args.wsi)
     base_mpp = (float(wsi.properties.get(openslide.PROPERTY_NAME_MPP_X, 0.25))
                 + float(wsi.properties.get(openslide.PROPERTY_NAME_MPP_Y, 0.25))) / 2
     level_mpp = base_mpp * wsi.level_downsamples[args.level]
