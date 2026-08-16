@@ -2174,3 +2174,175 @@
         再精讀）。破洞多的切片會持續付這個代價，留給下次要不要處理。
 
 ================================================================================
+
+[ ] 2026-08-15 | WsiTissuesContainer 延遲讀取：整個 pipeline 只有一個 region
+                 的像素被用到
+
+    WsiTissuesContainer.from_ds 對每個 region 呼叫一次 read_region，把像素全部
+    讀進記憶體並保留 [PatchingLib.py:1104-1122]。而下游只有一個地方讀那些像素：
+
+        SIFT_RANSAC.py:125   tpc = self.wsi_container[self.location.best_region_index]
+
+    stage 3 只讀「贏的那一個」region 的 tpc.img。stage 2 要的是 feature，不是
+    像素——它把 tile 交給 encoder 之後就不再回頭看。所以 N 個 region 讀進來，
+    N-1 個的像素從頭到尾沒有任何人碰。
+
+    ● 這件事今天以兩種不同的面貌各出現一次
+        記憶體：SlideWinTest 的 --no-filter 回合 OOM。2988 個未合併的 region，
+        每個讀自己的 bounding box，而 _cut_patch 是 .copy() [PatchingLib.py:884,
+        992]，加上 overlap 的主格與交錯格各鋪一次，同一個像素在記憶體裡有三份。
+        job 301949 MaxRSS 199.2 GB。目前用 --mem=600G 壓過去，那是治標。
+        時間：feature store（下一則）只能省掉編碼，省不掉讀取。
+        SlidewinPooling 實測 BRACS_1228 L0 是 read 278s / encode 285s，所以
+        快取 feature 之後仍然要付一半。
+
+    ● 要做什麼
+        container[i] 被索引時才 read_region，而不是在 from_ds 裡全部讀完。
+        from_ds 現在已經是唯一入口，且 resolve_scale 在讀任何東西之前就決定了
+        level 和 ds，格點座標由 PatchGrid.from_size 純幾何算出——也就是說
+        「有哪些 region、每個切出哪些 tile」完全不需要像素就能回答。這是延遲
+        讀取可行的前提，而它已經成立。
+
+    ● 邊界
+        stage 2 的 to_features 會走過每一個 region，所以「只讀一個」只在 feature
+        來自 store 時成立。兩件事要一起做才有完整效果，但延遲讀取本身對記憶體
+        的效果不依賴 store：讀完一個 region、編完、放掉，峰值就從 N 個掉到 1 個。
+        .copy() 換成 view 是另一個獨立的三分之一，但要先確認編碼路徑不寫入。
+
+================================================================================
+
+[ ] 2026-08-15 | BenchLocaScope 跨執行快取 (slide, level) 的 cls feature
+
+    bench_locascope.py:733 是每片玻片建一次 pipeline、跑完那片所有 shot，所以
+    單次執行內編碼已經攤掉了。這件事的價值在跨次執行：改了 stage 3 重跑、換
+    參數重跑，不必再編一次同樣的東西。production 是 cls + mean，所以只存 cls。
+
+    ● 省一半，不是全部
+        命中之後仍然要建 container，因為 stage 3 要贏的那個 region 的像素
+        [SIFT_RANSAC.py:125]。SlidewinPooling 實測 BRACS_1228 L0 是
+        read 278s / encode 285s，所以命中後是 278s + 0。另一半在上一則的延遲
+        讀取，兩件事是 A 和 A+B 的關係。
+        容量不是問題：七片三層全部約 5 GB（L0 十六萬個 tile x 1536 x 2 B）。
+
+    ● store 只收 fp16，這不是選擇
+        FeatureStore._validate:233 硬性要求 features 是 fp16 且 [N, n, D]，
+        cls 就是 [N, 1, 1536]。後果是命中與不命中的結果不會逐位相同：歸一化後
+        每分量約 0.0255，fp16 相對精度 2^-11，逐分量誤差約 1.2e-5，1536 維隨機
+        累加後相似度偏移約 1e-5。十五萬個候選裡差距小於 1e-5 的近似平手會重排。
+        所以往返測試用 decoy，不用容差。
+
+    ● 閘：檢查那個字串本來要代表的東西
+        風險只有一個，mask_id 是自由字串（現況 build_reference_store.py:362 是
+        'hest@L{n}'），蓋不住 min_region_ratio 和有沒有 merge_overlapping。兩組
+        不同的遮罩拿到同一個 id，store 就靜默回傳錯的 region，而下游只會看到
+        「retrieval 變差了」。
+        所以不信任 id，改成重算幾何：resolve_scale 是純算術，regions_view +
+        filter_patchable 是純幾何，PatchGrid.from_size 零讀取——「有哪些 region、
+        每個切出哪些 tile」完全不需要像素就能回答。拿重算的結果跟 store 的
+        x / y / region / grid_rc 逐一比對，幾毫秒。
+        座標系要盯：PatchInfo.x 是 level-n（PatchingLib.py:56 的 ds coords），而
+        ReferenceSampler.LevelSample 可能是 level-0。寫入端和閘兩邊都走
+        PatchInfo，不借 to_store_args。
+
+    ● 對不上時退回重算，但要出聲
+        決定是 fallback 而不是 raise：設定變了就是找不到對應的 store，那是正常
+        事件不是錯誤。代價是「快取永遠沒命中」會變成靜默的效能問題——跑一小時
+        才發現每次都在重算。所以訊息必須說出是哪一項對不上（哪個 region、哪個
+        座標、或根本沒有符合的檔案），不能只印 cache miss。
+
+    ● 六步，測試先寫
+        1. FeatureStore.py                  不動。欄位、cfg_hash、原子寫入和
+                                            load(require=) 都已經夠用。
+        2. utilities/WsiFeaturesMapStore.py 新檔。扁平化 list[FeaturesMap] -> 五個
+                                            張量、還原、以及上面那道閘。不知道
+                                            路徑也不知道 id。
+                                            名字是 Store 不是 Cache：它存的就是
+                                            FeaturesMap（PatchingLib 的類別名），
+                                            而 Cache 這個詞暗示可丟，實際上它是
+                                            FeatureStore 之上的儲存層。
+        3. GigaPathSlidingWinSimRot.py      build_wsi_features:224-232 的兩個分支
+                                            變三個：_by_ds 命中 / 快取命中（仍建
+                                            container，跳過 to_features）/ 從頭建
+                                            再寫入。retriever 只拿到一個有 load
+                                            和 save 的物件。
+        4. LocaScopePipeline.py             組 mask_id。只有它同時知道 mask_method、
+                                            mask_ds、min_region_ratio 和 merge。
+                                            encoder_id 不必再組：2026-08-16 的
+                                            GigaPathFunc 重構之後它是
+                                            GigaPathEncoder.encoder_id() 推導出來
+                                            的，而 encoder_cfg_json() 帶著欄位本身
+                                            讓 fallback 說得出是哪一項對不上。
+        5. test_wsi_features_map_store.py   最先寫。往返（decoy 不用容差）、改
+                                            min_region_ratio 要被擋、拿 L1 的去要
+                                            L2 要被擋、餵 fp32 或 [N, D] 要 raise。
+                                            四條都不需要 GPU 或玻片。
+        6. bench_locascope.py               --feature-store <dir> 與
+                                            --feature-store-mode {read,write,rw}。
+                                            分開是為了第一次能純填充：否則第一次
+                                            執行就要同時信任寫和讀，壞了分不出是
+                                            哪邊。
+
+        實作順序 5 -> 2 -> 3 -> 4 -> 6。
+
+================================================================================
+
+[ ] 2026-08-16 | ConfigIdentity 的註冊表與 config json：機制在、測過、零使用者
+
+    2026-08-16 的 config 重構做了兩樣東西，然後刻意沒有接上任何呼叫端。它們不是
+    半成品，是「現在不需要」——快取不靠它們就能運作，接上去只會多兩條沒人走的路。
+    這則記的是它們為什麼存在，以及要用的時候該補什麼。
+
+    ● 快取為什麼不需要它們
+        encoder_id   encoder.identity_id()
+        mask_id      TissueMaskConfig.mask_id()
+        正確性       WsiFeaturesMapStore 的幾何閘（重算 region 座標比對存下的欄位）
+        miss 的理由  逐欄位比對 StoreMeta，直接印出哪一項不同
+        四件事都不碰註冊表也不碰 json。
+
+    ● 註冊表：反方向，不是正方向
+        正方向 cfg.build(device) 本來就會分派——config 是哪個類別就是選擇本身，
+        不需要工廠。註冊表服務的是「名字 -> config」，而那有兩個用途：
+            CLI / jobscript 用一個字串指定實作，例如 --encoder gigapath
+            從一份 store 的紀錄重建當初的 config，讓 store 從「可辨識」變成
+            「可重現」
+        現況：register / registered / config_from / config_json /
+        config_from_json 都在 utilities/ConfigIdentity.py，三條測試守著（往返、
+        未知名字要列出已知的、一名一主）。@register 掛在 GigaPathEncoderConfig
+        ('gigapath')、HestSegConfig('hest')、TissueSegConfig('tissue-seg')、
+        TissueMaskConfig('tissue-mask') 上。
+
+    ● 要用之前必補的一件事
+        註冊表靠 import 副作用填充。TissueSegFunc 底部有
+            if 'HestSegFunc' not in sys.modules:
+                from HestSegFunc import HestSegConfig, HestSegmenter
+        （守衛是為了那個 import 環，不是為了風格）。TileEncoderFunc 沒有對應的
+        一行，所以 config_from('gigapath') 在沒人 import 過 GigaPathFunc 時會說
+        「Registered: hest, tissue-seg, tissue-mask」——看起來像 gigapath 沒註冊，
+        而真正的原因是模組沒被載入。補那一行，加上同樣的守衛。
+
+    ● json：唯一的用途是讓 miss 的訊息說得出「哪一項」
+        identity_json() 回傳 {'parts': [...], 'provenance': {...}}。現在的
+        WsiFeaturesMapStore.load 已經能印出欄位差異，因為它比的是 StoreMeta 的
+        欄位；json 要解的是另一個問題——StoreMeta 只存 id，而 id 是單向雜湊：
+            short_id(parts)            = sha256('|'.join(parts))[:8]
+            SamplerConfig.sampler_id() = sha256(...)[:8]
+        八個 hex 推不回 dtype='fp32'、tome_r=8、arch=...。所以只有 id 的 store
+        可以辨識、不能重現。
+
+    ● 要重現得決定 json 放哪，而兩邊都有代價
+        放進 StoreMeta   跟檔案綁在一起分不開，約 200 bytes。StoreMeta 已經帶
+                         wsi_path 純當來源記錄，多一個字串是一致的。
+        另外存           StoreMeta 保持精簡，但會走散。FeatureStore.py:42-44 已經
+                         因為同樣理由拒絕過 sidecar 一次（query store 的答案索引
+                         放進檔案而不是 sidecar）。差別是答案索引掉了無法評分，
+                         config json 掉了只失去重現能力，嚴重性低一級。
+        2026-08-16 的決定是「另外存」，位置未定。建議放 build_reference_store
+        已經在寫的那份 report CSV：至少它跟 store 同一次執行產生。
+
+    ● 不做也可以
+        這兩樣東西的成本是「兩百行程式碼和它們的測試待在那裡沒人用」。如果三個月
+        後仍然沒有使用者，刪掉是合理的——它們是方法不是 config 欄位，所以不像
+        2026-08-16 早上那三個死欄位那樣會進雜湊、假裝自己被套用了。方法沒人叫就
+        只是沒人叫。
+
+================================================================================
