@@ -119,9 +119,9 @@ from PatchingLib import (PatchGrid, QueryPatchContainer,            # noqa: E402
                          TissuePatchContainer)
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask, TissueRegion     # noqa: E402
-from HESTSegFunc import hest_seg_model, make_hest_method            # noqa: E402
-from GigaPathFunc import (build_transform, gigapath_model,          # noqa: E402
-                          gigapath_encode)
+from TissueSegFunc import HestSegConfig                             # noqa: E402
+from GigaPathFunc import GigaPathEncoderConfig                     # noqa: E402
+from TileEncoderFunc import TransformConfig                        # noqa: E402
 from GigaPathSlidingWinSim import SlidingWindowSimilarity           # noqa: E402
 from camera import Camera                                           # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
@@ -510,7 +510,7 @@ def analyse_slide(wsi_path, args, encoders, hest_method, rng) -> list:
         # used to pick grid points and count background.
         mask = TissuesRegionsMask.from_wsi(
             slide, ds=args.mask_ds, method=hest_method,
-            seg_chunk_px=int(args.seg_chunk_px), overlap=128,
+            seg_chunk_px=int(args.seg_chunk_px), stitch_overlap=128,
             level_rule='nearest')
         mask.filter_regions(min_ratio=args.min_region_ratio)
         mask.merge_overlapping()
@@ -867,20 +867,14 @@ def main() -> int:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'device={device}  step={args.step}  points={args.points}  '
           f'domain_gap={args.domain_gap}')
-    model = gigapath_model(device)
-    # One encoder per preprocess. The transform is the only difference; the
-    # model, device and batch size are shared, so the second costs a forward
-    # pass and nothing else.
-    def _make_encoder(transform):
-        def encode(patches):
-            return gigapath_encode(patches, model, device,
-                                   transform=transform,
-                                   batch_size=args.batch_size)
-        return encode
-
-    encoders = {name: _make_encoder(build_transform(name))
+    # One encoder per preprocess, over ONE loaded model. with_transform shares
+    # the weights and swaps only the pipeline, so the second arm costs a forward
+    # pass and not another 4.5 GB. dtype='fp32' keeps what gigapath_encode
+    # defaulted to before this call site moved to GigaPathEncoderConfig.
+    base = GigaPathEncoderConfig(batch_size=args.batch_size).with_model(dtype='fp32').build(device)
+    encoders = {name: base.variant(transform=TransformConfig(preprocess=name))
                 for name in PREPROCESS}
-    hest_method = make_hest_method(hest_seg_model(device), device)
+    hest_method = HestSegConfig().build(device)
     rng = np.random.default_rng(args.seed)
 
     all_rows, failed = [], []

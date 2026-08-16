@@ -72,9 +72,8 @@ from PatchingLib import PatchGrid                                   # noqa: E402
 import ReferenceSampler as RS                                       # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask                   # noqa: E402
-from HESTSegFunc import hest_seg_model, make_hest_method            # noqa: E402
-from GigaPathFunc import (gigapath_model, gigapath_encode_tokens,   # noqa: E402
-                          model_token_spec, pool_tokens)
+from TissueSegFunc import HestSegConfig                             # noqa: E402
+from GigaPathFunc import GigaPathEncoderConfig, pool_tokens         # noqa: E402
 from camera import Camera                                           # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 
@@ -146,7 +145,7 @@ def nearest_in(centres: np.ndarray, pts: np.ndarray, chunk: int = 4096):
 # ── one (slide, level) ────────────────────────────────────────────────────────
 
 def dump_one(wsi_path: str, level: int, out_root: Path, *,
-             mask, encoder_model, device, spec,
+             mask, encoder, device, spec,
              k: int, k_floor: int, n_query: int, seed: int,
              mask_id: str, encoder_id: str, batch_size: int,
              sampler_cfg: RS.SamplerConfig,
@@ -391,10 +390,8 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
         print(f'      holes: {n_rejected} distractors below valid '
               f'{level_cfg.min_valid:.2f} ({n_replaced} replaced), '
               f'{n_bad_answers} answers kept anyway', flush=True)
-    ref_tokens = gigapath_encode_tokens(ref_imgs, encoder_model, device,
-                                     batch_size=batch_size)
-    query_tokens = gigapath_encode_tokens(query_imgs, encoder_model, device,
-                                   batch_size=batch_size)
+    ref_tokens = encoder.tokens(ref_imgs)
+    query_tokens = encoder.tokens(query_imgs)
     print(f'      read {t_read:.0f}s   encode {time.time() - t0 - t_read:.0f}s',
           flush=True)
 
@@ -1048,13 +1045,15 @@ def main() -> int:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'device={device}  out={out_root}')
 
-    model = gigapath_model(device)                # single card on purpose
-    spec = model_token_spec(model)
-    encoder_id = 'prov-gigapath@fp32tokens'
+    # fp32 and single card on purpose -- this writes stores that existing ones
+    # have to stay comparable with. encoder_id is derived rather than typed, so
+    # a changed checkpoint or precision cannot keep the old name.
+    encoder = GigaPathEncoderConfig(batch_size=args.batch_size).with_model(dtype='fp32').build(device)
+    spec = encoder.spec
+    encoder_id = encoder.identity_id()
     print(f'spec={spec}\n')
 
-    hest = hest_seg_model(device)
-    hest_method = make_hest_method(hest, device)
+    hest_method = HestSegConfig().build(device)
     # The rule is part of the identity, not a footnote: 'best' and 'nearest' pick
     # different levels and so give different region boundaries. Without it in
     # mask_id the two would share a cfg_hash and could be silently mixed.
@@ -1078,7 +1077,7 @@ def main() -> int:
         # boundaries and their stores must not be mixed.
         mask = TissuesRegionsMask.from_wsi(
             slide, ds=args.mask_ds, method=hest_method,
-            seg_chunk_px=int(args.seg_chunk_px), overlap=128,
+            seg_chunk_px=int(args.seg_chunk_px), stitch_overlap=128,
             level_rule='nearest')
         n_raw = len(mask.tissue_regions)
         # The same two stages LocaScopePipeline.build() runs, in the same order
@@ -1104,7 +1103,7 @@ def main() -> int:
         for lv in sorted(levels):
             try:
                 dump_one(wsi_path, lv, out_root, mask=mask,
-                         encoder_model=model, device=device, spec=spec,
+                         encoder=encoder, device=device, spec=spec,
                          k=args.k, k_floor=args.k_floor, n_query=n_per_level,
                          seed=args.seed, mask_id=mask_id, encoder_id=encoder_id,
                          batch_size=args.batch_size, min_std=args.min_std,

@@ -17,7 +17,6 @@ from PatchingLib import QueryPatchContainer, FeaturesMap
 from SafeSlide import SafeSlide
 from TissuesRegionsMask import TissuesRegionsMask
 from TileSampler import TileSampler
-from GigaPathFunc import gigapath_model, gigapath_encode
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -135,7 +134,13 @@ class GigaPathKnnEstiMpp:
         stay reachable at every level.
         '''
         if self.mask is None:
-            self.mask = TissuesRegionsMask.from_wsi(self.wsi)
+            # hsv and not '': this samples tiles for a reference bank, and
+            # blank glass in that bank is noise the KNN has to route around. A
+            # cheap per-pixel threshold is worth its cost here in a way it is
+            # not for retrieval, which scores every window on its own merits.
+            from TissueSegFunc import TissueSegConfig
+            self.mask = TissuesRegionsMask.from_wsi(
+                self.wsi, method=TissueSegConfig('hsv').build())
         self.sampler = TileSampler(self.wsi, self.mask,
                                    tile_size=self.tile_size, seed=self.seed)
         self.sampler.sample(n=self.samples_per_level,

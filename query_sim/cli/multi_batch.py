@@ -265,11 +265,11 @@ def main():
     mask_method = None
     if args.hest:
         import torch
-        from HESTSegFunc import hest_seg_model, make_hest_method
+        from TissueSegFunc import HestSegConfig
         _dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f'mask seg  -> HEST DeepLabV3 on {_dev}  '
               f'(seg_chunk_px={args.seg_chunk_px})', flush=True)
-        mask_method = make_hest_method(hest_seg_model(_dev), _dev)
+        mask_method = HestSegConfig().build(_dev)
     else:
         print('mask seg  -> HSV threshold (default)', flush=True)
 

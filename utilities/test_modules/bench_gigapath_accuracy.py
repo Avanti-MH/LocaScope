@@ -7,7 +7,7 @@ tissue-region tiles from real WSIs (1 SVS + 1 MRXS).
 Sampling
 --------
   * 1 SVS (BRACS_1228) + 1 MRXS (Ki67 S1104043) — different level counts
-  * HESTSegFunc tissue mask (ds=32 by default)
+  * HEST tissue mask (aiNNModel/HestSegFunc, ds=32 by default)
   * TileSampler.sample(n=per_level) — per-level distribution
   * Total 200 patches split by WSI, then by level
 
@@ -51,16 +51,15 @@ import numpy as np
 import openslide
 import torch
 
-from _paths import setup_import_paths, PROJECT_ROOT, job_result_dir
+from _paths import setup_import_paths, PROJECT_ROOT, RESULT_DIR, job_result_dir
 setup_import_paths()
 
 from TissuesRegionsMask import TissuesRegionsMask
 from TileSampler import TileSampler
 from GigaPathFunc import (
-    gigapath_model, gigapath_apply_tome,
-    make_gigapath_encoder,
+    GigaPathEncoderConfig,
 )
-from HESTSegFunc import hest_seg_model, make_hest_method
+from TissueSegFunc import HestSegConfig
 
 
 # ── Config table ──────────────────────────────────────────────────────────────
@@ -79,13 +78,16 @@ _BASE_LABEL = 'baseline fp32'
 _TOPK       = (1, 5, 10, 50)
 
 
-def _load_model(device, tome_r):
-    '''Fresh GigaPath model. flash-attn on (default when TIMM_FUSED_ATTN unset).'''
+def _load_encoder(device, tome_r, batch_size, dtype):
+    '''Fresh encoder. flash-attn on (default when TIMM_FUSED_ATTN unset).
+
+    tome_r is a config field now, so ToMe is part of identity_id() rather than a
+    mutation applied afterwards that nothing recorded.
+    '''
     os.environ.pop('TIMM_FUSED_ATTN', None)
-    model = gigapath_model(device)
-    if tome_r > 0:
-        model = gigapath_apply_tome(model, r=tome_r)
-    return model
+    return GigaPathEncoderConfig(tome_r=tome_r, batch_size=batch_size)\
+        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
+        .build(device)
 
 
 # ── Sampling ─────────────────────────────────────────────────────────────────
@@ -107,7 +109,7 @@ def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
           f'seg_chunk_px={seg_chunk_px/1e6:.1f}M) ...', flush=True)
     mask = TissuesRegionsMask.from_wsi(
         wsi, ds=hest_ds, method=hest_method,
-        seg_chunk_px=seg_chunk_px, overlap=hest_overlap,
+        seg_chunk_px=seg_chunk_px, stitch_overlap=hest_overlap,
     )
     print(f'  tissue_fraction={mask.tissue_fraction() * 100:.1f}%  '
           f'regions={len(mask)}', flush=True)
@@ -134,11 +136,9 @@ def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
 def encode_config(images, device, dtype, tome_r, batch_size, label):
     print(f'\n[encode] {label}', flush=True)
     t0 = time.perf_counter()
-    model   = _load_model(device, tome_r)
-    encoder = make_gigapath_encoder(model, device,
-                                    batch_size=batch_size, dtype=dtype)
+    encoder = _load_encoder(device, tome_r, batch_size, dtype)
     feats = encoder(images)   # (N, D) fp32 unit-normalized
-    del model
+    del encoder
     if device.type == 'cuda':
         torch.cuda.empty_cache()
 
@@ -298,7 +298,7 @@ def parse_args():
     default_svs  = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs'
     default_mrxs = '/work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs'
     default_out  = Path(job_result_dir('AccuracyV1'))
-    default_tmp  = Path(PROJECT_ROOT) / 'result' / 'tmp'
+    default_tmp  = Path(RESULT_DIR) / 'tmp'
 
     p = argparse.ArgumentParser(description='GigaPath accuracy L1+L2')
     p.add_argument('--svs',  default=default_svs)
@@ -346,8 +346,7 @@ def main():
           f'{len(wsi_paths)} WSIs ({per_wsi} per WSI)', flush=True)
 
     print('\nLoading HEST tissue seg model ...', flush=True)
-    hest        = hest_seg_model(device)
-    hest_method = make_hest_method(hest, device)
+    hest_method = HestSegConfig().build(device)
 
     images = []
     for wp in wsi_paths:

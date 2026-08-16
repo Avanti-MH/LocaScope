@@ -101,20 +101,31 @@ def t_unknown_annotation_is_loud():
 def t_cfg_hash_identity_only():
     m = a_meta()
     h = m.cfg_hash()
+    # level and pooling are out because filename() already spells them out;
+    # base_mpp is out because it decides nothing about a tile once `level` is
+    # fixed, and its definition is ours to change -- see _IDENTITY_FIELDS.
     for over in (dict(n_tiles=999), dict(sample_seed=1), dict(created_at='2030'),
-                 dict(level=0), dict(pooling='tokens'), dict(ds=99.0)):
+                 dict(level=0), dict(pooling='tokens'), dict(base_mpp=0.5)):
         assert dataclasses.replace(m, **over).cfg_hash() == h, \
             f'{over} should not change the config hash'
+    # ds is in, and is the one that looks redundant: on a pyramid `level` fixes
+    # it. It stops being redundant the moment a caller encodes at a downsample
+    # no level has, and then one level resampled to two scales would otherwise
+    # be two sets of tiles under one filename.
     for over in (dict(encoder_id='other'), dict(mask_id='mask_all'),
-                 dict(tile_size=512), dict(overlap=False), dict(base_mpp=0.5)):
+                 dict(tile_size=512), dict(overlap=False), dict(ds=99.0),
+                 dict(sampler_id='zzzz9999')):
         assert dataclasses.replace(m, **over).cfg_hash() != h, \
             f'{over} should change the config hash'
 
 
 def t_float_format_is_stable():
     # cfg_hash feeds on the encoded strings, so two spellings of one value must
-    # not produce two hashes.
-    assert a_meta(base_mpp=0.24255).cfg_hash() == a_meta(base_mpp=0.242550).cfg_hash()
+    # not produce two hashes. Uses ds and not base_mpp: this has to be checked
+    # on a field the hash actually reads, or it passes for the wrong reason.
+    assert a_meta(ds=4.00003).cfg_hash() == a_meta(ds=4.0000300).cfg_hash()
+    assert a_meta(ds=4.00003).cfg_hash() != a_meta(ds=4.0).cfg_hash(), \
+        'the 0.04% between a requested ds and a level\'s own must not be rounded away'
 
 
 def t_slot_name_with_comma_refused():

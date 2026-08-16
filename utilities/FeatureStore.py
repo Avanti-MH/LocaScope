@@ -71,7 +71,45 @@ CORE_TENSORS = ('features', 'x', 'y', 'region', 'grid_rc')
 #: `level` and `pooling` are excluded because they are already in the filename,
 #: and `n_tiles` / `created_at` / `sample_seed` because they do not change the
 #: meaning of a tile.
-_IDENTITY_FIELDS = ('encoder_id', 'mask_id', 'tile_size', 'overlap', 'base_mpp',
+#:
+#: Three rules hold this set together. They are here rather than in a design
+#: document because this tuple is the only thing a future reader has to get
+#: right, and the cost of each mistake is different.
+#:
+#: 1. APPEND ONLY, AND NEVER REPURPOSE A NAME.
+#:    Adding a field re-hashes every existing store, but does not break them:
+#:    find() matches on metadata rather than filename, load(require=) still
+#:    validates, and save() writes a new name instead of overwriting. Old files
+#:    become orphans, which is a recompute, not a wrong answer. Giving an
+#:    existing name a new meaning is the one change that fails silently -- the
+#:    old and new stores hash the same and hold different things.
+#:
+#: 2. ONLY QUANTITIES WHOSE DEFINITION IS STABLE.
+#:    The values vary freely; that is the point. What must not vary is what the
+#:    NAME means. base_mpp used to be here and failed this twice: it decides
+#:    nothing about a tile (given `level`, which is in the filename, no part of
+#:    the read path touches it), and its definition lives in SafeSlide.base_mpp,
+#:    which changed on 2026-08-13 from mpp-x alone to the mean of mpp-x and
+#:    mpp-y. Every slide in this project has mpp-x != mpp-y, so that commit gave
+#:    a new hash to every store while the tiles and the vectors were unchanged.
+#:    ds replaces it and passes: it comes from the slide file
+#:    (level_downsamples), not from code of ours. It is redundant with `level`
+#:    today and deliberately so -- once a caller can encode at a downsample that
+#:    is not a pyramid level, one level resampled to two scales would be two
+#:    different sets of tiles under one filename. `level` stays in the filename
+#:    for the other half of that: ds=2 resampled from L0 and ds=2 native at L1
+#:    are not the same pixels.
+#:
+#: 3. THE HASH SEPARATES FILES; IT DOES NOT PROVE CORRECTNESS.
+#:    Every id here is a string some caller composed, so the hash is exactly as
+#:    good as the weakest of them -- mask_id in particular has to cover the
+#:    segmentation method, its ds, the region filter and whether merging ran, or
+#:    two different masks collide on one name. Getting the hash wrong costs a
+#:    recompute; getting a CHECK wrong costs a wrong answer. So the checks are
+#:    elsewhere and are made of the thing itself rather than its label: recompute
+#:    the grid geometry and compare it against the stored x / y / region /
+#:    grid_rc, and re-encode a handful of tiles and compare the vectors.
+_IDENTITY_FIELDS = ('ds', 'tile_size', 'overlap', 'encoder_id', 'mask_id',
                     'sampler_id')
 
 _COVERAGE = ('all', 'sample')
@@ -151,7 +189,7 @@ class StoreMeta:
 
     # what produced it
     encoder_id:  str                        # e.g. 'prov-gigapath@fp16'
-    mask_id:     str                        # e.g. 'hest@ds4' | 'mask_all'
+    mask_id:     str                        # e.g. 'hest@ds4' | 'none@ds4'
 
     # how much of the slide it covers
     coverage:    str                        # 'all' | 'sample'

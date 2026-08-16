@@ -553,7 +553,9 @@ def test_hest_seg(path: str, method: callable, ds: float = 64.0,
 def test_real_wsi(path: str, ds: float = 32.0) -> tuple:
     import openslide
     wsi = openslide.OpenSlide(path)
-    trm = TissuesRegionsMask.from_wsi(wsi, ds=ds)
+    from TissueSegFunc import TissueSegConfig
+    trm = TissuesRegionsMask.from_wsi(wsi, ds=ds,
+                                      method=TissueSegConfig('hsv').build())
     Ht, Wt = trm.main_mask.shape
     thumb = trm.read_matching_rgb(wsi)
     wsi.close()
@@ -737,7 +739,7 @@ def test_tiling_effect(path: str, ds: float = 32.0,
         print(f'  no-tile  SKIP ({type(e).__name__}: {e})')
 
     trm_til = TissuesRegionsMask.from_wsi(
-        wsi, ds=ds, method=method, seg_chunk_px=ref_mp, overlap=overlap,
+        wsi, ds=ds, method=method, seg_chunk_px=ref_mp, stitch_overlap=overlap,
     )
     H, W = trm_til.main_mask.shape
     if trm_no is not None:
@@ -767,7 +769,7 @@ def test_tiling_effect(path: str, ds: float = 32.0,
     sweep_list = []
     for mp in seg_chunk_px_list:
         trm = TissuesRegionsMask.from_wsi(
-            wsi, ds=ds, method=method, seg_chunk_px=mp, overlap=overlap,
+            wsi, ds=ds, method=method, seg_chunk_px=mp, stitch_overlap=overlap,
         )
         n_h, n_w = _plan_tile_grid(H, W, mp)
         sweep_list.append((
@@ -1037,11 +1039,10 @@ def main():
     hest_method = None
     if args.hest:
         import torch
-        from HESTSegFunc import hest_seg_model, make_hest_method
+        from TissueSegFunc import HestSegConfig
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f'\n[HEST] loading model on {device}')
-        hest_model = hest_seg_model(device)
-        hest_method = make_hest_method(hest_model, device)
+        hest_method = HestSegConfig().build(device)
 
     # Real WSI -- Otsu
     real_trm = None

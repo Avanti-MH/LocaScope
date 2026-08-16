@@ -8,6 +8,8 @@ Usage:
 
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -15,7 +17,16 @@ import openslide
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from TissuesRegionsMask import TissuesRegionsMask, _mask_hsv, _mask_otsu
+# mask_hsv and mask_otsu moved to aiNNModel/TissueSegFunc when segmentation
+# methods were collected in one place, so this needs a path entry it did not
+# before -- it used to reach both from utilities.
+_HERE = Path(__file__).resolve().parent
+for _d in (_HERE, _HERE.parent / 'aiNNModel'):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
+
+from TissuesRegionsMask import TissuesRegionsMask            # noqa: E402
+from TissueSegFunc import mask_hsv, mask_otsu                # noqa: E402
 
 
 def overlay(rgb, mask, color=(0, 200, 80), alpha=0.45):
@@ -40,8 +51,8 @@ def main():
 
     # Generate both masks for comparison
     sat = args.sat
-    tm_hsv  = TissuesRegionsMask.from_wsi(wsi, method=lambda rgb: _mask_hsv(rgb, sat_thresh=sat))
-    tm_otsu = TissuesRegionsMask.from_wsi(wsi, method=_mask_otsu)
+    tm_hsv  = TissuesRegionsMask.from_wsi(wsi, method=lambda rgb: mask_hsv(rgb, sat_thresh=sat))
+    tm_otsu = TissuesRegionsMask.from_wsi(wsi, method=mask_otsu)
 
     # Use the same get_thumbnail() call so thumb matches the mask shape exactly
     Ht, Wt  = tm_hsv.main_mask.shape[:2]

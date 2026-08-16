@@ -90,6 +90,11 @@ Everything below is COMPUTED from those five stored numbers, which is why
                     ranking scores f% at top@f% whatever the pool size, while
                     rank@100 scores 100/pool -- 35% at L2, 0.13% at L0.
 
+                    That holds while f * pool >= 1. Below it the max(1, ...)
+                    takes over, k is 1 whatever f says, and the null goes back
+                    to 1/pool. Only @0.01% reaches that floor on these slides,
+                    and only outside L0 -- see K_FRACTIONS for which levels.
+
   W / L / T         paired against the baseline, per query, on rank_truth:
                         W: rank_truth(arm) <  rank_truth(baseline)
                         L: rank_truth(arm) >  rank_truth(baseline)
@@ -125,7 +130,7 @@ list or the grouping never costs a GPU hour.
 ═══════════════════════════════════════════════════════════════════════════════
 
 They differ only in the grouping key. The paired block (W L T n_cmp win% Q1 med
-Q3 top@0.1/1/10%) is IDENTICAL in all four.
+Q3, one column per K_FRACTIONS entry) is IDENTICAL in all four.
 
   單片單層   slide x level    21 tables   n = --n-fov
              The only place absolute numbers are valid, because pool is a
@@ -212,10 +217,8 @@ from PatchingLib import (FeaturesMap, QueryPatchContainer,      # noqa: E402
                          WsiTissuesContainer)
 from SafeSlide import SafeSlide                                  # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask                # noqa: E402
-from HESTSegFunc import hest_seg_model, make_hest_method         # noqa: E402
-from GigaPathFunc import (gigapath_model, gigapath_encode,       # noqa: E402
-                          gigapath_encode_tokens, model_token_spec,
-                          pool_tokens)
+from TissueSegFunc import HestSegConfig                          # noqa: E402
+from GigaPathFunc import GigaPathEncoderConfig, pool_tokens      # noqa: E402
 from GigaPathSlidingWinSim import SlidingWindowSimilarity        # noqa: E402
 from camera import Camera                                        # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
@@ -247,7 +250,26 @@ K_FIXED = (1, 5, 10, 20, 30, 50, 100)
 
 #: Pool fractions. Their null is constant at f, which is what lets them cross
 #: levels where K_FIXED cannot.
-K_FRACTIONS = (0.001, 0.01, 0.10)
+#:
+#: 0.01% is the exception and has to be read with the pool beside it. k@f% is
+#: max(1, ceil(f * pool)), so the floor of 1 bites as soon as the pool is under
+#: 10,000 and the column stops meaning what its name says:
+#:
+#:     L0   pool 18,296..183,833   k = 2..19    a real 0.01% criterion
+#:     L1   pool  3,432.. 10,495   k = 1..2     partly floored
+#:     L2   pool    311..    499   k = 1        truth@1, null 0.20..0.32%
+#:
+#: It is here because L0 is where the pool is large enough for the other three
+#: to saturate -- @0.1% already sits at 78% there, so it separates nothing.
+#: Read it in 單片單層 and in the L0 row of 同層跨片; in 全部 it averages a
+#: genuine 0.01% at L0 with truth@1 at L2, which is not one criterion.
+K_FRACTIONS = (0.0001, 0.001, 0.01, 0.10)
+
+
+def _frac_label(fraction: float) -> str:
+    """0.0001 -> '@0.01%'. Header text and dict key are both derived from
+    K_FRACTIONS, so a fraction cannot be printed under another one's name."""
+    return f'@{fraction * 100:g}%'
 
 #: Furthest a FoV can be from the NEAREST POINT OF ONE GRID. Each grid steps by
 #: TILE on both axes, so the worst position is a cell centre: hypot(128, 128).
@@ -309,27 +331,46 @@ def concat_slots(slots: torch.Tensor) -> torch.Tensor:
                                                   # raw tensors and still be valid
 
 
-def pooled_descriptors(patches, model, device, spec, poolings,
-                       batch_size: int, token_chunk: int,
-                       dtype: torch.dtype = torch.float16) -> dict:
+def pooled_descriptors(patches, encoder, poolings) -> dict:
     """{pooling: [N, n*D]} for one patch list, encoding the tokens ONCE.
 
-    `gigapath_encode_tokens` returns [N, 197, 1536]; at 38,000 tiles that is
-    44 GB in fp32, so the tiles are walked in chunks and each chunk is pooled
-    into its five descriptors before the tokens are released. Encoding five
-    times instead -- once per pooling -- would be five forward passes for one
-    set of pixels.
+    Encoding once per pooling instead would be five forward passes over one set
+    of pixels, so all five reductions run off the same tokens. The question is
+    only where those tokens live while it happens.
+
+    They stay on the GPU. `reduce` is applied inside the encoder's batch loop,
+    so what crosses to the host is the 14 concatenated slots -- 86 KB per tile
+    against the 1.21 MB of [197, 1536] fp32 -- and the tokens for a batch are
+    freed on the next iteration. 68k tiles is 5.9 GB accumulated rather than
+    82 GB, which is why this takes no chunk parameter: `batch_size` bounds the
+    GPU side and nothing else needs bounding.
+
+    The earlier version pooled on the host, which needed an outer loop over
+    `--token-chunk` to bound the same total. That loop paid to move every token
+    across PCIe and only then discarded 93% of them.
+
+    Widths are recorded as the first batch is reduced rather than derived from
+    POOLINGS, so the split below cannot disagree with what pool_tokens actually
+    returned. The five results are views into one tensor, which is the whole
+    allocation -- slicing does not copy.
     """
-    out = {name: [] for name in poolings}
-    for start in range(0, len(patches), token_chunk):
-        chunk = patches[start:start + token_chunk]
-        tokens = gigapath_encode_tokens(chunk, model, device,
-                                        batch_size=batch_size, dtype=dtype)
+    widths = {}
+
+    def reduce(tokens):                       # [B, 197, 1536] fp32, on device
+        parts = []
         for name in poolings:
-            slots, _, _ = pool_tokens(tokens, name, spec)   # (feats, slots, layout)
-            out[name].append(concat_slots(slots).cpu())
-        del tokens
-    return {name: torch.cat(parts, dim=0) for name, parts in out.items()}
+            slots, _, _ = pool_tokens(tokens, name, encoder.spec)  # (feats, slots, layout)
+            flat = concat_slots(slots)
+            widths[name] = flat.shape[1]
+            parts.append(flat)
+        return torch.cat(parts, dim=1).cpu()  # one transfer, not five
+
+    packed = encoder.tokens(patches, reduce=reduce)
+    out, start = {}, 0
+    for name in poolings:
+        out[name] = packed[:, start:start + widths[name]]
+        start += widths[name]
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -396,9 +437,7 @@ def rank_of(answer_score: float, pools: list) -> int:
 #  Gates
 # ══════════════════════════════════════════════════════════════════════════════
 
-def gate_baseline_is_production(patches, model, device, spec,
-                                batch_size: int,
-                                dtype: torch.dtype = torch.float16) -> tuple:
+def gate_baseline_is_production(patches, encoder) -> tuple:
     """`cls` pooling must be the feature production actually ships.
 
     BOTH sides run at the same `dtype`. autocast changes the forward pass, so
@@ -407,16 +446,52 @@ def gate_baseline_is_production(patches, model, device, spec,
     a reason that is not a bug is worse than no gate.
     """
     sample = patches[:min(32, len(patches))]
-    tokens = gigapath_encode_tokens(sample, model, device,
-                                    batch_size=batch_size, dtype=dtype)
-    slots, _, _ = pool_tokens(tokens, 'cls', spec)          # (feats, slots, layout)
+    tokens = encoder.tokens(sample)
+    slots, _, _ = pool_tokens(tokens, 'cls', encoder.spec)  # (feats, slots, layout)
     pooled = F.normalize(slots[:, 0].float(), dim=-1)
-    shipped = F.normalize(
-        gigapath_encode(sample, model, device, batch_size=batch_size,
-                        dtype=dtype).float(),
-        dim=-1)
+    shipped = F.normalize(encoder.features(sample).float(), dim=-1)
     cos = float((pooled * shipped).sum(-1).min())
     return cos, cos > 1 - 1e-4
+
+
+def gate_reduce_matches_host(patches, encoder) -> tuple:
+    """Pooling on the GPU must give what pooling on the host gave.
+
+    `pooled_descriptors` hands the pooling to the encoder so the tokens never
+    cross to the host -- 86 KB per tile instead of 1.21 MB. That moves the
+    arithmetic onto the model's device and packs five descriptors of different
+    widths into one tensor, and neither of the two ways it can go wrong raises:
+
+      dtype    under autocast the tokens arrive fp16, and .mean(1) / .std(1)
+               over 196 of them in fp16 degrades the averaged slots while
+               leaving cls exactly right. That reads as "averaging poolings do
+               not help", which is a result, not an error.
+      packing  a wrong split offset hands each mode another mode's numbers, in
+               the right shape.
+
+    Scored against those two failures rather than a tolerance -- the right
+    tolerance is unknown, the wrong answers are not. Not asserted as exact: the
+    reference reduces on the CPU and this reduces on the GPU, and two sums of
+    1536 floats in different orders need not match bit for bit.
+    """
+    sample = patches[:min(32, len(patches))]
+    dim = int(encoder.spec['dim'])
+
+    got = pooled_descriptors(sample, encoder, POOLINGS)
+    tokens = encoder.tokens(sample)
+
+    worst_ratio, worst_name = math.inf, ''
+    for name in POOLINGS:
+        want = concat_slots(pool_tokens(tokens, name, encoder.spec)[0])
+        same = float((got[name] - want).abs().max())
+        decoys = [float((concat_slots(pool_tokens(tokens.half(), name, encoder.spec)[0])
+                         - want).abs().max())]
+        if want.shape[1] > dim:                  # cls has one slot to roll
+            decoys.append(float((got[name] - want.roll(dim, dims=1)).abs().max()))
+        ratio = min(decoys) / same if same > 0 else math.inf
+        if ratio < worst_ratio:
+            worst_ratio, worst_name = ratio, name
+    return (worst_ratio, worst_name), worst_ratio > 1000
 
 
 def gate_concat_identity(seed: int = 0) -> tuple:
@@ -467,12 +542,15 @@ def gate_tiles(path: str, n: int = 32) -> list:
         slide.close()
 
 
-def run_gates(patches, model, device, spec, batch_size: int,
-              dtype: torch.dtype = torch.float16) -> bool:
+def run_gates(patches, encoder) -> bool:
     print('[gate] baseline is production', end='  ', flush=True)
-    cos, ok_base = gate_baseline_is_production(patches, model, device, spec,
-                                               batch_size, dtype)
+    cos, ok_base = gate_baseline_is_production(patches, encoder)
     print(f'cos={cos:.7f}  {"OK" if ok_base else "FAIL"}')
+
+    print('[gate] reduce == pooling on the host', end='  ', flush=True)
+    (ratio, worst), ok_reduce = gate_reduce_matches_host(patches, encoder)
+    print(f'worst margin over a decoy {ratio:.3g}x ({worst})  '
+          f'{"OK" if ok_reduce else "FAIL"}')
 
     print('[gate] concat identity', end='  ', flush=True)
     delta, ok_concat = gate_concat_identity()
@@ -484,7 +562,7 @@ def run_gates(patches, model, device, spec, batch_size: int,
           f'd(overlap) {wo:.2f}/{MAX_SINGLE_GRID_DISTANCE:.2f}  '
           f'd(truth) {wt:.2f}/{MAX_TRUTH_DISTANCE:.2f}  '
           f'{"OK" if ok_grid else "FAIL"}')
-    return ok_base and ok_concat and ok_grid
+    return ok_base and ok_reduce and ok_concat and ok_grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -591,8 +669,8 @@ def ranks_for(maps: tuple, region: int, found: dict) -> tuple:
             rank_of(ovlp_answer, everything), pool)
 
 
-def run_slide_level(slide, stem, level, mask, args, model, device, spec,
-                    poolings, rng, dtype: torch.dtype = torch.float16) -> list:
+def run_slide_level(slide, stem, level, mask, args, encoder,
+                    poolings, rng) -> list:
     """Every query of one (slide, level), scored by every arm."""
     ds = float(slide.level_downsamples[level])
     base_mpp = slide.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
@@ -618,8 +696,7 @@ def run_slide_level(slide, stem, level, mask, args, model, device, spec,
     for container in containers:
         patches = list(container)
         n_tiles += len(patches)
-        pooled = pooled_descriptors(patches, model, device, spec, poolings,
-                                    args.batch_size, args.token_chunk, dtype)
+        pooled = pooled_descriptors(patches, encoder, poolings)
         for name in poolings:
             wsi_maps[name].append(FeaturesMap(container.grid, pooled[name]))
     encode_s = time.time() - started
@@ -639,8 +716,7 @@ def run_slide_level(slide, stem, level, mask, args, model, device, spec,
         container = QueryPatchContainer(shot)
         container.extract_all(TILE, overlap=False)   # only the main kernel is
         patches = list(container)                    # ever used, see module doc
-        pooled = pooled_descriptors(patches, model, device, spec, poolings,
-                                    args.batch_size, args.token_chunk, dtype)
+        pooled = pooled_descriptors(patches, encoder, poolings)
         for name in poolings:
             maps = score_maps(FeaturesMap(container.grid, pooled[name]),
                               wsi_maps[name])
@@ -761,27 +837,27 @@ def _pct(value: float) -> str:
 def print_paired(rows: list, title: str, arms: list) -> None:
     """The block that is identical at all four aggregation levels."""
     print(f'\n{title}   n={len(rows) // max(1, len(arms))} per arm')
+    fractions = ''.join(f'{_frac_label(f):>7}' for f in K_FRACTIONS)
     print(f'{"arm":<20}{"W":>5}{"L":>5}{"T":>5}{"n_cmp":>7}{"win%":>7}'
-          f'{"Q1":>7}{"med":>7}{"Q3":>7}{"@0.1%":>7}{"@1%":>7}{"@10%":>7}')
-    print('-' * 90)
+          f'{"Q1":>7}{"med":>7}{"Q3":>7}{fractions}')
+    print('-' * (62 + 7 * len(K_FRACTIONS)))
     by_arm = group_by(rows, ['arm'])
     for arm in arms:
         subset = by_arm.get((arm,))
         if not subset:
             continue
         s = paired_stats(subset)
+        # Same f-string on both sides of the dict, so a column cannot be read
+        # from a key paired_stats never wrote.
+        tops = ''.join(f'{_pct(s[f"top{f}"]):>7}' for f in K_FRACTIONS)
         if arm == BASELINE:
             print(f'{arm + "  (base)":<20}{"-":>5}{"-":>5}{"-":>5}{"-":>7}'
-                  f'{"-":>7}{"-":>7}{"-":>7}{"-":>7}'
-                  f'{_pct(s["top0.001"]):>7}{_pct(s["top0.01"]):>7}'
-                  f'{_pct(s["top0.1"]):>7}')
+                  f'{"-":>7}{"-":>7}{"-":>7}{"-":>7}{tops}')
         else:
             print(f'{arm:<20}{s["W"]:>5}{s["L"]:>5}{s["T"]:>5}{s["n_cmp"]:>7}'
                   f'{_pct(s["win_pct"]):>7}'
                   f'{s["ratio_q1"]:>7.2f}{s["ratio_med"]:>7.2f}'
-                  f'{s["ratio_q3"]:>7.2f}'
-                  f'{_pct(s["top0.001"]):>7}{_pct(s["top0.01"]):>7}'
-                  f'{_pct(s["top0.1"]):>7}')
+                  f'{s["ratio_q3"]:>7.2f}{tops}')
 
 
 def print_fixed_k(rows: list, arms: list) -> None:
@@ -814,11 +890,14 @@ def report(rows: list, arms: list, per_slide: bool) -> None:
     print(f'\n{"=" * 90}\n單片單層 -- absolute numbers, one pool each\n{"=" * 90}')
     for (slide, level), subset in sorted(group_by(rows, ['slide', 'level']).items()):
         pool = subset[0]['pool']
-        ks = '/'.join(str(k_at(f, pool)) for f in K_FRACTIONS)
+        # Printed as pairs rather than two parallel lists: k@0.01% floors to 1
+        # on a small pool, and the reader has to be able to see WHICH fraction
+        # floored without counting positions across two slash-separated runs.
+        ks = '  '.join(f'{_frac_label(f)}={k_at(f, pool)}' for f in K_FRACTIONS)
         base = [r for r in subset if r['arm'] == BASELINE]
         s = absolute_stats(base)
-        print(f'\n{slide}  L{level}   pool {pool:,}   '
-              f'k@0.1/1/10% = {ks}   baseline med {s["med_rank"]:,.0f}  '
+        print(f'\n{slide}  L{level}   pool {pool:,}   k: {ks}   '
+              f'baseline med {s["med_rank"]:,.0f}  '
               f'p90 {s["p90_rank"]:,.0f}')
         print_paired(subset, f'  {slide} L{level}', arms)
         print_fixed_k(subset, arms)
@@ -895,10 +974,6 @@ def main() -> int:
                         help='tiles per forward pass. 1024 matches the rest of '
                              'the benches and is affordable because the token '
                              'path runs under fp16 autocast')
-    parser.add_argument('--token-chunk', type=int, default=4096,
-                        help='tiles per token encode before pooling releases '
-                             'the [N, 197, 1536] intermediate. At fp16 that is '
-                             '4096 x 197 x 1536 x 2 = 2.5 GB held at once')
     parser.add_argument('--fp16', action=argparse.BooleanOptionalAction,
                         default=True,
                         help='run the forward pass under fp16 autocast. Output '
@@ -933,20 +1008,18 @@ def main() -> int:
         return 0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = gigapath_model(device)
-    spec = model_token_spec(model)
-    print(f'device={device}  spec={spec}  '
-          f'dtype={"fp16" if args.fp16 else "fp32"}  '
-          f'batch={args.batch_size}  token_chunk={args.token_chunk}\n')
+    encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
+        .with_model(dtype='fp16' if args.fp16 else 'fp32').build(device)
+    print(f'device={device}  spec={encoder.spec}  '
+          f'dtype={encoder.cfg.dtype}  batch={args.batch_size}  '
+          f'encoder={encoder.identity_id()}\n')
 
-    dtype = torch.float16 if args.fp16 else torch.float32
-    if not run_gates(gate_tiles(args.slides[0]), model, device, spec,
-                     args.batch_size, dtype):
+    if not run_gates(gate_tiles(args.slides[0]), encoder):
         print('\nGATE FAILURE -- stopping before the run spends hours '
               'producing numbers that could not mean anything')
         return 1
 
-    hest_method = make_hest_method(hest_seg_model(device), device)
+    hest_method = HestSegConfig().build(device)
     rng = np.random.default_rng(args.seed)
 
     all_rows, failed = [], []
@@ -957,7 +1030,7 @@ def main() -> int:
         try:
             mask = TissuesRegionsMask.from_wsi(
                 slide, ds=args.mask_ds, method=hest_method,
-                seg_chunk_px=int(args.seg_chunk_px), overlap=128,
+                seg_chunk_px=int(args.seg_chunk_px), stitch_overlap=128,
                 level_rule='nearest')
             mask.filter_regions(min_ratio=args.min_region_ratio)
             mask.merge_overlapping()
@@ -970,8 +1043,7 @@ def main() -> int:
                 if level >= slide.level_count:
                     continue
                 all_rows.extend(run_slide_level(
-                    slide, stem, level, mask, args, model, device, spec,
-                    POOLINGS, rng, dtype))
+                    slide, stem, level, mask, args, encoder, POOLINGS, rng))
         except Exception as exc:                          # noqa: BLE001
             print(f'  {type(exc).__name__}: {exc}')
             failed.append(stem)

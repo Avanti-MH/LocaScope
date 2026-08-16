@@ -42,7 +42,7 @@ GigaPath inference speed benchmark.
 
   Model flags (standard mode only; --compare covers all combos automatically):
     --no-flash-attn   set TIMM_FUSED_ATTN=0 before model load
-    --tome            apply Token Merging (gigapath_apply_tome)
+    --tome            apply Token Merging (GigaPathEncoderConfig.tome_r)
     --tome-r N        tokens merged per layer (default 8)
     --compile         torch.compile with mode=reduce-overhead (~2-5 min warmup)
 
@@ -76,21 +76,25 @@ from SafeSlide import SafeSlide
 from PatchingLib import WsiTissuesContainer
 from TissuesRegionsMask import TissuesRegionsMask
 from GigaPathFunc import (
-    gigapath_model, gigapath_compile, gigapath_apply_tome,
-    make_gigapath_encoder, _TRANSFORM,
+    GigaPathEncoderConfig,
 )
 
 
 # ── encode helpers ────────────────────────────────────────────────────────────
 
-def _run_batch_loop(model, ctx, device, batch_size, images):
+def _run_batch_loop(encoder, ctx, device, batch_size, images):
     '''Core encode loop used by standard mode for cpu/gpu split timing.
     Returns (features [N,D], t_cpu, t_gpu) in seconds.
 
     Per-batch two-phase timing:
       Phase A (t_cpu) — CPU transform only
-      Phase B (t_gpu) — H2D + model forward + normalize + D2H
+      Phase B (t_gpu) — H2D + model forward + pool + normalize + D2H
+
+    The pool is explicit because the model is built with global_pool='': it
+    hands back [B, 197, D], and taking the CLS here is what keeps phase B
+    measuring the same work it measured before, rather than a 197x larger D2H.
     '''
+    m = getattr(encoder.model, 'module', encoder.model)
     if not images:
         return torch.empty(0), 0.0, 0.0
     t_cpu = t_gpu = 0.0
@@ -101,7 +105,7 @@ def _run_batch_loop(model, ctx, device, batch_size, images):
         # Phase A: CPU transform
         t0 = time.perf_counter()
         batch_cpu = torch.stack([
-            _TRANSFORM(img if isinstance(img, Image.Image) else Image.fromarray(img))
+            _CPU_TRANSFORM(img if isinstance(img, Image.Image) else Image.fromarray(img))
             for img in chunk
         ])
         t_cpu += time.perf_counter() - t0
@@ -111,7 +115,7 @@ def _run_batch_loop(model, ctx, device, batch_size, images):
             torch.cuda.synchronize(device)
         t0 = time.perf_counter()
         with torch.no_grad(), ctx:
-            feats = model(batch_cpu.to(device))
+            feats = m.pool(m(batch_cpu.to(device)), pool_type='token')
         feat_cpu = F.normalize(feats.float(), dim=-1).cpu()
         if device.type == 'cuda':
             torch.cuda.synchronize(device)
@@ -121,11 +125,11 @@ def _run_batch_loop(model, ctx, device, batch_size, images):
     return torch.cat(outputs, dim=0), t_cpu, t_gpu
 
 
-def run_encode_timed(model, device, batch_size, dtype, images):
+def run_encode_timed(encoder, device, batch_size, dtype, images):
     '''Returns (t_cpu, t_gpu) in seconds. Used by standard mode.'''
     ctx = (torch.autocast(device_type=device.type, dtype=dtype)
            if dtype != torch.float32 else nullcontext())
-    _, t_cpu, t_gpu = _run_batch_loop(model, ctx, device, batch_size, images)
+    _, t_cpu, t_gpu = _run_batch_loop(encoder, ctx, device, batch_size, images)
     return t_cpu, t_gpu
 
 
@@ -166,12 +170,23 @@ _COMPARE_CONFIGS = [
 _LABEL_W = 36
 
 
-def _load_model_for_config(device, use_flash, use_tome, use_compile, tome_r):
+#: torch dtype -> the string GigaPathEncoderConfig takes. This bench sweeps precisions
+#: and holds them as torch dtypes throughout; the config is a string so that a
+#: hash of it is stable across torch versions.
+def _dt(d) -> str:
+    return 'fp16' if d is torch.float16 else 'fp32'
+
+
+_CPU_TRANSFORM = TransformConfig().build()
+
+
+def _load_encoder_for_config(device, use_flash, use_tome, use_compile, tome_r):
+    '''One encoder per config. tome_r and compile are GigaPathEncoderConfig fields now,
+    so the "ToMe before torch.compile" ordering is inside build() instead of
+    being two lines a caller has to keep in the right order.'''
     os.environ.pop('TIMM_FUSED_ATTN', None) if use_flash else os.environ.__setitem__('TIMM_FUSED_ATTN', '0')
-    model = gigapath_model(device)
-    if use_tome:    model = gigapath_apply_tome(model, r=tome_r)
-    if use_compile: model = gigapath_compile(model)
-    return model
+    return GigaPathEncoderConfig(tome_r=tome_r if use_tome else 0,
+                                 compile=use_compile).build(device)
 
 
 def _sweep_configs(device, tome_r, batch_sizes, encode_fn):
@@ -190,15 +205,18 @@ def _sweep_configs(device, tome_r, batch_sizes, encode_fn):
     for label, use_flash, dtype, use_tome, use_compile in _COMPARE_CONFIGS:
         if use_compile:
             print(f'  [torch.compile warmup for: {label}]')
-        model = _load_model_for_config(device, use_flash, use_tome, use_compile, tome_r)
+        base = _load_encoder_for_config(device, use_flash, use_tome, use_compile, tome_r)
+        # variant(), not a second build: the sweep changes batch size and
+        # precision, neither of which rebuilds a model, and reloading 4.5 GB per
+        # point would be most of what this bench claims to measure.
         pps_by_bs = {
-            bs: encode_fn(make_gigapath_encoder(model, device, batch_size=bs, dtype=dtype), bs)
+            bs: encode_fn(base.variant(batch_size=bs, dtype=_dt(dtype)), bs)
             for bs in batch_sizes
         }
         all_results[label] = pps_by_bs
         if label.startswith('baseline'):
             baseline_pps = {bs: v['pps'] for bs, v in pps_by_bs.items()}
-        del model
+        del base
     return all_results, baseline_pps
 
 
@@ -295,7 +313,7 @@ def bench_compare(device, tome_r, n_patches, batch_sizes, warmup, repeats=3):
 
 # ── Part 1 standard ───────────────────────────────────────────────────────────
 
-def bench_synthetic(model, device, batch_sizes, dtypes, n_patches, warmup, repeats):
+def bench_synthetic(base, device, batch_sizes, dtypes, n_patches, warmup, repeats):
     '''Single model config x batch_sizes x dtypes, with cpu/gpu split timing.'''
     print('\n' + '=' * 72)
     print(f'  Part 1 — Synthetic Sweep  ({n_patches} random 256x256 patches)')
@@ -310,14 +328,14 @@ def bench_synthetic(model, device, batch_sizes, dtypes, n_patches, warmup, repea
 
     for dtype in dtypes:
         for bs in batch_sizes:
-            encoder = make_gigapath_encoder(model, device, batch_size=bs, dtype=dtype)
+            encoder = base.variant(batch_size=bs, dtype=_dt(dtype))
             for _ in range(warmup):
                 encoder(patches[:bs])
 
             reset_peak(device)
             cpu_runs, gpu_runs = [], []
             for _ in range(repeats):
-                tc, tg = run_encode_timed(model, device, bs, dtype, patches)
+                tc, tg = run_encode_timed(base, device, bs, dtype, patches)
                 cpu_runs.append(tc); gpu_runs.append(tg)
 
             t_cpu     = sum(cpu_runs) / len(cpu_runs)
@@ -352,7 +370,11 @@ def bench_wsi_compare(device, wsi_path, tome_r, batch_sizes, level, overlap, war
 
     wsi  = SafeSlide(wsi_path)
     ds   = wsi.level_downsamples[level]
-    mask = TissuesRegionsMask.from_wsi(wsi)
+    from TissueSegFunc import TissueSegConfig
+    # hsv: these need real tissue tiles, so blank glass has to
+    # be excluded. Retrieval does not -- see GigaPathSlidingWinSim.
+    mask = TissuesRegionsMask.from_wsi(
+        wsi, method=TissueSegConfig('hsv').build())
     wtc  = WsiTissuesContainer(wsi, ds=ds, level=level,
                                tile_size=256, overlap=overlap, mask=mask)
     n_patches = sum(len(tp) for tp in wtc)
@@ -383,7 +405,7 @@ def bench_wsi_compare(device, wsi_path, tome_r, batch_sizes, level, overlap, war
 
 # ── Part 2 standard (WSI) ────────────────────────────────────────────────────
 
-def bench_wsi(model, device, wsi_path, levels, overlaps, batch_sizes, dtypes, warmup):
+def bench_wsi(base, device, wsi_path, levels, overlaps, batch_sizes, dtypes, warmup):
     '''Single model config x level x overlap x batch_sizes x dtypes, with cpu/gpu split.'''
     print('\n' + '=' * 72)
     print(f'  Part 2 — WSI Pipeline  {os.path.basename(wsi_path)}')
@@ -398,7 +420,11 @@ def bench_wsi(model, device, wsi_path, levels, overlaps, batch_sizes, dtypes, wa
     if base_mpp:
         print(f'  MPP/level={[f"{base_mpp * d:.3f}" for d in ds_list]}')
 
-    mask  = TissuesRegionsMask.from_wsi(wsi)
+    from TissueSegFunc import TissueSegConfig
+    # hsv: these need real tissue tiles, so blank glass has to
+    # be excluded. Retrieval does not -- see GigaPathSlidingWinSim.
+    mask = TissuesRegionsMask.from_wsi(
+        wsi, method=TissueSegConfig('hsv').build())
     n_all = len(mask.tissue_regions)
     print(f'  Tissue regions: {n_all}')
 
@@ -437,7 +463,7 @@ def bench_wsi(model, device, wsi_path, levels, overlaps, batch_sizes, dtypes, wa
             wsi_results    = []
             warmup_patches = list(wtc[0])[:max(batch_sizes)]
             for dtype in dtypes:
-                encoder = make_gigapath_encoder(model, device, batch_size=max(batch_sizes), dtype=dtype)
+                encoder = base.variant(batch_size=max(batch_sizes), dtype=_dt(dtype))
                 for _ in range(warmup):
                     encoder(warmup_patches[:batch_sizes[0]])
 
@@ -448,7 +474,7 @@ def bench_wsi(model, device, wsi_path, levels, overlaps, batch_sizes, dtypes, wa
                         patches_tp = list(tp)
                         if not patches_tp:
                             continue
-                        tc, tg = run_encode_timed(model, device, bs, dtype, patches_tp)
+                        tc, tg = run_encode_timed(base, device, bs, dtype, patches_tp)
                         t_cpu_total += tc; t_gpu_total += tg
 
                     t_encode = t_cpu_total + t_gpu_total
@@ -613,29 +639,27 @@ def main():
         os.environ['TIMM_FUSED_ATTN'] = '0'
 
     print('Loading GigaPath model...')
-    model = gigapath_model(device)
-    if n_gpus > 1:
-        model = torch.nn.DataParallel(model)
-        print(f'DataParallel across {n_gpus} GPUs')
-    if args.tome:
-        model = gigapath_apply_tome(model, r=args.tome_r)
-        print(f'ToMe applied (r={args.tome_r})')
     if args.compile:
         print('torch.compile... (first warmup ~2-5 min)')
-        model = gigapath_compile(model)
+    base = GigaPathEncoderConfig(tome_r=args.tome_r if args.tome else 0,
+                                 compile=args.compile).build(device, multi_gpu=n_gpus > 1)
+    if n_gpus > 1:
+        print(f'DataParallel across {n_gpus} GPUs')
+    if args.tome:
+        print(f'ToMe applied (r={args.tome_r})')
 
     opts = ([o for o in ['flash-attn' if not args.no_flash_attn else None,
                          f'ToMe(r={args.tome_r})' if args.tome else None,
                          'compile' if args.compile else None] if o])
     print(f'Optimizations : {", ".join(opts) if opts else "none (baseline)"}')
 
-    synthetic = bench_synthetic(model, device, args.batch_sizes, dtypes,
+    synthetic = bench_synthetic(base, device, args.batch_sizes, dtypes,
                                 args.n_patches, args.warmup, args.repeats)
 
     wsi_results = []
     if not args.no_wsi:
         if wsi_exists:
-            wsi_results = bench_wsi(model, device, args.wsi, args.levels, args.overlaps,
+            wsi_results = bench_wsi(base, device, args.wsi, args.levels, args.overlaps,
                                     args.batch_sizes, dtypes, args.warmup)
         else:
             print(f'\n[SKIP Part 2] WSI not found: {args.wsi}')

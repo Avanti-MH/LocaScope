@@ -60,9 +60,8 @@ import ReferenceSampler as RS                                       # noqa: E402
 from ReferenceSampler import BUCKETS, SamplerConfig                 # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask                   # noqa: E402
-from HESTSegFunc import hest_seg_model, make_hest_method            # noqa: E402
-from GigaPathFunc import (gigapath_model, gigapath_encode_tokens,   # noqa: E402
-                          model_token_spec, pool_tokens)
+from TissueSegFunc import HestSegConfig                             # noqa: E402
+from GigaPathFunc import GigaPathEncoderConfig                      # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 
 
@@ -157,7 +156,7 @@ def bucket_line(s) -> str:
             f'inherit={int((o == 2).sum())}')
 
 
-def build_slide(wsi_path, args, cfg, model, spec, device, hest_method,
+def build_slide(wsi_path, args, cfg, encoder, spec, device, hest_method,
                 encoder_id, mask_id, out_root, rows, reports) -> None:
     """Build one slide. Appends a row per level to `rows` and the pre-flight
     text to `reports`, so the run leaves a record under result/<job> rather than
@@ -168,7 +167,7 @@ def build_slide(wsi_path, args, cfg, model, spec, device, hest_method,
         t0 = time.time()
         mask = TissuesRegionsMask.from_wsi(
             slide, level=args.mask_level, method=hest_method,
-            seg_chunk_px=int(args.seg_chunk_px), overlap=128,
+            seg_chunk_px=int(args.seg_chunk_px), stitch_overlap=128,
             read_chunk_px=(int(args.read_chunk_px)
                            if args.read_chunk_px else None))
         n_raw = len(mask.tissue_regions)
@@ -246,9 +245,11 @@ def build_slide(wsi_path, args, cfg, model, spec, device, hest_method,
                 continue
             t_read = time.time() - t0
 
-            tok = gigapath_encode_tokens(imgs, model, device,
-                                         batch_size=args.batch_size)
-            feats, slots, layout = pool_tokens(tok, args.pooling, spec)
+            # .pooled() reduces inside the batch loop, so the 197-token
+            # intermediate never crosses to the host: 86 KB per tile instead of
+            # 1.21 MB. Same numbers -- test_gigapath_pooling scores this against
+            # pooling the tokens afterwards.
+            feats, slots, layout = encoder.pooled(imgs, args.pooling)
             final = to_sample(records, lv, g.ds)
 
             meta = FS.StoreMeta(
@@ -357,15 +358,20 @@ def main() -> int:
     os.makedirs(out_root, exist_ok=True)
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    hest = hest_seg_model(device)
-    hest_method = make_hest_method(hest, device)
+    hest_method = HestSegConfig().build(device)
     mask_id = f'hest@L{args.mask_level}'
 
-    model = spec = None
-    encoder_id = 'prov-gigapath@fp32tokens'
+    encoder = spec = None
+    encoder_id = 'prov-gigapath@fp32tokens'   # replaced below once a model exists
     if not args.dry_run:
-        model = gigapath_model(device)
-        spec = model_token_spec(model)
+        # fp32: what gigapath_encode_tokens defaulted to when this wrote its
+        # existing stores, and changing it would silently orphan them.
+        encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
+            .with_model(dtype='fp32').build(device)
+        spec = encoder.spec
+        # Derived, not typed: the old literal could not notice a changed
+        # checkpoint, a changed precision or a changed transform.
+        encoder_id = encoder.identity_id()
 
     print(f'out       {out_root}')
     print(f'sampler   {cfg.sampler_id()}   seed {cfg.seed}   '
@@ -376,7 +382,7 @@ def main() -> int:
     for path in args.wsi:
         print(f'== {Path(path).stem}', flush=True)
         try:
-            bad = build_slide(path, args, cfg, model, spec, device, hest_method,
+            bad = build_slide(path, args, cfg, encoder, spec, device, hest_method,
                               encoder_id, mask_id, out_root, rows, reports)
             if bad:
                 thin.append((Path(path).stem, bad))

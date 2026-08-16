@@ -15,10 +15,11 @@ sys.path.insert(0, str(ROOT / 'utilities'))
 sys.path.insert(0, str(ROOT / 'aiNNModel'))
 
 import openslide
-from PatchingLib import QueryPatchContainer, WsiTissuesContainer, FeaturesMap
+from PatchingLib import (QueryPatchContainer, WsiTissuesContainer,
+                         FeaturesMap, WsiFeaturesMap)
 from SafeSlide import SafeSlide
 from TissuesRegionsMask import TissuesRegionsMask
-from GigaPathFunc import gigapath_model, gigapath_encode
+from GigaPathFunc import GigaPathEncoderConfig
 
 def _sim_tensors_unfold(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
     '''The original implementation, kept as the reference the fast one is
@@ -131,13 +132,15 @@ def compute_gigapath_sliding_win_similarity(
 
     if encoder is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = gigapath_model(device)
-        encoder = lambda patches: gigapath_encode(patches, model, device, batch_size=batch_size)
+        # dtype='fp32' and not the GigaPathEncoderConfig default of fp16: the old
+        # gigapath_encode defaulted to fp32 and this caller never overrode it,
+        # so fp16 here would be a precision change smuggled in by a refactor.
+        encoder = GigaPathEncoderConfig(batch_size=batch_size).with_model(dtype='fp32').build(device)
 
-    WsiRegionsFeatures = [tp.to_features(encoder) for tp in WsiTissuesPathes]
+    wsi_features = WsiTissuesPathes.to_features(encoder)
     QueryFeatures = query.to_features(encoder)
 
-    return [SlidingWindowSimilarity(QueryFeatures, wf) for wf in WsiRegionsFeatures]
+    return [SlidingWindowSimilarity(QueryFeatures, wf) for wf in wsi_features]
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -176,7 +179,7 @@ class GigaPathSlidingWinSim:
     Staged GigaPath sliding-window similarity search.
 
     Stages (in order):
-        1. build_wsi_features(mpp)  — tile WSI at mpp → encode → FeaturesMap per region
+        1. build_wsi_features(mpp)  — tile WSI at mpp → encode → WsiFeaturesMap
         2. build_query_features()   — extract query patches → encode → FeaturesMap
         3. compute_sim_maps()       — SlidingWindowSimilarity per region → sim_maps
         4. find_best()              — find best match → SlideWinSimResult
@@ -208,7 +211,7 @@ class GigaPathSlidingWinSim:
 
         # Intermediate state — inspect at any stage for debugging / visualization
         self.wsi_container: Optional[WsiTissuesContainer] = None
-        self.wsi_features: Optional[list[FeaturesMap]] = None
+        self.wsi_features: Optional[WsiFeaturesMap] = None
         self.qc: Optional[QueryPatchContainer] = None
         self.query_features: Optional[FeaturesMap] = None
         self.sim_maps: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None
@@ -216,17 +219,25 @@ class GigaPathSlidingWinSim:
 
     # ── Stage 1 ──────────────────────────────────────────────────────────────
 
-    def build_wsi_features(self, mpp: Optional[float] = None) -> list[FeaturesMap]:
+    def build_wsi_features(self, mpp: Optional[float] = None) -> WsiFeaturesMap:
         '''Tile WSI at the given mpp (falls back to self.mpp), encode each region.'''
         mpp = mpp or self.mpp
         if mpp is None:
             raise ValueError('mpp must be provided in __init__ or build_wsi_features()')
         if self.mask is None:
-            self.mask = TissuesRegionsMask.from_wsi(self.wsi)
+            # '' and not a threshold: the retriever scores a window by the
+            # mean cosine over the query's tiles, so a window on blank glass
+            # loses on its own merits and the mask here is an optimisation, not
+            # a correctness requirement. '' skips the read AND the array -- see
+            # TissueSegFunc on why that is not the same as a method returning
+            # ones.
+            from TissueSegFunc import TissueSegConfig
+            self.mask = TissuesRegionsMask.from_wsi(
+                self.wsi, method=TissueSegConfig('').build())
         self.wsi_container = WsiTissuesContainer.from_mpp(
             self.wsi, mpp, tile_size=self.tile_size, overlap=self.overlap, mask=self.mask
         )
-        self.wsi_features = [tp.to_features(self.encoder) for tp in self.wsi_container]
+        self.wsi_features = self.wsi_container.to_features(self.encoder)
         return self.wsi_features
 
     # ── Stage 2 ──────────────────────────────────────────────────────────────
@@ -273,8 +284,10 @@ class GigaPathSlidingWinSim:
         # SURVIVING region while self.mask still lists them all. Zipping the
         # wrong one lands every window on a neighbouring region's coordinates
         # and raises nothing.
-        for ri, (region, (main_sim, overlap_sim)) in enumerate(
-            zip(self.wsi_container.tissue_regions, self.sim_maps)
+        # .items() and not zip(...): the pairing is the WsiFeaturesMap's, so
+        # there is no second list left to zip the wrong one of.
+        for ri, ((region, _), (main_sim, overlap_sim)) in enumerate(
+            zip(self.wsi_features.items(), self.sim_maps)
         ):
             hm = overlap_sim if use_overlap else main_sim
             if hm.numel() == 0:

@@ -203,10 +203,10 @@ def main():
     method = None
     if args.hest:
         import torch
-        from HESTSegFunc import hest_seg_model, make_hest_method
+        from TissueSegFunc import HestSegConfig
         dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f'  loading HEST on {dev}', flush=True)
-        method = make_hest_method(hest_seg_model(dev), dev)
+        method = HestSegConfig().build(dev)
 
     base = TissuesRegionsMask.from_wsi(
         wsi, ds=args.mask_ds, method=method,

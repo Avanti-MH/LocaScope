@@ -28,7 +28,7 @@ setup_import_paths()
 from QueryFromWSI import QueryFromWSI
 from simulate_microscope_photo import simulate_microscope_photo
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
-from GigaPathFunc import gigapath_model, make_gigapath_encoder
+from GigaPathFunc import GigaPathEncoderConfig
 from TissuesRegionsMask import TissuesRegionsMask
 
 
@@ -190,12 +190,14 @@ def main():
 
     # ── Build encoder + estimator (ref bank built once) ───────────────────────
     print('\nLoading GigaPath model...')
-    _model = gigapath_model(device)
-    encoder = make_gigapath_encoder(
-        _model, device, batch_size=args.batch_size,
-    )
+    encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
+        .with_model(dtype='fp32').build(device)
 
-    mask = TissuesRegionsMask.from_wsi(wsi)
+    from TissueSegFunc import TissueSegConfig
+    # hsv: these need real tissue tiles, so blank glass has to
+    # be excluded. Retrieval does not -- see GigaPathSlidingWinSim.
+    mask = TissuesRegionsMask.from_wsi(
+        wsi, method=TissueSegConfig('hsv').build())
     est = GigaPathKnnEstiMpp(
         wsi, encoder=encoder, mask=mask,
         tile_size=args.tile, samples_per_level=args.samples, k=args.k,

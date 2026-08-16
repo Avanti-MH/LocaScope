@@ -3,11 +3,12 @@ TileSampler — sample tiles from WSI levels within tissue regions.
 
 Usage:
     from TissuesRegionsMask import TissuesRegionsMask
+    from TissueSegFunc import TissueSegConfig
     from TileSampler import TileSampler
     import openslide
 
     wsi = openslide.OpenSlide('slide.svs')
-    mask = TissuesRegionsMask.from_wsi(wsi)
+    mask = TissuesRegionsMask.from_wsi(wsi, method=TissueSegConfig('hsv').build())
     sampler = TileSampler(wsi, mask, tile_size=256, seed=42)
 
     # Sample 100 tiles from each level

@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 import openslide
 
+
 # Ceiling on what may be handed to cv2.connectedComponentsWithStats in one call.
 # Above it the call does not raise, it segfaults: OpenSlide-sized masks made four
 # runs die at exit 139 with the fault inside _search_tissue_regions. The observed
@@ -256,7 +257,7 @@ class TissuesRegionsMask:
                      W:          int,
                      get_tile:   callable,
                      seg_chunk_px: int,
-                     overlap:    int,
+                     stitch_overlap: int,
                      source:     str = 'seg') -> np.ndarray:
         """Tile-and-stitch, decoupled from where the pixels come from.
 
@@ -283,7 +284,7 @@ class TissuesRegionsMask:
         tile_w = W // n_w
         print(f'  tiled {source}: {n_h}x{n_w} = {n_h * n_w} tiles at '
               f'~{tile_h}x{tile_w} each (input {H}x{W}, budget '
-              f'{seg_chunk_px / 1e6:.1f}M px, overlap={overlap})', flush=True)
+              f'{seg_chunk_px / 1e6:.1f}M px, stitch_overlap={stitch_overlap})', flush=True)
 
         result = np.zeros((H, W), dtype=np.uint8)
         for i in range(n_h):
@@ -293,10 +294,10 @@ class TissuesRegionsMask:
                 y1 = H if i == n_h - 1 else (i + 1) * tile_h
                 x1 = W if j == n_w - 1 else (j + 1) * tile_w
 
-                y0e = max(0, y0 - overlap)
-                x0e = max(0, x0 - overlap)
-                y1e = min(H, y1 + overlap)
-                x1e = min(W, x1 + overlap)
+                y0e = max(0, y0 - stitch_overlap)
+                x0e = max(0, x0 - stitch_overlap)
+                y1e = min(H, y1 + stitch_overlap)
+                x1e = min(W, x1 + stitch_overlap)
 
                 tile_mask = method(get_tile(y0e, x0e, y1e, x1e))
 
@@ -351,7 +352,8 @@ class TissuesRegionsMask:
     @classmethod
     def _segment_plane(cls, wsi, lv: int, ds_lv: float,
                        origin_x: int, origin_y: int, rw: int, rh: int,
-                       method, seg_chunk_px, read_chunk_px, overlap) -> np.ndarray:
+                       method, seg_chunk_px, read_chunk_px,
+                       stitch_overlap) -> np.ndarray:
         """The (rh, rw) uint8 mask of level `lv`, however it has to be got.
 
         Two ways in, and the difference is only where the pixels come from:
@@ -401,7 +403,7 @@ class TissuesRegionsMask:
             # the tiles smaller -- at the cost of more seams, which is a design
             # question this collapse currently hides.
             budget = min(read_chunk_px, seg_chunk_px) if seg_chunk_px else read_chunk_px
-            return cls._tiled_apply(method, rh, rw, _read, budget, overlap,
+            return cls._tiled_apply(method, rh, rw, _read, budget, stitch_overlap,
                                     source='read+seg')
 
         # img is local to this function, so it is gone by the time the caller
@@ -410,7 +412,7 @@ class TissuesRegionsMask:
         if seg_chunk_px is not None and img.shape[0] * img.shape[1] > seg_chunk_px:
             return cls._tiled_apply(method, rh, rw,
                                     lambda y0, x0, y1, x1: img[y0:y1, x0:x1],
-                                    seg_chunk_px, overlap, source='seg')
+                                    seg_chunk_px, stitch_overlap, source='seg')
         return method(img)
 
     @staticmethod
@@ -545,7 +547,7 @@ class TissuesRegionsMask:
                  level: int = None,
                  method: callable = None,
                  seg_chunk_px: int = None,
-                 overlap: int = 128,
+                 stitch_overlap: int = 128,
                  limit_bounds: bool = True,
                  read_chunk_px: int = None,
                  level_rule: str = 'best') -> 'TissuesRegionsMask':
@@ -626,16 +628,34 @@ class TissuesRegionsMask:
         wsi_level_downsamples = wsi.level_downsamples
 
         if method is None:
-            method = _mask_hsv
+            raise ValueError(
+                'from_wsi needs a method. It used to default to HSV, which made '
+                '"I did not say" and "I want HSV" the same request and left the '
+                'mask unable to say which it was. aiNNModel/TissueSegFunc.py has '
+                "the model-free ones -- TissueSegConfig('hsv').build() is the "
+                'old behaviour spelled out.')
 
         lv, ds_lv, origin_x, origin_y, span_w, span_h, rw, rh = \
             cls._resolve_geometry(wsi, ds, level, limit_bounds, level_rule)
 
-        mask = cls._segment_plane(wsi, lv, ds_lv, origin_x, origin_y, rw, rh,
-                                  method, seg_chunk_px, read_chunk_px, overlap)
-
-        main_mask = mask.astype(bool)
-        del mask          # 1 byte/px, and main_mask is the copy that is kept
+        # A segmenter that says it does not run gets neither the read nor the
+        # array. This is the difference between method='' and a method that
+        # returns ones: the latter still reads every pixel of the level to hand
+        # them to a function that ignores them -- twenty minutes at mask_ds=1 --
+        # and still allocates a full-size mask, 411 MB at mask_ds=4 and 6.6 GB
+        # at mask_ds=1, every element True.
+        #
+        # broadcast_to gives the shape and the values with no allocation. It is
+        # read-only, which is right: nothing may write into a mask, and an
+        # attempt raises here instead of silently editing a view.
+        if not getattr(method, 'runs', True):
+            main_mask = np.broadcast_to(True, (rh, rw))
+        else:
+            mask = cls._segment_plane(wsi, lv, ds_lv, origin_x, origin_y, rw, rh,
+                                      method, seg_chunk_px, read_chunk_px,
+                                      stitch_overlap)
+            main_mask = mask.astype(bool)
+            del mask      # 1 byte/px, and main_mask is the copy that is kept
 
         # The numerator has to be the level-0 span the mask actually covers, not
         # the canvas: pairing the canvas width with a cropped mask width would
@@ -778,6 +798,27 @@ class TissuesRegionsMask:
         2. Regions fully contained within another region
         Modifies self.tissue_regions in place; pushes a snapshot onto the
         undo stack (see regions_undo).
+
+        AREA ONLY, and deliberately so. This does not answer "can this region
+        host a tile" and must not be read as if it did: a 10000x5 strip has a
+        large area, survives any min_ratio, and then yields no patches at all --
+        which reaches the encoder as an empty batch, from a stack that names
+        neither the region nor the level. filter_patchable is the one that
+        checks both side lengths, and it has to be, because the answer depends
+        on tile_size and ds and neither is known when a mask is built.
+
+        The division is therefore:
+
+            filter_regions      small, and contained by another. A property of
+                                the segmentation, decided once.
+            filter_patchable    can host at least one tile. A property of the
+                                SCALE, decided per ds, on a regions_view() so
+                                the mask itself is never narrowed.
+
+        Neither subsumes the other and running one is not running the other.
+        This is written down rather than fixed: changing the criterion would
+        move every region list this project has produced, and that is a decision
+        to make with numbers, not in passing.
         '''
         if not self.tissue_regions:
             return
@@ -822,6 +863,14 @@ class TissuesRegionsMask:
         This means identical / nested cases are left alone (they are
         already handled by filter_regions); only genuine partial overlaps
         get merged.
+
+        ORDER MATTERS: this is incomplete on its own, by design. Nested and
+        identical boxes are skipped on the assumption that filter_regions has
+        already removed them, so merge-then-filter is not the same recipe as
+        filter-then-merge -- run this first and every nested region survives.
+        The dependency is one way and has no assertion behind it, which is why
+        the two belong in a config that applies them in a fixed order rather
+        than in two lines every caller writes out.
 
         Union-find propagates chained overlaps: if A overlaps B and
         B overlaps C, all three collapse into one merged region.
@@ -881,59 +930,3 @@ class TissuesRegionsMask:
                 x=x0, y=y0, w=x1 - x0, h=y1 - y0, index=k,
             ))
         self.tissue_regions = new_regs
-
-
-# ── Internal mask functions ───────────────────────────────────────────────────
-
-def mask_all(rgb: np.ndarray) -> np.ndarray:
-    """Everything is tissue. One blob, so one region covering the whole plane.
-
-    For stage 2. The retriever scores a window by the mean cosine over the
-    query's tiles, so a window sitting on blank glass loses on its own merits;
-    the tissue mask there is an optimisation, not a correctness requirement.
-    Handing it a single region buys something back that the optimisation costs:
-    find_best takes a global maximum over every placement in every region, so a
-    region with an order of magnitude more placements wins comparisons on
-    sample count alone. Measured at about 0.016 of uniform uplift on S1137178,
-    enough to displace fifteen matches that SIFT had verified with 218 to 915
-    inliers. With one region there is nothing to compare across.
-
-    Public, unlike _mask_hsv and _mask_otsu, because it is meant to be passed
-    in by a caller: TissuesRegionsMask.from_wsi(wsi, method=mask_all).
-
-    Tiling-safe by construction -- no global statistic, no neighbourhood, no
-    dependence on position.
-
-    WASTEFUL, and knowingly so: from_wsi still reads every pixel of the level
-    to hand them to a function that ignores them. At mask_ds=1 that is twenty
-    minutes and a full-size array to produce a constant. A constructor that
-    fabricates the all-ones mask from the bounds properties alone would do the
-    same job with no I/O at all; see log/TODO.log.
-    """
-    return np.ones(rgb.shape[:2], dtype=bool)
-
-
-def _mask_hsv(rgb: np.ndarray, sat_thresh: int = 15,
-              val_min: int = 30, val_max: int = 240) -> np.ndarray:
-    hsv  = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    sat, val = hsv[:, :, 1], hsv[:, :, 2]
-    mask = ((sat > sat_thresh) & (val > val_min) & (val < val_max)).astype(np.uint8)
-    k    = np.ones((7, 7), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
-    return mask.astype(bool)
-
-
-def _mask_otsu(rgb: np.ndarray, black_thresh: int = 20) -> np.ndarray:
-    gray  = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    valid = gray[gray > black_thresh]
-    if valid.size == 0:
-        return np.zeros(gray.shape, dtype=bool)
-    thr, _ = cv2.threshold(valid.reshape(-1, 1), 0, 255,
-                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    mask = ((gray > black_thresh) & (gray < int(thr))).astype(np.uint8)
-    k    = np.ones((7, 7), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
-    return mask.astype(bool)
-

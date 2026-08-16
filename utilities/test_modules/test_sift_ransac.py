@@ -33,7 +33,7 @@ from QueryFromWSI import QueryFromWSI
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
 from GigaPathSlidingWinSim import GigaPathSlidingWinSim, SlideWinSimResult
 from SIFT_RANSAC import SiftRansacLocalizer, SiftRansacResult
-from GigaPathFunc import gigapath_model, gigapath_encode
+from GigaPathFunc import GigaPathEncoderConfig
 
 
 # ── Visualization ─────────────────────────────────────────────────────────────
@@ -386,8 +386,7 @@ def main():
     print('\n[0] Loading GigaPath model...')
     t0 = time.perf_counter()
     device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    _model  = gigapath_model(device)
-    encoder = lambda patches: gigapath_encode(patches, _model, device, batch_size=args.batch)
+    encoder = GigaPathEncoderConfig(batch_size=args.batch).with_model(dtype='fp32').build(device)
     timings['0. load model'] = time.perf_counter() - t0
     print(f'  device={device}')
 
@@ -405,7 +404,11 @@ def main():
     # ── Step 3: Tissue mask ───────────────────────────────────────────────────
     print('\n[3] Building tissue mask...')
     t0 = time.perf_counter()
-    mask = TissuesRegionsMask.from_wsi(wsi)
+    from TissueSegFunc import TissueSegConfig
+    # hsv: these need real tissue tiles, so blank glass has to
+    # be excluded. Retrieval does not -- see GigaPathSlidingWinSim.
+    mask = TissuesRegionsMask.from_wsi(
+        wsi, method=TissueSegConfig('hsv').build())
     if args.filter:
         mask.filter_regions(args.min_region_ratio)
     mask.filter_patchable(tile_size=args.tile, ds=ds_est)
