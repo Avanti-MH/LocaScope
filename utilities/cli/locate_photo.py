@@ -77,8 +77,8 @@ sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 
 from _sift_plot        import match_img                              # noqa: E402
 from LocaScopePipeline import LocaScopePipeline                      # noqa: E402
-from GigaPathFunc      import gigapath_model, make_gigapath_encoder  # noqa: E402
-from HESTSegFunc       import *                                      # noqa: E402
+from GigaPathFunc      import GigaPathEncoderConfig                  # noqa: E402
+from TissueSegFunc     import HestSegConfig                          # noqa: E402
 
 
 PHOTO_EXTS = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
@@ -445,11 +445,13 @@ def main():
     print(f'device : {device}  precision={str(dtype).replace("torch.", "")}')
 
     print('\nLoading GigaPath ...', flush=True)
-    model    = gigapath_model(device)
-    encoder  = make_gigapath_encoder(model, device,
-                                     batch_size=args.batch_size, dtype=dtype)
-    segmodel = hest_seg_model(device)
-    hestseg  = make_hest_method(segmodel, device)
+    # From the resolved dtype, not args.precision: the rule above already
+    # demoted fp16 to fp32 on CPU.
+    encoder  = GigaPathEncoderConfig(batch_size=args.batch_size)\
+        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
+        .build(device)
+    from TissueMaskConfig import TissueMaskConfig
+    mask_cfg = TissueMaskConfig(seg=HestSegConfig(), ds=4.0)
 
     # Built ONCE for the whole folder -- see the module docstring.
     print('Building pipeline (mask + mpp reference bank) ...', flush=True)
@@ -457,9 +459,7 @@ def main():
     pl = LocaScopePipeline(args.wsi,
                            encoder,
                            tile_size=256,
-                           mask_method=hestseg,
-                           mask_ds=4.0,
-                           min_region_ratio=0.01,
+                           mask_cfg=mask_cfg,
                            knn_samples=100,
                            knn_k=5,
                            retriever_overlap=True,

@@ -622,6 +622,98 @@ class FeaturesMap:
         return self
 
 
+class WsiFeaturesMap:
+    '''Every tissue region's FeaturesMap for ONE slide at ONE scale.
+
+    The WSI-level counterpart of FeaturesMap, and the missing half of a pair
+    that already exists one level down:
+
+        TissuePatchContainer.to_features(encoder) -> FeaturesMap
+        WsiTissuesContainer .to_features(encoder) -> WsiFeaturesMap
+
+    What it is for is a bug this repo has paid for more than once. A bare
+    `list[FeaturesMap]` does not carry which regions it belongs to, so the
+    pairing lives in whichever variable a caller happened to zip it with:
+
+        GigaPathSlidingWinSim.py     zipped mask.tissue_regions (unfiltered)
+                                     with sim_maps (filtered). Every window
+                                     landed on a neighbouring region's
+                                     coordinates. Nothing raised.
+        GigaPathSlidingWinSimRot     had to publish `self.regions` with a
+                                     comment saying which of the two lists it
+                                     is, because the features line up with one
+                                     and not the other.
+        build_sim_canvas             takes mask AND regions, for the same
+                                     reason.
+
+    Here the pairing is the object. regions[i] and maps[i] are checked against
+    each other once, at construction, and there are no two lists left for a
+    caller to zip the wrong way round.
+
+    It deliberately holds NO pixels and knows nothing about files. The scale it
+    was built at travels with it -- ds, level, tile_size, overlap -- because
+    that is what a cached copy has to be checked against, and because a
+    FeaturesMap alone cannot say which downsample produced it.
+    '''
+
+    def __init__(self, regions: list, maps: List[FeaturesMap], *,
+                 ds: float, level: int, tile_size: int, overlap: bool):
+        if len(regions) != len(maps):
+            raise ValueError(
+                f'{len(maps)} FeaturesMaps for {len(regions)} regions -- these '
+                f'are paired by position, so a length difference means the '
+                f'features were built over a different region list')
+        for i, (region, fmap) in enumerate(zip(regions, maps)):
+            want = len(PatchGrid.from_size(
+                int(region.w / ds), int(region.h / ds), tile_size,
+                overlap=overlap,
+                x_offset=int(region.x / ds), y_offset=int(region.y / ds),
+                ds=ds, level=level))
+            if len(fmap) != want:
+                raise ValueError(
+                    f'region {i} at ds {ds} offers {want} patches and its '
+                    f'FeaturesMap holds {len(fmap)} -- the two were built at '
+                    f'different scales')
+
+        self.regions = regions
+        self.maps = maps
+        self.ds = float(ds)
+        self.level = level
+        self.tile_size = tile_size
+        self.overlap = overlap
+
+    @property
+    def feat_dim(self) -> int:
+        return self.maps[0].feat_dim if self.maps else 0
+
+    def n_patches(self) -> int:
+        return sum(len(m) for m in self.maps)
+
+    def grids(self) -> List[PatchGrid]:
+        return [m.grid for m in self.maps]
+
+    def __len__(self) -> int:
+        return len(self.maps)
+
+    def __getitem__(self, index: int) -> FeaturesMap:
+        return self.maps[index]
+
+    def __iter__(self) -> Iterator[FeaturesMap]:
+        return iter(self.maps)
+
+    def items(self) -> Iterator[Any]:
+        '''(region, FeaturesMap) pairs -- the zip that used to be written out.'''
+        return zip(self.regions, self.maps)
+
+    def summary(self) -> WsiFeaturesMap:
+        print(f'Regions      : {len(self)}')
+        print(f'Patches      : {self.n_patches()}')
+        print(f'Feature dim  : {self.feat_dim}')
+        print(f'Scale        : level {self.level}  ds {self.ds:g}  '
+              f'tile {self.tile_size}  overlap {self.overlap}')
+        return self
+
+
 class PatchContainerBase(ABC):
     '''
     Shared patch-container API for query and WSI sources.
@@ -1071,6 +1163,11 @@ class WsiTissuesContainer():
         self.ds: float = ds
         self.mask: Optional[TissuesRegionsMask] = mask
         self.tile_size: int = tile_size
+        #: Kept because it is part of the scale, not just an argument: the same
+        #: regions at the same ds hold a different number of patches with the
+        #: overlap grid than without, so anything comparing a built container
+        #: against a stored one has to know which it was.
+        self.overlap: bool = overlap
 
         if level is not None:
             self.level = level
@@ -1190,3 +1287,23 @@ class WsiTissuesContainer():
 
     def __iter__(self):
         return iter(self.tissue_patches)
+
+    def to_features(self, encoder: EncodeFn) -> WsiFeaturesMap:
+        '''Encode every region, keeping the regions attached to the result.
+
+        The line this replaces was written out at each call site:
+
+            [tp.to_features(encoder) for tp in container]
+
+        which produces a list that has forgotten which regions it came from.
+        Every caller then had to remember that the answer pairs with
+        `container.tissue_regions` and not with `mask.tissue_regions` -- the two
+        differ, because from_ds narrows the mask to what can host a tile, and
+        pairing them the wrong way puts every window on a neighbouring region's
+        coordinates without raising.
+        '''
+        return WsiFeaturesMap(
+            self.tissue_regions,
+            [tp.to_features(encoder) for tp in self.tissue_patches],
+            ds=self.ds, level=self.level,
+            tile_size=self.tile_size, overlap=self.overlap)

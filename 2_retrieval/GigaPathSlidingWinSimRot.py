@@ -37,7 +37,8 @@ sys.path.insert(0, str(ROOT / 'utilities'))
 sys.path.insert(0, str(ROOT / 'aiNNModel'))
 
 import openslide                                                            # noqa: E402
-from PatchingLib          import QueryPatchContainer, WsiTissuesContainer, FeaturesMap    # noqa: E402
+from PatchingLib          import (QueryPatchContainer, WsiTissuesContainer,   # noqa: E402
+                                  FeaturesMap, WsiFeaturesMap)
 from SafeSlide            import SafeSlide                                                # noqa: E402
 from TissuesRegionsMask   import TissueRegion, TissuesRegionsMask            # noqa: E402
 from GigaPathSlidingWinSim  import SlidingWindowSimilarity                   # noqa: E402
@@ -146,6 +147,7 @@ class GigaPathSlidingWinSimRot:
         mpp:       Optional[float]              = None,
         tile_size: int                          = 256,
         overlap:   bool                         = True,
+        feature_store                           = None,
     ):
         # SafeSlide so a hole in a MIRAX cannot kill the handle mid-run; see
         # utilities/SafeSlide.py. Only reached when constructed from a path --
@@ -158,6 +160,11 @@ class GigaPathSlidingWinSimRot:
         self.mpp       = mpp
         self.tile_size = tile_size
         self.overlap   = overlap
+        #: Optional. Anything with load(container) -> WsiFeaturesMap | None and
+        #: save(WsiFeaturesMap). This class does not know about paths, ids or
+        #: safetensors -- it asks, and rebuilds when the answer is None, which
+        #: is also what happens when the store decides it does not match.
+        self.feature_store = feature_store
 
         # Scale of the CURRENT build. `mpp` above is what the caller asked for;
         # these are what was actually used, and they are what everything
@@ -223,21 +230,42 @@ class GigaPathSlidingWinSimRot:
         self.mpp = self.wsi.base_mpp * self.ds   # mpp/ds/level now say one thing
 
         if self.mask is None:
-            self.mask = TissuesRegionsMask.from_wsi(self.wsi)
-            print(f'  [Rot] no mask given; segmented with TissuesRegionsMask '
-                  f'defaults, which are NOT what LocaScopePipeline uses '
-                  f'(no HEST model, default mask_ds, no filter_regions). '
+            # '' and not a threshold: this scores a window by the mean cosine
+            # over the query's tiles, so a window on blank glass loses on its
+            # own merits and the mask is an optimisation here, not a
+            # correctness requirement. '' skips the read AND the array.
+            from TissueSegFunc import TissueSegConfig
+            self.mask = TissuesRegionsMask.from_wsi(
+                self.wsi, method=TissueSegConfig('').build())
+            print(f'  [Rot] no mask given; one region over the whole scanned '
+                  f'rectangle, which is NOT what LocaScopePipeline uses '
+                  f'(HEST, mask_ds=4, filter_regions, merge_overlapping). '
                   f'{len(self.mask.tissue_regions)} regions, '
                   f'tissue {self.mask.tissue_fraction() * 100:.1f}%', flush=True)
 
+        # Three ways to end up with features, cheapest first.
         if self.ds in self._by_ds:
             self.wsi_container, self.wsi_features = self._by_ds[self.ds]
         else:
+            # The container is built either way. It is not only the source of
+            # the tiles -- stage 3 reads pixels back out of it
+            # (SIFT_RANSAC.py:125), so a cache hit skips the ENCODE and not the
+            # read. Half of a level-0 build, measured: 278s read + 285s encode
+            # on BRACS_1228. The other half needs lazy region reads; see
+            # log/TODO.log.
             self.wsi_container = WsiTissuesContainer.from_ds(
                 self.wsi, self.ds, tile_size=self.tile_size,
                 overlap=self.overlap, mask=self.mask)
-            self.wsi_features = [tp.to_features(self.encoder)
-                                 for tp in self.wsi_container]
+
+            self.wsi_features = None
+            if self.feature_store is not None:
+                self.wsi_features = self.feature_store.load(self.wsi_container)
+
+            if self.wsi_features is None:
+                self.wsi_features = self.wsi_container.to_features(self.encoder)
+                if self.feature_store is not None:
+                    self.feature_store.save(self.wsi_features)
+
             self._by_ds[self.ds] = (self.wsi_container, self.wsi_features)
         # `regions` is the container's list -- the FILTERED one the features and
         # similarity maps line up with, not self.mask's. Kept as an attribute
@@ -329,12 +357,13 @@ class GigaPathSlidingWinSimRot:
         two trailing dims collapse and what is left is one score per placement.
         Empty grids are skipped: a region smaller than the query produces none.
         """
-        for ri, (region, (main_sim, overlap_sim)) in enumerate(
-            # self.regions, not self.mask.tissue_regions: the maps were
-            # computed over the FILTERED regions, and the caller's mask
-            # still holds all of them. Zipping the wrong one shifts every
-            # window onto a neighbouring region's coordinates.
-            zip(self.regions, sim_maps)
+        for ri, ((region, _), (main_sim, overlap_sim)) in enumerate(
+            # wsi_features.items(), not self.mask.tissue_regions: the maps
+            # were computed over the FILTERED regions and the caller's mask
+            # still holds all of them. The WsiFeaturesMap carries its own
+            # regions, so there is no longer a second list to pick wrongly
+            # from -- which is what this comment used to be guarding.
+            zip(self.wsi_features.items(), sim_maps)
         ):
             hm = overlap_sim if use_overlap else main_sim
             if hm.numel() == 0:

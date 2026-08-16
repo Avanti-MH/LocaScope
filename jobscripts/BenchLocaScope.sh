@@ -9,8 +9,8 @@
                                          # one CPU-side transform loop
 #SBATCH --mem=600G                       # DataParallel feeds every card from
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH -o ./log/BenchLocaScope          # STDOUT
-#SBATCH -e ./log/BenchLocaScope          # STDERR
+#SBATCH -o /work/u26130998/log/BenchLocaScope          # STDOUT
+#SBATCH -e /work/u26130998/log/BenchLocaScope          # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -19,6 +19,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- End-to-end bench, with the stage-2 ranking exposed ---------
 #
@@ -49,8 +53,8 @@ conda activate gigapath
 # 262144 (see utilities/cli/analyze_sift_keypoints.py). Set LIMIT to 30 first
 # and read t_verify_s out of metrics.csv, rather than estimating.
 
-GT_CSV=result/MultiBatch1440/gt.csv
-IMAGES=result/MultiBatch1440/images
+GT_CSV="$RESULT_ROOT"/MultiBatch1440/gt.csv
+IMAGES="$RESULT_ROOT"/MultiBatch1440/images
 
 TOPK=20               # candidates enumerated per shot (free)
 SIFT_TOPK=5           # candidates SIFT actually verifies (K passes per shot)
@@ -88,6 +92,33 @@ echo "======== gt=$GT_CSV  topk=$TOPK  sift-topk=$SIFT_TOPK ========"
 echo "shots: $(( $(wc -l < "$GT_CSV") - 1 ))"
 echo
 
+# ---------------- WSI feature cache ----------------
+#
+# Each (slide, level) feature map is written here and reused by the next run.
+# result/cache/ rather than result/<job>/ because it is shared across jobs and
+# `make clean-job JOB=cache` is then the one obvious way to purge it.
+#
+# A HIT SKIPS THE ENCODE, NOT THE READ. Stage 3 reads pixels back out of the
+# container (3_localization/SIFT_RANSAC.py:125), so the container is built
+# either way: 278s read + 285s encode on BRACS_1228 L0, so roughly half. The
+# other half needs lazy per-region reads; see log/TODO.log.
+#
+# Keyed on the encoder and the mask recipe, and neither is a name someone typed:
+# encoder_id is derived from the config plus a sha256 of the loaded weights, and
+# mask_id from the segmentation method, its ds, the region filter and whether
+# merging ran. On top of that the geometry is rechecked against the mask in hand
+# before anything is trusted -- a matching filename is not evidence.
+#
+# MODE=w on the first run. Otherwise it has to trust the write and the read at
+# once, and a failure cannot say which. Every miss prints which field differed,
+# so a permanently cold cache does not read like a correctly invalidated one.
+FEATURE_STORE="${FEATURE_STORE:-/work/u26130998/result/cache/wsi_featuresmap_cache}"
+FEATURE_STORE_MODE="${FEATURE_STORE_MODE:-rw}"
+mkdir -p "$FEATURE_STORE"
+echo "feature cache: $FEATURE_STORE  (mode=$FEATURE_STORE_MODE)"
+echo "  du: $(du -sh "$FEATURE_STORE" 2>/dev/null | cut -f1)  files: $(ls -1 "$FEATURE_STORE" 2>/dev/null | wc -l)"
+echo ""
+
 # --out is omitted on purpose: bench_locascope falls back to
 # result/<SLURM_JOB_NAME>/, keeping the run beside its own log.
 python utilities/test_modules/bench_locascope.py \
@@ -99,6 +130,8 @@ python utilities/test_modules/bench_locascope.py \
   --multi-gpu \
   --precision fp16 --batch-size 8192 \
   --mask-all \
+  --feature-store "$FEATURE_STORE" \
+  --feature-store-mode "$FEATURE_STORE_MODE" \
   $LIMIT_FLAG $RESUME_FLAG $FAIL_FLAG
 
 echo ""

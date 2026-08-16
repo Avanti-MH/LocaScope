@@ -89,11 +89,9 @@ class LocaScopePipeline:
         wsi:                 Union[openslide.OpenSlide, str],
         encoder:             Callable,
         tile_size:           int   = 256,
-        mask_method:         Callable = None,
-        mask_ds:             float = 4.0,
-        mask_seg_chunk_px:   int   = 4_000_000,
-        mask_overlap:        int   = 128,
-        min_region_ratio:    float = 0.01,
+        mask_cfg:            'TissueMaskConfig' = None,
+        feature_store_root:  Optional[str] = None,
+        feature_store_mode:  str = 'rw',
         knn_samples:         int   = 40,
         knn_k:               int   = 5,
         knn_seed:            Optional[int] = 42,
@@ -113,11 +111,13 @@ class LocaScopePipeline:
         self.wsi                 = wsi
         self.encoder             = encoder
         self.tile_size           = tile_size
-        self.mask_method         = mask_method
-        self.mask_ds             = mask_ds
-        self.mask_seg_chunk_px   = mask_seg_chunk_px
-        self.mask_overlap        = mask_overlap
-        self.min_region_ratio    = min_region_ratio
+        # One value instead of five parameters and two remembered method calls.
+        # The mask a pipeline builds can now say how it was built, which is what
+        # a cache has to ask before trusting a stored feature map.
+        from TissueMaskConfig import TissueMaskConfig
+        self.mask_cfg            = mask_cfg or TissueMaskConfig()
+        self.feature_store_root  = feature_store_root
+        self.feature_store_mode  = feature_store_mode
         self.knn_samples         = knn_samples
         self.knn_k               = knn_k
         self.knn_seed            = knn_seed
@@ -140,14 +140,12 @@ class LocaScopePipeline:
     # ── One-time setup ────────────────────────────────────────────────────────
     def build(self) -> 'LocaScopePipeline':
         """Build mask + mpp KNN reference bank (per-WSI one-time)."""
-        self.mask = TissuesRegionsMask.from_wsi(self.wsi,
-                                                ds=self.mask_ds,
-                                                method=self.mask_method,
-                                                seg_chunk_px=self.mask_seg_chunk_px,
-                                                overlap=self.mask_overlap,
-                                                )
-        self.mask.filter_regions(min_ratio=self.min_region_ratio)
-        self.mask.merge_overlapping()
+        # Segment, filter and merge in one place and in one order. merge is
+        # incomplete without filter having run first -- it skips nested boxes on
+        # the assumption they are already gone -- and that dependency used to be
+        # two lines every caller wrote out.
+        self.mask = self.mask_cfg.build(
+            self.wsi, getattr(self.encoder, 'device', None))
 
         self.estimator = GigaPathKnnEstiMpp(
             self.wsi, encoder=self.encoder, mask=self.mask,
@@ -170,6 +168,22 @@ class LocaScopePipeline:
     # build at. Which is the point: this class did not know that ds, it only
     # knew the one it was asking for.
 
+    def _feature_store(self):
+        '''The cache for this slide, or None when no root was given.
+
+        Built here and nowhere else because mask_id needs the whole recipe --
+        segmentation method, its ds, the region filter, whether merging ran --
+        and this is the only object that holds all of it.
+        '''
+        if not self.feature_store_root:
+            return None
+        from WsiFeaturesMapStore import WsiFeaturesMapStore
+        return WsiFeaturesMapStore(
+            self.feature_store_root,
+            getattr(self.wsi, '_filename', self.mask_cfg and ''),
+            self.encoder, self.mask_cfg.mask_id(),
+            mode=self.feature_store_mode)
+
     def _get_retriever(self, level: int) -> Optional[GigaPathSlidingWinSimRot]:
         """Return cached rotation-aware retriever for this level, or None if unusable."""
         if level in self._retrievers:
@@ -183,6 +197,7 @@ class LocaScopePipeline:
                 self.wsi, encoder=self.encoder, mask=self.mask,
                 mpp=level_mpp, tile_size=self.tile_size,
                 overlap=self.retriever_overlap,
+                feature_store=self._feature_store(),
             )
             r.build_wsi_features()
             # How many regions survived is only knowable after the build now,

@@ -199,9 +199,17 @@ def validate_index_errors(grid: PatchGrid):
 
 # ── Offset: PatchInfo.x/y include offset ────────────────────────────────────
 
-def validate_offset(W, H, tile, ox, oy, ds=1.0, level=2, mpp=0.5):
+def validate_offset(W, H, tile, ox, oy, ds=1.0, level=2):
+    # No mpp here, and none on PatchInfo. This test used to pass mpp= and assert
+    # info.mpp, against a field PatchGrid has not had for a long time -- it was
+    # already failing at eee3412, so nothing downstream ever depended on it.
+    # Not reinstated: a patch knows its ds and its level, and mpp is
+    # ds * wsi.base_mpp, so storing it would be the same quantity written twice
+    # and free to disagree. TileInfo carries mpp legitimately -- it is a
+    # sampling record whose entire purpose is mpp estimation -- and that is a
+    # different dataclass.
     grid = PatchGrid.from_size(W, H, tile, overlap=True,
-                               x_offset=ox, y_offset=oy, ds=ds, level=level, mpp=mpp)
+                               x_offset=ox, y_offset=oy, ds=ds, level=level)
     for info in grid.iter_infos():
         local_x = info.x - ox
         local_y = info.y - oy
@@ -211,7 +219,6 @@ def validate_offset(W, H, tile, ox, oy, ds=1.0, level=2, mpp=0.5):
         assert local_y + tile <= H, f'patch bottom edge {local_y+tile} > H={H}'
         assert info.ds    == ds
         assert info.level == level
-        assert info.mpp   == mpp
 
     # Roundtrip still works after offset
     validate_flat_unified_roundtrip(grid)
@@ -313,7 +320,7 @@ def run_all_patchgrid(tile: int = 128):
     print(f'[PASS] non-divisible: tail pixels correctly excluded')
 
     # 4. Offset + ds/level/mpp forwarding
-    validate_offset(256, 256, tile, ox=128, oy=64, ds=4.0, level=2, mpp=0.5)
+    validate_offset(256, 256, tile, ox=128, oy=64, ds=4.0, level=2)
     print(f'[PASS] offset + ds/level/mpp: coordinates and metadata verified')
 
     return results
@@ -1367,7 +1374,6 @@ def validate_ds_gate(wsi) -> None:
 
 def validate_container_contract(wsi, tile: int, level: int) -> None:
     """What from_ds promises: a real level, its own ds, and usable regions."""
-    print(f'\n[scale] from_ds contract at level {level}')
     from PatchingLib import WsiTissuesContainer
 
     ds = float(wsi.level_downsamples[level])
@@ -1400,9 +1406,28 @@ def validate_container_contract(wsi, tile: int, level: int) -> None:
             f'this is what reaches gigapath_encode as an empty batch')
     assert len(mask.tissue_regions) == kept_before, (
         'from_ds narrowed the caller\'s mask instead of a view of it')
-    print(f'  ok   level {container.level}  ds {container.ds:g}  '
+    print(f'  ok   level {container.level}  ds {container.ds:<9.4g}  '
           f'{len(container.tissue_regions)}/{kept_before} regions kept, '
           f'all patchable')
+
+
+def validate_container_contract_every_level(wsi, tile: int) -> None:
+    """The contract at every level the slide has, not at one chosen number.
+
+    It used to take `--openslide-level`, whose default of 9 belongs to
+    test_real_wsi_from_openslide and is off the end of a 4-level SVS. Sweeping
+    instead removes the argument rather than picking a safer constant: the
+    number of levels is a property of the slide, and 2x and 4x pyramids do not
+    have the same ones -- BRACS steps 4x per level and Ki67 MRXS 2x, which is
+    the difference that made ds_target != ds_actual matter in the first place.
+
+    Bounded whatever the level. The big region is `tile * ds * 6` in level-0
+    units, so the container reads `6 * tile` px per side at every level; the
+    coarse end is not the expensive end here.
+    """
+    print(f'\n[scale] from_ds contract, all {wsi.level_count} levels')
+    for level in range(wsi.level_count):
+        validate_container_contract(wsi, tile, level)
 
 
 def run_scale_section(args, out_dir: str) -> None:
@@ -1420,7 +1445,7 @@ def run_scale_section(args, out_dir: str) -> None:
         print(f'  {os.path.basename(args.wsi)}  {wsi.mpp_summary()}')
         validate_resolve_scale(wsi)
         validate_ds_gate(wsi)
-        validate_container_contract(wsi, args.rsize, args.openslide_level)
+        validate_container_contract_every_level(wsi, args.rsize)
     finally:
         wsi.close()
 

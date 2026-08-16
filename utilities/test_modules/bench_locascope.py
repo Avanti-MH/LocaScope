@@ -60,9 +60,9 @@ from _sift_plot        import (draw_localization_row, draw_recall_row,  # noqa: 
 from _locascope_plots  import (append_metrics_row, load_metrics_csv,    # noqa: E402
                                render_all)
 from LocaScopePipeline import LocaScopePipeline, LocaScopeQueryResult    # noqa: E402
-from TissuesRegionsMask import mask_all                                 # noqa: E402
+from TissueSegFunc import TissueSegConfig                               # noqa: E402
 from SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
-from GigaPathFunc     import gigapath_model, make_gigapath_encoder      # noqa: E402
+from GigaPathFunc     import GigaPathEncoderConfig                      # noqa: E402
 
 
 # ── metric helpers ────────────────────────────────────────────────────────────
@@ -609,6 +609,20 @@ def main():
                          'hit the walltime -- 2500 shots at about a minute each '
                          'does not fit 24 hours. The retrievers still have to be '
                          'rebuilt, so resume at a WSI boundary loses least.')
+    ap.add_argument('--feature-store', default=None, metavar='DIR',
+                    help='cache each (slide, level) WSI feature map here, keyed '
+                         'on the encoder and the mask recipe. A hit skips the '
+                         'ENCODE, not the read -- stage 3 reads pixels back out '
+                         'of the container, so it is built either way '
+                         '(278s read + 285s encode on BRACS_1228 L0). Every '
+                         'miss prints which field differed, so a permanently '
+                         'cold cache does not read like a correctly invalidated '
+                         'one.')
+    ap.add_argument('--feature-store-mode', choices=['r', 'w', 'rw'], default='rw',
+                    help="'w' fills the cache without trusting it, which is how "
+                         'to populate it the first time: otherwise the first run '
+                         'has to trust the write and the read at once, and a '
+                         'failure cannot say which.')
     ap.add_argument('--mask-ds',    type=float, default=4.0, metavar='DS',
                     help='resolution the tissue mask is built at, as level-0 '
                          'pixels per mask pixel. from_wsi passes it to '
@@ -653,26 +667,31 @@ def main():
     print(f'precision  : {str(dtype).replace("torch.", "")}'
           f'{"  (requested fp16, CPU -> fp32)" if args.precision == "fp16" and dtype is torch.float32 else ""}')
     print('Loading GigaPath model ...', flush=True)
-    model   = gigapath_model(device, multi_gpu=args.multi_gpu)
+    encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
+        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
+        .build(device, multi_gpu=args.multi_gpu)
     if args.multi_gpu:
         import torch as _t
         print(f'  DataParallel over {_t.cuda.device_count()} GPU(s)', flush=True)
-    encoder = make_gigapath_encoder(model, device,
-                                    batch_size=args.batch_size, dtype=dtype)
+    print(f'  encoder    : {encoder.identity_id()}', flush=True)
 
     # Chosen once for the whole bench: loading DeepLabV3 is seconds of startup
     # and the weights are the same for every WSI.
-    mask_method = None
+    from TissueMaskConfig import TissueMaskConfig
     if args.mask_all:
-        mask_method = mask_all
+        # '' and not a method returning ones: same mask, without the
+        # full-level read and the full-size array. See TissueSegFunc.
+        seg = TissueSegConfig('')
         print('Mask       : one region over the whole scanned rectangle', flush=True)
     elif args.mask_hest:
-        from HESTSegFunc import hest_seg_model, make_hest_method
-        print('Mask       : HEST DeepLabV3, loading ...', flush=True)
-        mask_method = make_hest_method(hest_seg_model(device), device)
+        from TissueSegFunc import HestSegConfig
+        seg = HestSegConfig()
+        print('Mask       : HEST DeepLabV3', flush=True)
     else:
+        seg = TissueSegConfig('hsv')
         print('Mask       : HSV threshold (default)', flush=True)
-    print(f'Mask ds    : {args.mask_ds}', flush=True)
+    mask_cfg = TissueMaskConfig(seg=seg, ds=args.mask_ds)
+    print(f'Mask ds    : {args.mask_ds}   mask_id {mask_cfg.mask_id()}', flush=True)
 
     all_metrics: List[dict] = []
     metrics_path = os.path.join(out_dir, 'metrics.csv')
@@ -730,9 +749,10 @@ def main():
         wsi_tag = os.path.splitext(os.path.basename(wsi_path))[0]
         print(f'== {wsi_tag}  n_shots={len(wsi_rows)}  path={wsi_path}', flush=True)
         try:
-            pl = LocaScopePipeline(wsi_path, encoder,
-                                   mask_method=mask_method,
-                                   mask_ds=args.mask_ds).build()
+            pl = LocaScopePipeline(
+                wsi_path, encoder, mask_cfg=mask_cfg,
+                feature_store_root=args.feature_store,
+                feature_store_mode=args.feature_store_mode).build()
         except Exception as e:
             print(f'  [pipeline build failed] {type(e).__name__}: {e}', flush=True)
             for row in wsi_rows:
