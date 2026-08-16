@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                # CPU cores per task
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH -o ./log/MultiBatch1440       # STDOUT
-#SBATCH -e ./log/MultiBatch1440       # STDERR
+#SBATCH -o /work/u26130998/log/MultiBatch1440       # STDOUT
+#SBATCH -e /work/u26130998/log/MultiBatch1440       # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- One process per slide, written out ------------------------
 #
@@ -94,10 +98,10 @@ SEG_CHUNK_PX=2000000
 # is no model to bound the grid -- an HSV mask leaves seg_chunk_px None, and then
 # read_chunk_px is the only thing standing between ds=1 and the whole level
 # in memory.
-ARGS="--wh-ratio 45:32 --MPixels 1.47456 --per-camera 100 --jitter 0.05"
+ARGS="--wh-ratio 45:32 --MPixels 1.47456 --per-camera 50 --jitter 0.05"
 ARGS="$ARGS --mask-ds 1.0 --hest --seg-chunk-px $SEG_CHUNK_PX --seed 0 --append"
 
-OUT="result/$SLURM_JOB_NAME"
+OUT="$RESULT_ROOT/$SLURM_JOB_NAME"
 mkdir -p "$OUT"
 rm -f "$OUT/gt.csv" "$OUT/skips.csv"
 

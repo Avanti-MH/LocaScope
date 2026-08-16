@@ -6,7 +6,15 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 UTILITIES_DIR = os.path.abspath(os.path.join(HERE, '..'))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, '../..'))
-RESULT_DIR = os.path.join(PROJECT_ROOT, 'result')
+
+#: Where runs write. One level ABOVE the repo, so that outputs are not inside
+#: the working tree: an `rm -rf` of the checkout, a `git clean`, or a fresh
+#: clone no longer takes 60 GB of results with it, and nothing under `result/`
+#: can ever be staged by accident. Override with LOCASCOPE_OUTPUT_ROOT.
+OUTPUT_ROOT = os.environ.get(
+    'LOCASCOPE_OUTPUT_ROOT', os.path.abspath(os.path.join(PROJECT_ROOT, '..')))
+RESULT_DIR = os.path.join(OUTPUT_ROOT, 'result')
+LOG_DIR = os.path.join(OUTPUT_ROOT, 'log')
 QUERY_SIM_DIR = os.path.join(PROJECT_ROOT, 'query_sim')
 ESTIMATE_MPP_DIR = os.path.join(PROJECT_ROOT, '1_estimate_query_mpp')
 RETRIEVAL_DIR = os.path.join(PROJECT_ROOT, '2_retrieval')

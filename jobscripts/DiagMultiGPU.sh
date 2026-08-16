@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                # one transform loop feeds every card
 #SBATCH --ntasks-per-node=1              # Tasks per node
 #SBATCH --mem=600G                       # RAM
-#SBATCH -o ./log/DiagMultiGPU            # STDOUT
-#SBATCH -e ./log/DiagMultiGPU            # STDERR
+#SBATCH -o /work/u26130998/log/DiagMultiGPU            # STDOUT
+#SBATCH -e /work/u26130998/log/DiagMultiGPU            # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -18,6 +18,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
 
 # ---------------- Does DataParallel change GigaPath, and does it help? ------
 #

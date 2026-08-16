@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/WsiCoverage # STDOUT
-#SBATCH -e ./log/WsiCoverage # STDERR
+#SBATCH -o /work/u26130998/log/WsiCoverage # STDOUT
+#SBATCH -e /work/u26130998/log/WsiCoverage # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # CORPUS=result/MultiBatch
 # BENCH=result/BenchLocaScope
@@ -45,7 +49,7 @@ conda activate gigapath
 #   --draw-figures -1
 
 
-mkdir -p result/DiagWsiCoverage
+mkdir -p "$RESULT_ROOT"/DiagWsiCoverage
 python utilities/cli/diag_wsi_coverage.py \
   "/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs" \
-  --hest --mask-ds 4 --grid 48 --out result/DiagWsiCoverage
+  --hest --mask-ds 4 --grid 48 --out "$RESULT_ROOT"/DiagWsiCoverage

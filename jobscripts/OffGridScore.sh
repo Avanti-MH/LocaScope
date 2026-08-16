@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=8                 # openslide reads + the CPU transform
 #SBATCH --mem=128G                        # per-tile reads, never a whole region
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/OffGridScore_%a          # STDOUT, one file per slide
-#SBATCH -e ./log/OffGridScore_%a          # STDERR
+#SBATCH -o /work/u26130998/log/OffGridScore_%a          # STDOUT, one file per slide
+#SBATCH -e /work/u26130998/log/OffGridScore_%a          # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -19,6 +19,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- What does landing off the grid cost? -----------------------
 #
@@ -102,7 +106,7 @@ if [ "$IDX" -ge "${#SLIDES[@]}" ]; then
 fi
 WSI="${SLIDES[$IDX]}"
 STEM=$(basename "$WSI"); STEM="${STEM%.*}"
-OUT_DIR="${OUT:-result/OffGridScore}/$STEM"
+OUT_DIR="${OUT:-"$RESULT_ROOT"/OffGridScore}/$STEM"
 
 echo "======== [$IDX] $STEM ========"
 echo "wsi : $WSI"

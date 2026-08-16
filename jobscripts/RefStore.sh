@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                 # openslide reads
 #SBATCH --mem=400G                         # one level's tiles in flight
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/RefStore                 # STDOUT
-#SBATCH -e ./log/RefStore                 # STDERR
+#SBATCH -o /work/u26130998/log/RefStore                 # STDOUT
+#SBATCH -e /work/u26130998/log/RefStore                 # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,7 @@ ml load miniconda3/24.11.1
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
 
 # ---------------- Build the stage-1 reference under quota ---------------------
 #

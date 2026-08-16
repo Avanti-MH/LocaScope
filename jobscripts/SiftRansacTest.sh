@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/SiftRansacTest           # STDOUT
-#SBATCH -e ./log/SiftRansacTest           # STDERR
+#SBATCH -o /work/u26130998/log/SiftRansacTest           # STDOUT
+#SBATCH -e /work/u26130998/log/SiftRansacTest           # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
 
 # ---------------- Parameters ----------------
 WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs

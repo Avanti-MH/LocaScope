@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                # cosine matrices are the whole cost
 #SBATCH --mem=64G                        # one (slide, level) pair at a time
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH -o ./log/PoolingEval             # STDOUT
-#SBATCH -e ./log/PoolingEval             # STDERR
+#SBATCH -o /work/u26130998/log/PoolingEval             # STDOUT
+#SBATCH -e /work/u26130998/log/PoolingEval             # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,10 @@ ml load miniconda3/24.11.1
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Score existing stores; no GPU, no WSI, no model -------------
 #
@@ -33,8 +37,8 @@ conda activate gigapath
 # The pairing gate runs first for the same reason it does in PoolingBench.sh: a
 # report written from stores that do not pair looks legitimate and is wrong.
 
-OUT=result/cache/features
-REPORT=result/cache/pooling_report.txt
+OUT="$RESULT_ROOT"/cache/features
+REPORT="$RESULT_ROOT"/cache/pooling_report.txt
 
 echo "======== verifying answer indices ========"
 python utilities/cli/inspect_feature_store.py "$OUT" --pairs

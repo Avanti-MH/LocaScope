@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0) -- unused here
 #SBATCH --cpus-per-task=8                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/SlideWinSift             # STDOUT
-#SBATCH -e ./log/SlideWinSift             # STDERR
+#SBATCH -o /work/u26130998/log/SlideWinSift             # STDOUT
+#SBATCH -e /work/u26130998/log/SlideWinSift             # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Brute-force SIFT over a whole WSI ----------------
 # No encoder, no KNN, no mask, no pipeline. Slide the query image itself across
@@ -59,7 +63,7 @@ STRIDE=1             # take every Nth photo, to spread the sample
 # below cannot end up applying to only one of them.
 run_swsift () {
   local tag="$1" photo="$2" wsi="$3" gt="$4" level="$5" n="$6"
-  local out="result/SlideWinSift/$tag"
+  local out="$RESULT_ROOT/SlideWinSift/$tag"
   mkdir -p "$out"
 
   local args="--level $level --top $TOP --min-inliers $MIN_INLIERS --out $out"
@@ -87,9 +91,9 @@ run_swsift () {
 # 239 ms/window measured on 2026-08-06.
 if [ "$RUN_GOLDEN" -eq 1 ]; then
   run_swsift golden \
-    result/MultiBatch1440/images \
+    "$RESULT_ROOT"/MultiBatch1440/images \
     /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs \
-    result/MultiBatch1440/gt.csv \
+    "$RESULT_ROOT"/MultiBatch1440/gt.csv \
     0 1
 fi
 
@@ -113,9 +117,9 @@ fi
 # level, so a typo fails loudly instead of silently scanning the wrong shot.
 if [ "$RUN_GOLDEN" -eq 1 ]; then
   run_swsift golden_pipeline_miss \
-    result/MultiBatch1440/images/BRACS_1936_L0_syn00051.png \
+    "$RESULT_ROOT"/MultiBatch1440/images/BRACS_1936_L0_syn00051.png \
     /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_FEA/BRACS_1936.svs \
-    result/MultiBatch1440/gt.csv \
+    "$RESULT_ROOT"/MultiBatch1440/gt.csv \
     0 1
 fi
 

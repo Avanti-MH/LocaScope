@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (do not set 0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/TissueMaskTest           # STDOUT
-#SBATCH -e ./log/TissueMaskTest           # STDERR
+#SBATCH -o /work/u26130998/log/TissueMaskTest           # STDOUT
+#SBATCH -e /work/u26130998/log/TissueMaskTest           # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
 
 # =============================================================================
 # CLI knob inventory

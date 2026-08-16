@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=2
 #SBATCH --ntasks-per-node=1
-#SBATCH -o ./log/AccuracyV1
-#SBATCH -e ./log/AccuracyV1
+#SBATCH -o /work/u26130998/log/AccuracyV1
+#SBATCH -e /work/u26130998/log/AccuracyV1
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
 
 # ---------------- Parameters ----------------
 SVS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs

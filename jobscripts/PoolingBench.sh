@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                # openslide reads + the CPU transform
 #SBATCH --mem=128G                       # per-tile reads, not whole regions
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH -o ./log/PoolingBench            # STDOUT
-#SBATCH -e ./log/PoolingBench            # STDERR
+#SBATCH -o /work/u26130998/log/PoolingBench            # STDOUT
+#SBATCH -e /work/u26130998/log/PoolingBench            # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -18,6 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Does a different pooling find what CLS misses? -------------
 #
@@ -41,8 +45,8 @@ conda activate gigapath
 # coordinates from PatchGrid.from_size, which touches no pixels, and then reads
 # 256x256 tiles individually.
 
-OUT=result/cache/features
-REPORT=result/cache/pooling_report.txt
+OUT="$RESULT_ROOT"/cache/features
+REPORT="$RESULT_ROOT"/cache/pooling_report.txt
 
 K=2000                # reference tiles per (slide, level)
 K_FLOOR=2000          # floor for coarse levels; they take min(available, this)

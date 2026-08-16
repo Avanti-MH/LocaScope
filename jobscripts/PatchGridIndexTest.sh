@@ -7,13 +7,14 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/PatchGridIndexTest       # STDOUT
-#SBATCH -e ./log/PatchGridIndexTest       # STDERR
+#SBATCH -o /work/u26130998/log/PatchGridIndexTest       # STDOUT
+#SBATCH -e /work/u26130998/log/PatchGridIndexTest       # STDERR
 
 ml purge
 ml load miniconda3/24.11.1
 ml load cuda/12.6
 conda activate gigapath
+
 
 TILE=128
 python utilities/test_modules/test_patching_lib.py --only grid --tile $TILE --size $TILE

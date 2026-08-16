@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                  # the SVD is the whole cost
 #SBATCH --mem=64G                          # one token store in flight per level
 #SBATCH --ntasks-per-node=1                # Tasks per node
-#SBATCH -o ./log/SubspaceKnn               # STDOUT
-#SBATCH -e ./log/SubspaceKnn               # STDERR
+#SBATCH -o /work/u26130998/log/SubspaceKnn               # STDOUT
+#SBATCH -e /work/u26130998/log/SubspaceKnn               # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,10 @@ ml load miniconda3/24.11.1
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Step 5: is the scale subspace worth anything? ---------------
 #
@@ -101,7 +105,7 @@ if [ -n "${ONLY_WSI}" ]; then
 fi
 
 python utilities/test_modules/bench_subspace_knn.py "${SLIDES[@]}" \
-  --stores result/cache/features \
+  --stores "$RESULT_ROOT"/cache/features \
   --pooling cls \
   --per-level "${PER_LEVEL:-1000}" \
   --white-max "${WHITE_MAX:-0.15}" \

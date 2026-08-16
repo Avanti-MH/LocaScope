@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=2                # CPU cores per task
 #SBATCH --ntasks-per-node=1              # Tasks per node
 #SBATCH --array=0-9                      # One task per slide (10 slides)
-#SBATCH -o ./log/RealTest_%a             # STDOUT
-#SBATCH -e ./log/RealTest_%a             # STDERR
+#SBATCH -o /work/u26130998/log/RealTest_%a             # STDOUT
+#SBATCH -e /work/u26130998/log/RealTest_%a             # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -18,6 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Locate real microscope photos in their own WSI ----------------
 # No ground-truth position exists for these photos -- the sidecar .json files
@@ -42,7 +46,7 @@ conda activate gigapath
 # To list the mapping:     ls -d /work/u26130998/datasets/Ki67/*_ki67 | sort | cat -n
 
 DATA=/work/u26130998/datasets/Ki67
-OUT=result/RealTest
+OUT="$RESULT_ROOT"/RealTest
 
 # Photos per slide vary 71..478; every task fits well inside the 24h limit.
 # 'all' draws both figures for every photo, sorted into <out>/success/ and

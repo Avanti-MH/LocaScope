@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (do not set 0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o ./log/WsiHoles                 # STDOUT
-#SBATCH -e ./log/WsiHoles                 # STDERR
+#SBATCH -o /work/u26130998/log/WsiHoles                 # STDOUT
+#SBATCH -e /work/u26130998/log/WsiHoles                 # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,6 +17,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+
+
+# Runs write outside the checkout; see utilities/test_modules/_paths.py
+RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # =============================================================================
 # Where does read_region fail, for every Ki67 slide and every pyramid level?
@@ -56,7 +60,7 @@ DATA=/work/u26130998/datasets/Ki67
 LEVELS="0,1,2,3,4"   # one column per level in the grid figure
 BLOCK=128            # level-0 px; the finest size actually scanned
 SWEEP=5              # report BLOCK, 2x, 4x, ... this many doublings
-OUT=result/WsiHoles
+OUT="$RESULT_ROOT"/WsiHoles
 
 mkdir -p "$OUT"
 
