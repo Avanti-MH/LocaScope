@@ -76,6 +76,8 @@ from PIL import Image
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_ROOT / 'utilities'))
+sys.path.insert(0, str(_ROOT / 'utilities' / 'test_modules'))
+from _paths import job_result_dir                                   # noqa: E402
 
 from SlideWinSift import SlideWinSift          # noqa: E402
 from _sift_plot   import match_img             # noqa: E402
@@ -273,7 +275,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('photo', help='a photo, or a folder of photos')
     ap.add_argument('wsi')
-    ap.add_argument('--out', default='result/SlideWinSift')
+    ap.add_argument('--out', default='',
+                    help='output directory. Empty means result/<SLURM_JOB_NAME or SlideWinSift>/, via _paths.job_result_dir -- results live outside the checkout')
     ap.add_argument('--level', type=int, default=0)
     ap.add_argument('--step-frac', type=float, default=0.5)
     ap.add_argument('--top', type=int, default=5)
@@ -313,6 +316,11 @@ def main():
     ap.add_argument('--progress-every', type=int, default=200)
     args = ap.parse_args()
 
+    # job_result_dir honours SLURM_JOB_NAME, so a job's output lands under
+    # result/<job>/ without the jobscript spelling the path twice. The makedirs
+    # is for the other branch: `or` short-circuits, so an explicit --out never
+    # reaches job_result_dir and nothing else would create that directory.
+    args.out = args.out or job_result_dir('SlideWinSift')
     os.makedirs(args.out, exist_ok=True)
     photos = collect_photos(Path(args.photo))
     if not photos:

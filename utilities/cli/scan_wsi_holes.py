@@ -56,7 +56,12 @@ import argparse
 import csv
 import math
 import os
+import sys
 import time
+
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'test_modules'))
+from _paths import job_result_dir                                   # noqa: E402
 
 import numpy as np
 import openslide
@@ -162,10 +167,16 @@ def main():
                     help='scan the full canvas instead of openslide.bounds-*')
     ap.add_argument('--sweep', type=int, default=4,
                     help='how many doublings of --block to report')
-    ap.add_argument('--out', default='result/WsiHoles')
+    ap.add_argument('--out', default='',
+                    help='output directory. Empty means result/<SLURM_JOB_NAME or WsiHoles>/, via _paths.job_result_dir -- results live outside the checkout')
     ap.add_argument('--dpi', type=int, default=200)
     args = ap.parse_args()
 
+    # job_result_dir honours SLURM_JOB_NAME, so a job's output lands under
+    # result/<job>/ without the jobscript spelling the path twice. The makedirs
+    # is for the other branch: `or` short-circuits, so an explicit --out never
+    # reaches job_result_dir and nothing else would create that directory.
+    args.out = args.out or job_result_dir('WsiHoles')
     os.makedirs(args.out, exist_ok=True)
     levels = [int(v) for v in args.levels.split(',') if v.strip()]
 

@@ -32,6 +32,10 @@ sys.path.insert(0, os.path.dirname(_HERE))                                # quer
 _UTILITIES = os.path.abspath(os.path.join(_HERE, '..', '..', 'utilities'))
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
+_TM = os.path.abspath(os.path.join(_HERE, '..', '..', 'utilities', 'test_modules'))
+if _TM not in sys.path:
+    sys.path.insert(0, _TM)
+from _paths import job_result_dir                                   # noqa: E402
 
 from TissuesRegionsMask import TissuesRegionsMask     # noqa: E402
 from config             import DomainGapConfig         # noqa: E402
@@ -167,8 +171,14 @@ def main():
     ap.add_argument('--mask-ds',           type=float, default=32.0)
     ap.add_argument('--region-protrusion', type=float, default=0.5)
     ap.add_argument('--min-region-ratio',  type=float, default=0.01)
-    ap.add_argument('--out',               default='result/DiagCameraSkip')
+    ap.add_argument('--out',               default='',
+                    help='output directory. Empty means result/<SLURM_JOB_NAME or DiagCameraSkip>/, via _paths.job_result_dir -- results live outside the checkout')
     args = ap.parse_args()
+
+    # job_result_dir honours SLURM_JOB_NAME, so a job's output lands under
+    # result/<job>/ without the jobscript spelling the path twice, and it makes
+    # the directory itself.
+    args.out = args.out or job_result_dir('DiagCameraSkip')
 
     slide = openslide.OpenSlide(args.wsi_path)
     try:

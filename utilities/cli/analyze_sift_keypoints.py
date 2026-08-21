@@ -52,6 +52,8 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'query_sim'))
+sys.path.insert(0, str(_ROOT / 'utilities' / 'test_modules'))
+from _paths import job_result_dir                                   # noqa: E402
 
 from source.wsi_query import QueryFromWSI            # noqa: E402
 
@@ -325,9 +327,15 @@ def main():
                     help='filename from gt.csv; repeatable')
     ap.add_argument('--photo', action='append', default=[],
                     help='path to a real photo; repeatable')
-    ap.add_argument('--out',   default='result/SiftKeypointStudy')
+    ap.add_argument('--out',   default='',
+                    help='output directory. Empty means result/<SLURM_JOB_NAME or SiftKeypointStudy>/, via _paths.job_result_dir -- results live outside the checkout')
     args = ap.parse_args()
 
+    # job_result_dir honours SLURM_JOB_NAME, so a job's output lands under
+    # result/<job>/ without the jobscript spelling the path twice. The makedirs
+    # is for the other branch: `or` short-circuits, so an explicit --out never
+    # reaches job_result_dir and nothing else would create that directory.
+    args.out = args.out or job_result_dir('SiftKeypointStudy')
     os.makedirs(args.out, exist_ok=True)
     print(f'Output -> {args.out}\n')
 

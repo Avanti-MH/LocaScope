@@ -71,10 +71,11 @@ from matplotlib.patches import Rectangle
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
-for _d in ('utilities', 'aiNNModel'):
+for _d in ('utilities', 'aiNNModel', 'utilities/test_modules'):
     p = os.path.join(_ROOT, _d)
     if p not in sys.path:
         sys.path.insert(0, p)
+from _paths import job_result_dir                                   # noqa: E402
 
 from TissuesRegionsMask import TissuesRegionsMask     # noqa: E402
 
@@ -177,10 +178,16 @@ def main():
                     help='filter_patchable tile_size, for the ops panel')
     ap.add_argument('--patch-ds', type=float, default=1.0,
                     help='filter_patchable target level ds (1.0 = level 0)')
-    ap.add_argument('--out', default='result/DiagWsiCoverage')
+    ap.add_argument('--out', default='',
+                    help='output directory. Empty means result/<SLURM_JOB_NAME or DiagWsiCoverage>/, via _paths.job_result_dir -- results live outside the checkout')
     ap.add_argument('--dpi', type=int, default=400)
     args = ap.parse_args()
 
+    # job_result_dir honours SLURM_JOB_NAME, so a job's output lands under
+    # result/<job>/ without the jobscript spelling the path twice. The makedirs
+    # is for the other branch: `or` short-circuits, so an explicit --out never
+    # reaches job_result_dir and nothing else would create that directory.
+    args.out = args.out or job_result_dir('DiagWsiCoverage')
     os.makedirs(args.out, exist_ok=True)
     tag = os.path.splitext(os.path.basename(args.wsi))[0]
     wsi = openslide.OpenSlide(args.wsi)

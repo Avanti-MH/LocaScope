@@ -73,6 +73,8 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_ROOT / 'utilities'))
+sys.path.insert(0, str(_ROOT / 'utilities' / 'test_modules'))
+from _paths import job_result_dir                                   # noqa: E402
 sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 
 from _sift_plot        import match_img                              # noqa: E402
@@ -390,7 +392,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('photo', help='A photo file, or a folder of photos')
     ap.add_argument('wsi',   help='The WSI the photos were taken from')
-    ap.add_argument('--out',        default='result/LocatePhoto')
+    ap.add_argument('--out',        default='',
+                    help='output directory. Empty means result/<SLURM_JOB_NAME or LocatePhoto>/, via _paths.job_result_dir -- results live outside the checkout')
     ap.add_argument('--csv',        default='predictions.csv')
     ap.add_argument('--precision',  choices=['fp16', 'fp32'], default='fp16')
     ap.add_argument('--batch-size', type=int, default=1024)
@@ -411,6 +414,15 @@ def main():
                     help='rewrite the CSV instead of skipping photos already in it')
     args = ap.parse_args()
 
+    # job_result_dir honours SLURM_JOB_NAME, so a job's output lands under
+    # result/<job>/ without the jobscript spelling the path twice.
+    #
+    # The makedirs is NOT redundant with the one inside job_result_dir: `or`
+    # short-circuits, so an explicit --out never reaches it and nothing would
+    # create that directory. That cost a run -- --out pointed at a fresh
+    # result/RealTest/<tag>/ and the FileNotFoundError landed on the first CSV
+    # write, after GigaPath had loaded and the mask + MPP bank were built.
+    args.out = args.out or job_result_dir('LocatePhoto')
     os.makedirs(args.out, exist_ok=True)
     csv_path = os.path.join(args.out, args.csv)
     wsi_tag = os.path.splitext(os.path.basename(args.wsi))[0]

@@ -64,6 +64,14 @@ import csv
 import os
 import sys
 
+#: _paths imports os and sys and nothing else, so it costs this file none of
+#: what it is careful about -- no torch, no openslide, still under a second on a
+#: login node. Deriving OUTPUT_ROOT a second time here would have been the
+#: version that eventually disagrees with the first.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'test_modules'))
+import _paths                                                       # noqa: E402
+
 BAR = '=' * 74
 
 
@@ -367,7 +375,7 @@ def section_e(rows: list, tol: float) -> None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('metrics_csv', nargs='?',
-                    default='result/BenchLocaScope/metrics.csv')
+                    default=os.path.join(_paths.RESULT_DIR, 'BenchLocaScope', 'metrics.csv'))
     ap.add_argument('--tol-um', type=float, default=100.0,
                     help='final centre error at or under which a shot counts as '
                          'correct (default 100). The distribution is bimodal, so '
