@@ -17,6 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # ---------------- Parameters ----------------
@@ -29,7 +30,6 @@ TILE_SIZE=256
 TISSUE_RATIO=0.5
 SEED=42
 BATCH_SIZE=128
-TOME_R_SWEEP="0,1,2,3,4,8"
 
 # --out-dir defaults to result/$SLURM_JOB_NAME (set by SLURM automatically)
 # --tmp-dir defaults to result/tmp
@@ -44,8 +44,7 @@ python utilities/test_modules/bench_gigapath_accuracy.py \
   --tile-size       $TILE_SIZE \
   --tissue-ratio    $TISSUE_RATIO \
   --seed            $SEED \
-  --batch-size      $BATCH_SIZE \
-  --tome-r-sweep    "$TOME_R_SWEEP"
+  --batch-size      $BATCH_SIZE
 
 # Resume tiles (skip HEST + sampling if tiles already exist):
 # python utilities/test_modules/bench_gigapath_accuracy.py --resume-tiles

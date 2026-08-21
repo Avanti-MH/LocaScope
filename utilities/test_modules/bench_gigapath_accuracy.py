@@ -1,5 +1,5 @@
 '''
-GigaPath fp16 / ToMe accuracy analysis — Level 1 + Level 2.
+GigaPath fp16 accuracy analysis — Level 1 + Level 2.
 
 Compares embeddings from optimized configs against fp32 baseline on
 tissue-region tiles from real WSIs (1 SVS + 1 MRXS).
@@ -13,10 +13,8 @@ Sampling
 
 Configs
 -------
-  Main 4  (L1 + L2):
-    baseline fp32 / fp16 only / ToMe r=8 fp32 / fp16+ToMe r=8
-  ToMe r sweep (L1 only, fp32):
-    r ∈ {4, 6, 12}  (r=0 = baseline, r=8 already in main)
+  Main 2  (L1 + L2):
+    baseline fp32 / fp16 only
 
 Level 1 — embedding fidelity (intrinsic)
   Per-patch cosine similarity vs baseline → distribution
@@ -31,9 +29,8 @@ Level 2 — ranking preservation (intrinsic)
 Outputs
 ------
   result/<SLURM_JOB_NAME>/    (final analysis products; defaults to 'AccuracyV1' locally)
-    summary.txt       — L1 + L2 tables + ToMe sweep (CSV-parseable)
-    cos_hist.png      — L1 overlay histogram (main 4)
-    tome_sweep.png    — mean cos sim vs ToMe r (fp32)
+    summary.txt       — L1 + L2 tables (CSV-parseable)
+    cos_hist.png      — L1 overlay histogram
 
   result/tmp/               (byproducts — reproducibility + raw data)
     tiles/<wsi>.json  — sampled TileInfo per WSI
@@ -65,27 +62,24 @@ from TissueSegFunc import HestSegConfig
 # ── Config table ──────────────────────────────────────────────────────────────
 
 _MAIN_CONFIGS = [
-    # label,             dtype,           tome_r
-    ('baseline fp32',    torch.float32,   0),
-    ('fp16 only',        torch.float16,   0),
-    ('ToMe r=8',         torch.float32,   8),
-    ('fp16 + ToMe r=8',  torch.float16,   8),
-    ('fp16 + ToMe r=4',  torch.float16,   4),
-    ('fp16 + ToMe r=2',  torch.float16,   2),
+    # label,             dtype
+    ('baseline fp32',    torch.float32),
+    ('fp16 only',        torch.float16),
 ]
 
 _BASE_LABEL = 'baseline fp32'
 _TOPK       = (1, 5, 10, 50)
 
 
-def _load_encoder(device, tome_r, batch_size, dtype):
+def _load_encoder(device, batch_size, dtype):
     '''Fresh encoder. flash-attn on (default when TIMM_FUSED_ATTN unset).
 
-    tome_r is a config field now, so ToMe is part of identity_id() rather than a
-    mutation applied afterwards that nothing recorded.
+    dtype goes through with_model so it lands on the nested ModelConfig and
+    reaches identity_id(), rather than being a mutation applied afterwards that
+    nothing recorded.
     '''
     os.environ.pop('TIMM_FUSED_ATTN', None)
-    return GigaPathEncoderConfig(tome_r=tome_r, batch_size=batch_size)\
+    return GigaPathEncoderConfig(batch_size=batch_size)\
         .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
         .build(device)
 
@@ -133,10 +127,10 @@ def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
 
 # ── Encoding ─────────────────────────────────────────────────────────────────
 
-def encode_config(images, device, dtype, tome_r, batch_size, label):
+def encode_config(images, device, dtype, batch_size, label):
     print(f'\n[encode] {label}', flush=True)
     t0 = time.perf_counter()
-    encoder = _load_encoder(device, tome_r, batch_size, dtype)
+    encoder = _load_encoder(device, batch_size, dtype)
     feats = encoder(images)   # (N, D) fp32 unit-normalized
     del encoder
     if device.type == 'cuda':
@@ -276,20 +270,6 @@ def save_cos_hist(cos_by_cfg, out_path):
     print(f'  saved {out_path}', flush=True)
 
 
-def save_tome_sweep(rs_to_mean, out_path):
-    plt = _mpl()
-    rs = sorted(rs_to_mean.keys())
-    means = [rs_to_mean[r] for r in rs]
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(rs, means, 'o-', color='C0')
-    ax.set_xlabel('ToMe r (tokens merged per layer)')
-    ax.set_ylabel('mean cos sim vs baseline fp32')
-    ax.set_title('ToMe r sweep — accuracy trade-off (fp32)')
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
-    print(f'  saved {out_path}', flush=True)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -313,9 +293,6 @@ def parse_args():
     p.add_argument('--tissue-ratio',  type=float, default=0.5)
     p.add_argument('--seed',          type=int,   default=42)
     p.add_argument('--batch-size',    type=int,   default=128)
-    p.add_argument('--tome-r-sweep',  default='1,2,3,4,8',
-                   help='fp32 ToMe r values (comma-sep). r=8 already in main; '
-                        'duplicates are skipped.')
     p.add_argument('--out-dir',       type=Path, default=default_out,
                    help='final products: summary.txt + PNGs')
     p.add_argument('--tmp-dir',       type=Path, default=default_tmp,
@@ -372,20 +349,12 @@ def main():
         sys.exit(1)
     print(f'\nTotal sampled: {N} patches', flush=True)
 
-    # ── 2. Encode: main 4 configs + ToMe r sweep ──────────────────────────
+    # ── 2. Encode: the main configs ───────────────────────────────────────
     embeddings = {}
-    for label, dtype, r in _MAIN_CONFIGS:
-        embeddings[label] = encode_config(images, device, dtype, r,
+    for label, dtype in _MAIN_CONFIGS:
+        embeddings[label] = encode_config(images, device, dtype,
                                           args.batch_size, label)
 
-    sweep_rs = [int(x) for x in args.tome_r_sweep.split(',') if x.strip()]
-    for r in sweep_rs:
-        label = f'ToMe r={r}'
-        if label in embeddings:
-            continue
-        embeddings[label] = encode_config(images, device,
-                                          torch.float32, r,
-                                          args.batch_size, label)
 
     torch.save(embeddings, args.tmp_dir / 'embeddings.pt')
     print(f'\nsaved embeddings -> {args.tmp_dir / "embeddings.pt"}', flush=True)
@@ -404,7 +373,7 @@ def main():
     # ── 4. Level 2 — ranking preservation (main 4 only) ───────────────────
     l2 = {}
     if not args.skip_l2:
-        for label, _, _ in _MAIN_CONFIGS:
+        for label, _ in _MAIN_CONFIGS:
             if label == _BASE_LABEL:
                 continue
             l2[label] = level2_ranking(base, embeddings[label], ks=_TOPK)
@@ -417,14 +386,6 @@ def main():
         args.out_dir / 'cos_hist.png',
     )
 
-    tome_curve = {0: 1.0}
-    if 'ToMe r=8' in l1:
-        tome_curve[8] = l1['ToMe r=8']['mean']
-    for r in sweep_rs:
-        label = f'ToMe r={r}'
-        if label in l1:
-            tome_curve[r] = l1[label]['mean']
-    save_tome_sweep(tome_curve, args.out_dir / 'tome_sweep.png')
 
     # ── 6. summary.txt (also CSV-parseable) ───────────────────────────────
     with open(args.out_dir / 'summary.txt', 'w') as f:
@@ -434,10 +395,6 @@ def main():
         for k, s in l1.items():
             f.write(f'{k},{s["mean"]},{s["std"]},{s["p1"]},{s["p5"]},'
                     f'{s["p50"]},{s["p95"]},{s["p99"]}\n')
-        f.write('\n=== ToMe r sweep — mean cos sim vs baseline (fp32) ===\n')
-        f.write('r,mean_cos_sim\n')
-        for r in sorted(tome_curve.keys()):
-            f.write(f'{r},{tome_curve[r]}\n')
         if l2:
             f.write('\n=== Level 2 — Ranking preservation vs baseline fp32 ===\n')
             f.write('config,spearman,top1,top5,top10,top50,rank_shift_median,rank_shift_p95\n')

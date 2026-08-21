@@ -133,7 +133,8 @@ def compute_gigapath_sliding_win_similarity(
     if encoder is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # dtype='fp32' and not the GigaPathEncoderConfig default of fp16: the old
-        # gigapath_encode defaulted to fp32 and this caller never overrode it,
+        # the free function this replaced defaulted to fp32 (see
+        # GigaPathFunc_old) and this caller never overrode it,
         # so fp16 here would be a precision change smuggled in by a refactor.
         encoder = GigaPathEncoderConfig(batch_size=batch_size).with_model(dtype='fp32').build(device)
 

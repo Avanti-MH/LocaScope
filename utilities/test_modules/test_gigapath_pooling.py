@@ -9,7 +9,7 @@ Two halves, because they cost very different amounts:
 
     python utilities/test_modules/test_gigapath_pooling.py --with-model
         Loads GigaPath and asserts the two things the cheap half cannot:
-        pool_tokens(..., 'cls') is bit-for-bit the production feature, and
+        pooling_kinds(..., 'cls') is bit-for-bit the production feature, and
         pooling inside the encoder gives what pooling after it gave.
 
 The first check is why this file exists. Every pooling in the experiment is
@@ -40,7 +40,8 @@ import torch                                                # noqa: E402
 import torch.nn.functional as F                             # noqa: E402
 from PIL import Image                                       # noqa: E402
 
-from GigaPathFunc import (model_token_spec, pool_tokens,     # noqa: E402
+from GigaPathFunc import (model_token_spec, pooling_kinds,     # noqa: E402
+                          pool_slots,
                           _ring_bins)
 
 _RESULTS = []
@@ -69,12 +70,12 @@ def rejects(fn, needle=''):
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
-SPEC = {'dim': 8, 'token_grid': (14, 14), 'num_prefix': 1}
+SPEC = {'dim': 8, 'feat_hw': (14, 14), 'num_prefix': 1}
 
 
 def toks(n=3, spec=SPEC, seed=0):
     g = torch.Generator().manual_seed(seed)
-    t = spec['num_prefix'] + spec['token_grid'][0] * spec['token_grid'][1]
+    t = spec['num_prefix'] + spec['feat_hw'][0] * spec['feat_hw'][1]
     return torch.randn(n, t, spec['dim'], generator=g)
 
 
@@ -88,7 +89,8 @@ def t_shapes_and_slots():
                             ('rings3', 4, 'ring:3'),
                             ('grid2x2', 5, 'grid:2x2'),
                             ('tokens', 197, 'grid:14x14')):
-        f, slots, lay = pool_tokens(x, mode, SPEC)
+        f = pooling_kinds(x, mode, SPEC)
+        slots, lay = pool_slots(mode, SPEC)
         assert f.shape == (3, n, SPEC['dim']), f'{mode}: shape {tuple(f.shape)}'
         assert len(slots) == n, f'{mode}: {len(slots)} names for {n} slots'
         assert lay == layout, f'{mode}: layout {lay!r} != {layout!r}'
@@ -100,7 +102,7 @@ def t_every_slot_is_unit_norm():
     # between slots is fixed at write time, and that weighting is the open
     # question the experiment exists to answer.
     for mode in ('cls', 'cls_avg', 'cls_std', 'rings3', 'grid2x2', 'tokens'):
-        f, _, _ = pool_tokens(toks(), mode, SPEC)
+        f = pooling_kinds(toks(), mode, SPEC)
         n = f.norm(dim=-1)
         assert torch.allclose(n, torch.ones_like(n), atol=1e-5), \
             f'{mode}: slot norms range {n.min():.4f}..{n.max():.4f}'
@@ -108,7 +110,7 @@ def t_every_slot_is_unit_norm():
 
 def t_cls_slot_is_just_the_cls_token():
     x = toks()
-    f, _, _ = pool_tokens(x, 'cls_avg', SPEC)
+    f = pooling_kinds(x, 'cls_avg', SPEC)
     assert torch.allclose(f[:, 0], F.normalize(x[:, 0], dim=-1), atol=1e-6)
 
 
@@ -116,29 +118,118 @@ def t_registers_are_dropped():
     # DINOv2 _reg4 has num_prefix=5. Patches must start after the registers; the
     # failure mode otherwise is four junk vectors averaged into every pooling,
     # with no error and only a slightly worse score to show for it.
-    spec = {'dim': 8, 'token_grid': (4, 4), 'num_prefix': 5}
+    spec = {'dim': 8, 'feat_hw': (4, 4), 'num_prefix': 5}
     x = torch.zeros(1, 5 + 16, 8)
     x[0, 0] = 1.0                       # cls
     x[0, 1:5] = 99.0                    # registers -- must not reach any slot
     x[0, 5:] = 2.0                      # patches
-    f, _, _ = pool_tokens(x, 'cls_avg', spec)
+    f = pooling_kinds(x, 'cls_avg', spec)
     assert torch.allclose(f[0, 1], F.normalize(torch.full((8,), 2.0), dim=-1)), \
         'the average picked up the register tokens'
 
 
+def t_no_prefix_makes_slot_0_the_average():
+    # A CNN or a U-Net has no CLS: num_prefix is 0 and its summary vector is the
+    # global average, which is also what its features() returns. Reading
+    # tokens[:, 0] regardless would put the TOP-LEFT CELL in slot 0 and label it
+    # 'cls'. Nothing downstream raises -- the token-count check passes because
+    # 0 + gh*gw == T, the store validates, the vectors look like vectors. It
+    # would show up only as a pooling that scores worse than it should.
+    #
+    # Scored against that exact decoy rather than a tolerance: the corner is
+    # what the old code returned, so if it ever comes back this fails at the
+    # decoy and not at the margin.
+    spec = {'dim': 4, 'feat_hw': (2, 2), 'num_prefix': 0}
+    x = torch.zeros(1, 4, 4)
+    x[0, 0] = torch.tensor([9.0, 0.0, 0.0, 0.0])        # the corner cell
+    x[0, 1:] = 1.0
+    f = pooling_kinds(x, 'cls', spec)
+    slots, _ = pool_slots('cls', spec)
+    want = F.normalize(x[0].mean(0), dim=-1)
+    corner = F.normalize(x[0, 0], dim=-1)
+    d_want = float((f[0, 0] - want).abs().max())
+    d_corner = float((f[0, 0] - corner).abs().max())
+    assert d_want * 1000 < d_corner, (
+        f'slot 0 is {d_want:.3e} from the average and {d_corner:.3e} from the '
+        f'corner cell -- it took tokens[:, 0] with no prefix to take')
+    # 'gap' and not 'cls': StoreMeta.slots is the only record of what slot 0
+    # holds, so naming a global average after a token this model does not have
+    # would make the store say something false about itself.
+    assert slots[0] == 'gap', f"slot 0 of a prefix-free model is {slots[0]!r}"
+
+
+def t_no_prefix_refuses_the_mode_that_would_duplicate():
+    # cls_avg pairs the summary with the patch mean. With no prefix the summary
+    # IS the patch mean, so both slots would be the same vector -- bit-identical
+    # after per-slot normalisation. Nothing raises on its own: the store holds
+    # two slots, every similarity is exactly doubled, and the result reads as
+    # "cls_avg performs like cls" rather than as a broken configuration.
+    #
+    # cls_std is the control. std is not mean, so it stays legal, and if this
+    # ever starts raising the refusal has grown past what it was for.
+    spec = {'dim': 4, 'feat_hw': (2, 2), 'num_prefix': 0}
+    x = torch.randn(2, 4, 4, generator=torch.Generator().manual_seed(1))
+    rejects(lambda: pooling_kinds(x, 'cls_avg', spec), 'num_prefix=0')
+    f = pooling_kinds(x, 'cls_std', spec)
+    slots, _ = pool_slots('cls_std', spec)
+    assert slots == ('gap', 'std'), f'slots {slots}'
+    assert not torch.allclose(f[:, 0], f[:, 1]), 'std collapsed onto the summary'
+
+    # Every remaining mode names slot 0 for what it actually holds.
+    for mode in ('cls', 'cls_std', 'rings2', 'grid2x2', 'tokens'):
+        pooling_kinds(x, mode, spec)
+        slots, _ = pool_slots(mode, spec)
+        assert slots[0] == 'gap', f'{mode}: slot 0 is {slots[0]!r}'
+
+
+def t_no_prefix_keeps_every_cell_as_a_patch():
+    # The other half of the same rule: with num_prefix 0 the summary is computed
+    # FROM the cells, so no cell may be consumed by it. A slice of tokens[:, 1:]
+    # would drop one and still produce a plausible answer for every mode.
+    spec = {'dim': 2, 'feat_hw': (2, 2), 'num_prefix': 0}
+    x = torch.zeros(1, 4, 2)
+    x[0, :, 0] = torch.arange(4, dtype=torch.float32)
+    f = pooling_kinds(x, 'tokens', spec)
+    slots, layout = pool_slots('tokens', spec)
+    assert layout == 'grid:2x2'
+    assert len(slots) == 5, f'1 summary + 4 cells, got {len(slots)}'
+    for k in range(4):
+        assert torch.allclose(f[0, 1 + k], F.normalize(x[0, k], dim=-1),
+                              atol=1e-5), f'cell {k} is not slot {1 + k}'
+
+
+def t_outputspec_and_storemeta_subscript_the_same():
+    # pooling_kinds takes either supplier by name. The point of the test is that
+    # nothing converts between them: the same three keys reach it whether it was
+    # handed a live encoder's model_spec or a StoreMeta off disk, so a rename on
+    # one side fails here rather than at some consumer months later.
+    from TileEncoderFunc import ModelOutputSpec
+    spec = ModelOutputSpec(kind='tokens', dim=8, feat_hw=(4, 4), num_prefix=1)
+    for k, want in (('dim', 8), ('feat_hw', (4, 4)), ('num_prefix', 1),
+                    ('kind', 'tokens')):
+        assert spec[k] == want, f'spec[{k!r}] == {spec[k]!r}, wanted {want!r}'
+    x = toks(spec={'dim': 8, 'feat_hw': (4, 4), 'num_prefix': 1})
+    a = pooling_kinds(x, 'rings3', spec)
+    b = pooling_kinds(x, 'rings3', {'dim': 8, 'feat_hw': (4, 4),
+                                        'num_prefix': 1})
+    assert torch.equal(a, b), 'ModelOutputSpec and the plain dict disagree'
+    rejects(lambda: spec['token_grid'], 'token_grid')
+
+
 def t_grid_blocks_average_the_right_cells():
-    spec = {'dim': 1, 'token_grid': (4, 4), 'num_prefix': 1}
+    spec = {'dim': 1, 'feat_hw': (4, 4), 'num_prefix': 1}
     x = torch.zeros(1, 17, 1)
     x[0, 1:] = torch.arange(16, dtype=torch.float32).reshape(16, 1)
     # 4x4 grid, 2x2 blocks -> top-left block holds cells 0,1,4,5 -> mean 2.5
     g = x[0, 1:].reshape(4, 4)
     want = [g[:2, :2].mean(), g[:2, 2:].mean(), g[2:, :2].mean(), g[2:, 2:].mean()]
-    f, slots, _ = pool_tokens(x, 'grid2x2', spec)
+    f = pooling_kinds(x, 'grid2x2', spec)
+    slots, _ = pool_slots('grid2x2', spec)
     assert slots[1:] == ('g00', 'g01', 'g10', 'g11')
     # after per-slot normalization a 1-D vector is just its sign, so compare the
     # pre-normalized means through a second call on a widened dim
     x2 = x.repeat(1, 1, 2)
-    f2, _, _ = pool_tokens(x2, 'grid2x2', {**spec, 'dim': 2})
+    f2 = pooling_kinds(x2, 'grid2x2', {**spec, 'dim': 2})
     for k, w in enumerate(want):
         got = f2[0, 1 + k]
         assert torch.allclose(got, F.normalize(torch.tensor([w, w]), dim=-1), atol=1e-5), \
@@ -167,15 +258,15 @@ def t_rings_follow_the_tokens_to_the_gpu():
     dev = torch.device('cuda')
     assert _ring_bins(14, 14, 3, dev).device.type == 'cuda'
     assert torch.equal(_ring_bins(14, 14, 3, dev).cpu(), _ring_bins(14, 14, 3))
-    f, _, _ = pool_tokens(toks().to(dev), 'rings3', SPEC)
+    f = pooling_kinds(toks().to(dev), 'rings3', SPEC)
     assert f.device.type == 'cuda', 'ring pooling left the tokens\' device'
 
 
 def t_bad_inputs_are_refused():
-    rejects(lambda: pool_tokens(torch.zeros(3, 8), 'cls', SPEC), '[N, T, D]')
-    rejects(lambda: pool_tokens(torch.zeros(3, 5, 8), 'cls', SPEC), 'disagree')
-    rejects(lambda: pool_tokens(toks(), 'nonsense', SPEC), 'unknown pooling mode')
-    rejects(lambda: pool_tokens(toks(), 'grid3x3', SPEC), 'does not divide')
+    rejects(lambda: pooling_kinds(torch.zeros(3, 8), 'cls', SPEC), '[N, T, D]')
+    rejects(lambda: pooling_kinds(torch.zeros(3, 5, 8), 'cls', SPEC), 'disagree')
+    rejects(lambda: pooling_kinds(toks(), 'nonsense', SPEC), 'unknown pooling mode')
+    rejects(lambda: pooling_kinds(toks(), 'grid3x3', SPEC), 'does not divide')
 
 
 # ── config fields are honoured ────────────────────────────────────────────────
@@ -185,9 +276,13 @@ def t_bad_inputs_are_refused():
 # were added to EncoderConfig with comments explaining their effect and none of
 # them reached __init__. Setting weights='ft.ckpt' loaded the HF weights.
 #
-# The shape of that failure is worse than doing nothing. tome_r=8 differs from
-# its baseline, so the hash MOVES -- two stores, two filenames, identical
-# vectors, and every reason to believe one of them had ToMe applied.
+# The shape of that failure is worse than doing nothing. An inert field that
+# differs from its baseline still MOVES the hash -- two stores, two filenames,
+# identical vectors, and every reason to believe they hold different things.
+#
+# tome_r was one of the three and is gone; `pooling` took its place in the
+# checks below, and it is the better example because reading it is what
+# features() now does rather than something build() does once.
 #
 # vit_tiny rather than GigaPath: the loading path does not depend on the
 # architecture, and 5 MB keeps this in the half that runs on a login node.
@@ -263,35 +358,6 @@ def t_weights_field_is_actually_loaded():
         f'the checkpoint PATH leaked into identity: {parts}'
 
 
-def t_tome_field_is_actually_applied():
-    """GigaPathEncoderConfig(tome_r=...) must change the features.
-
-    Not checked through weights_id: ToMe patches block forwards rather than
-    parameters, so the state dict can come out identical while every vector
-    moves. log/TODO.log has the size of the move -- top-5 retrieval overlap
-    fell to 0.26 at r=8 -- which is why this is a field and not a footnote.
-    """
-    try:
-        import tome  # noqa: F401
-    except ImportError:
-        print('        [SKIP] tome not installed')
-        return
-
-    dev = torch.device('cpu')
-    plain = _tiny_encoder().build(dev)
-    merged = _tiny_encoder(tome_r=8).build(dev)
-
-    rng = np.random.default_rng(0)
-    tiles = [rng.integers(0, 255, (256, 256, 3), dtype=np.uint8)
-             for _ in range(2)]
-    gap = float((plain.features(tiles) - merged.features(tiles)).abs().max())
-    print(f'        r=8   max|Δfeat| {gap:.3e}')
-    assert gap > 1e-4, (
-        f'tome_r=8 changed nothing ({gap:.3e}). It changes the hash either way, '
-        f'so an inert field here means two stores holding the same vectors '
-        f'while one of them claims to be merged.')
-
-
 def t_identity_moves_only_where_it_should():
     """Which fields reach the hash, checked without loading anything."""
     from GigaPathFunc import GigaPathEncoderConfig, _GIGAPATH_BASELINE
@@ -306,12 +372,12 @@ def t_identity_moves_only_where_it_should():
     for over, why in ((dict(batch_size=999), 'batch_size'),
                       (dict(compile=True), 'compile'),
                       (dict(model=_dc.replace(M, weights='/tmp/x.ckpt')), 'weights'),
-                      (dict(tome_r=0), 'tome_r at its baseline')):
+                      (dict(pooling='cls'), "pooling at its baseline, spelled")):
         assert GigaPathEncoderConfig(**over).identity_parts(B) == [], \
             f'{why} must not reach the hash: ' \
             f'{GigaPathEncoderConfig(**over).identity_parts(B)}'
 
-    for over, why in ((dict(tome_r=8), 'tome_r away from baseline'),
+    for over, why in ((dict(pooling='grid2x2'), 'pooling away from baseline'),
                       (dict(model=_dc.replace(M, dtype='fp32')), 'dtype'),
                       (dict(model=_dc.replace(M, arch='timm:other')), 'arch')):
         assert GigaPathEncoderConfig(**over).identity_parts(B) != [], \
@@ -343,7 +409,7 @@ def t_spec_unwraps_dataparallel():
     # used and it searches only _parameters / _buffers / _modules.
     rejects(lambda: dp.embed_dim, 'embed_dim')
     assert model_token_spec(dp) == model_token_spec(m) == {
-        'dim': 8, 'token_grid': (4, 4), 'num_prefix': 1}
+        'dim': 8, 'feat_hw': (4, 4), 'num_prefix': 1}
 
 
 def t_spec_refuses_a_classifier():
@@ -392,7 +458,7 @@ def t_global_pool_empty_gives_the_same_tokens(n_tiles=4):
     would NOT be safe for 'avg', and the assertions below pin that.
     """
     import torch as _t
-    from GigaPathFunc_olde import gigapath_model, gigapath_encode
+    from GigaPathFunc_old import gigapath_model, gigapath_encode
 
     dev = _t.device('cuda' if _t.cuda.is_available() else 'cpu')
     model = gigapath_model(dev)
@@ -535,7 +601,7 @@ def t_encoder_matches_the_old_path(n_tiles=8):
     """
     import torch as _t
     from GigaPathFunc import GigaPathEncoderConfig
-    from GigaPathFunc_olde import gigapath_encode, gigapath_encode_tokens
+    from GigaPathFunc_old import gigapath_encode, gigapath_encode_tokens
 
     dev = _t.device('cuda' if _t.cuda.is_available() else 'cpu')
     encoder = GigaPathEncoderConfig(batch_size=3).build(dev)
@@ -586,8 +652,11 @@ def t_encoder_matches_the_old_path(n_tiles=8):
     # in two orders differ around 1e-8, which is the same 1.49e-08 the
     # reduce-vs-host check below reports independently.
     for mode in ('cls', 'cls_avg', 'rings3', 'grid2x2'):
-        new_p, slots, layout = encoder.pooled(tiles, mode)
-        ref_p, ref_slots, ref_layout = pool_tokens(old_tokens, mode, encoder.token_spec())
+        new_p = encoder.pooled(tiles, mode)
+        fs = encoder.pooled_spec(new_p, mode)
+        slots, layout = fs.slots, fs.slot_layout
+        ref_p, ref_slots, ref_layout = pooling_kinds(old_tokens, mode,
+                                                   encoder.model_spec)
         ref_p = ref_p.cpu()
         d = float((new_p - ref_p).abs().max())
         # Two decoys, because neither covers every mode. Rolling the TILES
@@ -601,7 +670,7 @@ def t_encoder_matches_the_old_path(n_tiles=8):
         print(f'        pooled {mode:8s} {tuple(new_p.shape)}  max|Δ| {d:.3e}   '
               + '  '.join(f'{k} {v:.2e}' for k, v in decoys.items()))
         assert (slots, layout) == (ref_slots, ref_layout), (
-            f'{mode}: .pooled() reports {(slots, layout)}, pool_tokens says '
+            f'{mode}: .pooled() reports {(slots, layout)}, pooling_kinds says '
             f'{(ref_slots, ref_layout)}')
         assert d * 1000 < worst, (
             f'{mode}: .pooled() differs from pooling the tokens afterwards by '
@@ -617,9 +686,9 @@ def t_encoder_matches_the_old_path(n_tiles=8):
 
 
 def t_cls_equals_production(n_tiles=8):
-    """pool_tokens(...,'cls') must BE gigapath_encode, not merely resemble it."""
+    """pooling_kinds(...,'cls') must BE gigapath_encode, not merely resemble it."""
     import torch as _t
-    from GigaPathFunc_olde import (gigapath_model, gigapath_encode,
+    from GigaPathFunc_old import (gigapath_model, gigapath_encode,
                                    gigapath_encode_tokens)
 
     dev = _t.device('cuda' if _t.cuda.is_available() else 'cpu')
@@ -643,7 +712,8 @@ def t_cls_equals_production(n_tiles=8):
              for _ in range(n_tiles)]
 
     a = gigapath_encode(tiles, model, dev)
-    b, slots, _ = pool_tokens(gigapath_encode_tokens(tiles, model, dev), 'cls', spec)
+    b = pooling_kinds(gigapath_encode_tokens(tiles, model, dev), 'cls', spec)
+    slots, _ = pool_slots('cls', spec)
     b = b[:, 0]
     cos = F.cosine_similarity(a, b, dim=-1)
     print(f'        cos(production, cls slot): min {cos.min():.8f}')
@@ -686,13 +756,13 @@ def t_reduce_equals_pooling_afterwards(n_tiles=8):
     import torch as _t
     from GigaPathFunc import GigaPathEncoderConfig
 
-    # The new API on both sides, and not GigaPathFunc_olde: this compares two
+    # The new API on both sides, and not GigaPathFunc_old: this compares two
     # routes THROUGH THE CURRENT ENCODER -- tokens crossing to the host and
     # pooled after, against pooled inside the batch loop. The frozen module has
     # no reduce hook, because the hook is the thing under test.
     dev = _t.device('cuda' if _t.cuda.is_available() else 'cpu')
     encoder = GigaPathEncoderConfig(batch_size=4).build(dev)
-    spec = encoder.token_spec()
+    spec = encoder.model_spec
     dim = int(spec['dim'])
 
     rng = np.random.default_rng(0)
@@ -703,7 +773,7 @@ def t_reduce_equals_pooling_afterwards(n_tiles=8):
     # still the default. fp16 autocast, so the tokens are the ones a run sees.
     tokens = encoder.tokens(tiles)
     assert tokens.dtype == _t.float32 and tokens.device.type == 'cpu'
-    host = {m: pool_tokens(tokens, m, spec)[0] for m in POOLINGS}
+    host = {m: pooling_kinds(tokens, m, spec) for m in POOLINGS}
 
     # Pooled on the model's device, inside the batch loop. batch_size below
     # n_tiles on purpose: reduce runs more than once and the parts are
@@ -715,7 +785,7 @@ def t_reduce_equals_pooling_afterwards(n_tiles=8):
         assert t.device.type == dev.type, 'reduce ran off the model device'
         parts = []
         for m in POOLINGS:
-            flat = pool_tokens(t, m, spec)[0].flatten(1)
+            flat = pooling_kinds(t, m, spec).flatten(1)
             widths[m] = flat.shape[1]
             parts.append(flat)
         return _t.cat(parts, dim=1).cpu()
@@ -732,7 +802,7 @@ def t_reduce_equals_pooling_afterwards(n_tiles=8):
         assert got.shape == want.shape, f'{m}: {tuple(got.shape)} vs {tuple(want.shape)}'
 
         same = (got - want).abs().max().item()
-        fp16 = (pool_tokens(tokens.half(), m, spec)[0].float()
+        fp16 = (pooling_kinds(tokens.half(), m, spec).float()
                 - want).abs().max().item()
         decoys = {'fp16': fp16}
         if want.shape[1] > 1:                     # cls has one slot to roll
@@ -755,11 +825,15 @@ def main() -> int:
     ap.add_argument('--tiles', type=int, default=8)
     args = ap.parse_args()
 
-    print('pool_tokens')
+    print('pooling_kinds')
     check('shapes and slot names agree',        t_shapes_and_slots)
     check('every slot is unit norm',            t_every_slot_is_unit_norm)
     check('cls slot is the cls token',          t_cls_slot_is_just_the_cls_token)
     check('register tokens are dropped',        t_registers_are_dropped)
+    check('no prefix -> slot 0 is the average', t_no_prefix_makes_slot_0_the_average)
+    check('no prefix -> cls_avg is refused',    t_no_prefix_refuses_the_mode_that_would_duplicate)
+    check('no prefix -> every cell is kept',    t_no_prefix_keeps_every_cell_as_a_patch)
+    check('ModelOutputSpec subscripts like the dict', t_outputspec_and_storemeta_subscript_the_same)
     check('grid blocks average the right cells', t_grid_blocks_average_the_right_cells)
     check('rings hold equal counts',            t_rings_hold_equal_counts)
     check('ring mask follows the tokens',       t_rings_follow_the_tokens_to_the_gpu)
@@ -772,7 +846,6 @@ def main() -> int:
     print('EncoderConfig fields are honoured')
     check('identity moves only where it should', t_identity_moves_only_where_it_should)
     check('weights= is actually loaded',        t_weights_field_is_actually_loaded)
-    check('tome_r= is actually applied',        t_tome_field_is_actually_applied)
 
     if args.with_model:
         print('equivalence (loads GigaPath)')

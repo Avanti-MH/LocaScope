@@ -30,10 +30,9 @@ for _d in ('aiNNModel', 'utilities'):
 
 import numpy as np                                          # noqa: E402
 import torch                                                # noqa: E402
-import torch.nn.functional as F                             # noqa: E402
 
 from ConfigIdentity import ModelConfig                      # noqa: E402
-from TileEncoderFunc import (OutputSpec, TileEncoder,       # noqa: E402
+from TileEncoderFunc import (ModelOutputSpec, TileEncoder,       # noqa: E402
                              TileEncoderConfig, TransformConfig)
 
 _RESULTS = []
@@ -102,6 +101,13 @@ class FakeConfig(TileEncoderConfig):
     transform: TransformConfig = field(
         default_factory=lambda: TransformConfig(scale_size=8, crop_size=8))
 
+    #: '' is NOT mapped, and that is the fake's job here: it stands for a config
+    #: whose author never said what their model's own answer is. feature_pooling
+    #: raises for it, which is what t_features_refuses_to_guess_for_tokens
+    #: checks. A real config maps it -- see TokenConfig below.
+    POOLINGS = {'': '', 'cls': 'cls', 'gap': 'gap', 'identity': 'identity',
+                'cls_avg': 'cls_avg', 'grid2x2': 'grid2x2'}
+
     def build(self, device, **kw):
         return FakeEncoder(self, device)
 
@@ -109,25 +115,70 @@ class FakeConfig(TileEncoderConfig):
 class FakeEncoder(TileEncoder):
     BASELINE = {'kind': 'vector',
                 'model': ModelConfig(source='local', arch='x:Y', dtype='fp32'),
-                'transform': TransformConfig(scale_size=8, crop_size=8)}
+                'transform': TransformConfig(scale_size=8, crop_size=8),
+                'head': '', 'pooling': ''}
 
     def __init__(self, cfg, device):
         self.cfg, self.device = cfg, device
         self.model = {'vector': _Vector, 'tokens': _Tokens,
                       'spatial': _Spatial}[cfg.kind]().eval()
-        self.spec = {
-            'vector':  OutputSpec('vector', DIM),
-            'tokens':  OutputSpec('tokens', DIM, GRID, PREFIX),
-            'spatial': OutputSpec('spatial', DIM, (2, 2)),
+        self.model_spec = {
+            'vector':  ModelOutputSpec('vector', DIM),
+            'tokens':  ModelOutputSpec('tokens', DIM, GRID, PREFIX),
+            'spatial': ModelOutputSpec('spatial', DIM, (2, 2)),
         }[cfg.kind]
         self._transform = cfg.transform.build()
         self._weights_id = None
 
 
+@dataclass(frozen=True)
+class TokenConfig(FakeConfig):
+    """A token model that HAS decided which token, the way a real one must.
+
+    One table entry is the whole of it: '' -> 'cls'. There is no _vector_from
+    override here and none in GigaPathFunc or Uni2Func either -- the base
+    reduces by cfg.pooling, so an override would be a second copy of that
+    decision and, worse, one that ignores cfg.pooling. This fake kept such an
+    override for one revision and two of the tests below caught it, which is
+    what they are for.
+    """
+    POOLINGS = {**FakeConfig.POOLINGS, '': 'cls'}
+
+    def build(self, device, **kw):
+        return TokenEncoder(self, device)
+
+
+@dataclass(frozen=True)
+class HeadConfig(FakeConfig):
+    """A model whose head already produced the vector, so nothing pools it."""
+    POOLINGS = {'': 'identity', 'identity': 'identity'}
+
+    def build(self, device, **kw):
+        return HeadEncoder(self, device)
+
+
 class TokenEncoder(FakeEncoder):
-    """A token model that HAS decided which token, the way a real one must."""
-    def _vector_from(self, raw):
-        return F.normalize(raw[:, 0], dim=-1)
+    """Built by TokenConfig; the decision lives in the config, not here."""
+
+
+#: What a head that collapses the token axis maps DIM to. Narrower than DIM on
+#: purpose: if the two were equal, a _pool that still consulted model_spec.dim
+#: would pass by coincidence.
+HEAD_DIM = DIM - 2
+
+
+class HeadEncoder(FakeEncoder):
+    """A token model behind a head that reduces, the shape CONCH's tower has.
+
+    The trunk hands back [B, T, DIM]; the head hands back [B, HEAD_DIM], which
+    is both a different rank and a different width. model_spec still describes
+    the TRUNK, because self.model is always the trunk -- so anything downstream
+    that reads model_spec to decide how to treat the head's output is wrong, and
+    this fake is here to say so before CONCH exists.
+    """
+
+    def _apply_head(self, raw):
+        return raw[:, 0, :HEAD_DIM]     # stands in for an attentional pooler
 
 
 def tiles(n=5):
@@ -135,20 +186,34 @@ def tiles(n=5):
     return [rng.integers(0, 255, (16, 16, 3), dtype=np.uint8) for _ in range(n)]
 
 
+#: Which config builds which fake. A real encoder has exactly one config class
+#: and the pairing is build(); here the tests name the ENCODER, so this is the
+#: reverse lookup. It exists because '' now resolves in POOLINGS, which is a
+#: property of the config -- so three fakes need three configs.
+_CONFIG_FOR = {FakeEncoder: FakeConfig, TokenEncoder: TokenConfig,
+               HeadEncoder: HeadConfig}
+
+
 def enc(kind, cls=FakeEncoder, **over):
-    cfg = FakeConfig(kind=kind,
-                     model=ModelConfig(source='local', arch='x:Y', dtype='fp32'),
-                     **over)
-    e = cls(cfg, torch.device('cpu'))
-    return e
+    cfg = _CONFIG_FOR[cls](
+        kind=kind,
+        model=ModelConfig(source='local', arch='x:Y', dtype='fp32'),
+        **over)
+    return cls(cfg, torch.device('cpu'))
 
 
 # ── features works for every kind ─────────────────────────────────────────────
 
 def t_features_for_vector_and_spatial():
-    """The two kinds whose reduction is arithmetic, so the base can do them."""
-    for kind in ('vector', 'spatial'):
-        f = enc(kind).features(tiles())
+    """The two kinds whose reduction is arithmetic, once the config names it.
+
+    Named here rather than inferred from kind: the base used to read
+    model_spec.kind to decide that a 'spatial' model means 'gap', which is only
+    sound while nothing sits between the model and the reduction. A head breaks
+    it, and CONCH has one.
+    """
+    for kind, pooling in (('vector', 'identity'), ('spatial', 'gap')):
+        f = enc(kind, pooling=pooling).features(tiles())
         assert f.shape == (5, DIM), f'{kind}: {tuple(f.shape)}'
         norms = f.norm(dim=-1)
         assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), \
@@ -156,30 +221,46 @@ def t_features_for_vector_and_spatial():
 
 
 def t_features_refuses_to_guess_for_tokens():
-    """A token model with no reduction declared must not silently pick one.
+    """A config that never said what '' means for it must not have one picked.
 
-    Guessing here would be answering a question the base cannot know -- GigaPath
-    validated the CLS against a stored tensor, and another model may not have --
-    and the guess would be invisible in every number downstream.
+    Guessing would be answering a question only the model's authors can --
+    GigaPath validated the CLS against a stored tensor, another model may not
+    have -- and the guess would be invisible in every number downstream.
     """
-    rejects(lambda: enc('tokens').features(tiles()), '_vector_from')
+    rejects(lambda: enc('tokens').features(tiles()), 'POOLINGS')
 
 
 def t_features_for_a_token_model_that_decided():
-    f = TokenEncoder(FakeConfig(kind='tokens',
-                                model=ModelConfig(source='local', arch='x:Y',
-                                                  dtype='fp32')),
-                     torch.device('cpu')).features(tiles())
+    """TokenConfig maps '' to 'cls', and that one table entry is the difference."""
+    f = enc('tokens', TokenEncoder).features(tiles())
     assert f.shape == (5, DIM), tuple(f.shape)
 
 
 # ── capabilities are gated, and say what the model is ─────────────────────────
 
 def t_tokens_only_for_token_models():
+    """tokens() is gated on kind. pooled() is NOT -- see below."""
     for kind in ('vector', 'spatial'):
         e = enc(kind)
         rejects(lambda: e.tokens(tiles()), kind)
-        rejects(lambda: e.pooled(tiles(), 'cls'), kind)
+
+
+def t_pooled_reaches_a_feature_map():
+    """pooled() works on a CNN, because _pool permutes rather than refusing.
+
+    [B, C, H, W] is channel-first and pooling_kinds reads channel-last, which is
+    a layout difference and not a reason a feature map cannot be pooled into
+    rings or blocks -- those mean the same thing over cells as over patches.
+
+    'vector' output has genuinely nothing to reduce, so that one still refuses,
+    and the message says what the only legal mode is rather than what is wrong.
+    """
+    got = enc('spatial').pooled(tiles(), 'grid2x2')
+    assert got.shape == (5, 5, DIM), tuple(got.shape)     # summary + 2x2 blocks
+    fs = enc('spatial').pooled_spec(got, 'grid2x2')
+    assert fs.slots[0] == 'gap', fs.slots     # no prefix -> not 'cls'
+    assert fs.slot_layout == 'grid:2x2', fs.slot_layout
+    rejects(lambda: enc('vector').pooled(tiles(), 'cls'), "'identity'")
 
 
 def t_spatial_only_for_spatial_models():
@@ -260,14 +341,99 @@ def t_variant_refuses_what_rebuilds():
     rejects(lambda: a.variant(model=ModelConfig()), 'model')
 
 
-# ── OutputSpec ────────────────────────────────────────────────────────────────
+# ── ModelOutputSpec ──────────────────────────────────────────────────────────
 
 def t_output_spec_refuses_nonsense():
-    rejects(lambda: OutputSpec('token', 8), 'kind must be')
-    rejects(lambda: OutputSpec('tokens', 8), 'patch grid')
-    rejects(lambda: OutputSpec('vector', 8, (2, 2)), 'no grid')
-    assert OutputSpec('tokens', 8, (14, 14), 1).n_tokens() == 197
-    rejects(lambda: OutputSpec('vector', 8).n_tokens(), 'no token count')
+    rejects(lambda: ModelOutputSpec('token', 8), 'kind must be')
+    rejects(lambda: ModelOutputSpec('tokens', 8), 'patch grid')
+    rejects(lambda: ModelOutputSpec('vector', 8, (2, 2)), 'no feat_hw')
+    assert ModelOutputSpec('tokens', 8, (14, 14), 1).n_tokens() == 197
+    rejects(lambda: ModelOutputSpec('vector', 8).n_tokens(), 'no token count')
+
+# ── cfg.pooling decides what __call__ hands back ──────────────────────────────
+
+def t_call_follows_the_configured_pooling():
+    """The whole reason pooling is a FIELD rather than an argument.
+
+    encoder(patches) is the EncodeFn PatchingLib speaks -- one list in, one
+    tensor out, nowhere to put a mode. Before this, a multi-slot pooling could
+    only reach retrieval by a caller assembling its own FeaturesMap. Here the
+    config says grid2x2 and the plain call honours it.
+
+    Widths, not just "different": 5 slots of DIM concatenated, which is also
+    what makes the cosine the mean of the per-slot cosines.
+    """
+    plain = enc('tokens', TokenEncoder)
+    grid = enc('tokens', TokenEncoder, pooling='grid2x2')
+    assert plain(tiles()).shape == (5, DIM), tuple(plain(tiles()).shape)
+    assert grid(tiles()).shape == (5, 5 * DIM), tuple(grid(tiles()).shape)
+
+
+def t_pooling_alias_does_not_fork_the_id():
+    """'' and 'cls' are one computation on a model whose answer IS the CLS.
+
+    Both land on 'cls', because POOLINGS resolves in __post_init__ and the
+    canonical side of the table is the concrete mode. So nothing downstream ever
+    sees '' -- not feature_pooling, not the store's filename, not the id.
+    """
+    a = enc('tokens', TokenEncoder)
+    b = enc('tokens', TokenEncoder, pooling='cls')
+    assert a.cfg.pooling == 'cls', f"'' stayed {a.cfg.pooling!r}"
+    assert b.cfg.pooling == 'cls', f'alias survived as {b.cfg.pooling!r}'
+    assert a.identity_id() == b.identity_id()
+
+
+def t_unknown_pooling_dies_at_config_time():
+    """Before the weights load, not after -- POOLINGS is closed for that.
+
+    The grid family looked unenumerable until the divisibility rule made it
+    obvious that which grids are legal was always a property of the model.
+    """
+    rejects(lambda: FakeConfig(kind='tokens', pooling='grid3x3'), 'grid3x3')
+    rejects(lambda: FakeConfig(kind='tokens', pooling='grid3x3'), 'Accepts')
+
+
+def t_feature_spec_describes_what_features_returned():
+    """One slot whatever the pooling, because _vector_from flattened them.
+
+    The file holds one vector per tile and `pooling` is the only record of what
+    went into it; pool_slots(pooling, model_spec) recovers the rest.
+    """
+    for pooling, width in (('', DIM), ('grid2x2', 5 * DIM)):
+        e = enc('tokens', TokenEncoder, pooling=pooling)
+        f = e.features(tiles())
+        fs = e.feature_spec(f)
+        assert fs.dim == width == f.shape[-1], (pooling, fs.dim, f.shape)
+        assert fs.slots == (e.feature_pooling,), fs.slots
+        assert fs.pooling == ('cls' if pooling == '' else pooling), fs.pooling
+
+
+def t_a_head_that_reduces_does_not_confuse_the_pooling():
+    """_pool reads the RANK of what it is handed, not model_spec.kind.
+
+    model_spec says 'tokens' because self.model is the trunk. After the head
+    there is no token axis and no DIM-wide channel left, so a _pool that
+    branched on kind would push a two-dimensional tensor into pooling_kinds and
+    be told it is not [N, T, D]. This is CONCH's shape, written down before
+    CONCH is, because the version of _pool that shipped an hour ago failed it.
+    """
+    e = enc('tokens', HeadEncoder)
+    f = e.features(tiles())
+    assert f.shape == (5, HEAD_DIM), tuple(f.shape)
+    fs = e.feature_spec(f)
+    assert fs.dim == HEAD_DIM, fs.dim         # NOT model_spec.dim
+    assert e.model_spec.dim == DIM, 'model_spec must still describe the trunk'
+    # tokens() is upstream of the head, so it is unaffected by it.
+    assert e.tokens(tiles()).shape == (5, N_TOK, DIM), tuple(e.tokens(tiles()).shape)
+
+
+def t_tokens_spec_is_the_model_s_own():
+    """tokens() went through no head and no pooling, so its spec is model_spec
+    and its slots are empty -- naming entries is a reducer's job."""
+    e = enc('tokens', TokenEncoder)
+    fs = e.tokens_spec(e.tokens(tiles()))
+    assert fs.shape == e.model_spec, fs.shape
+    assert fs.slots == (), fs.slots
 
 
 # ── identity ──────────────────────────────────────────────────────────────────
@@ -296,6 +462,7 @@ def main() -> int:
 
     print('capabilities')
     check('tokens() gated on kind',           t_tokens_only_for_token_models)
+    check('pooled() reaches a feature map',   t_pooled_reaches_a_feature_map)
     check('spatial() gated on kind',          t_spatial_only_for_spatial_models)
     check('the refusal names a way forward',  t_the_refusal_names_what_works)
     check('unreduced shapes come through',    t_shapes_come_through_unreduced)
@@ -310,8 +477,17 @@ def main() -> int:
     check('dtype lands on ModelConfig',       t_variant_rewrites_dtype_on_the_nested_config)
     check('refuses what would rebuild',       t_variant_refuses_what_rebuilds)
 
-    print('OutputSpec')
+    print('ModelOutputSpec')
     check('refuses impossible shapes',        t_output_spec_refuses_nonsense)
+
+    print('cfg.pooling')
+    check('__call__ follows it',              t_call_follows_the_configured_pooling)
+    check('an alias does not fork the id',    t_pooling_alias_does_not_fork_the_id)
+    check('an unknown one dies at config',    t_unknown_pooling_dies_at_config_time)
+    check('feature_spec describes features',  t_feature_spec_describes_what_features_returned)
+    check('a reducing head does not confuse it',
+          t_a_head_that_reduces_does_not_confuse_the_pooling)
+    check("tokens_spec is the model's own",   t_tokens_spec_is_the_model_s_own)
 
     print('identity')
     check('batch size does not split it',     t_identity_ignores_batch_size)

@@ -98,7 +98,20 @@ model = timm.create_model(
 
 ---
 
-## 6. Token Merging (ToMe)
+## 6. Token Merging (ToMe) — 已否決，程式碼已移除
+
+> **試過，失敗，不要再試。** 決定過程與數字見 `log/MILESTONE.log` M3 和
+> `log/TODO.log`：對 GigaPath（ViT-g，靠 LayerScale 穩住殘差）套 ToMe 之後
+> top-5 retrieval overlap 掉到 0.26，fp16 併用時直接 NaN。同一輪測到 fp16
+> 單獨用是乾淨的（cos=0.99995、5.5× 加速），所以 fp16 進生產、ToMe 出局。
+>
+> 還有第二個理由，是後來才看見的：ToMe 合併 token 但不動
+> `patch_embed.grid_size`，所以 `model_spec` 會宣稱 197 個 token 而輸出只有
+> 101 個。在 `features()` 還是 `raw[:, 0]` 的年代沒有任何東西會發現這件事。
+>
+> `aiNNModel/GigaPathFunc.py` 裡的實作已刪除；`GigaPathFunc_old.py` 保留舊
+> API 供等效測試使用。下面這段留著，是為了記錄「當初為什麼想用」——
+> `MILESTONE.log` 記的是失敗過程，不是動機。
 
 ViT 各層合併相似 token，減少 30–50% 計算量，對病理圖影響小。
 

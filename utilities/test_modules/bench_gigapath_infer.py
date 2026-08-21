@@ -3,25 +3,24 @@
 GigaPath inference speed benchmark.
 
 ════════════════════════════════════════════════════════════════════════
-  --compare mode  (7 optimization configs vs baseline)
+  --compare mode  (6 optimization configs vs baseline)
 ════════════════════════════════════════════════════════════════════════
 
-  7 configs compared:
+  6 configs compared:
     baseline fp32
     fp16 only
     flash-attn only (fp32)
-    ToMe r=8 only (fp32)
     compile only (fp32)
     fp16 + flash
-    ALL fp16+flash+tome+compile
+    ALL fp16+flash+compile
 
   Part 1 — bench_compare  (synthetic patches)
-    Sweep: 7 configs × --compare-bs  (default [8,16,64,128,512,1024,4096])
+    Sweep: 6 configs × --compare-bs  (default [8,16,64,128,512,1024,4096])
     Output 1 — Flat table:  (config, bs) per row → patches/s, ×speedup, GPU MB
     Output 2 — Matrix:      config × bs; baseline shows p/s, others show ×speedup
 
   Part 2 — bench_wsi_compare  (real WSI, fixed level/overlap)
-    Sweep: 7 configs × --wsi-compare-bs  (default [32,128,512])
+    Sweep: 6 configs × --wsi-compare-bs  (default [32,128,512])
            fixed --wsi-compare-level 0  --wsi-compare-overlap false
     Output 1 — Flat table:  (config, bs) per row → encode_s, patches/s, ×speedup, GPU MB
     Output 2 — Matrix:      same format as Part 1
@@ -42,8 +41,6 @@ GigaPath inference speed benchmark.
 
   Model flags (standard mode only; --compare covers all combos automatically):
     --no-flash-attn   set TIMM_FUSED_ATTN=0 before model load
-    --tome            apply Token Merging (GigaPathEncoderConfig.tome_r)
-    --tome-r N        tokens merged per layer (default 8)
     --compile         torch.compile with mode=reduce-overhead (~2-5 min warmup)
 
 ════════════════════════════════════════════════════════════════════════
@@ -54,7 +51,7 @@ GigaPath inference speed benchmark.
     python bench_gigapath_infer.py --compare --no-wsi
     python bench_gigapath_infer.py --compare --compare-bs 64 128 512 --wsi-compare-bs 64 128
     python bench_gigapath_infer.py
-    python bench_gigapath_infer.py --tome --compile --no-wsi
+    python bench_gigapath_infer.py --compile --no-wsi
     python bench_gigapath_infer.py --no-flash-attn
 """
 
@@ -157,14 +154,13 @@ def sep(char='─', w=72):
 # ── compare mode: configs and shared loop ─────────────────────────────────────
 
 _COMPARE_CONFIGS = [
-    # (label,                          flash,  dtype,          tome,  compile)
-    ('baseline  fp32',                 False,  torch.float32,  False, False),
-    ('fp16  only',                     False,  torch.float16,  False, False),
-    ('flash-attn  only (fp32)',        True,   torch.float32,  False, False),
-    ('ToMe r=8  only (fp32)',          False,  torch.float32,  True,  False),
-    ('compile  only (fp32)',           False,  torch.float32,  False, True),
-    ('fp16 + flash',                   True,   torch.float16,  False, False),
-    ('ALL  fp16+flash+tome+compile',   True,   torch.float16,  True,  True),
+    # (label,                          flash,  dtype,          compile)
+    ('baseline  fp32',                 False,  torch.float32,  False),
+    ('fp16  only',                     False,  torch.float16,  False),
+    ('flash-attn  only (fp32)',        True,   torch.float32,  False),
+    ('compile  only (fp32)',           False,  torch.float32,  True),
+    ('fp16 + flash',                   True,   torch.float16,  False),
+    ('ALL  fp16+flash+compile',        True,   torch.float16,  True),
 ]
 
 _LABEL_W = 36
@@ -180,18 +176,16 @@ def _dt(d) -> str:
 _CPU_TRANSFORM = TransformConfig().build()
 
 
-def _load_encoder_for_config(device, use_flash, use_tome, use_compile, tome_r):
-    '''One encoder per config. tome_r and compile are GigaPathEncoderConfig fields now,
-    so the "ToMe before torch.compile" ordering is inside build() instead of
-    being two lines a caller has to keep in the right order.'''
+def _load_encoder_for_config(device, use_flash, use_compile):
+    '''One encoder per config. compile is a GigaPathEncoderConfig field, so
+    build() owns when it is applied rather than the caller.'''
     os.environ.pop('TIMM_FUSED_ATTN', None) if use_flash else os.environ.__setitem__('TIMM_FUSED_ATTN', '0')
-    return GigaPathEncoderConfig(tome_r=tome_r if use_tome else 0,
-                                 compile=use_compile).build(device)
+    return GigaPathEncoderConfig(compile=use_compile).build(device)
 
 
-def _sweep_configs(device, tome_r, batch_sizes, encode_fn):
+def _sweep_configs(device, batch_sizes, encode_fn):
     '''
-    Run all 7 _COMPARE_CONFIGS, load a fresh model per config, sweep batch_sizes.
+    Run all 6 _COMPARE_CONFIGS, load a fresh model per config, sweep batch_sizes.
 
     encode_fn(encoder, bs) -> dict  must contain at least {'pps': float, 'mem': float}.
     The callback owns warmup, timing, and any extra metric collection.
@@ -202,10 +196,10 @@ def _sweep_configs(device, tome_r, batch_sizes, encode_fn):
     '''
     all_results  = {}
     baseline_pps = {}
-    for label, use_flash, dtype, use_tome, use_compile in _COMPARE_CONFIGS:
+    for label, use_flash, dtype, use_compile in _COMPARE_CONFIGS:
         if use_compile:
             print(f'  [torch.compile warmup for: {label}]')
-        base = _load_encoder_for_config(device, use_flash, use_tome, use_compile, tome_r)
+        base = _load_encoder_for_config(device, use_flash, use_compile)
         # variant(), not a second build: the sweep changes batch size and
         # precision, neither of which rebuilds a model, and reloading 4.5 GB per
         # point would be most of what this bench claims to measure.
@@ -290,7 +284,7 @@ def _print_compare_matrix(all_results, baseline_pps, batch_sizes):
 
 # ── Part 1 comparison ─────────────────────────────────────────────────────────
 
-def bench_compare(device, tome_r, n_patches, batch_sizes, warmup, repeats=3):
+def bench_compare(device, n_patches, batch_sizes, warmup, repeats=3):
     '''7 configs x batch_sizes sweep on synthetic patches.'''
     print('\n' + '=' * 72)
     print(f'  Part 1 — Comparison Sweep  n={n_patches} synthetic patches')
@@ -306,7 +300,7 @@ def bench_compare(device, tome_r, n_patches, batch_sizes, warmup, repeats=3):
         t = _time_encoder(encoder, patches, device, repeats)
         return {'pps': n_patches / t, 'mem': peak_gpu_mb(device)}
 
-    all_results, baseline_pps = _sweep_configs(device, tome_r, batch_sizes, encode_fn)
+    all_results, baseline_pps = _sweep_configs(device, batch_sizes, encode_fn)
     _print_compare_flat(all_results, baseline_pps, batch_sizes)
     _print_compare_matrix(all_results, baseline_pps, batch_sizes)
 
@@ -361,7 +355,7 @@ def bench_synthetic(base, device, batch_sizes, dtypes, n_patches, warmup, repeat
 
 # ── Part 2 comparison (WSI) ───────────────────────────────────────────────────
 
-def bench_wsi_compare(device, wsi_path, tome_r, batch_sizes, level, overlap, warmup):
+def bench_wsi_compare(device, wsi_path, batch_sizes, level, overlap, warmup):
     '''7 configs x batch_sizes on a real WSI (fixed level/overlap).'''
     print('\n' + '=' * 72)
     print(f'  Part 2 — WSI Comparison  level={level}  overlap={overlap}'
@@ -397,7 +391,7 @@ def bench_wsi_compare(device, wsi_path, tome_r, batch_sizes, level, overlap, war
         pps = n_patches / t_encode if t_encode > 0 else 0.0
         return {'pps': pps, 'mem': peak_gpu_mb(device), 'encode_s': t_encode}
 
-    all_results, baseline_pps = _sweep_configs(device, tome_r, batch_sizes, encode_fn)
+    all_results, baseline_pps = _sweep_configs(device, batch_sizes, encode_fn)
     wsi.close()
     _print_compare_flat(all_results, baseline_pps, batch_sizes, show_encode_s=True)
     _print_compare_matrix(all_results, baseline_pps, batch_sizes)
@@ -596,8 +590,6 @@ def main():
     # ── model flags (standard mode only) ──
     ap.add_argument('--no-flash-attn', action='store_true',
                     help='disable flash-attn (TIMM_FUSED_ATTN=0)')
-    ap.add_argument('--tome',    action='store_true')
-    ap.add_argument('--tome-r',  type=int, default=8)
     ap.add_argument('--compile', action='store_true',
                     help='torch.compile (first warmup ~2-5 min)')
 
@@ -617,14 +609,14 @@ def main():
 
     # ── comparison mode ──────────────────────────────────────────────────────
     if args.compare:
-        bench_compare(device, args.tome_r,
+        bench_compare(device,
                       n_patches=args.compare_patches,
                       batch_sizes=args.compare_bs,
                       warmup=args.warmup,
                       repeats=args.repeats)
         if not args.no_wsi:
             if wsi_exists:
-                bench_wsi_compare(device, args.wsi, args.tome_r,
+                bench_wsi_compare(device, args.wsi,
                                   batch_sizes=args.wsi_compare_bs,
                                   level=args.wsi_compare_level,
                                   overlap=args.wsi_compare_overlap,
@@ -641,15 +633,12 @@ def main():
     print('Loading GigaPath model...')
     if args.compile:
         print('torch.compile... (first warmup ~2-5 min)')
-    base = GigaPathEncoderConfig(tome_r=args.tome_r if args.tome else 0,
-                                 compile=args.compile).build(device, multi_gpu=n_gpus > 1)
+    base = GigaPathEncoderConfig(compile=args.compile).build(
+        device, multi_gpu=n_gpus > 1)
     if n_gpus > 1:
         print(f'DataParallel across {n_gpus} GPUs')
-    if args.tome:
-        print(f'ToMe applied (r={args.tome_r})')
 
-    opts = ([o for o in ['flash-attn' if not args.no_flash_attn else None,
-                         f'ToMe(r={args.tome_r})' if args.tome else None,
+    opts = ([o for o in ["flash-attn" if not args.no_flash_attn else None,
                          'compile' if args.compile else None] if o])
     print(f'Optimizations : {", ".join(opts) if opts else "none (baseline)"}')
 
