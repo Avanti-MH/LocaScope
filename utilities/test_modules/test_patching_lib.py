@@ -1403,7 +1403,7 @@ def validate_container_contract(wsi, tile: int, level: int) -> None:
             f'one {tile} px tile, so it should have been filtered out')
         assert len(patches) > 0, (
             f'region {i} survived the filter and still yielded no patches; '
-            f'this is what reaches gigapath_encode as an empty batch')
+            f'this is what reaches the encoder as an empty batch')
     assert len(mask.tissue_regions) == kept_before, (
         'from_ds narrowed the caller\'s mask instead of a view of it')
     print(f'  ok   level {container.level}  ds {container.ds:<9.4g}  '

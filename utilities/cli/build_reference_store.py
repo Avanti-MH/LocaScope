@@ -62,6 +62,7 @@ from SafeSlide import SafeSlide                                     # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask                   # noqa: E402
 from TissueSegFunc import HestSegConfig                             # noqa: E402
 from GigaPathFunc import GigaPathEncoderConfig                      # noqa: E402
+import _paths                                                       # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 
 
@@ -249,7 +250,12 @@ def build_slide(wsi_path, args, cfg, encoder, spec, device, hest_method,
             # intermediate never crosses to the host: 86 KB per tile instead of
             # 1.21 MB. Same numbers -- test_gigapath_pooling scores this against
             # pooling the tokens afterwards.
-            feats, slots, layout = encoder.pooled(imgs, args.pooling)
+            feats = encoder.pooled(imgs, args.pooling)
+            # The names come from the mode and the spec, not from a second
+            # reduction -- pooled_spec reads the tensor it is handed and checks
+            # the slot count against what pool_slots named.
+            fs = encoder.pooled_spec(feats, args.pooling)
+            slots, layout = fs.slots, fs.slot_layout
             final = to_sample(records, lv, g.ds)
 
             meta = FS.StoreMeta(
@@ -257,7 +263,7 @@ def build_slide(wsi_path, args, cfg, encoder, spec, device, hest_method,
                 mpp=base_mpp * g.ds, base_mpp=base_mpp, tile_size=cfg.tile,
                 overlap=True, pooling=args.pooling, slots=tuple(slots),
                 slot_layout=layout, dim=spec['dim'],
-                token_grid=tuple(spec['token_grid']),
+                feat_hw=tuple(spec['feat_hw']),
                 num_prefix=spec['num_prefix'], encoder_id=encoder_id,
                 mask_id=mask_id, coverage='sample', n_available=len(g.xy),
                 sample_seed=cfg.seed, n_tiles=len(final),
@@ -297,7 +303,12 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('wsi', nargs='+', help='WSI paths')
-    ap.add_argument('--out', default='result/cache/features',
+    # Absolute, off _paths.RESULT_DIR. A repo-relative default here resolved
+    # against the caller's cwd and so wrote INSIDE the checkout -- the one thing
+    # the result/ move exists to prevent. RefStore.sh passes no --out, so this
+    # default is what it used.
+    ap.add_argument('--out',
+                    default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'),
                     help='store root -- the same cache the pooling stores use. '
                          'They coexist because sampler_id and mask_id are both '
                          'in cfg_hash, so the filenames differ')
@@ -364,11 +375,14 @@ def main() -> int:
     encoder = spec = None
     encoder_id = 'prov-gigapath@fp32tokens'   # replaced below once a model exists
     if not args.dry_run:
-        # fp32: what gigapath_encode_tokens defaulted to when this wrote its
+        # fp32: what the free function defaulted to (GigaPathFunc_old) when
+        # this wrote its
         # existing stores, and changing it would silently orphan them.
         encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
             .with_model(dtype='fp32').build(device)
-        spec = encoder.spec
+        # The model_spec itself: StoreMeta and pooling_kinds read dim / feat_hw /
+        # num_prefix off it by name, so there is nothing to convert.
+        spec = encoder.model_spec
         # Derived, not typed: the old literal could not notice a changed
         # checkpoint, a changed precision or a changed transform.
         encoder_id = encoder.identity_id()

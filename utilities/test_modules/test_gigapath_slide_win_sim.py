@@ -99,7 +99,7 @@ from QueryFromWSI import QueryFromWSI
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
 from GigaPathSlidingWinSim import compute_gigapath_sliding_win_similarity
 from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot
-from GigaPathFunc import gigapath_model, gigapath_encode
+from GigaPathFunc import GigaPathEncoderConfig
 
 
 ROTATIONS = (0, 90, 180, 270)
@@ -392,7 +392,7 @@ def run_rotation_checks(wsi, mask, query_np, encoder, args, base_mpp) -> None:
 
 # ── Visualization ─────────────────────────────────────────────────────────────
 
-def draw_figure(thumb, mask, query_img_np, query_qpc,
+def draw_figure(thumb, mask, regions, query_img_np, query_qpc,
                 sim_maps, ds, tile_size,
                 gt_x, gt_y, est_x, est_y, error_um,
                 wsi_name, mpp_gt, mpp_est,
@@ -401,6 +401,10 @@ def draw_figure(thumb, mask, query_img_np, query_qpc,
                 out):
 
     Ht, Wt = mask.main_mask.shape
+    # `regions` and not mask.tissue_regions: sim_maps was computed over the
+    # container's list, which from_ds narrowed to what can host a tile. Panel
+    # [0,0] below draws mask.tissue_regions on purpose -- that panel is about
+    # the segmentation, this canvas is about the scores.
     sim_canvas = build_sim_canvas(mask, regions, sim_maps, ds, tile_size, Wt, Ht)
     valid = ~np.isnan(sim_canvas)
     vmin = float(np.nanmin(sim_canvas)) if valid.any() else -1.0
@@ -649,9 +653,11 @@ def main():
              if args.precision == 'fp16' and device.type == 'cuda'
              else torch.float32)
     print(f'  device={device}  precision={str(dtype).replace("torch.", "")}')
-    _model = gigapath_model(device)
-    encoder = lambda patches: gigapath_encode(patches, _model, device,
-                                              batch_size=args.batch, dtype=dtype)
+    # From the resolved `dtype`, not from args.precision: the rule above already
+    # demoted fp16 to fp32 on CPU, and passing the raw flag would put that back.
+    encoder = GigaPathEncoderConfig(batch_size=args.batch)\
+        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
+        .build(device)
     timings['0. load model'] = time.perf_counter() - t0
 
     # ── Step 2: Estimate MPP ──────────────────────────────────────────────────
@@ -668,7 +674,11 @@ def main():
     # ── Step 3: Tissue mask ───────────────────────────────────────────────────
     print('\n[3] Building tissue mask...')
     t0 = time.perf_counter()
-    mask = TissuesRegionsMask.from_wsi(wsi)
+    from TissueSegFunc import TissueSegConfig
+    # hsv: these need real tissue tiles, so blank glass has to
+    # be excluded. Retrieval does not -- see GigaPathSlidingWinSim.
+    mask = TissuesRegionsMask.from_wsi(
+        wsi, method=TissueSegConfig('hsv').build())
     before = len(mask.tissue_regions)
     if args.filter:
         mask.filter_regions(args.min_region_ratio)
@@ -789,7 +799,7 @@ def main():
     out = args.out or os.path.join(job_result_dir('SlideWinTest'),
                                     f'slide_win_sim__{tag}.png')
     draw_figure(
-        thumb, mask, query_np, query_qpc,
+        thumb, mask, regions, query_np, query_qpc,
         sim_maps, ds_est, args.tile,
         args.x, args.y, est_x, est_y, err_um,
         wsi_name, args.mpp, mpp_est,

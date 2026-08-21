@@ -35,12 +35,28 @@ def a_meta(**over) -> FS.StoreMeta:
         wsi_stem='S1104360,G7E,110208', wsi_path='/data/S1104360.mrxs', level=1,
         ds=2.0, mpp=0.4851, base_mpp=0.24255, tile_size=256, overlap=True,
         pooling='cls_avg', slots=('cls', 'avg'), slot_layout='none',
-        dim=8, token_grid=(14, 14), num_prefix=1,
+        dim=8, feat_hw=(14, 14), num_prefix=1,
         encoder_id='prov-gigapath@fp16', mask_id='hest@ds4',
         coverage='sample', n_available=1000, sample_seed=7, n_tiles=4,
     )
     base.update(over)
     return FS.StoreMeta(**base)
+
+
+def a_token_meta(**over) -> FS.StoreMeta:
+    """A meta that IS a token store, not one merely labelled as such.
+
+    pooling='tokens' keeps one slot per cell, so feat_hw, slot_layout and the
+    slot count are three statements of one fact, and save() checks they agree.
+    The read/find tests below use 'tokens' as a value to match ON, and used to
+    pair it with feat_hw=(14,14), two slots and slot_layout='none' -- a store
+    that could not exist on disk. A fixture that could not exist is a weak
+    fixture: it can pass while the thing it stands for is impossible.
+    """
+    base = dict(pooling='tokens', feat_hw=(1, 2), slot_layout='grid:1x2',
+                slots=('cls', 'p0', 'p1'))
+    base.update(over)
+    return a_meta(**base)
 
 
 def tensors_for(meta: FS.StoreMeta, **over):
@@ -112,7 +128,7 @@ def t_cfg_hash_identity_only():
     # it. It stops being redundant the moment a caller encodes at a downsample
     # no level has, and then one level resampled to two scales would otherwise
     # be two sets of tiles under one filename.
-    for over in (dict(encoder_id='other'), dict(mask_id='mask_all'),
+    for over in (dict(encoder_id='other'), dict(mask_id='none@ds4'),
                  dict(tile_size=512), dict(overlap=False), dict(ds=99.0),
                  dict(sampler_id='zzzz9999')):
         assert dataclasses.replace(m, **over).cfg_hash() != h, \
@@ -186,6 +202,37 @@ def t_save_rejects_slot_layout_mismatch(root):
     rejects(lambda: FS.save(root, meta=bad, **tensors_for(m)), 'implies')
 
 
+def t_token_store_must_say_where_its_slots_sat(root):
+    """A store that keeps every cell has to say what the cell layout was.
+
+    This is the one pooling whose READER needs geometry: slot k sat at
+    (k // W, k % W) and nothing else in the file says what W is. feat_hw comes
+    off the encoder's model_spec and slot_layout comes out of pooling_kinds --
+    two different lines -- so agreement between them is evidence they came from
+    the same model, and a mismatch is a store whose slot positions are lost.
+
+    Without this, feat_hw=None loaded cleanly and every position went with it.
+    """
+    ok = a_token_meta()
+    FS.save(root, meta=ok, **tensors_for(ok))
+    rejects(lambda: FS.save(root, meta=dataclasses.replace(ok, feat_hw=None),
+                            **tensors_for(ok)), 'feat_hw')
+    rejects(lambda: FS.save(root, meta=dataclasses.replace(ok, feat_hw=(2, 1)),
+                            **tensors_for(ok)), 'implies')
+    # query_tokens is the same store under another name -- the bench writes it
+    # for the query side -- so it must be inside the check, not beside it.
+    q = a_token_meta(pooling='query_tokens')
+    FS.save(root, meta=q, **tensors_for(q))
+    rejects(lambda: FS.save(root, meta=dataclasses.replace(q, feat_hw=None),
+                            **tensors_for(q)), 'feat_hw')
+    # A pooling that REDUCES the cells keeps no positions, so it is free to
+    # carry feat_hw as provenance while its slot_layout says 'none'. If this
+    # ever starts raising, the check has stopped distinguishing the two.
+    r = a_meta(pooling='cls_avg', slots=('cls', 'avg'), slot_layout='none',
+               feat_hw=(14, 14))
+    FS.save(root, meta=r, **tensors_for(r))
+
+
 def t_extra_tensors(root):
     m = a_meta(pooling='queries')
     extra = {'ans_main': torch.arange(4, dtype=torch.int32),
@@ -201,7 +248,7 @@ def t_extra_tensors(root):
 # ── read ──────────────────────────────────────────────────────────────────────
 
 def t_require_refuses(root):
-    m = a_meta(pooling='tokens', slots=('cls', 'p0'), coverage='sample')
+    m = a_token_meta(coverage='sample')
     p = FS.save(root, meta=m, **tensors_for(m))
     FS.load(p, require={'pooling': 'tokens', 'coverage': 'sample'})   # matches
     try:
@@ -225,8 +272,8 @@ def t_load_meta_and_keys(root):
 def t_find(root):
     for lvl in (0, 1):
         for pool in ('cls', 'tokens'):
-            m = a_meta(level=lvl, pooling=pool,
-                       slots=('cls',) if pool == 'cls' else ('cls', 'p0'))
+            m = (a_meta(level=lvl, pooling='cls', slots=('cls',))
+                 if pool == 'cls' else a_token_meta(level=lvl))
             FS.save(root, meta=m, **tensors_for(m))
     def n(**q):
         return len(FS.find(root, **q))
@@ -248,8 +295,7 @@ def t_find_one(root):
     caller no way to disambiguate, which is barely better than the wrong pick.
     """
     for sid in ('', 'aaaa1111'):
-        m = a_meta(level=0, pooling='tokens', slots=('cls', 'p0'),
-                   sampler_id=sid)
+        m = a_token_meta(level=0, sampler_id=sid)
         FS.save(root, meta=m, **tensors_for(m))
 
     one = FS.find_one(root, level=0, pooling='tokens', sampler_id='aaaa1111')
@@ -329,6 +375,7 @@ def main() -> int:
             ('only on-grid tiles are bounded by the grid',
              t_on_grid_count_is_what_is_bounded),
             ('slot_layout must agree with n',       t_save_rejects_slot_layout_mismatch),
+            ('a token store must say its layout',   t_token_store_must_say_where_its_slots_sat),
             ('extra tensors, and name collisions',  t_extra_tensors),
         ):
             check(name, in_own_dir(fn, name))

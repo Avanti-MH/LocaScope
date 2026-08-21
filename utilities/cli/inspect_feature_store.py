@@ -108,14 +108,14 @@ def expand(paths) -> list:
 def show(path: Path) -> FS.StoreMeta:
     m = FS.load_meta(path)
     size = path.stat().st_size / 1e9
-    grid = f'{m.token_grid[0]}x{m.token_grid[1]}' if m.token_grid else '-'
+    grid = f'{m.feat_hw[0]}x{m.feat_hw[1]}' if m.feat_hw else '-'
     is_query = 'query' in m.pooling
     print(f'{path.name}')
     print(f'  slide     {m.wsi_stem}  L{m.level}   ds={m.ds:g}  '
           f'mpp={m.mpp:.4f}  base_mpp={m.base_mpp:.4f}')
     print(f'  features  pooling={m.pooling}  slots={len(m.slots)}  '
           f'layout={m.slot_layout}  dim={m.dim}  '
-          f'token_grid={grid}  num_prefix={m.num_prefix}')
+          f'feat_hw={grid}  num_prefix={m.num_prefix}')
     print(f'  made by   encoder={m.encoder_id}   mask={m.mask_id}   '
           f'tile={m.tile_size}   overlap={m.overlap}')
     print(f'  identity  cfg_hash={m.cfg_hash()}   {size:.2f} GB   {m.created_at}')

@@ -182,8 +182,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                     # noqa: E402
 
 import FeatureStore as FeatureStoreModule                           # noqa: E402
-from GigaPathFunc import pool_tokens                                # noqa: E402
+from GigaPathFunc import pooling_kinds                                # noqa: E402
 from GigaPathKnnEstiMpp import KnnClassifier                        # noqa: E402
+import _paths                                                       # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 from bench_feature_axes import load_slide_balanced                  # noqa: E402
 
@@ -640,9 +641,7 @@ def load_query_level(store_root, wsi_stem, level, pooling):
     meta = FeatureStoreModule.load_meta(path)
     tensors, _ = FeatureStoreModule.load(path, keys=['features', 'fov_id'])
 
-    token_spec = {'dim': meta.dim, 'token_grid': meta.token_grid,
-                  'num_prefix': meta.num_prefix}
-    slots = pool_tokens(tensors['features'].float(), pooling, token_spec)[0]
+    slots = pooling_kinds(tensors['features'].float(), pooling, meta)
     features = torch.nn.functional.normalize(
         slots.reshape(slots.shape[0], -1), dim=-1)
     return features, tensors['fov_id'].numpy().astype(np.int64), float(meta.mpp)
@@ -1085,7 +1084,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description='Does the KNN do better in the scale subspace?')
     parser.add_argument('slides', nargs='+', help='wsi_stem of each slide')
-    parser.add_argument('--stores', default='result/cache/features')
+    parser.add_argument('--stores',
+                        default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'))
     parser.add_argument('--pooling', default='cls')
     parser.add_argument('--per-level', type=int, default=1000,
                         help='tiles per level, balanced (default 1000)')

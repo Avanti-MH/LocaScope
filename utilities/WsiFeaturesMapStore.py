@@ -107,8 +107,9 @@ def to_store_tensors(wfm: WsiFeaturesMap) -> dict:
     comparison here.
 
     features come out [N, 1, D] because a store's second axis is its slots and
-    this path carries one -- the production CLS. A pooling with more of them
-    goes through pool_tokens and does not come here.
+    this path carries one -- whatever the encoder's features() reduced to,
+    which is the CLS for a ViT and a global average for a CNN. A pooling with
+    more slots goes through pooling_kinds and does not come here.
     """
     grids = wfm.grids()
     parts = [m.features for m in wfm]
@@ -221,10 +222,33 @@ class WsiFeaturesMapStore:
     only agree if the mask and the scale agree.
     """
 
-    #: What this path stores. A pooling with more slots goes through pool_tokens
-    #: and does not come here; see to_store_tensors.
-    POOLING = 'cls'
-    SLOTS = ('cls',)
+    #: ONE slot, always -- that much is this path's own property and not the
+    #: encoder's. A WsiFeaturesMap holds one vector per tile by construction:
+    #: PatchingLib refuses features that are not [N, D], to_store_tensors
+    #: unsqueezes the slot axis in, and from_store_tensors refuses anything with
+    #: more than one. A parameter here would offer a state this path cannot
+    #: reach, and one slot genuinely has no layout for any model.
+    #:
+    #: WHAT that one vector is, though, is the encoder's property, so it is not
+    #: named here. This used to read POOLING = 'cls', which is true of GigaPath
+    #: and a false claim about every CNN handed to the same constructor -- their
+    #: features() is a global average. See TileEncoder.feature_pooling.
+    #:
+    #: Switching the PIPELINE to a multi-slot pooling is not a change to this.
+    #: It is, in order: [N, D] -> [N, n, D] in PatchingLib, the two conversions
+    #: above, a decision in retrieval about how n slots combine into one score
+    #: -- the open question the pooling bench exists to answer, not a plumbing
+    #: change -- and only then this.
+    SLOT_LAYOUT = 'none'
+
+    @property
+    def pooling(self) -> str:
+        """The store's pooling label, which is whatever features() reduced by.
+
+        A property and not a constant so that the filename, the load-time
+        require= and the saved metadata cannot drift apart: all three read this.
+        """
+        return self.encoder.feature_pooling
 
     def __init__(self, root, wsi_path, encoder, mask_id: str,
                  mode: str = 'rw', verbose: bool = True):
@@ -247,7 +271,7 @@ class WsiFeaturesMapStore:
         """The metadata fields a stored file has to agree with."""
         return {'wsi_stem': self.wsi_stem,
                 'level': container.level,
-                'pooling': self.POOLING,
+                'pooling': self.pooling,
                 'ds': float(container.ds),
                 'tile_size': container.tile_size,
                 'overlap': container.overlap,
@@ -262,7 +286,7 @@ class WsiFeaturesMapStore:
         want = self._require(container)
         try:
             hits = FS.find(self.root, wsi_stem=self.wsi_stem,
-                           level=container.level, pooling=self.POOLING)
+                           level=container.level, pooling=self.pooling)
         except FileNotFoundError:
             hits = []
         if not hits:
@@ -314,8 +338,15 @@ class WsiFeaturesMapStore:
             level=wfm.level, ds=wfm.ds,
             mpp=base_mpp * wfm.ds, base_mpp=base_mpp,
             tile_size=wfm.tile_size, overlap=wfm.overlap,
-            pooling=self.POOLING, slots=self.SLOTS, slot_layout='none',
-            dim=wfm.feat_dim, token_grid=None, num_prefix=0,
+            pooling=self.pooling, slots=(self.pooling,),
+            slot_layout=self.SLOT_LAYOUT,
+            dim=wfm.feat_dim,
+            # From the encoder, not literals. These two describe what PRODUCED
+            # the file, so None/0 was a claim about GigaPath rather than about
+            # this store -- and a false one, since the model that made these
+            # vectors does have a 14x14 patch grid and one prefix token.
+            feat_hw=self.encoder.model_spec.feat_hw,
+            num_prefix=self.encoder.model_spec.num_prefix,
             encoder_id=self.encoder.identity_id(), mask_id=self.mask_id,
             coverage='all', n_available=wfm.n_patches(), sample_seed=None,
             n_tiles=wfm.n_patches())

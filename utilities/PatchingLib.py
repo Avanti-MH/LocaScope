@@ -1244,7 +1244,7 @@ class WsiTissuesContainer():
           the mask is narrowed to regions that can host a tile at that ds, on a
           `regions_view()` so the caller's mask is untouched. Callers used to do
           this themselves; when they filtered at a different ds the answer was a
-          region with zero patches, and `gigapath_encode` dies on an empty batch
+          region with zero patches, and the encoder dies on an empty batch
           inside torch.cat naming neither the region nor the level.
 
         `filter_regions` and `merge_overlapping` are NOT applied. They depend on

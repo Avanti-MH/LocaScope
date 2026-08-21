@@ -74,7 +74,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                     # noqa: E402
 
 import FeatureStore as FeatureStoreModule                           # noqa: E402
-from GigaPathFunc import pool_tokens                                # noqa: E402
+from GigaPathFunc import pooling_kinds                                # noqa: E402
+import _paths                                                       # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 
 
@@ -113,9 +114,7 @@ def load_level(store_root, wsi_stem, level, pooling, sampler_id=None):
         white_fraction = np.full(tensors['features'].shape[0], np.nan,
                                  dtype=np.float32)
 
-    token_spec = {'dim': meta.dim, 'token_grid': meta.token_grid,
-                  'num_prefix': meta.num_prefix}
-    slots = pool_tokens(tensors['features'].float(), pooling, token_spec)[0]
+    slots = pooling_kinds(tensors['features'].float(), pooling, meta)
     features = torch.nn.functional.normalize(
         slots.reshape(slots.shape[0], -1), dim=-1)
 
@@ -699,7 +698,8 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('wsi_stem', nargs='+',
                         help='one or more slides, e.g. BRACS_1228')
-    parser.add_argument('--stores', default='result/cache/features')
+    parser.add_argument('--stores',
+                        default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'))
     parser.add_argument('--out', default='')
     parser.add_argument('--pooling', default='cls')
     parser.add_argument('--sampler-id', default=None,

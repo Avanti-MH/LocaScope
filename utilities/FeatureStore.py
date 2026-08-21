@@ -62,9 +62,24 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-SCHEMA_VERSION = '1'
+#: '2' renamed token_grid -> feat_hw. Deliberately not given a default that
+#: would let version-1 files still load: their writers disagreed about what the
+#: field MEANT -- build_reference_store put the producing model's patch grid in
+#: it, WsiFeaturesMapStore put None -- so a silent fallback would preserve that
+#: disagreement instead of ending it. Every version-1 file is a regenerable
+#: cache; refusing them costs a re-encode and buys one meaning per field.
+SCHEMA_VERSION = '2'
 
 CORE_TENSORS = ('features', 'x', 'y', 'region', 'grid_rc')
+
+#: Slot names that hold the tile's single summary vector rather than a cell, so
+#: they do not count towards what a slot_layout implies. Which one appears is
+#: the model's property: a ViT's summary is its CLS token, a CNN's is the global
+#: average of its feature map, and calling the second 'cls' would name a token
+#: that does not exist. Spelled here and not imported from GigaPathFunc, which
+#: this module deliberately does not depend on -- pooling_kinds writes them, this
+#: reads them, and the test that saves a store from each keeps the two in step.
+SUMMARY_SLOTS = frozenset({'cls', 'gap'})
 
 #: Fields that decide what a tile IS. Two stores that agree on these hold
 #: comparable vectors; two that disagree do not, whatever else they share.
@@ -184,8 +199,22 @@ class StoreMeta:
     slots:       Tuple[str, ...]            # len == n
     slot_layout: str                        # 'none' | 'grid:2x2' | 'ring:3' | ...
     dim:         int                        # D
-    token_grid:  Optional[Tuple[int, int]]  # the model's patch grid, if relevant
-    num_prefix:  int                        # CLS + registers; the slice point
+
+    #: These two describe the ENCODER THAT WROTE THIS, not the slots above.
+    #: `slots` and `slot_layout` say what is in the file; feat_hw and num_prefix
+    #: say what produced it, and are the readable companion to encoder_id, which
+    #: is a hash and cannot be inverted. So a pooling='cls' store still carries
+    #: (14, 14) here: the file holds one vector, the model that made it had a
+    #: 14x14 patch grid, and both facts are worth keeping.
+    #:
+    #: The distinction is not academic -- the two writers used to disagree about
+    #: it, which is what SCHEMA_VERSION '2' is for.
+    #:
+    #: feat_hw, not token_grid: a CNN's output is a feature map with no tokens
+    #: in it, and `grid` alone would collide with grid_rc one field below, which
+    #: indexes the lattice of TILES across the slide. See ModelOutputSpec.
+    feat_hw:     Optional[Tuple[int, int]]  # (H, W) of the encoder's output
+    num_prefix:  int                        # CLS + registers; 0 if it has none
 
     # what produced it
     encoder_id:  str                        # e.g. 'prov-gigapath@fp16'
@@ -223,6 +252,20 @@ class StoreMeta:
     def filename(self) -> str:
         return (f'{self.wsi_stem}__L{self.level}__{self.pooling}'
                 f'__{self.cfg_hash()}.safetensors')
+
+    def __getitem__(self, key: str):
+        """Field access by name, so pooling_kinds can take a StoreMeta as-is.
+
+        pooling_kinds has two suppliers -- a live encoder's ModelOutputSpec and a
+        StoreMeta off disk -- and they now spell dim / feat_hw / num_prefix
+        identically. Subscripting is the whole of what it needs from either, so
+        the three benches that used to rebuild a dict from these very fields
+        pass `meta` instead.
+        """
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key) from None
 
     # ── string round-trip ────────────────────────────────────────────────────
 
@@ -323,15 +366,37 @@ def _validate(features, x, y, region, grid_rc, meta: StoreMeta, extra) -> None:
                f"coverage='all' but n_tiles={n_tiles} != n_available="
                f'{meta.n_available}')
 
+    n_summary = 1 if set(meta.slots) & SUMMARY_SLOTS else 0
     if meta.slot_layout.startswith('grid:'):
         gh, gw = (int(v) for v in meta.slot_layout[5:].split('x'))
-        want = gh * gw + (1 if 'cls' in meta.slots else 0)
+        want = gh * gw + n_summary
         _check(want == n_slots,
                f'slot_layout {meta.slot_layout!r} implies {want} slots, got {n_slots}')
     elif meta.slot_layout.startswith('ring:'):
-        want = int(meta.slot_layout[5:]) + (1 if 'cls' in meta.slots else 0)
+        want = int(meta.slot_layout[5:]) + n_summary
         _check(want == n_slots,
                f'slot_layout {meta.slot_layout!r} implies {want} slots, got {n_slots}')
+
+    # pooling='tokens' is the one store whose READER has to know where each slot
+    # sat, because it keeps every cell rather than a reduction of them. Slot k
+    # is at (k // W, k % W) and nothing else in the file says what W is.
+    #
+    # The two values compared here are written by different lines -- feat_hw off
+    # the encoder's model_spec, slot_layout out of pooling_kinds -- so agreement
+    # is evidence that both came from the same model. Without this a token store
+    # could carry feat_hw=None and still load cleanly, and every slot's position
+    # would be lost with nothing raising.
+    # endswith and not ==: the query side of the pooling bench writes
+    # 'query_tokens', which keeps every cell for exactly the same reason and
+    # would otherwise sit outside the one check that protects it.
+    if meta.pooling.endswith('tokens'):
+        _check(meta.feat_hw is not None,
+               "pooling='tokens' keeps one slot per cell, so feat_hw says where "
+               'each slot sat; it is None')
+        want = f'grid:{meta.feat_hw[0]}x{meta.feat_hw[1]}'
+        _check(meta.slot_layout == want,
+               f'feat_hw {meta.feat_hw} implies slot_layout {want!r}, '
+               f'got {meta.slot_layout!r}')
 
     for k in (extra or {}):
         _check(k not in CORE_TENSORS,
