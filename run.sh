@@ -41,7 +41,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # # ---------------- Step 2: run the 3-stage pipeline over the whole corpus ----------------
 # echo ""
 # echo "======== [2/2] bench_locascope: 3-stage pipeline + metrics + plots ========"
-# python utilities/test_modules/bench_locascope.py \
+# python utilities/bench_modules/bench_locascope.py \
 #   --gt-csv     $CORPUS/gt.csv \
 #   --images-dir $CORPUS/images \
 #   --out        $BENCH \
