@@ -18,6 +18,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # Runs write outside the checkout; see utilities/test_modules/_paths.py
@@ -68,6 +69,11 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 MODE="${MODE:-smoke}"
 
+# Resolved once. The bench puts this name in the CSV's filename AND in every
+# row, so the echo lines at the bottom have to spell the same default the ARGS
+# line does -- two places that must agree is one place too many.
+ENCODER="${ENCODER:-gigapath}"
+
 if [ "$MODE" = "smoke" ]; then
   BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
   KI67=/work/u26130998/datasets/Ki67
@@ -76,14 +82,16 @@ if [ "$MODE" = "smoke" ]; then
     "$KI67/S1104233,G7E,110208.mrxs"
   )
   ARGS="--slides ${SLIDES[*]} --levels 1 2 --n-fov ${N_FOV:-25}"
+  ARGS="$ARGS --encoder $ENCODER"
   OUT="$RESULT_ROOT/SlidewinPooling/smoke"
 else
   ARGS="--levels ${LEVELS:-0 1 2} --n-fov ${N_FOV:-100} --batch-size ${BATCH_SIZE:-2048}"
+  ARGS="$ARGS --encoder $ENCODER"
   OUT="$RESULT_ROOT/SlidewinPooling"
 fi
 
-echo "======== mode=$MODE ========"
-echo "out : $OUT"
+echo "======== mode=$MODE  encoder=$ENCODER ========"
+echo "out : $OUT/slidewin_pooling_$ENCODER.csv"
 echo ""
 
 python utilities/test_modules/bench_slidewin_pooling.py \
@@ -92,7 +100,7 @@ python utilities/test_modules/bench_slidewin_pooling.py \
 
 echo ""
 echo "======== done ========"
-echo "  $OUT/slidewin_pooling.csv"
+echo "  $OUT/slidewin_pooling_$ENCODER.csv"
 echo ""
 echo "  Read the gates FIRST -- a failure there means no number below is worth"
 echo "  reading. Then truth_pctile per (slide, level): 0.5 = broken mapping."
@@ -107,4 +115,8 @@ echo "  Every metric is derived from two stored integers per (query, arm), so"
 echo "  re-tabulating costs no GPU:"
 echo ""
 echo "    python utilities/test_modules/bench_slidewin_pooling.py --report-only \\"
-echo "        $OUT/slidewin_pooling.csv"
+echo "        $OUT/slidewin_pooling_$ENCODER.csv"
+echo ""
+echo "  One encoder per report. Feeding two CSVs at once is refused: every"
+echo "  table averages over rows, so the merge would print one comparison"
+echo "  where there are two."

@@ -18,6 +18,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # Runs write outside the checkout; see utilities/test_modules/_paths.py
@@ -40,13 +41,13 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # is under 100k tiles -- minutes on a single card. Asking for four would queue
 # longer for no gain.
 #
-# MEMORY: 128G, not the 600G BenchLocaScope needs. That job reads a mask_all
-# region whole (18.7 Gpx at L0, RSS 339 GB observed); this one computes grid
-# coordinates from PatchGrid.from_size, which touches no pixels, and then reads
-# 256x256 tiles individually.
+# MEMORY: 128G, not the 600G BenchLocaScope needs. That job reads an unmasked
+# region whole (method='', 18.7 Gpx at L0, RSS 339 GB observed); this one
+# computes grid coordinates from PatchGrid.from_size, which touches no pixels,
+# and then reads 256x256 tiles individually.
 
-OUT="$RESULT_ROOT"/cache/features
-REPORT="$RESULT_ROOT"/cache/pooling_report.txt
+OUT="$RESULT_ROOT"/cache/reference_features
+REPORT="$RESULT_ROOT"/cache/reference_report.txt
 
 K=2000                # reference tiles per (slide, level)
 K_FLOOR=2000          # floor for coarse levels; they take min(available, this)
@@ -96,6 +97,7 @@ LEVEL_FLAG=""
 
 python utilities/test_modules/bench_gigapath_pooling.py \
   --phase dump \
+  --encoder "${ENCODER:-gigapath}" \
   --out "$OUT" \
   -k $K --k-floor $K_FLOOR --queries $QUERIES \
   --mask-ds $MASK_DS --seed $SEED \
@@ -136,6 +138,14 @@ echo ""
 echo "======== done ========"
 echo "  stores  $OUT/"
 echo "  report  $REPORT"
+echo ""
+echo "  The report ends with the same paired tables as log/SlidewinPooling --"
+echo "  W/L/T against the cls baseline, top@f%, truth@k and gap@k -- printed by"
+echo "  the same code (utilities/RetrievalReport.py), so the two benches'"
+echo "  columns mean the same thing and can be read side by side. What differs"
+echo "  is the unit: a row there is one FoV window through stage 2, a row here"
+echo "  is one tile against a store. Expect the absolute numbers to differ; it"
+echo "  is the ORDERING of the arms that is comparable."
 echo ""
 echo "  Read it for CONSISTENCY across the 25 (slide, level) combinations, not"
 echo "  for a winner in any one of them. A pooling that leads on one slide and"

@@ -17,6 +17,7 @@ ml load miniconda3/24.11.1
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # Runs write outside the checkout; see utilities/test_modules/_paths.py
@@ -105,7 +106,7 @@ if [ -n "${ONLY_WSI}" ]; then
 fi
 
 python utilities/test_modules/bench_subspace_knn.py "${SLIDES[@]}" \
-  --stores "$RESULT_ROOT"/cache/features \
+  --stores "$RESULT_ROOT"/cache/reference_features \
   --pooling cls \
   --per-level "${PER_LEVEL:-1000}" \
   --white-max "${WHITE_MAX:-0.15}" \

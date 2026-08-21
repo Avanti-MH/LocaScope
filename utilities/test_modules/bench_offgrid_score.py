@@ -45,7 +45,7 @@ are wrong and no score in the output means anything.
 Reading one tile at a time, not the region
 ------------------------------------------
 `WsiTissuesContainer` reads a whole tissue region in one call, which is correct
-for production (it needs every window) and catastrophic here (a mask_all L0
+for production (it needs every window) and catastrophic here (an unsegmented L0
 region is 18.7 Gpx; one such read took 4083 s, see TODO 2026-08-13). This needs
 only (R+2) x (C+2) tiles around each grid point, so it reads exactly that
 window and builds the same `TissuePatchContainer` over it -- the identical three
@@ -120,8 +120,7 @@ from PatchingLib import (PatchGrid, QueryPatchContainer,            # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask, TissueRegion     # noqa: E402
 from TissueSegFunc import HestSegConfig                             # noqa: E402
-from GigaPathFunc import GigaPathEncoderConfig                     # noqa: E402
-from TileEncoderFunc import TransformConfig                        # noqa: E402
+from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
 from GigaPathSlidingWinSim import SlidingWindowSimilarity           # noqa: E402
 from camera import Camera                                           # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
@@ -783,18 +782,44 @@ def read_scores(paths) -> list:
     return rows
 
 
-def render(rows, out_dir: Path) -> list:
+def encoder_tag(rows, fallback: str = '') -> str:
+    """Which encoder these rows came from, read from the rows themselves.
+
+    From the rows and not from args, because --plot-only draws CSVs written by
+    an earlier run: argparse's default would name whichever encoder was not
+    used, and the figure would carry the wrong model's name.
+
+    Mixed rows stop the run. Every figure below averages over rows, so one
+    heatmap drawn from two encoders is a picture of neither -- and it would
+    look exactly like a picture of one.
+
+    Empty when the rows predate the column, which leaves the old filenames
+    unchanged so --plot-only over an old CSV still redraws what it drew.
+    """
+    seen = {r.get('encoder', '') for r in rows} - {''}
+    if len(seen) > 1:
+        raise SystemExit(
+            f'these rows mix encoders ({", ".join(sorted(seen))}). Draw them '
+            f'separately -- one heatmap cannot mean two models.')
+    return seen.pop() if seen else fallback
+
+
+def render(rows, out_dir: Path, encoder: str = '') -> list:
     """Gates, figures and the definition list. Shared by a real run and by
     --plot-only, so a merged CSV is drawn by exactly the code that drew the
     per-slide ones."""
     gates = aggregate_gates(rows) if rows else []
-    write_csv(gates, out_dir / 'offgrid_gates.csv')
+    tag = encoder_tag(rows, encoder)
+    suffix = f'_{tag}' if tag else ''
+    write_csv(gates, out_dir / f'offgrid_gates{suffix}.csv')
+    # No suffix: the definition list is this bench's own vocabulary and says
+    # nothing about which model produced a number.
     write_csv([dict(term=term, means=means) for term, means in DEFINITIONS],
               out_dir / 'offgrid_definitions.csv')
     if rows:
-        plot_heatmap(rows, out_dir / 'offgrid_heatmap.png')
-        plot_surface(rows, out_dir / 'offgrid_surface.png')
-        plot_profile(rows, out_dir / 'offgrid_profile.png')
+        plot_heatmap(rows, out_dir / f'offgrid_heatmap{suffix}.png')
+        plot_surface(rows, out_dir / f'offgrid_surface{suffix}.png')
+        plot_profile(rows, out_dir / f'offgrid_profile{suffix}.png')
     return gates
 
 
@@ -842,6 +867,13 @@ def main() -> int:
     parser.add_argument('--mask-ds', type=float, default=4.0)
     parser.add_argument('--seg-chunk-px', type=float, default=4_000_000)
     parser.add_argument('--min-region-ratio', type=float, default=0.01)
+    parser.add_argument(
+        '--encoder', default='gigapath', choices=encoder_names(),
+        help='which tile encoder. Only the module for THIS one is imported: '
+             'every implementation sets HF_HOME above its own timm import and '
+             'setdefault is first-one-wins, so importing all three would point '
+             'two of them at the wrong weight cache -- silently. See '
+             'TileEncoderFunc._IMPLEMENTATIONS.')
     parser.add_argument('--batch-size', type=int, default=1024)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', default=None)
@@ -867,13 +899,24 @@ def main() -> int:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'device={device}  step={args.step}  points={args.points}  '
           f'domain_gap={args.domain_gap}')
-    # One encoder per preprocess, over ONE loaded model. with_transform shares
-    # the weights and swaps only the pipeline, so the second arm costs a forward
-    # pass and not another 4.5 GB. dtype='fp32' keeps what gigapath_encode
-    # defaulted to before this call site moved to GigaPathEncoderConfig.
-    base = GigaPathEncoderConfig(batch_size=args.batch_size).with_model(dtype='fp32').build(device)
-    encoders = {name: base.variant(transform=TransformConfig(preprocess=name))
-                for name in PREPROCESS}
+    # One encoder per preprocess, over ONE loaded model. variant() shares the
+    # weights and swaps only the pipeline, so the second arm costs a forward
+    # pass and not another 4.5 GB. dtype='fp32' keeps what the free function
+    # defaulted to before this call site moved to a config.
+    #
+    # The transform is REPLACED rather than edited, and that carries a hazard
+    # worth naming now that --encoder exists: TransformConfig(preprocess=name)
+    # takes its other five fields from the dataclass defaults, which are
+    # GigaPath's 256/224 bicubic ImageNet numbers. For UNI2 or CONCH that would
+    # silently substitute another model's preprocessing -- so it is built off
+    # the encoder's OWN transform, with only `preprocess` changed.
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size)\
+        .with_model(dtype='fp32')
+    base = cfg.build(device)
+    import dataclasses as _dc
+    encoders = {
+        name: base.variant(transform=_dc.replace(cfg.transform, preprocess=name))
+        for name in PREPROCESS}
     hest_method = HestSegConfig().build(device)
     rng = np.random.default_rng(args.seed)
 
@@ -887,9 +930,17 @@ def main() -> int:
             traceback.print_exc()
             failed.append(Path(path).stem)
 
+    # Stamped here rather than inside scan_point: one place that cannot miss a
+    # row, and scan_point has no reason to know which encoder built the models
+    # it was handed. The encoder is in the NAME as well as in every row --
+    # the name stops a second encoder's run from overwriting the first one's
+    # numbers, the column stops the two from being drawn on one heatmap.
+    for row in all_rows:
+        row['encoder'] = args.encoder
+
     print(f'\n{"=" * 78}\nwriting to {out_dir}')
-    write_csv(all_rows, out_dir / 'offgrid_scores.csv')
-    failed_gates = report_gates(render(all_rows, out_dir))
+    write_csv(all_rows, out_dir / f'offgrid_scores_{args.encoder}.csv')
+    failed_gates = report_gates(render(all_rows, out_dir, args.encoder))
     if failed:
         print(f'\n{len(failed)} slide(s) failed: {", ".join(failed)}')
     return 1 if (failed or failed_gates) else 0

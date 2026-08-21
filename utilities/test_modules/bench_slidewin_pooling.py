@@ -14,7 +14,7 @@ been measured against an alternative at the window level, and retrieval's
 largest failure bucket is "the truth was never proposed" (32.3% of 1404 shots,
 result/BenchLocaScope).
 
-    pooling   cls  cls_avg  cls_std  rings3  grid2x2      (aiNNModel pool_tokens)
+    pooling   cls  cls_avg  cls_std  rings3  grid2x2      (aiNNModel pooling_kinds)
     score     mean  geomean  min                          (how R_q x C_q cosines
                                                            become one number)
 
@@ -160,7 +160,7 @@ Nothing here fails loudly. A broken coordinate mapping produces "no pooling
 improves retrieval", which reads as a finding. So three checks run first, each
 taking seconds, each able to pass only if the machinery means something:
 
-  baseline is production   pool_tokens(...,'cls') against gigapath_encode.
+  baseline is production   pooling_kinds(...,'cls') against .features().
                            Without it every arm is compared to a baseline that
                            is not the shipped feature. test_gigapath_pooling
                            already pins this at cos 1.2e-7; it is repeated here
@@ -218,7 +218,11 @@ from PatchingLib import (FeaturesMap, QueryPatchContainer,      # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask                # noqa: E402
 from TissueSegFunc import HestSegConfig                          # noqa: E402
-from GigaPathFunc import GigaPathEncoderConfig, pool_tokens      # noqa: E402
+from TileEncoderFunc import (admissible_poolings, encoder_config,  # noqa: E402
+                             encoder_names, pooling_kinds)
+from RetrievalReport import (K_FIXED, K_FRACTIONS,              # noqa: E402,F401
+                             attach_baseline, frac_label, k_at,
+                             report, truth_rank)
 from GigaPathSlidingWinSim import SlidingWindowSimilarity        # noqa: E402
 from camera import Camera                                        # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
@@ -227,7 +231,7 @@ from _paths import job_result_dir                                # noqa: E402
 TILE = 256
 HALF_TILE = TILE // 2
 
-#: Rows of the comparison. Every one is a `pool_tokens` mode; the slot counts
+#: Rows of the comparison. Every one is a `pooling_kinds` mode; the slot counts
 #: are 1, 2, 2, 4, 5, so the concatenated descriptors are 1536 .. 7680 wide.
 POOLINGS = ('cls', 'cls_avg', 'cls_std', 'rings3', 'grid2x2')
 
@@ -244,32 +248,16 @@ BASELINE = 'cls+mean'
 #: guard. Same value as bench_offgrid_score, so the two benches agree.
 GEOMEAN_FLOOR = 1e-3
 
-#: Fixed candidate budgets. Meaningful only where pool is comparable, so these
-#: are printed for 單片單層 and 同層跨片 and nowhere else.
-K_FIXED = (1, 5, 10, 20, 30, 50, 100)
-
-#: Pool fractions. Their null is constant at f, which is what lets them cross
-#: levels where K_FIXED cannot.
-#:
-#: 0.01% is the exception and has to be read with the pool beside it. k@f% is
-#: max(1, ceil(f * pool)), so the floor of 1 bites as soon as the pool is under
-#: 10,000 and the column stops meaning what its name says:
+#: K_FIXED and K_FRACTIONS are imported from RetrievalReport, which owns them
+#: along with every statistic computed from them. What the pools look like HERE,
+#: which is what decides whether @0.01% means anything on a given row:
 #:
 #:     L0   pool 18,296..183,833   k = 2..19    a real 0.01% criterion
 #:     L1   pool  3,432.. 10,495   k = 1..2     partly floored
 #:     L2   pool    311..    499   k = 1        truth@1, null 0.20..0.32%
 #:
-#: It is here because L0 is where the pool is large enough for the other three
-#: to saturate -- @0.1% already sits at 78% there, so it separates nothing.
-#: Read it in 單片單層 and in the L0 row of 同層跨片; in 全部 it averages a
+#: Read @0.01% in 單片單層 and in the L0 row of 同層跨片; in 全部 it averages a
 #: genuine 0.01% at L0 with truth@1 at L2, which is not one criterion.
-K_FRACTIONS = (0.0001, 0.001, 0.01, 0.10)
-
-
-def _frac_label(fraction: float) -> str:
-    """0.0001 -> '@0.01%'. Header text and dict key are both derived from
-    K_FRACTIONS, so a fraction cannot be printed under another one's name."""
-    return f'@{fraction * 100:g}%'
 
 #: Furthest a FoV can be from the NEAREST POINT OF ONE GRID. Each grid steps by
 #: TILE on both axes, so the worst position is a cell centre: hypot(128, 128).
@@ -326,7 +314,7 @@ def concat_slots(slots: torch.Tensor) -> torch.Tensor:
     `SlidingWindowSimilarity`. Weighting the slots differently would be a third
     axis; it is deliberately not opened.
     """
-    slots = F.normalize(slots.float(), dim=-1)   # pool_tokens already does this;
+    slots = F.normalize(slots.float(), dim=-1)   # pooling_kinds already does this;
     return F.normalize(slots.flatten(1), dim=-1)  # repeated so the gate can feed
                                                   # raw tensors and still be valid
 
@@ -350,16 +338,17 @@ def pooled_descriptors(patches, encoder, poolings) -> dict:
     across PCIe and only then discarded 93% of them.
 
     Widths are recorded as the first batch is reduced rather than derived from
-    POOLINGS, so the split below cannot disagree with what pool_tokens actually
+    POOLINGS, so the split below cannot disagree with what pooling_kinds actually
     returned. The five results are views into one tensor, which is the whole
     allocation -- slicing does not copy.
     """
     widths = {}
+    spec = encoder.model_spec
 
     def reduce(tokens):                       # [B, 197, 1536] fp32, on device
         parts = []
         for name in poolings:
-            slots, _, _ = pool_tokens(tokens, name, encoder.spec)  # (feats, slots, layout)
+            slots = pooling_kinds(tokens, name, spec)   # (feats, slots, layout)
             flat = concat_slots(slots)
             widths[name] = flat.shape[1]
             parts.append(flat)
@@ -447,14 +436,14 @@ def gate_baseline_is_production(patches, encoder) -> tuple:
     """
     sample = patches[:min(32, len(patches))]
     tokens = encoder.tokens(sample)
-    slots, _, _ = pool_tokens(tokens, 'cls', encoder.spec)  # (feats, slots, layout)
+    slots = pooling_kinds(tokens, 'cls', encoder.model_spec)
     pooled = F.normalize(slots[:, 0].float(), dim=-1)
     shipped = F.normalize(encoder.features(sample).float(), dim=-1)
     cos = float((pooled * shipped).sum(-1).min())
     return cos, cos > 1 - 1e-4
 
 
-def gate_reduce_matches_host(patches, encoder) -> tuple:
+def gate_reduce_matches_host(patches, encoder, poolings) -> tuple:
     """Pooling on the GPU must give what pooling on the host gave.
 
     `pooled_descriptors` hands the pooling to the encoder so the tokens never
@@ -475,16 +464,22 @@ def gate_reduce_matches_host(patches, encoder) -> tuple:
     1536 floats in different orders need not match bit for bit.
     """
     sample = patches[:min(32, len(patches))]
-    dim = int(encoder.spec['dim'])
+    dim = int(encoder.model_spec.dim)
+    spec = encoder.model_spec
 
-    got = pooled_descriptors(sample, encoder, POOLINGS)
+    # `poolings`, not the module-level POOLINGS: that one is what this bench
+    # WANTS compared, and admissible_poolings has already narrowed it to what
+    # this encoder's patch grid admits. Gating the wider list would raise inside
+    # pooling_kinds -- with a shape message, not a "this encoder cannot do
+    # grid2x2" one -- before the run that would have dropped it ever started.
+    got = pooled_descriptors(sample, encoder, poolings)
     tokens = encoder.tokens(sample)
 
     worst_ratio, worst_name = math.inf, ''
-    for name in POOLINGS:
-        want = concat_slots(pool_tokens(tokens, name, encoder.spec)[0])
+    for name in poolings:
+        want = concat_slots(pooling_kinds(tokens, name, spec))
         same = float((got[name] - want).abs().max())
-        decoys = [float((concat_slots(pool_tokens(tokens.half(), name, encoder.spec)[0])
+        decoys = [float((concat_slots(pooling_kinds(tokens.half(), name, spec))
                          - want).abs().max())]
         if want.shape[1] > dim:                  # cls has one slot to roll
             decoys.append(float((got[name] - want.roll(dim, dims=1)).abs().max()))
@@ -542,13 +537,14 @@ def gate_tiles(path: str, n: int = 32) -> list:
         slide.close()
 
 
-def run_gates(patches, encoder) -> bool:
+def run_gates(patches, encoder, poolings) -> bool:
     print('[gate] baseline is production', end='  ', flush=True)
     cos, ok_base = gate_baseline_is_production(patches, encoder)
     print(f'cos={cos:.7f}  {"OK" if ok_base else "FAIL"}')
 
     print('[gate] reduce == pooling on the host', end='  ', flush=True)
-    (ratio, worst), ok_reduce = gate_reduce_matches_host(patches, encoder)
+    (ratio, worst), ok_reduce = gate_reduce_matches_host(
+        patches, encoder, poolings)
     print(f'worst margin over a decoy {ratio:.3g}x ({worst})  '
           f'{"OK" if ok_reduce else "FAIL"}')
 
@@ -683,7 +679,7 @@ def run_slide_level(slide, stem, level, mask, args, encoder,
     started = time.time()
     # from_ds, not the constructor: it drops regions that cannot host a tile at
     # this level. Constructing directly left them in, and S1104233 L2 -- 23
-    # regions, several of them slivers -- reached gigapath_encode with an empty
+    # regions, several of them slivers -- reached the encoder with an empty
     # batch and died in torch.cat naming neither the region nor the level.
     wsi = WsiTissuesContainer.from_ds(slide, ds, tile_size=TILE,
                                       overlap=True, mask=mask)
@@ -724,6 +720,11 @@ def run_slide_level(slide, stem, level, mask, args, encoder,
                 rank_main, rank_ovlp, pool = ranks_for(
                     maps[score], query['region'], query)
                 rows.append({
+                    # First column on purpose. Every table below averages over
+                    # rows, so a CSV that cannot say which encoder produced it
+                    # reads as one comparison when two were merged; --report-only
+                    # refuses a mixed set on this key.
+                    'encoder': args.encoder,
                     'slide': stem, 'level': level, 'fov_id': fov_id,
                     'pool': pool, 'd_main': round(query['d_main'], 2),
                     'd_overlap': round(query['d_overlap'], 2),
@@ -749,173 +750,15 @@ def run_slide_level(slide, stem, level, mask, args, encoder,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Derived metrics -- everything below reads only the stored integers
+#  Derived metrics -- everything reads only the stored integers
+#
+#  They live in utilities/RetrievalReport.py because bench_gigapath_pooling asks
+#  the same question one scale down and prints the same tables. Two copies of
+#  "@1%" would never have raised: both would print a plausible number under the
+#  same header, and a comparison between the two benches would be quietly
+#  invalid. Moving them was pure relocation -- `--report-only` on the existing
+#  CSV redraws the previous log byte for byte, which is the check that it was.
 # ══════════════════════════════════════════════════════════════════════════════
-
-def truth_rank(row: dict) -> int:
-    """The geometrically closer grid point's rank. The metric of record."""
-    return (row['rank_main'] if row['d_main'] <= row['d_overlap']
-            else row['rank_overlap'])
-
-
-def fine_rank(row: dict) -> int:
-    """The better-ranked of the two. Strictly easier than truth."""
-    return min(row['rank_main'], row['rank_overlap'])
-
-
-def k_at(fraction: float, pool: int) -> int:
-    """max(1, ceil(f * pool)). Per query, because pool is per (slide, level)."""
-    return max(1, int(math.ceil(fraction * pool)))
-
-
-def attach_baseline(rows: list) -> list:
-    """Give every row the baseline's truth rank for the SAME query.
-
-    The pairing is what makes the comparison immune to pool size: both arms saw
-    one query and one candidate pool, and only the scoring differed.
-    """
-    base = {(r['slide'], r['level'], r['fov_id']): truth_rank(r)
-            for r in rows if r['arm'] == BASELINE}
-    missing = 0
-    for row in rows:
-        key = (row['slide'], row['level'], row['fov_id'])
-        if key in base:
-            row['base_truth'] = base[key]
-        else:
-            missing += 1
-    if missing:
-        print(f'  WARNING {missing} rows have no baseline for their query')
-    return [r for r in rows if 'base_truth' in r]
-
-
-def paired_stats(rows: list) -> dict:
-    """W / L / T / win% / ratio quartiles / top@f%, for one arm in one group."""
-    wins = sum(1 for r in rows if truth_rank(r) < r['base_truth'])
-    losses = sum(1 for r in rows if truth_rank(r) > r['base_truth'])
-    ties = len(rows) - wins - losses
-    ratios = np.array([r['base_truth'] / truth_rank(r) for r in rows],
-                      dtype=float)
-    stats = {'n': len(rows), 'W': wins, 'L': losses, 'T': ties,
-             'n_cmp': wins + losses,
-             'win_pct': wins / (wins + losses) if wins + losses else float('nan'),
-             'ratio_q1': float(np.percentile(ratios, 25)),
-             'ratio_med': float(np.median(ratios)),
-             'ratio_q3': float(np.percentile(ratios, 75))}
-    for fraction in K_FRACTIONS:
-        hits = [truth_rank(r) <= k_at(fraction, r['pool']) for r in rows]
-        stats[f'top{fraction}'] = float(np.mean(hits))
-    return stats
-
-
-def absolute_stats(rows: list) -> dict:
-    """Only valid where `pool` is a single number: ranks, fixed k, gap@k."""
-    truths = np.array([truth_rank(r) for r in rows], dtype=float)
-    fines = np.array([fine_rank(r) for r in rows], dtype=float)
-    stats = {'med_rank': float(np.median(truths)),
-             'p90_rank': float(np.percentile(truths, 90))}
-    for k in K_FIXED:
-        stats[f'truth@{k}'] = float(np.mean(truths <= k))
-        stats[f'gap@{k}'] = float(np.mean(fines <= k) - np.mean(truths <= k))
-    return stats
-
-
-def group_by(rows: list, keys) -> dict:
-    out = {}
-    for row in rows:
-        out.setdefault(tuple(row[k] for k in keys), []).append(row)
-    return out
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  The four tables
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _pct(value: float) -> str:
-    return '   -' if not np.isfinite(value) else f'{value * 100:3.0f}%'
-
-
-def print_paired(rows: list, title: str, arms: list) -> None:
-    """The block that is identical at all four aggregation levels."""
-    print(f'\n{title}   n={len(rows) // max(1, len(arms))} per arm')
-    fractions = ''.join(f'{_frac_label(f):>7}' for f in K_FRACTIONS)
-    print(f'{"arm":<20}{"W":>5}{"L":>5}{"T":>5}{"n_cmp":>7}{"win%":>7}'
-          f'{"Q1":>7}{"med":>7}{"Q3":>7}{fractions}')
-    print('-' * (62 + 7 * len(K_FRACTIONS)))
-    by_arm = group_by(rows, ['arm'])
-    for arm in arms:
-        subset = by_arm.get((arm,))
-        if not subset:
-            continue
-        s = paired_stats(subset)
-        # Same f-string on both sides of the dict, so a column cannot be read
-        # from a key paired_stats never wrote.
-        tops = ''.join(f'{_pct(s[f"top{f}"]):>7}' for f in K_FRACTIONS)
-        if arm == BASELINE:
-            print(f'{arm + "  (base)":<20}{"-":>5}{"-":>5}{"-":>5}{"-":>7}'
-                  f'{"-":>7}{"-":>7}{"-":>7}{"-":>7}{tops}')
-        else:
-            print(f'{arm:<20}{s["W"]:>5}{s["L"]:>5}{s["T"]:>5}{s["n_cmp"]:>7}'
-                  f'{_pct(s["win_pct"]):>7}'
-                  f'{s["ratio_q1"]:>7.2f}{s["ratio_med"]:>7.2f}'
-                  f'{s["ratio_q3"]:>7.2f}{tops}')
-
-
-def print_fixed_k(rows: list, arms: list) -> None:
-    """Fixed candidate budgets. Only where pool sizes are comparable."""
-    print(f'\n  fixed k -- truth@k')
-    print(f'  {"arm":<20}' + ''.join(f'{f"k={k}":>8}' for k in K_FIXED))
-    by_arm = group_by(rows, ['arm'])
-    for arm in arms:
-        subset = by_arm.get((arm,))
-        if not subset:
-            continue
-        s = absolute_stats(subset)
-        print(f'  {arm:<20}' + ''.join(f'{_pct(s[f"truth@{k}"]):>8}'
-                                       for k in K_FIXED))
-    base = by_arm.get((BASELINE,))
-    if base:
-        s = absolute_stats(base)
-        print(f'  {"gap@k (base)":<20}'
-              + ''.join(f'{_pct(s[f"gap@{k}"]):>8}' for k in K_FIXED))
-
-
-def report(rows: list, arms: list, per_slide: bool) -> None:
-    """單片單層 -> 同層跨片 -> 單片跨層 -> 全部, in that order.
-
-    Absolute numbers first and narrowest, conclusions last and widest, because
-    a reader who stops early should stop on the numbers that are valid in the
-    smallest scope rather than on an aggregate whose caveats they have not read
-    yet.
-    """
-    print(f'\n{"=" * 90}\n單片單層 -- absolute numbers, one pool each\n{"=" * 90}')
-    for (slide, level), subset in sorted(group_by(rows, ['slide', 'level']).items()):
-        pool = subset[0]['pool']
-        # Printed as pairs rather than two parallel lists: k@0.01% floors to 1
-        # on a small pool, and the reader has to be able to see WHICH fraction
-        # floored without counting positions across two slash-separated runs.
-        ks = '  '.join(f'{_frac_label(f)}={k_at(f, pool)}' for f in K_FRACTIONS)
-        base = [r for r in subset if r['arm'] == BASELINE]
-        s = absolute_stats(base)
-        print(f'\n{slide}  L{level}   pool {pool:,}   k: {ks}   '
-              f'baseline med {s["med_rank"]:,.0f}  '
-              f'p90 {s["p90_rank"]:,.0f}')
-        print_paired(subset, f'  {slide} L{level}', arms)
-        print_fixed_k(subset, arms)
-
-    print(f'\n{"=" * 90}\n同層跨片 -- PRIMARY\n{"=" * 90}')
-    for (level,), subset in sorted(group_by(rows, ['level']).items()):
-        print_paired(subset, f'L{level}  ({len(group_by(subset, ["slide"]))} slides)',
-                     arms)
-        print_fixed_k(subset, arms)
-
-    if per_slide:
-        print(f'\n{"=" * 90}\n單片跨層\n{"=" * 90}')
-        for (slide,), subset in sorted(group_by(rows, ['slide']).items()):
-            print_paired(subset, slide, arms)
-
-    print(f'\n{"=" * 90}\n全部 -- CONCLUSION\n{"=" * 90}')
-    print_paired(rows, 'all slides, all levels', arms)
-
 
 def write_csv(rows: list, path: Path) -> None:
     if not rows:
@@ -970,6 +813,14 @@ def main() -> int:
     parser.add_argument('--mask-ds', type=float, default=4.0)
     parser.add_argument('--seg-chunk-px', type=float, default=4_000_000)
     parser.add_argument('--min-region-ratio', type=float, default=0.01)
+    parser.add_argument(
+        '--encoder', default='gigapath', choices=encoder_names(),
+        help='which tile encoder. Only the module for THIS one is imported: '
+             'every implementation sets HF_HOME above its own timm import and '
+             'setdefault is first-one-wins, so importing all three would point '
+             'two of them at the wrong weight cache -- silently. See '
+             'TileEncoderFunc._IMPLEMENTATIONS. Arms this encoder cannot do '
+             'are dropped by name and printed; see admissible_poolings.')
     parser.add_argument('--batch-size', type=int, default=1024,
                         help='tiles per forward pass. 1024 matches the rest of '
                              'the benches and is affordable because the token '
@@ -980,8 +831,10 @@ def main() -> int:
                              'is fp32 either way (GigaPathFunc.py:174); this is '
                              'the precision production already ships, recorded '
                              'in log/TODO.log at cos=0.99995 against fp32 with '
-                             'a 5.5x speedup. The NaN that killed Token Merging '
-                             'needed ToMe as well -- fp16 alone was clean.')
+                             'a 5.5x speedup. The NaN that appeared alongside '
+                             'it needed Token Merging as well; fp16 on its own '
+                             'was clean, which is why one shipped and the other '
+                             'was removed (log/MILESTONE.log M3).')
     parser.add_argument('--per-slide', action=argparse.BooleanOptionalAction,
                         default=True,
                         help='print the 單片跨層 tables. Worth having only when '
@@ -1003,18 +856,44 @@ def main() -> int:
     if args.report_only:
         if not args.csv:
             parser.error('--report-only needs at least one CSV path')
-        rows = attach_baseline(read_rows(args.csv))
-        report(rows, arms, per_slide=args.per_slide)
+        rows = read_rows(args.csv)
+        seen = {r.get('encoder', '') for r in rows}
+        if len(seen) > 1:
+            parser.error(
+                f'these CSVs mix encoders ({", ".join(sorted(seen))}). Every '
+                f'table averages over rows, so the merge would print one '
+                f'comparison where there are two. Report them separately.')
+        report(attach_baseline(rows, BASELINE), arms, BASELINE,
+               per_slide=args.per_slide)
         return 0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
-        .with_model(dtype='fp16' if args.fp16 else 'fp32').build(device)
-    print(f'device={device}  spec={encoder.spec}  '
-          f'dtype={encoder.cfg.dtype}  batch={args.batch_size}  '
-          f'encoder={encoder.identity_id()}\n')
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size)\
+        .with_model(dtype='fp16' if args.fp16 else 'fp32')
 
-    if not run_gates(gate_tiles(args.slides[0]), encoder):
+    # Which arms this encoder can actually run. POOLINGS above is what the bench
+    # WANTS compared; the patch grid decides what is possible, and the two are
+    # not the same list across encoders -- 14x14 divides by 7 and 16x16 does
+    # not. Narrowed before the model loads, and the dropped ones are printed:
+    # a table with four arms where five were asked for still reads as a complete
+    # comparison unless something says which is missing.
+    poolings, dropped = admissible_poolings(cfg, POOLINGS)
+    if not poolings:
+        parser.error(f'{args.encoder} admits none of {POOLINGS}; it accepts '
+                     f'{", ".join(sorted(cfg.POOLINGS))}')
+    if dropped:
+        print(f'[arms] {args.encoder} cannot do {", ".join(dropped)} -- '
+              f'dropped. Its patch grid admits {", ".join(sorted(cfg.POOLINGS))}')
+    arms = [f'{p}+{s}' for p in poolings for s in SCORES]
+
+    encoder = cfg.build(device)
+    print(f'device={device}  encoder={args.encoder}  '
+          f'model_spec={encoder.model_spec}  '
+          f'dtype={encoder.cfg.model.dtype}  batch={args.batch_size}  '
+          f'id={encoder.identity_id()}')
+    print(f'arms      {len(arms)}, baseline = {BASELINE}\n')
+
+    if not run_gates(gate_tiles(args.slides[0]), encoder, poolings):
         print('\nGATE FAILURE -- stopping before the run spends hours '
               'producing numbers that could not mean anything')
         return 1
@@ -1043,7 +922,7 @@ def main() -> int:
                 if level >= slide.level_count:
                     continue
                 all_rows.extend(run_slide_level(
-                    slide, stem, level, mask, args, encoder, POOLINGS, rng))
+                    slide, stem, level, mask, args, encoder, poolings, rng))
         except Exception as exc:                          # noqa: BLE001
             print(f'  {type(exc).__name__}: {exc}')
             failed.append(stem)
@@ -1051,9 +930,14 @@ def main() -> int:
             slide.close()
 
     print(f'\n{"=" * 78}\nwriting to {out_dir}')
-    write_csv(all_rows, out_dir / 'slidewin_pooling.csv')
+    # The encoder is in the NAME as well as in every row: the name stops a
+    # second encoder's run from overwriting the first one's numbers, the column
+    # stops the two from being averaged together afterwards. Neither does the
+    # other's job.
+    write_csv(all_rows, out_dir / f'slidewin_pooling_{args.encoder}.csv')
     if all_rows:
-        report(attach_baseline(all_rows), arms, per_slide=args.per_slide)
+        report(attach_baseline(all_rows, BASELINE), arms, BASELINE,
+               per_slide=args.per_slide)
     if failed:
         print(f'\n{len(failed)} slide(s) failed: {", ".join(failed)}')
     return 1 if failed else 0

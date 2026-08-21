@@ -23,7 +23,7 @@ For each (slide, level):
     reference set   tiles at the PRODUCTION grid positions -- main grid and the
                     half-tile-shifted overlap grid, the same two the retriever
                     scores. Coordinates come from PatchGrid.from_size, which is
-                    pure geometry, so nothing large is read: a mask_all region at
+                    pure geometry, so nothing large is read: an unsegmented region at
                     L0 is 18.7 Gpx and reading it whole once cost 3h43m.
 
     query set       whole FoVs photographed by query_sim's Camera, then cut into
@@ -67,13 +67,16 @@ for _d in ('utilities', 'aiNNModel', 'query_sim', 'utilities/test_modules'):
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
+import _paths                                                       # noqa: E402
 import FeatureStore as FS                                           # noqa: E402
+import RetrievalReport as RR                                        # noqa: E402
 from PatchingLib import PatchGrid                                   # noqa: E402
 import ReferenceSampler as RS                                       # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask                   # noqa: E402
 from TissueSegFunc import HestSegConfig                             # noqa: E402
-from GigaPathFunc import GigaPathEncoderConfig, pool_tokens         # noqa: E402
+from TileEncoderFunc import (encoder_config, encoder_names,          # noqa: E402
+                             pool_slots, pooling_kinds)
 from camera import Camera                                           # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 
@@ -397,14 +400,15 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
 
     common = dict(wsi_stem=stem, wsi_path=str(wsi_path), level=level, ds=ds,
                   mpp=level_mpp, base_mpp=base_mpp, tile_size=TILE, overlap=True,
-                  dim=spec['dim'], token_grid=tuple(spec['token_grid']),
+                  dim=spec['dim'], feat_hw=tuple(spec['feat_hw']),
                   num_prefix=spec['num_prefix'], encoder_id=encoder_id,
                   mask_id=mask_id, coverage='sample', sample_seed=seed,
                   sampler_id=level_cfg.sampler_id())
 
     written = {}
     for tag, tok in (('ref', ref_tokens), ('query', query_tokens)):
-        feats, slots, layout = pool_tokens(tok, 'tokens', spec)
+        feats = pooling_kinds(tok, 'tokens', spec)
+        slots, layout = pool_slots('tokens', spec)
         n = feats.shape[0]
         if tag == 'ref':
             xy, reg, rc = ref_xy, ref_region, ref_rowcol
@@ -544,8 +548,49 @@ def _rank_stats(sim: torch.Tensor, ans: np.ndarray):
     return better + 1, better / max(1, n_pool - 1)
 
 
-def _spec_of(m) -> dict:
-    return {'dim': m.dim, 'token_grid': m.token_grid, 'num_prefix': m.num_prefix}
+def slidewin_rows(query_meta, ref_tensors, pooled_q, pooled_r, poolings,
+                  query_tensors, dmain, dovlp) -> list:
+    """The same rows bench_slidewin_pooling stores, for the same tables.
+
+    That bench asks its question of a whole FoV window through stage 2; this one
+    asks it of a single tile against a store. Different systems, one metric
+    vocabulary -- W/L/T against the baseline, top@f%, truth@k, gap@k -- so the
+    numbers here can be read beside the ones in log/SlidewinPooling rather than
+    only against each other.
+
+    Only the same-level pool (level_delta == 0). truth and fine are defined by
+    which of the two INTERLEAVED GRIDS the query sat closer to, and the other
+    two levels have their own grids at their own scale; ranking against them is
+    the scale question, which phase 1 and phase 2 already answer above.
+
+    ans_main / ans_ovlp are the stored indices rather than a recomputed nearest,
+    because the main/overlap distinction is what gap@k is made of and only the
+    dump knows which grid each index came from.
+    """
+    n = pooled_q[poolings[0]].shape[0]
+    pool = int(ref_tensors['features'].shape[0])
+    a_main = query_tensors['ans_main'].numpy().astype(np.int64)
+    a_ovlp = query_tensors['ans_ovlp'].numpy().astype(np.int64)
+    fov = query_tensors['fov_id'].numpy().astype(np.int64)
+    # fov_id repeats across the tiles of one shot, and RetrievalReport pairs
+    # arms on it. Two tiles of the same FoV would collide, so the pairing key is
+    # the row itself -- each query tile is its own retrieval question here.
+    qid = np.arange(n, dtype=np.int64)
+
+    out = []
+    for mode in poolings:
+        sim = combine_slots(pooled_q[mode], pooled_r[(mode, 0)])
+        rank_main, _ = _rank_stats(sim, a_main)
+        rank_ovlp, _ = _rank_stats(sim, a_ovlp)
+        for i in range(n):
+            out.append({
+                'slide': query_meta.wsi_stem, 'level': int(query_meta.level),
+                'fov_id': int(qid[i]), 'shot_id': int(fov[i]), 'pool': pool,
+                'arm': mode,
+                'rank_main': int(rank_main[i]), 'rank_overlap': int(rank_ovlp[i]),
+                'd_main': float(dmain[i]), 'd_overlap': float(dovlp[i]),
+            })
+    return out
 
 
 def _table(rows, head, title, note=''):
@@ -614,10 +659,11 @@ def eval_one(query_path: Path, query_meta, refs: dict, poolings, rec: dict = Non
 
     pooled_q, pooled_r = {}, {}
     for mode in poolings:
-        pooled_q[mode] = pool_tokens(query_tensors['features'].float(), mode, _spec_of(query_meta))[0]
+        pooled_q[mode] = pooling_kinds(query_tensors['features'].float(), mode,
+                                     query_meta)[0]
         for level_delta, (ref_tensors, ref_meta) in loaded.items():
-            pooled_r[(mode, level_delta)] = pool_tokens(ref_tensors['features'].float(), mode,
-                                               _spec_of(ref_meta))[0]
+            pooled_r[(mode, level_delta)] = pooling_kinds(
+                ref_tensors['features'].float(), mode, ref_meta)[0]
 
     # One decomposition per (pooling, slot), reused by every whitening variant.
     # Only the same-level pool: whitening across scales would mix two questions.
@@ -766,6 +812,10 @@ def eval_one(query_path: Path, query_meta, refs: dict, poolings, rec: dict = Non
                     'fitted on the reference pool of THIS slide and level, never '
                     'on queries -- the pool exists at build() time, so this is '
                     'deployable as-is. "none" is the production path')
+
+    if rec is not None:
+        rec['rows'] = slidewin_rows(query_meta, loaded[0][0], pooled_q, pooled_r,
+                                    poolings, query_tensors, dmain, dovlp)
     return lines
 
 
@@ -959,11 +1009,25 @@ def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
             continue
         rec = {'stem': stem, 'level': lv, 'p1': {}, 'p2': {}, 'delta': {},
                'rot': {}, 'white': {}, 'step': None, 'pool': 0, 'n_fov': 0,
-               'sampler': ''}
+               'sampler': '', 'rows': []}
         lines += eval_one(query_path, query_meta, refs, poolings, rec=rec, whitens=whitens)
         recs.append(rec)
 
     lines += _summary(recs, poolings, whitens)
+
+    # The same tables bench_slidewin_pooling prints, from the same code in
+    # utilities/RetrievalReport.py. Last because they are the widest reading:
+    # everything above is one (slide, level) at a time, and these aggregate.
+    # per_slide is on because this bench spans two pyramid steps (4x on SVS, 2x
+    # on MRXS) and a per-slide block is where that shows.
+    rows = [r for rec in recs for r in rec['rows']]
+    if rows:
+        lines.append(f'\n\n{"#" * 90}')
+        lines.append('# paired tables -- same metrics as log/SlidewinPooling')
+        lines.append('# baseline is `cls`, which is what production keeps.')
+        lines.append(f'{"#" * 90}')
+        RR.report(RR.attach_baseline(rows, 'cls'), list(poolings), 'cls',
+                  per_slide=True, emit=lines.append)
     text = '\n'.join(lines)
     print(text)
     if out_txt:
@@ -986,9 +1050,16 @@ def main() -> int:
                          f'the reference pool. Pass none at all to skip the '
                          f'table -- it costs one eigh per (pooling, slot). '
                          f'Default {" ".join(WHITENS)}')
-    ap.add_argument('--gt-csv', default='result/MultiBatch1440/gt.csv',
+    # Absolute, off _paths.RESULT_DIR. These were repo-relative and so resolved
+    # against the CALLER'S cwd -- which happened to work while runs were
+    # launched from the checkout with results still inside it, and stopped the
+    # moment result/ moved out to /work/u26130998/. A relative default cannot be
+    # right here: nothing under result/ lives in the repo any more.
+    ap.add_argument('--gt-csv',
+                    default=str(Path(_paths.RESULT_DIR) / 'MultiBatch1440' / 'gt.csv'),
                     help='only read for its wsi_path/level pairs')
-    ap.add_argument('--out', default='result/cache/features')
+    ap.add_argument('--out',
+                    default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'))
     ap.add_argument('--wsi', default=None, help='substring filter, for a small run')
     ap.add_argument('--levels', type=int, nargs='+', default=None)
     ap.add_argument('-k', type=int, default=5000, help='reference tiles at L0')
@@ -1015,6 +1086,15 @@ def main() -> int:
                          'LocaScopePipeline. It gates on BBOX area, so a value '
                          'like 0.10 lets one large legitimate region set a bar '
                          'the rest cannot clear -- see log/TODO.log.')
+    ap.add_argument(
+        '--encoder', default='gigapath', choices=encoder_names(),
+        help='which tile encoder. Only the module for THIS one is imported: '
+             'every implementation sets HF_HOME above its own timm import and '
+             'setdefault is first-one-wins, so importing all three would point '
+             'two of them at the wrong weight cache -- silently. See '
+             'TileEncoderFunc._IMPLEMENTATIONS. The stores this writes carry '
+             'encoder_id in their filenames, so two encoders cannot overwrite '
+             "each other's dumps.")
     ap.add_argument('--batch-size', type=int, default=256)
     ap.add_argument('--min-std', type=float, default=8.0,
                     help='reject a FoV whose pixels vary less than this; blank '
@@ -1047,9 +1127,15 @@ def main() -> int:
 
     # fp32 and single card on purpose -- this writes stores that existing ones
     # have to stay comparable with. encoder_id is derived rather than typed, so
-    # a changed checkpoint or precision cannot keep the old name.
-    encoder = GigaPathEncoderConfig(batch_size=args.batch_size).with_model(dtype='fp32').build(device)
-    spec = encoder.spec
+    # a changed checkpoint or precision cannot keep the old name -- and neither
+    # can a changed encoder, which is why --encoder cannot collide with the
+    # stores already on disk.
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size)\
+        .with_model(dtype='fp32')
+    encoder = cfg.build(device)
+    # The ModelOutputSpec itself: pooling_kinds and StoreMeta read dim / feat_hw /
+    # num_prefix off it by name, so there is nothing to convert.
+    spec = encoder.model_spec
     encoder_id = encoder.identity_id()
     print(f'spec={spec}\n')
 
