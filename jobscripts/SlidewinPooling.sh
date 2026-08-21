@@ -94,7 +94,7 @@ echo "======== mode=$MODE  encoder=$ENCODER ========"
 echo "out : $OUT/slidewin_pooling_$ENCODER.csv"
 echo ""
 
-python utilities/test_modules/bench_slidewin_pooling.py \
+python utilities/bench_modules/bench_slidewin_pooling.py \
   $ARGS \
   --out "$OUT"
 
@@ -114,7 +114,7 @@ echo ""
 echo "  Every metric is derived from two stored integers per (query, arm), so"
 echo "  re-tabulating costs no GPU:"
 echo ""
-echo "    python utilities/test_modules/bench_slidewin_pooling.py --report-only \\"
+echo "    python utilities/bench_modules/bench_slidewin_pooling.py --report-only \\"
 echo "        $OUT/slidewin_pooling_$ENCODER.csv"
 echo ""
 echo "  One encoder per report. Feeding two CSVs at once is refused: every"

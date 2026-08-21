@@ -2,8 +2,8 @@
 """Does a different token pooling, or a different window score, retrieve the
 right window better than production does?
 
-    python utilities/test_modules/bench_slidewin_pooling.py --n-fov 100
-    python utilities/test_modules/bench_slidewin_pooling.py --report-only \
+    python utilities/bench_modules/bench_slidewin_pooling.py --n-fov 100
+    python utilities/bench_modules/bench_slidewin_pooling.py --report-only \
         /work/u26130998/result/SlidewinPooling/slidewin_pooling.csv
 
 Stage 2 as it actually runs -- mask, regions, sliding window -- with two axes

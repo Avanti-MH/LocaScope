@@ -116,7 +116,7 @@ echo "======== [$IDX] $STEM  encoder=$ENCODER ========"
 echo "wsi : $WSI"
 echo "out : $OUT_DIR"
 
-python utilities/test_modules/bench_offgrid_score.py "$WSI" \
+python utilities/bench_modules/bench_offgrid_score.py "$WSI" \
   --encoder "$ENCODER" \
   --step "${STEP:-16}" \
   --points "${POINTS:-5}" \
@@ -153,7 +153,7 @@ echo "  ONE set of figures covering every slide, once the array finishes."
 echo "  --plot-only reads the CSVs and redraws; no GPU, no WSI, no model, so"
 echo "  it runs on a login node in seconds and can be repeated freely:"
 echo ""
-echo "    python utilities/test_modules/bench_offgrid_score.py --plot-only \\"
+echo "    python utilities/bench_modules/bench_offgrid_score.py --plot-only \\"
 echo "        result/OffGridScore/*/offgrid_scores_$ENCODER.csv \\"
 echo "        --out result/OffGridScore"
 echo ""

@@ -72,7 +72,7 @@ SLIDES=(
   "S1137178,G7E,110926" "S1151088,G7E,111220"
 )
 
-python utilities/test_modules/bench_feature_axes.py "${SLIDES[@]}" \
+python utilities/bench_modules/bench_feature_axes.py "${SLIDES[@]}" \
   --stores "$RESULT_ROOT"/cache/reference_features \
   --pooling cls
 

@@ -42,7 +42,7 @@ OVERLAPS="true false"
 # ---------------- Run ----------------
 
 # comparison mode: 7 configs × batch sweep (Part 1) + WSI comparison (Part 2)
-# python utilities/test_modules/bench_gigapath_infer.py \
+# python utilities/bench_modules/bench_gigapath_infer.py \
 #   --wsi              $WSI \
 #   --compare \
 #   --compare-patches  $COMPARE_PATCHES \
@@ -53,7 +53,7 @@ OVERLAPS="true false"
 #   --warmup $WARMUP
 
 # comparison mode: Part 1 only, no-wsi
-python utilities/test_modules/bench_gigapath_infer.py \
+python utilities/bench_modules/bench_gigapath_infer.py \
   --compare \
   --no-wsi \
   --compare-patches  $COMPARE_PATCHES \
@@ -61,7 +61,7 @@ python utilities/test_modules/bench_gigapath_infer.py \
   --warmup $WARMUP
 
 # standard mode: single model config, detailed level × overlap × batch × dtype sweep
-# python utilities/test_modules/bench_gigapath_infer.py \
+# python utilities/bench_modules/bench_gigapath_infer.py \
 #   --wsi         $WSI \
 #   --n-patches   $N_PATCHES \
 #   --warmup      $WARMUP \

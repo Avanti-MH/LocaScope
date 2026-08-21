@@ -1,7 +1,7 @@
 """metrics.csv -> summary + figures. Pure post-processing; no torch / no WSI.
 
 Lives in utilities/ rather than beside either caller because both need it:
-`test_modules/bench_locascope.py` (writes metrics during the run) and
+`bench_modules/bench_locascope.py` (writes metrics during the run) and
 `cli/plot_locascope_metrics.py` (re-plots an existing metrics.csv offline).
 
 Every function takes `metrics: List[dict]` — the same row shape that

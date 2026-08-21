@@ -36,7 +36,7 @@ BATCH_SIZE=128
 # Override here only if you want a non-standard location.
 
 # ---------------- Run ----------------
-python utilities/test_modules/bench_gigapath_accuracy.py \
+python utilities/bench_modules/bench_gigapath_accuracy.py \
   --svs             "$SVS" \
   --mrxs            "$MRXS" \
   --total-patches   $TOTAL_PATCHES \
@@ -47,4 +47,4 @@ python utilities/test_modules/bench_gigapath_accuracy.py \
   --batch-size      $BATCH_SIZE
 
 # Resume tiles (skip HEST + sampling if tiles already exist):
-# python utilities/test_modules/bench_gigapath_accuracy.py --resume-tiles
+# python utilities/bench_modules/bench_gigapath_accuracy.py --resume-tiles

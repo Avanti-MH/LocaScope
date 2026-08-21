@@ -95,7 +95,7 @@ WSI_FLAG=""
 LEVEL_FLAG=""
 [ -n "$ONLY_LEVELS" ] && LEVEL_FLAG="--levels $ONLY_LEVELS"
 
-python utilities/test_modules/bench_gigapath_pooling.py \
+python utilities/bench_modules/bench_gigapath_pooling.py \
   --phase dump \
   --encoder "${ENCODER:-gigapath}" \
   --out "$OUT" \
@@ -131,7 +131,7 @@ fi
 
 echo ""
 echo "======== eval (no GPU; rerun on a login node any time) ========"
-python utilities/test_modules/bench_gigapath_pooling.py \
+python utilities/bench_modules/bench_gigapath_pooling.py \
   --phase eval --out "$OUT" --report "$REPORT"
 
 echo ""
@@ -153,7 +153,7 @@ echo "  not the next has told you nothing -- that is how classify_region died"
 echo "  (see the M4.2 entry in log/TODO.log)."
 echo ""
 echo "  Re-eval without re-dumping:"
-echo "    python utilities/test_modules/bench_gigapath_pooling.py --phase eval"
+echo "    python utilities/bench_modules/bench_gigapath_pooling.py --phase eval"
 echo "  Delta histograms:"
 echo "    python utilities/cli/inspect_feature_store.py --pairs --hist"
 

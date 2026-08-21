@@ -122,7 +122,7 @@ echo ""
 
 # --out is omitted on purpose: bench_locascope falls back to
 # result/<SLURM_JOB_NAME>/, keeping the run beside its own log.
-python utilities/test_modules/bench_locascope.py \
+python utilities/bench_modules/bench_locascope.py \
   --gt-csv     "$GT_CSV" \
   --images-dir "$IMAGES" \
   --topk       $TOPK \

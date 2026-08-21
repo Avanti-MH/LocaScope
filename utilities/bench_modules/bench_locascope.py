@@ -17,7 +17,7 @@ Outputs (in --out DIR, default result/BenchLocaScope/):
     recall_at_k.png           Stage 2 recall@K, overall and per routed level
 
 Usage:
-    python utilities/test_modules/bench_locascope.py \\
+    python utilities/bench_modules/bench_locascope.py \\
         --gt-csv result/MultiBatch/gt.csv \\
         --images-dir result/MultiBatch/images \\
         --out result/BenchLocaScope \\

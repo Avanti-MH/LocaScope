@@ -105,7 +105,7 @@ if [ -n "${ONLY_WSI}" ]; then
   SLIDES=("${ONLY_WSI}")
 fi
 
-python utilities/test_modules/bench_subspace_knn.py "${SLIDES[@]}" \
+python utilities/bench_modules/bench_subspace_knn.py "${SLIDES[@]}" \
   --stores "$RESULT_ROOT"/cache/reference_features \
   --pooling cls \
   --per-level "${PER_LEVEL:-1000}" \
