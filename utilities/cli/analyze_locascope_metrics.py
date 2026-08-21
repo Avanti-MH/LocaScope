@@ -69,7 +69,7 @@ import sys
 #: login node. Deriving OUTPUT_ROOT a second time here would have been the
 #: version that eventually disagrees with the first.
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'test_modules'))
+    os.path.dirname(os.path.abspath(__file__)), '..'))
 import _paths                                                       # noqa: E402
 
 BAR = '=' * 74

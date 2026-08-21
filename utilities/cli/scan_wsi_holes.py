@@ -60,7 +60,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'test_modules'))
+    os.path.dirname(os.path.abspath(__file__)), '..'))
 from _paths import job_result_dir                                   # noqa: E402
 
 import numpy as np

@@ -32,10 +32,10 @@ sys.path.insert(0, os.path.dirname(_HERE))                                # quer
 _UTILITIES = os.path.abspath(os.path.join(_HERE, '..', '..', 'utilities'))
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
-_TM = os.path.abspath(os.path.join(_HERE, '..', '..', 'utilities', 'test_modules'))
-if _TM not in sys.path:
-    sys.path.insert(0, _TM)
-from _paths import job_result_dir                                   # noqa: E402
+# Through the package, the way batch, demo and multi_batch already do it. This
+# file used to reach past them into utilities/test_modules for a second copy of
+# the same function.
+from cli import job_result_dir                                      # noqa: E402
 
 from TissuesRegionsMask import TissuesRegionsMask     # noqa: E402
 from config             import DomainGapConfig         # noqa: E402

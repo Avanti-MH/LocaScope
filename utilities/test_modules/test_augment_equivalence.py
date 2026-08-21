@@ -73,7 +73,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _d in ('query_sim', 'utilities', 'utilities/test_modules'):
+for _d in ('query_sim', 'utilities'):
     _p = str(_ROOT / _d)
     if _p not in sys.path:
         sys.path.insert(0, _p)

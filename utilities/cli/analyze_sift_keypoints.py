@@ -52,7 +52,6 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'query_sim'))
-sys.path.insert(0, str(_ROOT / 'utilities' / 'test_modules'))
 from _paths import job_result_dir                                   # noqa: E402
 
 from source.wsi_query import QueryFromWSI            # noqa: E402

@@ -16,7 +16,14 @@ Usage:
 import argparse
 import math
 import os
+import sys
 import time
+
+# _paths holds the one definition of OUTPUT_ROOT for every package, so it lives
+# in utilities/ rather than beside this file. That directory goes on sys.path
+# here, because setup_import_paths -- which puts the rest there -- is inside it.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import cv2
 import matplotlib.patches as mpatches

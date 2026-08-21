@@ -203,8 +203,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _d in ('utilities', 'aiNNModel', 'query_sim', '2_retrieval',
-           'utilities/test_modules'):
+for _d in ('utilities', 'aiNNModel', 'query_sim', '2_retrieval'):
     _p = str(_ROOT / _d)
     if _p not in sys.path:
         sys.path.insert(0, _p)

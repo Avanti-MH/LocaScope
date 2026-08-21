@@ -73,7 +73,6 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_ROOT / 'utilities'))
-sys.path.insert(0, str(_ROOT / 'utilities' / 'test_modules'))
 from _paths import job_result_dir                                   # noqa: E402
 sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 

@@ -169,8 +169,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _directory in ('utilities', 'aiNNModel', 'utilities/test_modules',
-                   '1_estimate_query_mpp'):
+for _directory in ('utilities', 'aiNNModel', '1_estimate_query_mpp'):
     _path = str(_ROOT / _directory)
     if _path not in sys.path:
         sys.path.insert(0, _path)

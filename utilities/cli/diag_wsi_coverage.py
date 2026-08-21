@@ -71,7 +71,7 @@ from matplotlib.patches import Rectangle
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
-for _d in ('utilities', 'aiNNModel', 'utilities/test_modules'):
+for _d in ('utilities', 'aiNNModel'):
     p = os.path.join(_ROOT, _d)
     if p not in sys.path:
         sys.path.insert(0, p)

@@ -62,7 +62,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _directory in ('utilities', 'aiNNModel', 'utilities/test_modules'):
+for _directory in ('utilities', 'aiNNModel'):
     _path = str(_ROOT / _directory)
     if _path not in sys.path:
         sys.path.insert(0, _path)

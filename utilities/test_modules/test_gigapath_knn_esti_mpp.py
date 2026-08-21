@@ -14,17 +14,26 @@ import argparse
 import os
 import sys
 
+# _paths holds the one definition of OUTPUT_ROOT for every package, so it lives
+# in utilities/ rather than beside this file. That directory goes on sys.path
+# here, because setup_import_paths -- which puts the rest there -- is inside it.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..'))
+
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import openslide
-from SafeSlide import SafeSlide
 import torch
 
 from _paths import job_result_dir, setup_import_paths
 
 setup_import_paths()
+# SafeSlide is in utilities/ and was imported ABOVE this line, before anything
+# had put that directory on sys.path -- so this file only ran where something
+# else had already arranged it. Moved below the bootstrap, where it resolves.
+from SafeSlide import SafeSlide                                      # noqa: E402
 from QueryFromWSI import QueryFromWSI
 from simulate_microscope_photo import simulate_microscope_photo
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp

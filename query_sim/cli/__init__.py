@@ -1,35 +1,39 @@
 """Shared helper for query_sim CLI entry points.
 
-`job_result_dir(name)` mirrors `utilities/test_modules/_paths.job_result_dir`:
-returns `<OUTPUT_ROOT>/result/<SLURM_JOB_NAME or default>/`, creating it if
-needed.
+`job_result_dir(name)` returns `<OUTPUT_ROOT>/result/<SLURM_JOB_NAME or
+default>/`, creating it if needed. OUTPUT_ROOT is one level ABOVE the repo, not
+inside it: results are the expensive half of this project -- 60 GB of feature
+stores and figures -- and keeping them out of the working tree means an
+`rm -rf` of the checkout, a `git clean`, or a fresh clone cannot take them, and
+nothing under `result/` can be staged by accident.
 
-OUTPUT_ROOT is one level ABOVE the repo, not inside it. Results are the
-expensive half of this project -- 60 GB of feature stores and figures -- and
-keeping them out of the working tree means an `rm -rf` of the checkout, a
-`git clean`, or a fresh clone cannot take them, and nothing under `result/`
-can be staged by accident. Override with LOCASCOPE_OUTPUT_ROOT.
+RE-EXPORTED, not redefined. This file used to carry its own copy of the rule,
+on the argument that a CLI depending on a helper under utilities/test_modules
+would be the wrong direction. The direction was the real problem; the copy was
+not the fix. It ended with two definitions inside ONE package -- batch, demo
+and multi_batch imported the local one while diag_camera_skip inserted
+utilities/test_modules into sys.path to import the other -- which is what
+`keep the two in step` means once nothing enforces it.
 
-The rule is duplicated rather than imported because this package lives at
-`query_sim/cli/` and `_paths` lives under `utilities/test_modules/`; a CLI
-depending on a test helper would be the wrong direction. Keep the two in step.
+_paths lives in utilities/ now, the library layer this package already depends
+on for TissuesRegionsMask and config, so the import points DOWN rather than
+sideways at a sibling. What this package legitimately owns is its default job
+names -- QuerySimBatch, QuerySimDemo, MultiBatch -- which are arguments to the
+function, not a second copy of it.
 
 demo.py / batch.py must add `query_sim/` to sys.path themselves BEFORE
 `from cli import job_result_dir` (this package lives at `query_sim/cli/`).
 """
 
 import os
+import sys
 
-HERE        = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT   = os.path.abspath(os.path.join(HERE, '..', '..'))
-OUTPUT_ROOT = os.environ.get(
-    'LOCASCOPE_OUTPUT_ROOT', os.path.abspath(os.path.join(REPO_ROOT, '..')))
-RESULT_DIR  = os.path.join(OUTPUT_ROOT, 'result')
-LOG_DIR     = os.path.join(OUTPUT_ROOT, 'log')
+_UTILITIES = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', 'utilities'))
+if _UTILITIES not in sys.path:
+    sys.path.insert(0, _UTILITIES)
 
-
-def job_result_dir(default_name: str) -> str:
-    name = os.environ.get('SLURM_JOB_NAME') or default_name
-    path = os.path.join(RESULT_DIR, name)
-    os.makedirs(path, exist_ok=True)
-    return path
+# Re-exported so that `from cli import job_result_dir` keeps working unchanged
+# for the three callers that already spell it that way.
+from _paths import (LOG_DIR, OUTPUT_ROOT, RESULT_DIR,  # noqa: E402,F401
+                    job_result_dir)
