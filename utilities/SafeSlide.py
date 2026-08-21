@@ -111,10 +111,22 @@ class SafeSlide(openslide.OpenSlide):
             where one bad tile blanks the whole requested rect.
 
     Attributes:
-        reopens: how many times the handle had to be replaced, which equals the
-            number of failed reads.
-        holes:   (x, y, level, w, h) of every read that failed, in the order
-                 they were attempted. Level-0 coordinates, as read_region takes.
+        reopens: how many times the handle had to be replaced. NOT the number of
+            rects lost, and usually far larger: subdivision fails at every node
+            of the descent it takes to find a hole, and each of those failures
+            heals. One 2816x2608 rect over one bad tile reopens thousands of
+            times while abandoning a few dozen 44x41 leaves. Read it as the cost
+            paid, not as the damage done.
+        holes:   (x, y, level, w, h) of every rect ABANDONED -- the leaves of
+                 the subdivision, where min_chunk stopped the descent. The
+                 internal failures that were healed and split successfully are
+                 not here, because nothing was lost at them. Level-0
+                 coordinates, as read_region takes.
+
+    Both of those changed meaning when subdivision arrived and this block did
+    not say so, which is how test_safe_slide came to assert reopens == 1 and
+    len(holes) == 1 for a read that now returns partly real tissue. The two
+    numbers answer different questions and neither answers the other one.
     """
 
     def __init__(self, filename: Filename, record_holes: bool = True,
@@ -392,9 +404,16 @@ class SafeSlide(openslide.OpenSlide):
     # ── reporting ────────────────────────────────────────────────────────────
 
     def hole_summary(self) -> str:
+        """What was lost, and what it cost to find out -- two different numbers.
+
+        The area is of the rects ABANDONED, so it is the pixels genuinely
+        missing, not the size of the reads that failed on the way down. Saying
+        `failed reads` here invited exactly the confusion the Attributes block
+        above now warns about.
+        """
         if not self.holes:
-            return 'no failed reads'
+            return 'no rects abandoned'
         area = sum(w * h for _, _, _, w, h in self.holes)
         levels = sorted({lv for _, _, lv, _, _ in self.holes})
-        return (f'{len(self.holes)} failed reads on levels {levels}, '
-                f'{area} px requested, handle reopened {self.reopens}x')
+        return (f'{len(self.holes)} rects abandoned on levels {levels}, '
+                f'{area} px lost, handle reopened {self.reopens}x')

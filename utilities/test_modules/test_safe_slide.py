@@ -9,15 +9,22 @@ was diagnosed on.
   0. control      — a BARE OpenSlide really is destroyed by one failed read, so
                     the rest of the suite is testing something that matters
   1. good read    — an ordinary read is untouched, no reopen, no hole recorded
-  2. bad read     — a failed read returns a fully transparent blank of the
-                    requested size, and records the position
+  2. bad read     — subdivision recovers tissue the whole-rect blank threw away,
+                    scored against min_chunk=0, which IS the old behaviour
   3. survival     — metadata and further reads still work afterwards. This is
                     the whole point: a bare handle fails here
   4. sharing      — a second holder of the SAME object recovers too, which is
                     why LocaScopePipeline can hand one slide to every stage
-  5. rgb          — a hole composites to the background colour (white), not the
-                    black that .convert('RGB') produces
-  6. valid        — the alpha channel marks the hole as unreal
+  5. rgb          — the part with no image composites to the background colour
+                    (white), not the black that .convert('RGB') produces
+  6. valid        — the alpha channel separates real pixels from holes inside
+                    ONE read, and agrees with the recorded hole list
+
+Checks 2 to 6 were written before cfbef2d, when a failed read blanked the whole
+requested rectangle, and they asserted that: reopens == 1, one hole covering the
+whole request, every pixel transparent. Subdivision made all of that false and
+nothing failed, because nothing ran this file. SafeSlide's own Attributes block
+had drifted the same way and is why `reopens == 1` looked right.
 
 Usage:
     python utilities/test_modules/test_safe_slide.py
@@ -103,21 +110,84 @@ def validate_good_read(path, good):
 # ── 2. a failed read becomes a blank ─────────────────────────────────────────
 
 def validate_bad_read(path, bad):
+    """Subdivision recovers tissue that the whole-rect blank threw away.
+
+    Scored against a deliberately wrong alternative rather than a threshold:
+    min_chunk=0 disables subdivision and IS the pre-cfbef2d behaviour, by
+    SafeSlide's own documentation. So the same rect is read twice and the two
+    results are compared. A margin over a decoy is evidence; a tolerance on one
+    number would only be a guess about how much this particular hole costs.
+
+    What each side must show is forced by the geometry, not chosen:
+
+        min_chunk=0    every pixel transparent, exactly one rect abandoned, and
+                       that rect is the whole request
+        min_chunk=64   some pixels real (that is the recovery) AND some still
+                       transparent (there IS a hole, or the comparison is
+                       measuring nothing), many small rects abandoned, each
+                       inside the request
+
+    reopens is NOT asserted equal to the number of holes. Subdivision fails at
+    every node of the descent and heals at each one, so reopens counts the cost
+    of finding the hole while holes counts the damage. Asserting one from the
+    other is what the previous version of this test did.
+    """
+    # ── the decoy: subdivision off, which is what cfbef2d replaced ──────────
+    w0 = SafeSlide(path, min_chunk=0, warn=False)
+    img0 = w0.read_region((bad[0], bad[1]), 0, (bad[2], bad[3]))
+    alpha0 = np.array(img0.getchannel('A'))
+
+    assert img0.size == (bad[2], bad[3]), f'size {img0.size}'
+    assert img0.mode == 'RGBA', f'mode {img0.mode}'
+    assert alpha0.max() == 0, (
+        'with min_chunk=0 the whole rect must be blank; if it is not, this rect '
+        'no longer fails and --bad-* needs pointing somewhere that does')
+    assert len(w0.holes) == 1, f'expected one abandoned rect, got {w0.holes}'
+    assert w0.holes[0] == (bad[0], bad[1], 0, bad[2], bad[3]), \
+        f'abandoned rect recorded as {w0.holes[0]}'
+    w0.close()
+
+    # ── production: subdivision on ──────────────────────────────────────────
     w = SafeSlide(path)
     img = w.read_region((bad[0], bad[1]), 0, (bad[2], bad[3]))
-
-    assert img.size == (bad[2], bad[3]), \
-        f'blank must match the requested size, got {img.size}'
-    assert img.mode == 'RGBA', f'mode {img.mode}'
     alpha = np.array(img.getchannel('A'))
-    assert alpha.max() == 0, 'blank must be fully transparent'
 
-    assert w.reopens == 1, f'expected exactly one reopen, got {w.reopens}'
-    assert len(w.holes) == 1, f'expected one hole, got {w.holes}'
-    assert w.holes[0] == (bad[0], bad[1], 0, bad[2], bad[3]), \
-        f'hole recorded as {w.holes[0]}'
+    assert img.size == (bad[2], bad[3]), f'size {img.size}'
+    assert img.mode == 'RGBA', f'mode {img.mode}'
+
+    real = int((alpha > 0).sum())
+    total = int(alpha.size)
+    assert real > 0, (
+        f'subdivision recovered nothing: all {total} px are still blank, the '
+        f'same answer min_chunk=0 gave. Either this rect has genuinely no '
+        f'image anywhere -- in which case it cannot demonstrate subdivision, '
+        f'and --bad-* should straddle the edge of a hole -- or the descent is '
+        f'not reaching readable tiles.')
+    assert real < total, (
+        f'every pixel came back real, so this read never hit a hole and the '
+        f'comparison above measured nothing. Point --bad-* at a rect that '
+        f'actually fails.')
+
+    assert len(w.holes) > 1, (
+        f'subdivision recovered pixels but abandoned {len(w.holes)} rect(s); '
+        f'recovery means the request was split, so more than one leaf should '
+        f'have been given up on')
+    x0, y0, bw, bh = bad
+    for hx, hy, hlv, hw, hh in w.holes:
+        assert hlv == 0, f'level {hlv} recorded for a level-0 read'
+        assert x0 <= hx and hx + hw <= x0 + bw, f'abandoned rect {hx}+{hw} escapes x'
+        assert y0 <= hy and hy + hh <= y0 + bh, f'abandoned rect {hy}+{hh} escapes y'
+        assert max(hw, hh) <= w._min_chunk, \
+            f'abandoned {hw}x{hh}, above the min_chunk={w._min_chunk} floor'
+    assert w.reopens >= len(w.holes), \
+        f'{w.reopens} reopens for {len(w.holes)} abandoned rects; every ' \
+        f'abandoned rect failed at least once'
+
+    lost = sum(hw * hh for _, _, _, hw, hh in w.holes)
+    print(f'[PASS] bad read: min_chunk=0 blanks all {total} px; min_chunk='
+          f'{w._min_chunk} recovers {real} ({100.0 * real / total:.1f}%), '
+          f'abandoning {len(w.holes)} rects = {lost} px, {w.reopens} reopens')
     w.close()
-    print('[PASS] bad read: transparent blank of the right size, position logged')
 
 
 # ── 3. the object survives ───────────────────────────────────────────────────
@@ -136,11 +206,16 @@ def validate_survives(path, good, bad):
     assert w.properties.get('openslide.mpp-x') is not None, \
         'properties map is bound to the dead handle'
 
-    # And reading still works.
+    # And reading still works. What matters is that the GOOD read adds nothing,
+    # so the count is compared against itself rather than against 1: the failed
+    # read above reopened once per node of the subdivision descent.
+    before = w.reopens
+    assert before > 0, 'the bad read should have reopened at least once'
     img = w.read_region((good[0], good[1]), 0, (good[2], good[3]))
     assert np.array(img.getchannel('A')).max() > 0, \
         'a good read after a heal came back blank'
-    assert w.reopens == 1, f'the good read should not have reopened again ({w.reopens})'
+    assert w.reopens == before, \
+        f'the good read reopened again ({before} -> {w.reopens})'
     w.close()
     print('[PASS] survives: metadata and reads both work after a failure')
 
@@ -158,12 +233,15 @@ def validate_shared(path, good, bad):
     alias = w                       # stands in for another stage holding it
 
     w.read_region((bad[0], bad[1]), 0, (bad[2], bad[3]))
+    before = w.reopens
 
     assert alias.level_count == w.level_count
     img = alias.read_region((good[0], good[1]), 0, (good[2], good[3]))
     assert np.array(img.getchannel('A')).max() > 0, \
         'the second holder did not recover'
-    assert alias.reopens == 1 and alias is w
+    assert alias is w, 'the alias stopped being the same object'
+    assert alias.reopens == before, \
+        f'reading through the alias reopened ({before} -> {alias.reopens})'
     w.close()
     print('[PASS] shared: a second holder of the same object recovers too')
 
@@ -171,45 +249,78 @@ def validate_shared(path, good, bad):
 # ── 5. holes come back white, not black ──────────────────────────────────────
 
 def validate_rgb_background(path, bad):
+    """The hole composites to background; the recovered tissue does not.
+
+    Located by the alpha mask rather than by assuming the whole rect is a hole.
+    That assumption was true before subdivision and is what the old version
+    asserted -- `(rgb == expected).all()` -- which now fails on the tissue
+    cfbef2d recovers. The proposition worth testing was never `the whole rect
+    is white`; it is `the part with no image is background rather than black`.
+    """
     # The FULL bad rect, not a small read at its corner: the hole is somewhere
     # inside the region, so a 256 px read anchored at the same origin succeeds
     # and would be testing real tissue instead. `good` deliberately IS that
     # corner, which makes the mistake easy to make.
     rgb_shape = (bad[3], bad[2], 3)
-    w = SafeSlide(path)
-    rgb = w.read_region_rgb((bad[0], bad[1]), 0, (bad[2], bad[3]))
+    w = SafeSlide(path, warn=False)
+    rgb, valid = w.read_region_valid((bad[0], bad[1]), 0, (bad[2], bad[3]))
 
-    assert w.reopens == 1, f'expected the read to fail, reopens={w.reopens}'
+    assert w.reopens > 0, f'expected the read to fail, reopens={w.reopens}'
     assert rgb.shape == rgb_shape, f'shape {rgb.shape}'
     assert rgb.dtype == np.uint8
+    assert not valid.all(), 'no hole in this rect; --bad-* must point at one'
+
     # White is the openslide default background; a slide declaring another
     # colour would give that instead, so compare against what the slide says.
-    expected = tuple(int(w.background_color[1:][i:i+2], 16) for i in (0, 2, 4))
-    got = tuple(int(v) for v in rgb.reshape(-1, 3)[0])
-    assert got == expected, \
-        f'hole came back {got}, expected background {expected}; ' \
-        f'this is the .convert("RGB") black-hole bug'
-    assert (rgb == np.array(expected, dtype=np.uint8)).all(), \
-        'hole should be uniformly the background colour'
+    expected = np.array(
+        [int(w.background_color[1:][i:i+2], 16) for i in (0, 2, 4)],
+        dtype=np.uint8)
+    holes = rgb[~valid]
+    assert (holes == expected).all(), (
+        f'{int((holes != expected).any(axis=1).sum())} hole pixels are not the '
+        f'background {tuple(int(v) for v in expected)}; first is '
+        f'{tuple(int(v) for v in holes[(holes != expected).any(axis=1)][0])}. '
+        f'This is the .convert("RGB") black-hole bug.')
     w.close()
-    print(f'[PASS] rgb: hole composited to background {expected}, not black')
+    print(f'[PASS] rgb: {len(holes)} hole px composited to background '
+          f'{tuple(int(v) for v in expected)}, not black')
 
 
 # ── 6. alpha marks the hole ──────────────────────────────────────────────────
 
 def validate_valid_mask(path, good, bad):
-    w = SafeSlide(path)
+    """alpha separates real pixels from holes, WITHIN one read.
+
+    `not valid_bad.any()` held only while a failure blanked the whole rect. The
+    mask has to distinguish now, which is a stronger claim than the one it
+    replaced: both values must appear in the same array, and the invalid part
+    must agree with what read_region recorded as abandoned.
+    """
+    w = SafeSlide(path, warn=False)
 
     # Again the full rect -- see the note in validate_rgb_background.
     _, valid_bad = w.read_region_valid((bad[0], bad[1]), 0, (bad[2], bad[3]))
     assert valid_bad.shape == (bad[3], bad[2])
-    assert not valid_bad.any(), 'a hole must be entirely invalid'
-    assert w.reopens == 1, f'expected the read to fail, reopens={w.reopens}'
+    assert w.reopens > 0, f'expected the read to fail, reopens={w.reopens}'
+    assert not valid_bad.all(), 'a rect with a hole cannot be entirely valid'
+    assert valid_bad.any(), (
+        'the whole rect is invalid, so the mask is not separating anything; '
+        'either subdivision recovered nothing here or it is not running')
+
+    # The two are written by different code -- alpha comes from the image
+    # openslide returned, holes from the recursion that gave up -- so their
+    # agreement is evidence rather than a restatement.
+    lost = sum(hw * hh for _, _, _, hw, hh in w.holes)
+    invalid = int((~valid_bad).sum())
+    assert invalid == lost, (
+        f'{invalid} px are transparent but {lost} px were recorded as '
+        f'abandoned; the mask and the hole list disagree about the same read')
 
     _, valid_good = w.read_region_valid((good[0], good[1]), 0, (256, 256))
-    assert valid_good.any(), 'a good read must be at least partly valid'
+    assert valid_good.all(), 'the good read must be entirely valid'
     w.close()
-    print('[PASS] valid: alpha separates real pixels from holes')
+    print(f'[PASS] valid: alpha separates {invalid} hole px from '
+          f'{int(valid_bad.sum())} real px, and agrees with holes')
 
 
 def main():
