@@ -19,6 +19,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # Runs write outside the checkout; see utilities/test_modules/_paths.py

@@ -17,6 +17,7 @@ ml load miniconda3/24.11.1
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # ---------------- Build the stage-1 reference under quota ---------------------
