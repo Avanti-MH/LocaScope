@@ -30,9 +30,9 @@ their own metadata, in four places and consistently --
 
 all four Resize(256) then CenterCrop(224), and the demo then asserts its output
 against a stored tensor. So 256/224 is the preprocessing those weights were
-validated with and crop_pct is an upstream slip. test_gigapath_pooling holds the
-baseline down against that same stored tensor, so a changed default fails there
-rather than in a number nobody can trace.
+validated with and crop_pct is an upstream slip. test_gigapath_equivalence holds
+the baseline down against that same stored tensor, so a changed default fails
+there rather than in a number nobody can trace.
 
 flash-attn is auto-detected by timm; no extra code needed.
 '''
@@ -217,7 +217,7 @@ class GigaPathEncoder(TileEncoder):
 
     That the empty setting returns exactly what this module used to assemble by
     hand -- fc_norm(forward_features(x)) -- is measured, not assumed:
-    test_gigapath_pooling checks it at max|delta| == 0 and asserts the four
+    test_gigapath_equivalence checks it at max|delta| == 0 and asserts the four
     preconditions the equality rests on. Going through model() rather than
     around it is what lets DataParallel work and removes the private attribute
     reach.

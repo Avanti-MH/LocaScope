@@ -248,8 +248,8 @@ def build_slide(wsi_path, args, cfg, encoder, spec, device, hest_method,
 
             # .pooled() reduces inside the batch loop, so the 197-token
             # intermediate never crosses to the host: 86 KB per tile instead of
-            # 1.21 MB. Same numbers -- test_gigapath_pooling scores this against
-            # pooling the tokens afterwards.
+            # 1.21 MB. Same numbers -- test_encoders scores this against
+            # pooling the tokens afterwards, for every encoder rather than one.
             feats = encoder.pooled(imgs, args.pooling)
             # The names come from the mode and the spec, not from a second
             # reduction -- pooled_spec reads the tensor it is handed and checks

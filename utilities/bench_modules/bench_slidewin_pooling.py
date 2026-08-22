@@ -162,9 +162,14 @@ taking seconds, each able to pass only if the machinery means something:
 
   baseline is production   pooling_kinds(...,'cls') against .features().
                            Without it every arm is compared to a baseline that
-                           is not the shipped feature. test_gigapath_pooling
-                           already pins this at cos 1.2e-7; it is repeated here
-                           because this bench's whole claim is relative to it.
+                           is not the shipped feature. test_encoders pins the
+                           same equality for all three encoders (`features() is
+                           the cls slot`); it is repeated here because this
+                           bench's whole claim is relative to it, and because a
+                           cheap assertion belongs in front of an expensive run
+                           rather than only in a test somebody may not have run.
+                           The two are separate definitions on purpose -- see
+                           gate_baseline_is_production below.
 
   concat identity          each slot L2-normalised, concatenated, normalised
                            again gives a cosine equal to the MEAN of the

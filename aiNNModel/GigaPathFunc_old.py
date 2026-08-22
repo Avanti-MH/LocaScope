@@ -6,7 +6,8 @@ functions taking (model, device, batch_size, dtype) at every call site, a
 module-level _TRANSFORM built at import, and Token Merging applied by mutating
 a model after construction. The replacement is EncoderConfig / TransformConfig /
 GigaPathEncoder in GigaPathFunc.py; the equivalence between the two is measured
-in test_gigapath_pooling.py, not assumed.
+in test_gigapath_equivalence.py, not assumed -- that file exists for this
+comparison and has nothing else left in it.
 
 Delete once nobody needs to read the old shape.
 '''
@@ -253,7 +254,7 @@ def gigapath_encode_tokens(
     Applying it unconditionally is correct in both cases. And because LayerNorm
     acts per token along D, fc_norm(tokens)[:, 0] == fc_norm(tokens[:, 0])
     exactly, so slot 0 IS the production feature rather than an approximation of
-    it -- test_gigapath_pooling.py holds that equality down.
+    it -- test_gigapath_equivalence.py holds that equality down.
 
     Note this calls the unwrapped module, so it runs on one GPU even under
     DataParallel. That is the intended trade: the pooling dump is ~68k tiles,
