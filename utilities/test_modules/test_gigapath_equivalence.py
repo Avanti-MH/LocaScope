@@ -319,9 +319,14 @@ def t_encoder_matches_the_old_path(n_tiles=8):
         new_p = encoder.pooled(tiles, mode)
         fs = encoder.pooled_spec(new_p, mode)
         slots, layout = fs.slots, fs.slot_layout
-        ref_p, ref_slots, ref_layout = pooling_kinds(old_tokens, mode,
-                                                   encoder.model_spec)
-        ref_p = ref_p.cpu()
+        # Two calls, not one unpacking. 923e9e6 split pool_tokens -- which
+        # returned the tensor and its slot names together -- into pooling_kinds
+        # that reduces and pool_slots that names, precisely so the names stop
+        # being a byproduct of a reduction. This line still unpacked three
+        # values and had done since that commit: it sits behind --with-model,
+        # which nothing passed, so it was never run.
+        ref_p = pooling_kinds(old_tokens, mode, encoder.model_spec).cpu()
+        ref_slots, ref_layout = pool_slots(mode, encoder.model_spec)
         d = float((new_p - ref_p).abs().max())
         # Two decoys, because neither covers every mode. Rolling the TILES
         # catches a batching or concatenation slip and works at any slot count;
