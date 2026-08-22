@@ -8,8 +8,16 @@
 #SBATCH --cpus-per-task=8                 # openslide reads + the CPU transform
 #SBATCH --mem=256G                        # a level-0 region is read whole
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o /work/u26130998/log/SlidewinPooling    # STDOUT
-#SBATCH -e /work/u26130998/log/SlidewinPooling    # STDERR
+#SBATCH -o /work/u26130998/log/%x          # STDOUT, named by --job-name
+#SBATCH -e /work/u26130998/log/%x          # STDERR
+#
+# %x, so a second encoder's run does not overwrite the first one's log the way
+# it would have overwritten its CSV. #SBATCH cannot read a shell variable --
+# SLURM parses these before the script runs -- so the name comes from the
+# command line, next to the encoder it belongs to:
+#
+#   ENCODER=conch_vit HEAD=trunk sbatch --job-name=ConchSlidewinPooling \
+#       jobscripts/SlidewinPooling.sh
 
 # ---------------- Load modules ----------------
 ml purge
@@ -21,7 +29,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- pooling x window score, through stage 2 --------------------
@@ -74,6 +82,21 @@ MODE="${MODE:-smoke}"
 # line does -- two places that must agree is one place too many.
 ENCODER="${ENCODER:-gigapath}"
 
+# Which exit of the model. Empty for encoders with one, which is gigapath and
+# uni2. CONCH has two and needs HEAD=trunk to run here AT ALL: its default is
+# the attentional pooler, one 512-d vector with no token axis, so all five arms
+# this bench compares are inadmissible and it stops before loading anything.
+#
+# trunk is the bare ViT at 28x28 of 768 -- the same shape the other two have,
+# which is what makes the three comparable rather than merely all present.
+#
+# TAG is what the CSV is named after, and it carries the head because
+# identity_id does: two heads are two vectors of two widths, and a table
+# averaging both would read as one comparison. Empty head leaves the names
+# gigapath and uni2 already wrote unchanged.
+HEAD="${HEAD:-}"
+TAG="$ENCODER${HEAD:+_$HEAD}"
+
 if [ "$MODE" = "smoke" ]; then
   BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
   KI67=/work/u26130998/datasets/Ki67
@@ -82,16 +105,16 @@ if [ "$MODE" = "smoke" ]; then
     "$KI67/S1104233,G7E,110208.mrxs"
   )
   ARGS="--slides ${SLIDES[*]} --levels 1 2 --n-fov ${N_FOV:-25}"
-  ARGS="$ARGS --encoder $ENCODER"
+  ARGS="$ARGS --encoder $ENCODER${HEAD:+ --head $HEAD}"
   OUT="$RESULT_ROOT/SlidewinPooling/smoke"
 else
   ARGS="--levels ${LEVELS:-0 1 2} --n-fov ${N_FOV:-100} --batch-size ${BATCH_SIZE:-2048}"
-  ARGS="$ARGS --encoder $ENCODER"
+  ARGS="$ARGS --encoder $ENCODER${HEAD:+ --head $HEAD}"
   OUT="$RESULT_ROOT/SlidewinPooling"
 fi
 
-echo "======== mode=$MODE  encoder=$ENCODER ========"
-echo "out : $OUT/slidewin_pooling_$ENCODER.csv"
+echo "======== mode=$MODE  encoder=$TAG ========"
+echo "out : $OUT/slidewin_pooling_$TAG.csv"
 echo ""
 
 python utilities/bench_modules/bench_slidewin_pooling.py \
@@ -100,7 +123,7 @@ python utilities/bench_modules/bench_slidewin_pooling.py \
 
 echo ""
 echo "======== done ========"
-echo "  $OUT/slidewin_pooling_$ENCODER.csv"
+echo "  $OUT/slidewin_pooling_$TAG.csv"
 echo ""
 echo "  Read the gates FIRST -- a failure there means no number below is worth"
 echo "  reading. Then truth_pctile per (slide, level): 0.5 = broken mapping."
@@ -115,7 +138,7 @@ echo "  Every metric is derived from two stored integers per (query, arm), so"
 echo "  re-tabulating costs no GPU:"
 echo ""
 echo "    python utilities/bench_modules/bench_slidewin_pooling.py --report-only \\"
-echo "        $OUT/slidewin_pooling_$ENCODER.csv"
+echo "        $OUT/slidewin_pooling_$TAG.csv"
 echo ""
 echo "  One encoder per report. Feeding two CSVs at once is refused: every"
 echo "  table averages over rows, so the merge would print one comparison"

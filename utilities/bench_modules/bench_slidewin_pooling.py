@@ -413,6 +413,23 @@ def grid_answers(x: int, y: int) -> dict:
             'truth': 'main' if d_main <= d_ovlp else 'overlap'}
 
 
+def encoder_tag(args) -> str:
+    """What names this run, in the filename AND in every row.
+
+    One definition because the two must agree: the filename stops a second
+    encoder from overwriting the first one's numbers, the column stops the two
+    from being averaged together afterwards, and a tag computed twice is a tag
+    that eventually differs in one of them.
+
+    The head is in it because it is in identity_id. conch_vit through its
+    attentional pooler and through its trunk are 512-d and 768-d vectors in
+    different spaces; a table averaging both would read as one comparison.
+    Empty head means the encoder's own single exit, so gigapath and uni2 keep
+    the names they already wrote.
+    """
+    return f'{args.encoder}_{args.head}' if args.head else args.encoder
+
+
 def rank_of(answer_score: float, pools: list) -> int:
     """1 + how many candidates beat this one, across every region and BOTH grids.
 
@@ -727,8 +744,10 @@ def run_slide_level(slide, stem, level, mask, args, encoder,
                     # First column on purpose. Every table below averages over
                     # rows, so a CSV that cannot say which encoder produced it
                     # reads as one comparison when two were merged; --report-only
-                    # refuses a mixed set on this key.
-                    'encoder': args.encoder,
+                    # refuses a mixed set on this key. encoder_tag and not
+                    # args.encoder: conch_vit has two heads and they are two
+                    # different vectors.
+                    'encoder': encoder_tag(args),
                     'slide': stem, 'level': level, 'fov_id': fov_id,
                     'pool': pool, 'd_main': round(query['d_main'], 2),
                     'd_overlap': round(query['d_overlap'], 2),
@@ -825,6 +844,16 @@ def main() -> int:
              'two of them at the wrong weight cache -- silently. See '
              'TileEncoderFunc._IMPLEMENTATIONS. Arms this encoder cannot do '
              'are dropped by name and printed; see admissible_poolings.')
+    parser.add_argument(
+        '--head', default='',
+        help="which exit of the model, empty for its own default. Only CONCH "
+             "has two, and it needs --head trunk to run here at all: its "
+             "default attentional pooler hands back ONE 512-d vector, so every "
+             "arm this bench compares is inadmissible and it stops before "
+             "loading anything. trunk is the bare ViT, the same shape GigaPath "
+             "and UNI2 have, which is what makes the three comparable. The "
+             "head reaches identity_id and the output filename, because two "
+             "heads are two different vectors of two different widths.")
     parser.add_argument('--batch-size', type=int, default=1024,
                         help='tiles per forward pass. 1024 matches the rest of '
                              'the benches and is affordable because the token '
@@ -872,8 +901,14 @@ def main() -> int:
         return 0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    cfg = encoder_config(args.encoder, batch_size=args.batch_size)\
+    # --head is passed only when given, so an encoder with one exit never has
+    # to declare a spelling for it and gigapath/uni2 runs are byte-identical to
+    # before this option existed.
+    over = {'head': args.head} if args.head else {}
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp16' if args.fp16 else 'fp32')
+
+    tag = encoder_tag(args)
 
     # Which arms this encoder can actually run. POOLINGS above is what the bench
     # WANTS compared; the patch grid decides what is possible, and the two are
@@ -891,7 +926,7 @@ def main() -> int:
     arms = [f'{p}+{s}' for p in poolings for s in SCORES]
 
     encoder = cfg.build(device)
-    print(f'device={device}  encoder={args.encoder}  '
+    print(f'device={device}  encoder={tag}  '
           f'model_spec={encoder.model_spec}  '
           f'dtype={encoder.cfg.model.dtype}  batch={args.batch_size}  '
           f'id={encoder.identity_id()}')
@@ -938,7 +973,7 @@ def main() -> int:
     # second encoder's run from overwriting the first one's numbers, the column
     # stops the two from being averaged together afterwards. Neither does the
     # other's job.
-    write_csv(all_rows, out_dir / f'slidewin_pooling_{args.encoder}.csv')
+    write_csv(all_rows, out_dir / f'slidewin_pooling_{tag}.csv')
     if all_rows:
         report(attach_baseline(all_rows, BASELINE), arms, BASELINE,
                per_slide=args.per_slide)
