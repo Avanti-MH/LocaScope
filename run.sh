@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=WsiCoverage # Job name
+#SBATCH --job-name=EoMTest # Job name
 #SBATCH --partition=normal2               # Partition
 #SBATCH --time=24:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o /work/u26130998/log/WsiCoverage # STDOUT
-#SBATCH -e /work/u26130998/log/WsiCoverage # STDERR
+#SBATCH -o /work/u26130998/log/EoMTest # STDOUT
+#SBATCH -e /work/u26130998/log/EoMTest # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -17,9 +17,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # CORPUS=result/MultiBatch
@@ -49,7 +50,9 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #   --draw-figures -1
 
 
-mkdir -p "$RESULT_ROOT"/DiagWsiCoverage
-python utilities/cli/diag_wsi_coverage.py \
-  "/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs" \
-  --hest --mask-ds 4 --grid 48 --out "$RESULT_ROOT"/DiagWsiCoverage
+cd /work/u26130998/LocaScope
+python utilities/test_modules/test_EoMT.py \
+    --tile-figure /work/u26130998/prov-gigapath/images/01581x_25327y.png \
+                  /work/u26130998/prov-gigapath/images/01581x_25583y.png \
+    --wsi /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs \
+          /work/u26130998/datasets/Ki67/S1103520,G7E,110126.mrxs

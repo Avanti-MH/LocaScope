@@ -45,7 +45,7 @@ retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC
   `x/y`：query 是繞自己中心旋轉的，中心點不受旋轉影響，跟未知方向的 ground
   truth 比較時才站得住。
 
-> ⚠ `location: SlideWinSimResult` 這個型別標註（`SIFT_RANSAC.py:15`）指向
+> ⚠ `location: SlideWinSimResult` 這個型別標註（`SIFT_RANSAC.py:127`）指向
 > `2_retrieval/GigaPathSlidingWinSim.py` 的非旋轉版本，但 production 實際傳入
 > 的是 `SlideWinSimRotResult`——能動是因為鴨子定型，標註本身在說謊。抽出一個
 > Stage 2/3 共用的 result protocol 是畫布審查排定的下一步，這裡先誠實記下來。

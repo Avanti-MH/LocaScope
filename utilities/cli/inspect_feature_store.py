@@ -92,7 +92,20 @@ def expand(paths) -> list:
         if p.is_dir():
             hits = sorted(p.glob('*.safetensors'))
             if not hits:
-                missing.append(f'{p} is a directory with no .safetensors in it')
+                # One level down, because stores now live under an encoder tag:
+                # result/cache/features/gigapath/. Only when the directory
+                # itself holds none, so pointing at one encoder still inspects
+                # exactly that encoder, and the descent is announced -- an
+                # inspection silently covering two encoders would put two
+                # feature spaces in one table.
+                subs = sorted(d for d in p.iterdir()
+                              if d.is_dir() and any(d.glob('*.safetensors')))
+                for d in subs:
+                    print(f'[dir] {p.name}/{d.name}')
+                    hits.extend(sorted(d.glob('*.safetensors')))
+            if not hits:
+                missing.append(f'{p} is a directory with no .safetensors in it, '
+                               f'and no subdirectory of it has any either')
             out.extend(hits)
         elif p.exists():
             out.append(p)

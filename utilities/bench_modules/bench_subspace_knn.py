@@ -1097,14 +1097,27 @@ def main() -> int:
                              'background-matched subset disables that subset')
     parser.add_argument('--skip-arm-b', action='store_true')
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--out', default=None)
+    parser.add_argument(
+        '--out', default=None,
+        help='output directory, used verbatim. Default: '
+             'result/<SLURM_JOB_NAME or SubspaceKnn>/<encoder>/, where the '
+             'encoder is the last component of --stores. That level is added '
+             'only to the derived path, so name it yourself when you pass one.')
     args = parser.parse_args()
     if args.white_max is not None and args.white_max < 0:
         args.white_max = None
 
-    out_dir = Path(args.out or job_result_dir('SubspaceKnn'))
-    out_dir.mkdir(parents=True, exist_ok=True)
     store_root = Path(args.stores)
+    # The tag comes from the input, because this bench has no encoder of its own
+    # -- it reads features somebody else wrote. The store root's last component
+    # IS the encoder tag under the output convention (result/cache/features/
+    # gigapath/) and is readable; meta.encoder_id identifies the encoder too but
+    # is eight hex characters of sha256 that cannot be inverted, so a directory
+    # named after it would tell whoever opens it nothing.
+    # Derived path only -- an explicit --out is used verbatim.
+    out_dir = Path(args.out or job_result_dir('SubspaceKnn',
+                                              encoder=store_root.name))
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     all_scores, all_groups, all_selected, all_gates, failed = [], [], [], [], []
     for slide in args.slides:

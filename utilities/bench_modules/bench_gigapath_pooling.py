@@ -68,8 +68,9 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
 import _paths                                                       # noqa: E402
+from _paths import encoder_tag                                      # noqa: E402
 import FeatureStore as FS                                           # noqa: E402
-import RetrievalReport as RR                                        # noqa: E402
+from dump_function import RetrievalReport as RR                     # noqa: E402
 from PatchingLib import PatchGrid                                   # noqa: E402
 import ReferenceSampler as RS                                       # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
@@ -1016,7 +1017,7 @@ def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
     lines += _summary(recs, poolings, whitens)
 
     # The same tables bench_slidewin_pooling prints, from the same code in
-    # utilities/RetrievalReport.py. Last because they are the widest reading:
+    # utilities/dump_function/RetrievalReport.py. Last because they are the widest reading:
     # everything above is one (slide, level) at a time, and these aggregate.
     # per_slide is on because this bench spans two pyramid steps (4x on SVS, 2x
     # on MRXS) and a per-slide block is where that shows.
@@ -1058,8 +1059,13 @@ def main() -> int:
     ap.add_argument('--gt-csv',
                     default=str(Path(_paths.RESULT_DIR) / 'MultiBatch1440' / 'gt.csv'),
                     help='only read for its wsi_path/level pairs')
-    ap.add_argument('--out',
-                    default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'))
+    # default=None rather than the path itself, so that "the user named a
+    # directory" stays distinguishable from "we chose one". Only the second gets
+    # the encoder level appended, and BOTH phases resolve it the same way or
+    # eval reads a directory dump never wrote to.
+    ap.add_argument('--out', default=None,
+                    help='store root, used verbatim. Default '
+                         'result/cache/features/<encoder>/')
     ap.add_argument('--wsi', default=None, help='substring filter, for a small run')
     ap.add_argument('--levels', type=int, nargs='+', default=None)
     ap.add_argument('-k', type=int, default=5000, help='reference tiles at L0')
@@ -1095,6 +1101,15 @@ def main() -> int:
              'TileEncoderFunc._IMPLEMENTATIONS. The stores this writes carry '
              'encoder_id in their filenames, so two encoders cannot overwrite '
              "each other's dumps.")
+    ap.add_argument(
+        '--head', default='',
+        help="which exit of the model, empty for its own default. Only CONCH "
+             "has two, and it needs --head trunk to run here at all: this "
+             "bench calls encoder.tokens(), while CONCH's default attentional "
+             "pooler hands back ONE 512-d vector with no token axis. trunk is "
+             "the bare ViT, the same shape GigaPath and UNI2 have, which is "
+             "what makes the three comparable rather than merely all runnable. "
+             "The head reaches identity_id and so reaches the store filenames.")
     ap.add_argument('--batch-size', type=int, default=256)
     ap.add_argument('--min-std', type=float, default=8.0,
                     help='reject a FoV whose pixels vary less than this; blank '
@@ -1102,9 +1117,17 @@ def main() -> int:
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args()
 
+    # Resolved once, before the phase split, or eval would read a directory
+    # dump never wrote to. The default cache root carries the tag but no job
+    # name: it is shared across jobs on purpose, since a store's whole value is
+    # being reusable by the next run.
+    tag = encoder_tag(args.encoder, args.head)
+    store_root = (Path(args.out) if args.out
+                  else Path(_paths.RESULT_DIR) / 'cache' / 'features' / tag)
+
     if args.phase == 'eval':
         # No GPU, no WSI, no model -- everything needed is in the stores.
-        return eval_all(Path(args.out), wsi_filter=args.wsi,
+        return eval_all(store_root, wsi_filter=args.wsi,
                         poolings=tuple(args.poolings), out_txt=args.report,
                         whitens=tuple(args.whitens))
 
@@ -1121,7 +1144,7 @@ def main() -> int:
     if not combos:
         sys.exit('no (slide, level) pairs matched')
 
-    out_root = Path(args.out)
+    out_root = store_root
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'device={device}  out={out_root}')
 
@@ -1130,7 +1153,11 @@ def main() -> int:
     # a changed checkpoint or precision cannot keep the old name -- and neither
     # can a changed encoder, which is why --encoder cannot collide with the
     # stores already on disk.
-    cfg = encoder_config(args.encoder, batch_size=args.batch_size)\
+    # Passed only when given, so gigapath and uni2 build byte-identical configs
+    # to before this option existed and their identity_id does not move -- which
+    # is what keeps the stores already on disk readable.
+    over = {'head': args.head} if args.head else {}
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp32')
     encoder = cfg.build(device)
     # The ModelOutputSpec itself: pooling_kinds and StoreMeta read dim / feat_hw /

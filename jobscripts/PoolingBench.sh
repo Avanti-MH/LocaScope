@@ -21,7 +21,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Does a different pooling find what CLS misses? -------------
@@ -47,7 +47,20 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # and then reads 256x256 tiles individually.
 
 OUT="$RESULT_ROOT"/cache/reference_features
-REPORT="$RESULT_ROOT"/cache/reference_report.txt
+
+# Spelled the same way as SlidewinPooling.sh, and spelled ONCE: the bench
+# appends this tag to --out itself, so dump, the pairing check and eval have to
+# agree about it or eval reads a directory dump never wrote to. Every one of
+# them below passes --encoder for that reason.
+ENCODER="${ENCODER:-gigapath}"
+HEAD="${HEAD:-}"          # conch_vit needs `HEAD=trunk`: this bench calls
+                          # encoder.tokens(), and the attentional pooler has
+                          # no token axis to pool.
+TAG="$ENCODER${HEAD:+_$HEAD}"
+
+# Inside the tagged directory, not beside it: the report is written from those
+# stores and a second encoder would otherwise overwrite the first one's.
+REPORT="$OUT/$TAG"/reference_report.txt
 
 K=2000                # reference tiles per (slide, level)
 K_FLOOR=2000          # floor for coarse levels; they take min(available, this)
@@ -97,7 +110,7 @@ LEVEL_FLAG=""
 
 python utilities/bench_modules/bench_gigapath_pooling.py \
   --phase dump \
-  --encoder "${ENCODER:-gigapath}" \
+  --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
   --out "$OUT" \
   -k $K --k-floor $K_FLOOR --queries $QUERIES \
   --mask-ds $MASK_DS --seed $SEED \
@@ -118,7 +131,7 @@ fi
 # than a bug. Cheap enough to always run.
 echo ""
 echo "======== verifying answer indices ========"
-python utilities/cli/inspect_feature_store.py "$OUT" --pairs
+python utilities/cli/inspect_feature_store.py "$OUT/$TAG" --pairs
 PAIR_RC=$?
 
 if [ $PAIR_RC -ne 0 ]; then
@@ -132,20 +145,21 @@ fi
 echo ""
 echo "======== eval (no GPU; rerun on a login node any time) ========"
 python utilities/bench_modules/bench_gigapath_pooling.py \
-  --phase eval --out "$OUT" --report "$REPORT"
+  --phase eval --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
+  --out "$OUT" --report "$REPORT"
 
 echo ""
 echo "======== done ========"
-echo "  stores  $OUT/"
+echo "  stores  $OUT/$TAG/"
 echo "  report  $REPORT"
 echo ""
 echo "  The report ends with the same paired tables as log/SlidewinPooling --"
 echo "  W/L/T against the cls baseline, top@f%, truth@k and gap@k -- printed by"
-echo "  the same code (utilities/RetrievalReport.py), so the two benches'"
-echo "  columns mean the same thing and can be read side by side. What differs"
-echo "  is the unit: a row there is one FoV window through stage 2, a row here"
-echo "  is one tile against a store. Expect the absolute numbers to differ; it"
-echo "  is the ORDERING of the arms that is comparable."
+echo "  the same code (utilities/dump_function/RetrievalReport.py), so the two"
+echo "  benches' columns mean the same thing and can be read side by side."
+echo "  What differs is the unit: a row there is one FoV window through stage"
+echo "  2, a row here is one tile against a store. Expect the absolute numbers"
+echo "  to differ; it is the ORDERING of the arms that is comparable."
 echo ""
 echo "  Read it for CONSISTENCY across the 25 (slide, level) combinations, not"
 echo "  for a winner in any one of them. A pooling that leads on one slide and"
@@ -153,7 +167,8 @@ echo "  not the next has told you nothing -- that is how classify_region died"
 echo "  (see the M4.2 entry in log/TODO.log)."
 echo ""
 echo "  Re-eval without re-dumping:"
-echo "    python utilities/bench_modules/bench_gigapath_pooling.py --phase eval"
+echo "    python utilities/bench_modules/bench_gigapath_pooling.py --phase eval \\"
+echo "        --encoder $ENCODER${HEAD:+ --head $HEAD}"
 echo "  Delta histograms:"
 echo "    python utilities/cli/inspect_feature_store.py --pairs --hist"
 
@@ -163,7 +178,8 @@ echo "    python utilities/cli/inspect_feature_store.py --pairs --hist"
 # DIFFERENT filenames and neither overwrites the other. They coexist, which is
 # the point: the comparison needs both.
 #
-#   --phase eval    needs no selector. It keys stores by cfg_hash and pairs a
+#   --phase eval    needs --encoder now (it appends the tag to --out), but no
+#                   sampler selector. It keys stores by cfg_hash and pairs a
 #                   query store only with the reference of the same hash, so
 #                   each batch is scored on its own and both appear in one
 #                   report. The header line of every combination now prints the

@@ -79,7 +79,7 @@ Two axes on top of the displacement scan
                  `min` is the hardest AND. All three read the same tensor, so
                  they are columns and cost nothing.
 
-Outputs, all under result/OffGridScore/
+Outputs, all under result/OffGridScore/<encoder>/
 ---------------------------------------
     offgrid_scores.csv      one row per (slide, level, point, dx, dy, preprocess)
     offgrid_heatmap.png     2D score maps, both preprocessings, plus ALL
@@ -123,7 +123,7 @@ from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
 from GigaPathSlidingWinSim import SlidingWindowSimilarity           # noqa: E402
 from camera import Camera                                           # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
-from _paths import job_result_dir                                   # noqa: E402
+from _paths import encoder_tag, job_result_dir                      # noqa: E402
 
 TILE = 256
 
@@ -781,7 +781,7 @@ def read_scores(paths) -> list:
     return rows
 
 
-def encoder_tag(rows, fallback: str = '') -> str:
+def encoder_from_rows(rows, fallback: str = '') -> str:
     """Which encoder these rows came from, read from the rows themselves.
 
     From the rows and not from args, because --plot-only draws CSVs written by
@@ -808,17 +808,19 @@ def render(rows, out_dir: Path, encoder: str = '') -> list:
     --plot-only, so a merged CSV is drawn by exactly the code that drew the
     per-slide ones."""
     gates = aggregate_gates(rows) if rows else []
-    tag = encoder_tag(rows, encoder)
-    suffix = f'_{tag}' if tag else ''
-    write_csv(gates, out_dir / f'offgrid_gates{suffix}.csv')
-    # No suffix: the definition list is this bench's own vocabulary and says
-    # nothing about which model produced a number.
+    # Called for the guard, not for a name: out_dir already carries the encoder,
+    # and a filename repeating it would be the same fact spelled twice. What
+    # this still has to do is REFUSE a mixed set -- every figure below averages
+    # over rows, so one heatmap drawn from two encoders is a picture of neither
+    # and looks exactly like a picture of one.
+    encoder_from_rows(rows, encoder)
+    write_csv(gates, out_dir / 'offgrid_gates.csv')
     write_csv([dict(term=term, means=means) for term, means in DEFINITIONS],
               out_dir / 'offgrid_definitions.csv')
     if rows:
-        plot_heatmap(rows, out_dir / f'offgrid_heatmap{suffix}.png')
-        plot_surface(rows, out_dir / f'offgrid_surface{suffix}.png')
-        plot_profile(rows, out_dir / f'offgrid_profile{suffix}.png')
+        plot_heatmap(rows, out_dir / 'offgrid_heatmap.png')
+        plot_surface(rows, out_dir / 'offgrid_surface.png')
+        plot_profile(rows, out_dir / 'offgrid_profile.png')
     return gates
 
 
@@ -873,6 +875,15 @@ def main() -> int:
              'setdefault is first-one-wins, so importing all three would point '
              'two of them at the wrong weight cache -- silently. See '
              'TileEncoderFunc._IMPLEMENTATIONS.')
+    parser.add_argument(
+        '--head', default='',
+        help="which exit of the model, empty for its own default. Only CONCH "
+             "has two, and both run here -- this bench wants one vector per "
+             "tile and either exit is that -- so the choice is between two "
+             "embeddings, not a prerequisite. Worth setting trunk anyway when "
+             "comparing encoders: the attentional pooler is 512-d against "
+             "GigaPath's 1536 and the trunk's 768, and a table holding both "
+             "widths under one column heading reads as one comparison.")
     parser.add_argument('--batch-size', type=int, default=1024)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', default=None)
@@ -881,19 +892,32 @@ def main() -> int:
     if not args.slides:
         parser.error('give at least one WSI path, or CSV paths with --plot-only')
 
-    out_dir = Path(args.out or job_result_dir('OffGridScore'))
-    out_dir.mkdir(parents=True, exist_ok=True)
+    def out_for(tag: str) -> Path:
+        # The tag goes on the DERIVED path only. An explicit --out is used
+        # verbatim, because OffGridScore.sh composes $OUT/$TAG/$STEM itself and
+        # a second tag would bury the encoder under the slide.
+        d = Path(args.out or job_result_dir('OffGridScore', encoder=tag))
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     if args.plot_only:
         missing = [p for p in args.slides if not Path(p).exists()]
         if missing:
             parser.error('no such CSV: ' + ', '.join(missing))
-        print(f'plot-only: {len(args.slides)} csv -> {out_dir}')
         rows = read_scores(args.slides)
+        # The DIRECTORY comes from the rows, for the same reason
+        # encoder_from_rows exists at all: --plot-only draws CSVs an earlier run
+        # wrote, so argparse's default would file them under whichever encoder
+        # was not used. args is the fallback for rows predating the column.
+        out_dir = out_for(encoder_from_rows(
+            rows, encoder_tag(args.encoder, args.head)))
+        print(f'plot-only: {len(args.slides)} csv -> {out_dir}')
         print(f'  {len(rows)} rows, '
               f'{len({r["wsi_stem"] for r in rows})} slide(s)')
         gates = render(rows, out_dir)
         return 1 if report_gates(gates) else 0
+
+    out_dir = out_for(encoder_tag(args.encoder, args.head))
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'device={device}  step={args.step}  points={args.points}  '
@@ -909,7 +933,10 @@ def main() -> int:
     # GigaPath's 256/224 bicubic ImageNet numbers. For UNI2 or CONCH that would
     # silently substitute another model's preprocessing -- so it is built off
     # the encoder's OWN transform, with only `preprocess` changed.
-    cfg = encoder_config(args.encoder, batch_size=args.batch_size)\
+    # Passed only when given, so gigapath and uni2 build byte-identical configs
+    # to before this option existed and their identity_id does not move.
+    over = {'head': args.head} if args.head else {}
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp32')
     base = cfg.build(device)
     import dataclasses as _dc
@@ -931,15 +958,17 @@ def main() -> int:
 
     # Stamped here rather than inside scan_point: one place that cannot miss a
     # row, and scan_point has no reason to know which encoder built the models
-    # it was handed. The encoder is in the NAME as well as in every row --
-    # the name stops a second encoder's run from overwriting the first one's
-    # numbers, the column stops the two from being drawn on one heatmap.
+    # it was handed.
+    # The encoder is in the DIRECTORY as well as in every row -- the directory
+    # stops a second encoder's run from overwriting the first one's numbers, the
+    # column stops the two from being drawn on one heatmap.
     for row in all_rows:
-        row['encoder'] = args.encoder
+        row['encoder'] = encoder_tag(args.encoder, args.head)
 
     print(f'\n{"=" * 78}\nwriting to {out_dir}')
-    write_csv(all_rows, out_dir / f'offgrid_scores_{args.encoder}.csv')
-    failed_gates = report_gates(render(all_rows, out_dir, args.encoder))
+    write_csv(all_rows, out_dir / 'offgrid_scores.csv')
+    failed_gates = report_gates(
+        render(all_rows, out_dir, encoder_tag(args.encoder, args.head)))
     if failed:
         print(f'\n{len(failed)} slide(s) failed: {", ".join(failed)}')
     return 1 if (failed or failed_gates) else 0

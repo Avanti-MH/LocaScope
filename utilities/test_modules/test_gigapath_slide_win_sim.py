@@ -649,7 +649,7 @@ def main():
     print('\n[0] Loading GigaPath model...')
     t0 = time.perf_counter()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # Same rule as utilities/cli/locate_photo.py:442 -- fp16 on CUDA, fp32
+    # Same rule as utilities/cli/locate_photo.py:489 -- fp16 on CUDA, fp32
     # elsewhere, because autocast has nothing to offer on CPU. This file claims
     # to exercise the path LocaScopePipeline takes, and the two callers that
     # actually take it (locate_photo, bench_locascope) both hand it an fp16

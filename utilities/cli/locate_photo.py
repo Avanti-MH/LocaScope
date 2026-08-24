@@ -60,7 +60,6 @@ import time
 import traceback
 from pathlib import Path
 
-import cv2
 import numpy as np
 import openslide
 import matplotlib
@@ -73,12 +72,15 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_ROOT / 'utilities'))
-from _paths import job_result_dir                                   # noqa: E402
+from _paths import encoder_tag, job_result_dir                      # noqa: E402
 sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 
-from _sift_plot        import match_img                              # noqa: E402
+from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
+                                      warp_query_into,
+                                      blend_in_footprint,
+                                      checker_in_footprint)
 from LocaScopePipeline import LocaScopePipeline                      # noqa: E402
-from GigaPathFunc      import GigaPathEncoderConfig                  # noqa: E402
+from TileEncoderFunc   import encoder_config, encoder_names                # noqa: E402
 from TissueSegFunc     import HestSegConfig                          # noqa: E402
 
 
@@ -153,19 +155,6 @@ def collect_photos(target: Path, limit: int, stride: int) -> list[Path]:
     if limit > 0:
         photos = photos[:limit]
     return photos
-
-
-def _checkerboard(a: np.ndarray, b: np.ndarray, n: int = 8) -> np.ndarray:
-    """Interleave two same-size images in an n x n checker pattern."""
-    out = a.copy()
-    h, w = a.shape[:2]
-    ch, cw = h // n, w // n
-    for i in range(n):
-        for j in range(n):
-            if (i + j) % 2:
-                out[i * ch:(i + 1) * ch, j * cw:(j + 1) * cw] = \
-                    b[i * ch:(i + 1) * ch, j * cw:(j + 1) * cw]
-    return out
 
 
 # ── the per-photo row ─────────────────────────────────────────────────────────
@@ -257,45 +246,71 @@ def build_row(slide_tag, photo_path, img, res, base_mpp, tile_size,
 # ── figures ───────────────────────────────────────────────────────────────────
 
 def save_shot_figure(img, res, stem, wsi_tag, out_dir) -> str | None:
-    """5 panels: photo, WSI warped into the photo frame, blend, checker, matches."""
+    """5 panels drawn in the WSI's frame: photo, footprint, blend, checker, matches.
+
+    Panels 2-4 warp the QUERY into the WSI crop rather than the crop into the
+    query, because the question this figure exists to answer is where the photo
+    is on the slide -- so the slide holds still and the photo moves into it, and
+    the footprint is read against its own surroundings. That direction also uses
+    H as estimated (query px -> crop px) instead of its inverse.
+
+    They are gated on `success`, not merely on `H is not None`, which is what
+    every other consumer of refine.H already does (`_sift_plot`, `bench_locascope`,
+    `test_sift_ransac`). A rejected H carries no located footprint to draw.
+    """
     if res.refine is None or res.retrieval is None or res.localizer is None:
         return None
     loc = res.localizer
-    H = res.refine.H
+    s = res.refine
+    crop = loc.wsi_crop
 
     fig, axes = plt.subplots(1, 5, figsize=(30, 6.5))
 
     axes[0].imshow(img)
     axes[0].set_title(f'Photo\n{stem}  {img.shape[1]}x{img.shape[0]}')
 
-    if H is not None and loc.wsi_crop is not None:
-        # Invert H (query px -> crop px) to pull the WSI into the photo frame.
-        # A correct localisation makes this panel a copy of the photo.
-        H_inv = np.linalg.inv(H)
-        warped = cv2.warpPerspective(loc.wsi_crop, H_inv,
-                                     (img.shape[1], img.shape[0]))
-        axes[1].imshow(warped)
-        axes[1].set_title('WSI warped into photo frame\n(should match panel 1)')
+    if crop is not None and s.success and s.H is not None:
+        warped, cover = warp_query_into(img, crop.shape, s.H)
+        quad = query_quad(img.shape, s.H)
+        poly = np.vstack([quad, quad[0]])
 
-        axes[2].imshow(cv2.addWeighted(img, 0.5, warped, 0.5, 0))
-        axes[2].set_title('Blend 50/50\n(ghosting = misalignment)')
+        axes[1].imshow(crop)
+        axes[1].plot(poly[:, 0], poly[:, 1], color='dodgerblue', lw=2.0)
+        # Lock the view to the crop. A bad H can put the quad far outside it,
+        # and matplotlib would autoscale to include it, squashing the image.
+        axes[1].set_xlim(0, crop.shape[1])
+        axes[1].set_ylim(crop.shape[0], 0)
+        axes[1].set_title('Photo footprint in the WSI crop\n'
+                          f'centre @level-0 = ({s.center_x0}, {s.center_y0})')
 
-        axes[3].imshow(_checkerboard(img, warped))
-        axes[3].set_title('Checkerboard\n(discontinuities = misalignment)')
+        axes[2].imshow(blend_in_footprint(crop, warped, cover))
+        axes[2].set_title('Blend 50/50 inside the footprint\n'
+                          '(ghosting = misalignment)')
+
+        axes[3].imshow(checker_in_footprint(crop, warped, cover))
+        axes[3].set_title('Checkerboard inside the footprint\n'
+                          '(discontinuities = misalignment)')
+    elif crop is not None:
+        # Still worth drawing: this is where retrieval sent us. With panel 1 and
+        # the matches in panel 5 it separates "retrieval went to the wrong place"
+        # from "right place, SIFT could not hold on".
+        axes[1].imshow(crop)
+        axes[1].set_title('WSI crop retrieval chose\n(no located footprint)')
+        axes[2].set_title(f'not localised  ({s.inlier_count} inliers)')
+        axes[3].set_title('')
     else:
-        for i, t in ((1, 'no homography'), (2, ''), (3, '')):
+        for i, t in ((1, 'no WSI crop'), (2, ''), (3, '')):
             axes[i].set_title(t)
 
-    if loc.wsi_crop is not None and loc.good_matches:
-        axes[4].imshow(match_img(img, loc.query_kps, loc.wsi_crop,
+    if crop is not None and loc.good_matches:
+        axes[4].imshow(match_img(img, loc.query_kps, crop,
                                  loc.crop_kps, loc.good_matches))
-        axes[4].set_title(f'SIFT matches\n{res.refine.match_count} good  '
-                          f'{res.refine.inlier_count} inliers')
+        axes[4].set_title(f'SIFT matches\n{s.match_count} good  '
+                          f'{s.inlier_count} inliers')
 
     for ax in axes:
         ax.axis('off')
 
-    s = res.refine
     fig.suptitle(
         f'{stem}  ->  {wsi_tag}    '
         f'est_mpp={res.est_mpp:.4f} (L{res.routed_level})   '
@@ -392,8 +407,23 @@ def main():
     ap.add_argument('photo', help='A photo file, or a folder of photos')
     ap.add_argument('wsi',   help='The WSI the photos were taken from')
     ap.add_argument('--out',        default='',
-                    help='output directory. Empty means result/<SLURM_JOB_NAME or LocatePhoto>/, via _paths.job_result_dir -- results live outside the checkout')
+                    help='output directory, used verbatim. Empty means '
+                         'result/<SLURM_JOB_NAME or LocatePhoto>/<encoder>/, '
+                         'via _paths.job_result_dir -- results live outside '
+                         'the checkout. The encoder level is added only to '
+                         'that derived path; give --out and you get exactly '
+                         'what you named, so put the encoder in it yourself.')
     ap.add_argument('--csv',        default='predictions.csv')
+    ap.add_argument('--encoder', default='gigapath', choices=encoder_names())
+    ap.add_argument(
+    '--head', default='',
+    help="which exit of the model, empty for its own default. Only CONCH "
+         "has two: the attentional pooler it ships with, 512-d, which is "
+         "the default; and 'trunk', the bare ViT at 768-d, the same shape "
+         "GigaPath and UNI2 have. BOTH run here -- this pipeline wants one "
+         "vector per tile and either exit is that -- so the choice is "
+         "between two embeddings, not a prerequisite. The head is part of "
+         "identity_id, so the two never compare equal.")
     ap.add_argument('--precision',  choices=['fp16', 'fp32'], default='fp16')
     ap.add_argument('--batch-size', type=int, default=1024)
     ap.add_argument('--device',     default='auto')
@@ -421,7 +451,15 @@ def main():
     # create that directory. That cost a run -- --out pointed at a fresh
     # result/RealTest/<tag>/ and the FileNotFoundError landed on the first CSV
     # write, after GigaPath had loaded and the mask + MPP bank were built.
-    args.out = args.out or job_result_dir('LocatePhoto')
+    # The encoder names a level of its own, because a run with a different one
+    # writes different predictions into the same predictions.csv.
+    #
+    # Only on the derived path. An explicit --out is used verbatim: the caller
+    # named a directory, and realtest.sh:56 already composes the tag itself --
+    # appending a second one would give RealTest/<slide>/<tag>/ where the
+    # convention wants RealTest/<tag>/<slide>/.
+    enc_tag = encoder_tag(args.encoder, args.head)
+    args.out = args.out or job_result_dir('LocatePhoto', encoder=enc_tag)
     os.makedirs(args.out, exist_ok=True)
     csv_path = os.path.join(args.out, args.csv)
     wsi_tag = os.path.splitext(os.path.basename(args.wsi))[0]
@@ -455,12 +493,13 @@ def main():
              else torch.float32)
     print(f'device : {device}  precision={str(dtype).replace("torch.", "")}')
 
-    print('\nLoading GigaPath ...', flush=True)
+    print(f'\nLoading {enc_tag} ...', flush=True)
     # From the resolved dtype, not args.precision: the rule above already
     # demoted fp16 to fp32 on CPU.
-    encoder  = GigaPathEncoderConfig(batch_size=args.batch_size)\
-        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
-        .build(device)
+    over = {'head': args.head} if args.head else {}
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
+        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')
+    encoder = cfg.build(device)
     from TissueMaskConfig import TissueMaskConfig
     mask_cfg = TissueMaskConfig(seg=HestSegConfig(), ds=4.0)
 

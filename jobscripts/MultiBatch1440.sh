@@ -20,7 +20,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- One process per slide, written out ------------------------

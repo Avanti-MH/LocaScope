@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from _paths import job_result_dir, setup_import_paths
+from _paths import encoder_tag, job_result_dir, setup_import_paths
 setup_import_paths()
 
 from PatchingLib import QueryPatchContainer
@@ -40,7 +40,7 @@ from QueryFromWSI import QueryFromWSI
 from GigaPathKnnEstiMpp import GigaPathKnnEstiMpp
 from GigaPathSlidingWinSim import GigaPathSlidingWinSim, SlideWinSimResult
 from SIFT_RANSAC import SiftRansacLocalizer, SiftRansacResult
-from GigaPathFunc import GigaPathEncoderConfig
+from TileEncoderFunc import encoder_config, encoder_names
 
 
 # ── Visualization ─────────────────────────────────────────────────────────────
@@ -351,6 +351,15 @@ def main():
     ap.add_argument('--filter',  action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument('--min-region-ratio', type=float, default=0.10)
     ap.add_argument('--batch',   type=int,   default=1024)
+    # Added so the output tag is DERIVED rather than typed. This file was pinned
+    # to GigaPath, and a hardcoded 'gigapath/' in the path would be a literal
+    # that cannot notice the day the pin moves.
+    ap.add_argument('--encoder', default='gigapath', choices=encoder_names(),
+                    help='which tile encoder drives retrieval before SIFT runs')
+    ap.add_argument('--head', default='',
+                    help="which exit of the model, empty for its own default. "
+                         "Only CONCH has two; either works here, since this "
+                         "wants one vector per tile.")
     ap.add_argument('--padding', type=int,   default=2,
                     help='Padding around retrieval best match for SIFT crop (in tiles)')
     ap.add_argument('--min-inliers', type=int, default=10)
@@ -393,7 +402,9 @@ def main():
     print('\n[0] Loading GigaPath model...')
     t0 = time.perf_counter()
     device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    encoder = GigaPathEncoderConfig(batch_size=args.batch).with_model(dtype='fp32').build(device)
+    over = {'head': args.head} if args.head else {}
+    encoder = encoder_config(args.encoder, batch_size=args.batch, **over)\
+        .with_model(dtype='fp32').build(device)
     timings['0. load model'] = time.perf_counter() - t0
     print(f'  device={device}')
 
@@ -498,8 +509,13 @@ def main():
     )
 
     tag = f"{'ov' if args.overlap else 'nov'}_{'flt' if args.filter else 'noflt'}"
-    out = args.out or os.path.join(job_result_dir('SiftRansacTest'),
-                                    f'sift_ransac__{tag}.png')
+    # The figure is the encoder's: retrieval picks the window SIFT then refines,
+    # so a different one puts SIFT in front of different pixels. The grid/filter
+    # tag stays in the filename because it varies WITHIN one encoder's runs.
+    out = args.out or os.path.join(
+        job_result_dir('SiftRansacTest', encoder=encoder_tag(args.encoder,
+                                                             args.head)),
+        f'sift_ransac__{tag}.png')
 
     draw_figure(
         thumb=thumb, mask=mask,

@@ -22,7 +22,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- End-to-end bench, with the stage-2 ranking exposed ---------
@@ -100,7 +100,7 @@ echo
 # `make clean-job JOB=cache` is then the one obvious way to purge it.
 #
 # A HIT SKIPS THE ENCODE, NOT THE READ. Stage 3 reads pixels back out of the
-# container (3_localization/SIFT_RANSAC.py:125), so the container is built
+# container (3_localization/SIFT_RANSAC.py:150), so the container is built
 # either way: 278s read + 285s encode on BRACS_1228 L0, so roughly half. The
 # other half needs lazy per-region reads; see log/TODO.log.
 #

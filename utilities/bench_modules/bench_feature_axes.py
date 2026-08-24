@@ -700,7 +700,12 @@ def main() -> int:
                         help='one or more slides, e.g. BRACS_1228')
     parser.add_argument('--stores',
                         default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'))
-    parser.add_argument('--out', default='')
+    parser.add_argument(
+        '--out', default='',
+        help='output directory, used verbatim. Default: '
+             'result/<SLURM_JOB_NAME or FeatureAxes>/<encoder>/, where the '
+             'encoder is the last component of --stores. That level is added '
+             'only to the derived path, so name it yourself when you pass one.')
     parser.add_argument('--pooling', default='cls')
     parser.add_argument('--sampler-id', default=None,
                         help="which sampling rule's stores to read when a root "
@@ -717,7 +722,19 @@ def main() -> int:
 
     store_root = (args.stores if os.path.isabs(args.stores)
                   else str(_ROOT / args.stores))
-    out_dir = args.out or job_result_dir('FeatureAxes')
+
+    # This bench has no encoder of its own -- it reads features somebody else
+    # wrote -- so the tag comes from the input. The store root's last component
+    # IS the encoder tag under the output convention (result/cache/features/
+    # gigapath/), which is readable; meta.encoder_id would also identify the
+    # encoder but it is eight hex characters of sha256 and cannot be inverted,
+    # so a directory named after it would say nothing to whoever opens it.
+    # Pointed somewhere else, this degrades to naming the directory the features
+    # came from, which is still the honest answer to "whose features are these".
+    # Derived path only -- an explicit --out is used verbatim.
+    out_dir = args.out or job_result_dir(
+        'FeatureAxes',
+        encoder=os.path.basename(os.path.normpath(store_root)))
     os.makedirs(out_dir, exist_ok=True)
 
     summary_rows, component_rows, decoy_rows = [], [], []

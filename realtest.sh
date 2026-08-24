@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=2                # CPU cores per task
 #SBATCH --ntasks-per-node=1              # Tasks per node
 #SBATCH --array=0-9                      # One task per slide (10 slides)
-#SBATCH -o /work/u26130998/log/RealTest_%a             # STDOUT
-#SBATCH -e /work/u26130998/log/RealTest_%a             # STDERR
+#SBATCH -o /work/u26130998/log/%x_%a             # STDOUT
+#SBATCH -e /work/u26130998/log/%x_%a             # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -18,9 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate gigapath
+source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Locate real microscope photos in their own WSI ----------------
@@ -46,6 +47,21 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # To list the mapping:     ls -d /work/u26130998/datasets/Ki67/*_ki67 | sort | cat -n
 
 DATA=/work/u26130998/datasets/Ki67
+
+# One encoder per run, and the output directory carries it. predictions.csv has
+# no encoder column and resume skips on photo name alone (locate_photo.py:472),
+# so two encoders sharing a directory would make the second run print
+# "nothing to do" and exit 0 -- no error, no rows.
+#
+# The tag is composed HERE, above the slide, and locate_photo takes --out
+# verbatim. It adds the encoder level only to the directory it derives itself,
+# so letting it append would give RealTest/<slide>/<encoder>/ where the
+# convention wants RealTest/<encoder>/<slide>/.
+ENCODER="${ENCODER:-gigapath}"
+HEAD="${HEAD:-}"
+TAG="$ENCODER${HEAD:+_$HEAD}"
+ENC_FLAG="--encoder $ENCODER${HEAD:+ --head $HEAD}"
+
 OUT="$RESULT_ROOT"/RealTest
 
 # Photos per slide vary 71..478; every task fits well inside the 24h limit.
@@ -87,20 +103,21 @@ if [ -z "$WSI" ]; then
   exit 0
 fi
 
-echo "======== [$IDX] $(basename "$PHOTO_DIR")  ->  $(basename "$WSI") ========"
+echo "======== [$IDX] $(basename "$PHOTO_DIR")  ->  $(basename "$WSI")  enc=$TAG ========"
 echo "photos: $(ls "$PHOTO_DIR"/*.bmp 2>/dev/null | wc -l)"
 
 python utilities/cli/locate_photo.py \
   "$PHOTO_DIR" \
   "$WSI" \
-  --out "$OUT/$(basename "$PHOTO_DIR")" \
+  --out "$OUT/$TAG/$(basename "$PHOTO_DIR")" \
   --figures $FIGURES --figure-limit $FIGURE_LIMIT \
   --limit $LIMIT --stride $STRIDE $RESUME_FLAG \
+  $ENC_FLAG \
   --precision fp16 --batch-size 1024
 
 echo ""
-echo "======== done -> $OUT/$(basename "$PHOTO_DIR") ========"
+echo "======== done -> $OUT/$TAG/$(basename "$PHOTO_DIR") ========"
 
 # Merge every slide's CSV afterwards (run once, after the array finishes):
-#   awk 'FNR==1 && NR!=1 {next} {print}' result/RealTest/*/predictions.csv \
-#       > result/RealTest/all_predictions.csv
+#   awk 'FNR==1 && NR!=1 {next} {print}' result/RealTest/<encoder>/*/predictions.csv \
+#       > result/RealTest/<encoder>/all_predictions.csv

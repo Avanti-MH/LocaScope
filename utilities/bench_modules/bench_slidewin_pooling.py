@@ -224,13 +224,13 @@ from TissuesRegionsMask import TissuesRegionsMask                # noqa: E402
 from TissueSegFunc import HestSegConfig                          # noqa: E402
 from TileEncoderFunc import (admissible_poolings, encoder_config,  # noqa: E402
                              encoder_names, pooling_kinds)
-from RetrievalReport import (K_FIXED, K_FRACTIONS,              # noqa: E402,F401
-                             attach_baseline, frac_label, k_at,
-                             report, truth_rank)
+from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
+                                           attach_baseline, frac_label, k_at,
+                                           report, truth_rank)
 from GigaPathSlidingWinSim import SlidingWindowSimilarity        # noqa: E402
 from camera import Camera                                        # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
-from _paths import job_result_dir                                # noqa: E402
+from _paths import encoder_tag, job_result_dir                   # noqa: E402
 
 TILE = 256
 HALF_TILE = TILE // 2
@@ -411,23 +411,6 @@ def grid_answers(x: int, y: int) -> dict:
     return {'main_rc': (main_row, main_col), 'ovlp_rc': (ovlp_row, ovlp_col),
             'd_main': d_main, 'd_overlap': d_ovlp,
             'truth': 'main' if d_main <= d_ovlp else 'overlap'}
-
-
-def encoder_tag(args) -> str:
-    """What names this run, in the filename AND in every row.
-
-    One definition because the two must agree: the filename stops a second
-    encoder from overwriting the first one's numbers, the column stops the two
-    from being averaged together afterwards, and a tag computed twice is a tag
-    that eventually differs in one of them.
-
-    The head is in it because it is in identity_id. conch_vit through its
-    attentional pooler and through its trunk are 512-d and 768-d vectors in
-    different spaces; a table averaging both would read as one comparison.
-    Empty head means the encoder's own single exit, so gigapath and uni2 keep
-    the names they already wrote.
-    """
-    return f'{args.encoder}_{args.head}' if args.head else args.encoder
 
 
 def rank_of(answer_score: float, pools: list) -> int:
@@ -747,7 +730,7 @@ def run_slide_level(slide, stem, level, mask, args, encoder,
                     # refuses a mixed set on this key. encoder_tag and not
                     # args.encoder: conch_vit has two heads and they are two
                     # different vectors.
-                    'encoder': encoder_tag(args),
+                    'encoder': encoder_tag(args.encoder, args.head),
                     'slide': stem, 'level': level, 'fov_id': fov_id,
                     'pool': pool, 'd_main': round(query['d_main'], 2),
                     'd_overlap': round(query['d_overlap'], 2),
@@ -775,7 +758,7 @@ def run_slide_level(slide, stem, level, mask, args, encoder,
 # ══════════════════════════════════════════════════════════════════════════════
 #  Derived metrics -- everything reads only the stored integers
 #
-#  They live in utilities/RetrievalReport.py because bench_gigapath_pooling asks
+#  They live in utilities/dump_function/RetrievalReport.py because bench_gigapath_pooling asks
 #  the same question one scale down and prints the same tables. Two copies of
 #  "@1%" would never have raised: both would print a plausible number under the
 #  same header, and a comparison between the two benches would be quietly
@@ -873,10 +856,23 @@ def main() -> int:
                         help='print the 單片跨層 tables. Worth having only when '
                              'the per-level tables show an H&E / Ki67 split')
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--out', default=None)
+    parser.add_argument(
+        '--out', default=None,
+        help='output directory, used verbatim. Default: '
+             'result/<SLURM_JOB_NAME or SlidewinPooling>/<encoder>/ -- the '
+             'encoder level is added only to that derived path, so name it '
+             'yourself when you pass one.')
     args = parser.parse_args()
 
-    out_dir = Path(args.out or job_result_dir('SlidewinPooling'))
+    # The tag is a directory, not a filename suffix. It used to be both halves
+    # of `slidewin_pooling_<tag>.csv` sitting in a shared directory; one
+    # mechanism is enough, and the directory is the half that also covers
+    # anything else a run drops beside the CSV.
+    #
+    # Added only to the derived path. An explicit --out is used verbatim --
+    # SlidewinPooling.sh:117 already spells $OUT/$TAG in what it echoes.
+    tag = encoder_tag(args.encoder, args.head)
+    out_dir = Path(args.out or job_result_dir('SlidewinPooling', encoder=tag))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     arms = [f'{p}+{s}' for p in POOLINGS for s in SCORES]
@@ -907,8 +903,6 @@ def main() -> int:
     over = {'head': args.head} if args.head else {}
     cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp16' if args.fp16 else 'fp32')
-
-    tag = encoder_tag(args)
 
     # Which arms this encoder can actually run. POOLINGS above is what the bench
     # WANTS compared; the patch grid decides what is possible, and the two are
@@ -973,7 +967,7 @@ def main() -> int:
     # second encoder's run from overwriting the first one's numbers, the column
     # stops the two from being averaged together afterwards. Neither does the
     # other's job.
-    write_csv(all_rows, out_dir / f'slidewin_pooling_{tag}.csv')
+    write_csv(all_rows, out_dir / 'slidewin_pooling.csv')
     if all_rows:
         report(attach_baseline(all_rows, BASELINE), arms, BASELINE,
                per_slide=args.per_slide)

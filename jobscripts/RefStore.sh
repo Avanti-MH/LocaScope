@@ -55,18 +55,31 @@ WSIS=(
   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
 )
 
+# Spelled once, and passed to BOTH invocations. The store root and the report
+# directory both carry it, so a dry run that names one encoder and a build that
+# names another would describe a directory the build never wrote to.
+#
+# conch_vit needs `HEAD=trunk`: this writes POOLED features, and pooling needs a
+# token axis that CONCH's default attentional pooler does not have.
+ENCODER="${ENCODER:-gigapath}"
+HEAD="${HEAD:-}"
+TAG="$ENCODER${HEAD:+_$HEAD}"
+ENC_FLAG="--encoder $ENCODER${HEAD:+ --head $HEAD}"
+
 echo "======== dry run: quotas only, no tile is read ========"
 python utilities/cli/build_reference_store.py "${WSIS[@]}" \
+  $ENC_FLAG \
   --dry-run
 
 echo ""
 echo "======== build ========"
 python utilities/cli/build_reference_store.py "${WSIS[@]}" \
+  $ENC_FLAG \
   --pooling tokens
 
 echo ""
 echo "======== done ========"
-echo "  result/cache/features/*.safetensors"
+echo "  result/cache/features/$TAG/*.safetensors"
 echo ""
 echo "  Every tile carries why it is there: white_frac, bucket, origin"
 echo "  (grid / displaced / inherited), parent_x/parent_y, inherit_id, valid_frac."
@@ -74,4 +87,7 @@ echo "  inherit_id is the same number at every level for one physical location,"
 echo "  so cross-level correspondence is an index lookup rather than a search."
 echo ""
 echo "  Inspect with:  python utilities/cli/inspect_feature_store.py \\"
-echo "                        result/cache/features"
+echo "                        result/cache/features/$TAG"
+echo ""
+echo "  The encoder names a directory of its own, and the readers glob one"
+echo "  level without recursing -- so point them at the encoder, not the cache."

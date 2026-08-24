@@ -61,9 +61,9 @@ from ReferenceSampler import BUCKETS, SamplerConfig                 # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissuesRegionsMask import TissuesRegionsMask                   # noqa: E402
 from TissueSegFunc import HestSegConfig                             # noqa: E402
-from GigaPathFunc import GigaPathEncoderConfig                      # noqa: E402
+from TileEncoderFunc import encoder_config, encoder_names           # noqa: E402
 import _paths                                                       # noqa: E402
-from _paths import job_result_dir                                   # noqa: E402
+from _paths import encoder_tag, job_result_dir                      # noqa: E402
 
 
 def _record(s, i: int) -> dict:
@@ -307,14 +307,19 @@ def main() -> int:
     # against the caller's cwd and so wrote INSIDE the checkout -- the one thing
     # the result/ move exists to prevent. RefStore.sh passes no --out, so this
     # default is what it used.
-    ap.add_argument('--out',
-                    default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'),
-                    help='store root -- the same cache the pooling stores use. '
-                         'They coexist because sampler_id and mask_id are both '
-                         'in cfg_hash, so the filenames differ')
-    ap.add_argument('--report-dir', default='',
-                    help='where the per-level CSV and the pre-flight text go; '
-                         'default result/<SLURM_JOB_NAME>')
+    # default=None rather than the path itself, so that "the user named a
+    # directory" stays distinguishable from "we chose one". Only the second
+    # gets the encoder level appended.
+    ap.add_argument('--out', default=None,
+                    help='store root, used verbatim. Default '
+                         'result/cache/features/<encoder>/ -- the same cache '
+                         'the pooling stores use. They coexist because '
+                         'sampler_id and mask_id are both in cfg_hash, so the '
+                         'filenames differ')
+    ap.add_argument('--report-dir', default=None,
+                    help='where the per-level CSV and the pre-flight text go, '
+                         'used verbatim; default '
+                         'result/<SLURM_JOB_NAME>/<encoder>/')
     ap.add_argument('--levels', type=int, nargs='*', default=None,
                     help='levels to build; default every level')
     ap.add_argument('--dry-run', action='store_true',
@@ -322,6 +327,24 @@ def main() -> int:
     ap.add_argument('--pooling', default='cls',
                     help="'cls' keeps one vector per tile (~61 MB/slide); "
                          "'tokens' keeps all 197 (~6 GB/slide)")
+    ap.add_argument(
+        '--encoder', default='gigapath', choices=encoder_names(),
+        help='which tile encoder. Only the module for THIS one is imported: '
+             'every implementation sets HF_HOME above its own timm import and '
+             'setdefault is first-one-wins, so importing all three would point '
+             'two of them at the wrong weight cache -- silently. See '
+             'TileEncoderFunc._IMPLEMENTATIONS. A store carries encoder_id in '
+             'its identity, so one built here can only be read back by a run '
+             'using the same encoder; that is a refusal, not a wrong answer.')
+    ap.add_argument(
+        '--head', default='',
+        help="which exit of the model, empty for its own default. Only CONCH "
+             "has two, and it needs --head trunk here: this writes pooled "
+             "features, and pooling needs a token axis that CONCH's default "
+             "attentional pooler does not have -- it hands back ONE 512-d "
+             "vector. trunk is the bare ViT, the same shape GigaPath and UNI2 "
+             "have. The head reaches identity_id, so the two never compare "
+             "equal.")
 
     ap.add_argument('--n-target', type=int, default=1000)
     ap.add_argument('--tile', type=int, default=256)
@@ -364,21 +387,45 @@ def main() -> int:
                         min_useful=args.min_useful,
                         seed=args.seed)
 
-    out_root = (args.out if os.path.isabs(args.out)
-                else str(_ROOT / args.out))
+    # The default store root gets the tag but NOT a job name: it is a cache
+    # shared across jobs on purpose, and a store's whole value is being reusable
+    # by the next run. The readers glob one directory non-recursively
+    # (FeatureStore.py:492), so this is also the level they must be pointed at.
+    # An explicit --out is used verbatim, tag included or not, as the caller
+    # wrote it.
+    enc_tag = encoder_tag(args.encoder, args.head)
+    if args.out:
+        out_root = (args.out if os.path.isabs(args.out)
+                    else str(_ROOT / args.out))
+    else:
+        out_root = os.path.join(_paths.RESULT_DIR, 'cache', 'features', enc_tag)
     os.makedirs(out_root, exist_ok=True)
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     hest_method = HestSegConfig().build(device)
     mask_id = f'hest@L{args.mask_level}'
 
-    encoder = spec = None
-    encoder_id = 'prov-gigapath@fp32tokens'   # replaced below once a model exists
+    # None, not a placeholder string. --dry-run builds no model, so there is no
+    # identity_id to derive, and nothing on that path reads this: _build_slide
+    # returns at its own `if args.dry_run` before StoreMeta is ever constructed,
+    # and the preflight report is rendered from cfg and geometry alone.
+    #
+    # It used to be 'prov-gigapath@fp32tokens', which was dead either way -- the
+    # real one overwrites it below -- and would have become a lie the moment
+    # --encoder took a second value. A plausible-looking dead string is the
+    # dangerous kind: the next person to read it on this path gets an answer
+    # instead of an error. None makes that use fail where it is written.
+    encoder = spec = encoder_id = None
     if not args.dry_run:
         # fp32: what the free function defaulted to (GigaPathFunc_old) when
         # this wrote its
-        # existing stores, and changing it would silently orphan them.
-        encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
+        # existing stores, and changing it would silently orphan them. It stays
+        # fixed across --encoder for the same reason -- the precision is part of
+        # identity_id, so letting it follow the encoder would move gigapath's
+        # own name too.
+        over = {'head': args.head} if args.head else {}
+        encoder = encoder_config(args.encoder, batch_size=args.batch_size,
+                                 **over)\
             .with_model(dtype='fp32').build(device)
         # The model_spec itself: StoreMeta and pooling_kinds read dim / feat_hw /
         # num_prefix off it by name, so there is nothing to convert.
@@ -418,7 +465,7 @@ def main() -> int:
     # and only SLURM's stdout goes to log/. The pre-flight is the answer to
     # "why did this level only get 296 tiles", and a log is overwritten by the
     # next job with the same name.
-    report_dir = args.report_dir or job_result_dir('RefStore')
+    report_dir = args.report_dir or job_result_dir('RefStore', encoder=enc_tag)
     os.makedirs(report_dir, exist_ok=True)
     if reports:
         txt = os.path.join(report_dir, 'refstore_preflight.txt')

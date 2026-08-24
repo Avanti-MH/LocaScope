@@ -15,6 +15,34 @@ from PatchingLib import QueryPatchContainer, WsiTissuesContainer
 from GigaPathSlidingWinSim import SlideWinSimResult
 
 
+# ── homography predicate ──────────────────────────────────────────────────────
+
+def is_invertible(H) -> bool:
+    """Can this H be inverted at all? The first line against a degenerate one.
+
+    Ask the question the consumers actually ask, rather than thresholding the
+    determinant: a homography is defined only up to scale, so any threshold on
+    det(H) is a guess about that scale, and the value being guessed at has no
+    fixed meaning between two shots. `cv2.invert` with DECOMP_LU returns 0 when
+    the factorisation hits a zero pivot, which is the same condition that makes
+    `np.linalg.inv` raise LinAlgError.
+
+    A singular H is not a homography. It collapses the plane onto a line, so
+    infinitely many source points share one destination and no inverse mapping
+    exists. `cv2.warpPerspective` does NOT say so: it inverts M internally and
+    ignores invert()'s return code, so it paints black instead of failing.
+
+    This catches only the exact half of the problem. log/TODO.log:476 records
+    the other half as failure mode B: an H degenerate enough to map every match
+    to one place, scoring 233-278 inliers with a ratio near 1, because every
+    point passes a geometric check made with the broken H itself. Those are
+    near-singular rather than singular, so LU still inverts them and this
+    returns True.
+    """
+    ok, _ = cv2.invert(np.asarray(H, dtype=np.float64), flags=cv2.DECOMP_LU)
+    return bool(ok)
+
+
 # ── Result dataclass ──────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -216,8 +244,25 @@ class SiftRansacLocalizer:
 
             H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
             if H is not None:
+                # Count first, reject second: the inlier count is what tells the
+                # two failure modes apart in the log, and it stays true of the
+                # match even when the model fitted to it is thrown away.
                 inliers = int(mask.sum())
-                success = inliers >= self.min_inliers
+                if is_invertible(H):
+                    success = inliers >= self.min_inliers
+                else:
+                    # findHomography returns a degenerate H when RANSAC's support
+                    # is the bare 4-point minimal sample. 4 pairs give exactly the
+                    # 8 equations H's 8 degrees of freedom need, so ANY quadruple
+                    # is reproduced with zero reprojection error and counts as its
+                    # own inlier set -- there is no fifth point to veto a
+                    # degenerate configuration (3 points collinear, or two SIFT
+                    # keypoints at the same location). The result is rank-deficient
+                    # and has no inverse. Drop it here so the consumers' existing
+                    # `H is not None` check means what it says; keeping it made
+                    # locate_photo's failure figure raise LinAlgError, and made
+                    # every non-raising near-singular case draw a garbage panel.
+                    H = None
                 if success:
                     # Map query top-left (0,0) and centre through H → wsi_crop px
                     pts = np.array(

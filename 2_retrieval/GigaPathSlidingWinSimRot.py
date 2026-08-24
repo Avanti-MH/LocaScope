@@ -91,7 +91,7 @@ class SlideWinSimCandidate:
     The best_* aliases below make a candidate usable directly as
     SiftRansacLocalizer's `location`. That refiner reads exactly five
     attributes -- best_region_index, best_x, best_y, ds, best_rotation
-    (SIFT_RANSAC.py:125-204, the last one via getattr) -- and already accepts
+    (SIFT_RANSAC.py:127-290, the last one via getattr) -- and already accepts
     either result type by duck typing, so verifying a candidate is a matter of
     handing it over rather than of building a fake result around it.
     """
@@ -249,7 +249,7 @@ class GigaPathSlidingWinSimRot:
         else:
             # The container is built either way. It is not only the source of
             # the tiles -- stage 3 reads pixels back out of it
-            # (SIFT_RANSAC.py:125), so a cache hit skips the ENCODE and not the
+            # (SIFT_RANSAC.py:150), so a cache hit skips the ENCODE and not the
             # read. Half of a level-0 build, measured: 278s read + 285s encode
             # on BRACS_1228. The other half needs lazy region reads; see
             # log/TODO.log.

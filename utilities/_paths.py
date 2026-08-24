@@ -46,7 +46,25 @@ def setup_import_paths():
             sys.path.insert(0, path)
 
 
-def job_result_dir(default_name: str) -> str:
+def encoder_tag(encoder: str, head: str = '') -> str:
+    """What names an encoder's outputs, in one place.
+
+    The head is part of it because it is part of identity_id: conch_vit through
+    its attentional pooler and through its trunk are 512-d and 768-d vectors in
+    different spaces, and one directory holding both would read as one
+    experiment. An empty head means the encoder's own single exit, so gigapath
+    and uni2 get plain names.
+
+    Here rather than in each caller because it is already a name computed in
+    two places -- the output path and, for the pooling benches, a CSV column
+    naming the arm -- and a tag computed twice is a tag that eventually differs
+    in one of them. Takes strings, not an argparse Namespace, so that this file
+    keeps importing os and sys and nothing else.
+    """
+    return f'{encoder}_{head}' if head else str(encoder)
+
+
+def job_result_dir(default_name: str, *, encoder: str = '') -> str:
     """
     Return the per-job output directory: RESULT_DIR / (SLURM_JOB_NAME or default_name).
     Creates the directory if it doesn't exist.
@@ -58,8 +76,17 @@ def job_result_dir(default_name: str) -> str:
     Write it as `args.out or job_result_dir(...)` and then makedirs the result
     anyway: `or` short-circuits, so an explicit --out never reaches this
     function and nothing else would create that directory.
+
+    `encoder` adds one more level, and the rule for when to pass it is: if
+    running a different encoder would change what this writes, the directory
+    says which one wrote it. It is a directory rather than a filename suffix
+    because a run usually emits more than one file -- a CSV next to a
+    figures/<category>/ tree -- and tagging only the CSV leaves a second
+    encoder overwriting the first one's figures one at a time, which reads as a
+    redrawn figure rather than as a collision. Pass encoder_tag(...) into it.
     """
     name = os.environ.get('SLURM_JOB_NAME') or default_name
-    path = os.path.join(RESULT_DIR, name)
+    path = os.path.join(RESULT_DIR, name, encoder) if encoder \
+        else os.path.join(RESULT_DIR, name)
     os.makedirs(path, exist_ok=True)
     return path

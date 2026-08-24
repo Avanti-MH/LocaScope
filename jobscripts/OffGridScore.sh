@@ -22,7 +22,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- What does landing off the grid cost? -----------------------
@@ -107,17 +107,24 @@ if [ "$IDX" -ge "${#SLIDES[@]}" ]; then
 fi
 WSI="${SLIDES[$IDX]}"
 STEM=$(basename "$WSI"); STEM="${STEM%.*}"
-# Resolved once: the bench puts this name in every filename it writes and in
-# every row it stores, so the echo lines below must spell the same default.
+# Resolved once: the bench puts this name in every row it stores, so the echo
+# lines below must spell the same default.
+#
+# The tag goes ABOVE the slide, and the bench takes --out verbatim -- it adds
+# the encoder level only to the directory it derives itself. Composing it here
+# is what keeps the layout result/<job>/<encoder>/<slide>/ rather than burying
+# the encoder one level down under each slide.
 ENCODER="${ENCODER:-gigapath}"
-OUT_DIR="${OUT:-"$RESULT_ROOT"/OffGridScore}/$STEM"
+HEAD="${HEAD:-}"
+TAG="$ENCODER${HEAD:+_$HEAD}"
+OUT_DIR="${OUT:-"$RESULT_ROOT"/OffGridScore}/$TAG/$STEM"
 
-echo "======== [$IDX] $STEM  encoder=$ENCODER ========"
+echo "======== [$IDX] $STEM  encoder=$TAG ========"
 echo "wsi : $WSI"
 echo "out : $OUT_DIR"
 
 python utilities/bench_modules/bench_offgrid_score.py "$WSI" \
-  --encoder "$ENCODER" \
+  --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
   --step "${STEP:-16}" \
   --points "${POINTS:-5}" \
   --white-max 0.15 \
@@ -128,24 +135,24 @@ python utilities/bench_modules/bench_offgrid_score.py "$WSI" \
 
 echo ""
 echo "======== done ========"
-echo "  result/OffGridScore/offgrid_scores_$ENCODER.csv  one row per (slide, level,"
+echo "  result/OffGridScore/$TAG/<slide>/offgrid_scores.csv  one row per (slide, level,"
 echo "                                               point, dx, dy, preprocess)"
-echo "  result/OffGridScore/offgrid_gates_$ENCODER.csv   geometry gates, AGGREGATED"
+echo "  result/OffGridScore/$TAG/<slide>/offgrid_gates.csv   geometry gates, AGGREGATED"
 echo "                                               over points -- per point the"
 echo "                                               endpoints are two separate"
 echo "                                               exposures and their order is"
 echo "                                               noise, not geometry"
-echo "  result/OffGridScore/offgrid_definitions.csv  every name, and what it is"
+echo "  result/OffGridScore/$TAG/<slide>/offgrid_definitions.csv  every name, and what it is"
 echo ""
 echo "  Read the gates FIRST. Both are forced by the geometry:"
 echo "    main_decays    main(0,0) > main(128,128)          on the mean combiner"
 echo "    overlap_rises  overlap(128,128) > overlap(0,0)"
 echo ""
 echo "  Then the figures, all covering every slide at once:"
-echo "    offgrid_heatmap_$ENCODER.png  2D maps, none|grey x main|overlap, plus ALL"
-echo "    offgrid_surface_$ENCODER.png  one 3D panel per preprocess, where the two"
+echo "    offgrid_heatmap.png  2D maps, none|grey x main|overlap, plus ALL"
+echo "    offgrid_surface.png  one 3D panel per preprocess, where the two"
 echo "                         windows trade places"
-echo "    offgrid_profile_$ENCODER.png  along dx = dy, one panel per combiner:"
+echo "    offgrid_profile.png  along dx = dy, one panel per combiner:"
 echo "                         mean (additive, production) vs geomean"
 echo "                         (multiplicative = AND) vs min (hardest AND)"
 echo ""
@@ -154,10 +161,10 @@ echo "  --plot-only reads the CSVs and redraws; no GPU, no WSI, no model, so"
 echo "  it runs on a login node in seconds and can be repeated freely:"
 echo ""
 echo "    python utilities/bench_modules/bench_offgrid_score.py --plot-only \\"
-echo "        result/OffGridScore/*/offgrid_scores_$ENCODER.csv \\"
-echo "        --out result/OffGridScore"
+echo "        result/OffGridScore/$TAG/*/offgrid_scores.csv \\"
+echo "        --out result/OffGridScore/$TAG/merged"
 echo ""
-echo "  That also writes the merged offgrid_gates_$ENCODER.csv, aggregated across"
+echo "  That also writes the merged offgrid_gates.csv, aggregated across"
 echo "  all seven slides rather than one at a time. Keep the glob to ONE encoder:"
 echo "  the figures average over rows, so a mixed set is refused rather than"
 echo "  drawn as a picture of neither model."

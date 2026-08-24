@@ -66,7 +66,6 @@ import sys
 import time
 from pathlib import Path
 
-import cv2
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -79,7 +78,10 @@ sys.path.insert(0, str(_ROOT / 'utilities'))
 from _paths import job_result_dir                                   # noqa: E402
 
 from SlideWinSift import SlideWinSift          # noqa: E402
-from _sift_plot   import match_img             # noqa: E402
+from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
+                                      warp_query_into,
+                                      blend_in_footprint,
+                                      checker_in_footprint)
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -144,8 +146,11 @@ def gt_center(row: dict, base_mpp: float) -> tuple:
     """(cx, cy) @ level-0 of the shot's centre.
 
     Copied from bench_locascope._gt_center rather than imported, because that
-    module pulls in torch and the whole pipeline and this tool deliberately
-    depends on neither.
+    module pulls in the whole pipeline. Torch is no longer part of that reason:
+    SlideWinSift now reaches SIFT_RANSAC for is_invertible and gets torch with
+    it, accepted deliberately because this tool is the brute-force baseline
+    with a single importer. What is still worth not importing is
+    bench_locascope itself.
 
     The rect query_sim read is fov_width x fov_height at the NOMINAL mpp, and
     both the rotation and the final centre-crop are centred on it, so its centre
@@ -160,19 +165,6 @@ def gt_center(row: dict, base_mpp: float) -> tuple:
 
 
 # ── figure ────────────────────────────────────────────────────────────────────
-
-def _checkerboard(a: np.ndarray, b: np.ndarray, n: int = 8) -> np.ndarray:
-    """Interleave two same-size images in an n x n checker pattern."""
-    out = a.copy()
-    h, w = a.shape[:2]
-    ch, cw = h // n, w // n
-    for i in range(n):
-        for j in range(n):
-            if (i + j) % 2:
-                out[i * ch:(i + 1) * ch, j * cw:(j + 1) * cw] = \
-                    b[i * ch:(i + 1) * ch, j * cw:(j + 1) * cw]
-    return out
-
 
 def backdrop(sws: SlideWinSift, max_side: int = 2500) -> tuple:
     """(rgb, ds) of the scanned rectangle, small enough to draw on.
@@ -201,7 +193,11 @@ def save_figure(img, res, sws, stem, wsi_tag, out_dir,
 
     The photo is drawn once in a column of its own rather than once per row --
     it is the same image every time, and the comparison the rows exist for is
-    photo-versus-warped, which reads better with the reference held still.
+    photo-versus-window, which reads better with the reference held still.
+
+    Each row is drawn in the WINDOW's frame: the query is warped into the window
+    rather than the window into the query, because the question is where the
+    photo sits, and that direction uses H as estimated rather than its inverse.
     """
     hits = [h for h in res.hits if h.H is not None and h.crop is not None]
     k = max(1, len(hits))
@@ -218,18 +214,28 @@ def save_figure(img, res, sws, stem, wsi_tag, out_dir,
     ax.axis('off')
 
     for r, h in enumerate(hits):
-        H_inv = np.linalg.inv(h.H)
-        warped = cv2.warpPerspective(h.crop, H_inv, (img.shape[1], img.shape[0]))
+        warped, cover = warp_query_into(img, h.crop.shape, h.H)
+        quad = query_quad(img.shape, h.H)
+        poly = np.vstack([quad, quad[0]])
         for c, (pic, title) in enumerate((
                 (h.crop,  f'#{r+1} window @L{res.level}\n'
                           f'({h.win_x0}, {h.win_y0}) level-0'),
-                (warped,  'WSI warped into photo frame\n(should match the photo)'),
-                (cv2.addWeighted(img, 0.5, warped, 0.5, 0),
-                          'Blend 50/50\n(ghosting = misalignment)'),
-                (_checkerboard(img, warped),
-                          'Checkerboard\n(discontinuities = misalignment)'))):
+                (h.crop,  'Photo footprint in the window\n'
+                          f'centre @level-0 = ({h.center_x0}, {h.center_y0})'),
+                (blend_in_footprint(h.crop, warped, cover),
+                          'Blend 50/50 inside the footprint\n'
+                          '(ghosting = misalignment)'),
+                (checker_in_footprint(h.crop, warped, cover),
+                          'Checkerboard inside the footprint\n'
+                          '(discontinuities = misalignment)'))):
             a = fig.add_subplot(gs[r, c])
             a.imshow(pic)
+            if c == 1:
+                a.plot(poly[:, 0], poly[:, 1], color='dodgerblue', lw=2.0)
+                # Lock the view: a quad landing outside the window would make
+                # matplotlib autoscale and squash the image.
+                a.set_xlim(0, h.crop.shape[1])
+                a.set_ylim(h.crop.shape[0], 0)
             a.set_title(title, fontsize=9)
             a.axis('off')
         a = fig.add_subplot(gs[r, 4])

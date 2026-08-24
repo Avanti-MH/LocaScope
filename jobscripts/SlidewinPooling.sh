@@ -114,7 +114,7 @@ else
 fi
 
 echo "======== mode=$MODE  encoder=$TAG ========"
-echo "out : $OUT/slidewin_pooling_$TAG.csv"
+echo "out : $OUT/$TAG/slidewin_pooling.csv"
 echo ""
 
 python utilities/bench_modules/bench_slidewin_pooling.py \
@@ -123,7 +123,7 @@ python utilities/bench_modules/bench_slidewin_pooling.py \
 
 echo ""
 echo "======== done ========"
-echo "  $OUT/slidewin_pooling_$TAG.csv"
+echo "  $OUT/$TAG/slidewin_pooling.csv"
 echo ""
 echo "  Read the gates FIRST -- a failure there means no number below is worth"
 echo "  reading. Then truth_pctile per (slide, level): 0.5 = broken mapping."
@@ -138,7 +138,7 @@ echo "  Every metric is derived from two stored integers per (query, arm), so"
 echo "  re-tabulating costs no GPU:"
 echo ""
 echo "    python utilities/bench_modules/bench_slidewin_pooling.py --report-only \\"
-echo "        $OUT/slidewin_pooling_$TAG.csv"
+echo "        $OUT/$TAG/slidewin_pooling.csv"
 echo ""
 echo "  One encoder per report. Feeding two CSVs at once is refused: every"
 echo "  table averages over rows, so the merge would print one comparison"

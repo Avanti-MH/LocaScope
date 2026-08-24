@@ -20,7 +20,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Step 5: is the scale subspace worth anything? ---------------
@@ -106,7 +106,7 @@ if [ -n "${ONLY_WSI}" ]; then
 fi
 
 python utilities/bench_modules/bench_subspace_knn.py "${SLIDES[@]}" \
-  --stores "$RESULT_ROOT"/cache/reference_features \
+  --stores "$RESULT_ROOT"/cache/reference_features/"${ENCODER:-gigapath}" \
   --pooling cls \
   --per-level "${PER_LEVEL:-1000}" \
   --white-max "${WHITE_MAX:-0.15}" \

@@ -25,6 +25,79 @@ import matplotlib.patches as mpatches
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def query_quad(query_shape, H) -> np.ndarray:
+    """The query's 4 corners in crop px, from the origin round to (0, h).
+
+    A rotated quad, not an axis-aligned box: a box drawn from the mapped (0, 0)
+    extends in the wrong direction once the query came in rotated, and pushes
+    the mapped centre outside its own footprint.
+
+    Every caller draws with it, which is why it sits here, while `is_invertible`
+    -- the other question worth asking about an H -- sits in
+    3_localization/SIFT_RANSAC.py, where the code that must not import
+    matplotlib can reach it.
+    """
+    h_q, w_q = query_shape[:2]
+    corners = np.float32(
+        [[0, 0], [w_q, 0], [w_q, h_q], [0, h_q]]).reshape(-1, 1, 2)
+    return cv2.perspectiveTransform(
+        corners, np.asarray(H, dtype=np.float64)).reshape(-1, 2)
+
+
+def warp_query_into(query_img, crop_shape, H):
+    """Warp the query into the WSI crop's frame. Returns (warped, cover).
+
+    This is the direction the figures want: the question is where the photo sits
+    on the slide, so the slide is the frame that stays still and the photo is
+    what moves into it. It also uses H as estimated -- query px -> crop px --
+    instead of its inverse.
+
+    `cover` is the footprint the query actually lands on, and it is needed
+    because the crop is bigger than the query. SIFT_RANSAC pads the crop by 2
+    tiles on every side, so a 1440x1024 photo covers about 28% of the resulting
+    2560x2048 crop; a blend or a checker run over the whole crop would turn the
+    other 72% into half-dark noise and hide the thing being checked.
+
+    Only call this on an H that `is_invertible`. `warpPerspective` inverts M
+    internally and ignores the return code, so a singular one paints black in
+    silence rather than raising the way `np.linalg.inv` would.
+    """
+    ch, cw = crop_shape[:2]
+    M = np.asarray(H, dtype=np.float64)
+    warped = cv2.warpPerspective(query_img, M, (cw, ch))
+    ones = np.full(query_img.shape[:2], 255, np.uint8)
+    cover = cv2.warpPerspective(ones, M, (cw, ch)) > 127
+    return warped, cover
+
+
+def blend_in_footprint(crop, warped, cover, alpha: float = 0.5) -> np.ndarray:
+    """The crop with the warped query blended over it, inside `cover` only."""
+    out = crop.copy()
+    out[cover] = cv2.addWeighted(crop, 1.0 - alpha, warped, alpha, 0.0)[cover]
+    return out
+
+
+def checker_in_footprint(crop, warped, cover, n: int = 8) -> np.ndarray:
+    """Interleave the warped query with the crop in an n x n checker.
+
+    The cells are laid out over the footprint's bounding box rather than over
+    the whole crop: an 8x8 grid across a crop that the query covers a quarter of
+    would put only about 2x2 cells on the thing being checked.
+    """
+    out = crop.copy()
+    ys, xs = np.nonzero(cover)
+    if ys.size == 0:
+        return out
+    y0, x0 = int(ys.min()), int(xs.min())
+    ch = max(1, (int(ys.max()) + 1 - y0) // n)
+    cw = max(1, (int(xs.max()) + 1 - x0) // n)
+    rows = ((np.arange(crop.shape[0], dtype=np.int32) - y0) // ch)[:, None]
+    cols = ((np.arange(crop.shape[1], dtype=np.int32) - x0) // cw)[None, :]
+    take = (((rows + cols) % 2) == 1) & cover
+    out[take] = warped[take]
+    return out
+
+
 def match_img(query_img, query_kps, wsi_crop, crop_kps, matches,
               max_m: int = 60, gap: int = 128) -> np.ndarray:
     """Compose query | gap | wsi_crop with vertical centers aligned; draw match lines."""
@@ -248,10 +321,7 @@ def draw_localization_row(
     # axis-aligned box. Drawing a box from the mapped (0,0) would extend in the
     # wrong direction and push the centre marker outside it.
     if sift.success and sift.H is not None:
-        h_q, w_q = query_img.shape[:2]
-        corners = np.float32(
-            [[0, 0], [w_q, 0], [w_q, h_q], [0, h_q]]).reshape(-1, 1, 2)
-        mapped = cv2.perspectiveTransform(corners, sift.H).reshape(-1, 2)
+        mapped = query_quad(query_img.shape, sift.H)
         # crop px (level-n) -> level-n global -> level-0 -> zoom-crop px
         qx = ((mapped[:, 0] + crop_origin_x) * sift.ds - crop_x0) / crop_ds
         qy = ((mapped[:, 1] + crop_origin_y) * sift.ds - crop_y0) / crop_ds
@@ -299,9 +369,8 @@ def draw_localization_row(
         H = sift.H
         h_q, w_q = query_img.shape[:2]
 
-        corners = np.float32([[0, 0], [w_q, 0], [w_q, h_q], [0, h_q]]).reshape(-1, 1, 2)
-        mapped  = cv2.perspectiveTransform(corners, H).reshape(-1, 2)
-        poly    = np.vstack([mapped, mapped[0]])
+        mapped = query_quad(query_img.shape, H)
+        poly   = np.vstack([mapped, mapped[0]])
         ax.plot(poly[:, 0], poly[:, 1], 'lime', linewidth=2.0, label='Query boundary')
 
         A  = H[:2, :2]

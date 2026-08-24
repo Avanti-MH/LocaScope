@@ -20,7 +20,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/test_modules/_paths.py
+# Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- What is in the feature space, and where is mpp in it? -------
@@ -73,7 +73,7 @@ SLIDES=(
 )
 
 python utilities/bench_modules/bench_feature_axes.py "${SLIDES[@]}" \
-  --stores "$RESULT_ROOT"/cache/reference_features \
+  --stores "$RESULT_ROOT"/cache/reference_features/"${ENCODER:-gigapath}" \
   --pooling cls
 
 echo ""

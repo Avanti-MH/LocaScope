@@ -7,7 +7,7 @@ Inputs (from query_sim/cli/multi_batch.py):
     <images-dir>     result/MultiBatch/images/
     (WSI paths are read from gt.csv's wsi_path column)
 
-Outputs (in --out DIR, default result/BenchLocaScope/):
+Outputs (in --out DIR/<encoder>/, default result/BenchLocaScope/<encoder>/):
     metrics.csv               per-shot: mpp/retrieval/refine errors (px + um)
     summary.txt               aggregate stats + failure counts
     stage1_mpp_cdf.png        Stage 1 CDF (aggregate + per-WSI subplots)
@@ -54,15 +54,16 @@ sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 
 sys.path.insert(0, str(_ROOT / '3_localization'))
 
-from _paths            import job_result_dir                            # noqa: E402
-from _sift_plot        import (draw_localization_row, draw_recall_row,  # noqa: E402
-                               read_anchored_crop, read_zoom_crop)
-from _locascope_plots  import (append_metrics_row, load_metrics_csv,    # noqa: E402
-                               render_all)
+from _paths            import encoder_tag, job_result_dir               # noqa: E402
+from dump_function._sift_plot import (draw_localization_row,            # noqa: E402
+                                      draw_recall_row, read_anchored_crop,
+                                      read_zoom_crop)
+from dump_function._locascope_plots import (append_metrics_row,         # noqa: E402
+                                            load_metrics_csv, render_all)
 from LocaScopePipeline import LocaScopePipeline, LocaScopeQueryResult    # noqa: E402
 from TissueSegFunc import TissueSegConfig                               # noqa: E402
 from SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
-from GigaPathFunc     import GigaPathEncoderConfig                      # noqa: E402
+from TileEncoderFunc   import encoder_config, encoder_names             # noqa: E402
 
 
 # ── metric helpers ────────────────────────────────────────────────────────────
@@ -547,7 +548,10 @@ def main():
     ap.add_argument('--gt-csv',     required=True)
     ap.add_argument('--images-dir', required=True)
     ap.add_argument('--out',        default=None,
-                    help='Output dir. Default: result/<SLURM_JOB_NAME or BenchLocaScope>/')
+                    help='Output dir, used verbatim. Default: '
+                         'result/<SLURM_JOB_NAME or BenchLocaScope>/<encoder>/ '
+                         '-- the encoder level is added only to that derived '
+                         'path, so put it in --out yourself when you give one.')
     ap.add_argument('--limit',      type=int, default=None,
                     help='Process only the first N shots (debug).')
     ap.add_argument('--draw-figures', type=int, default=0, metavar='N',
@@ -583,6 +587,23 @@ def main():
                          'is K SIFT passes per shot. 0 = off.')
     ap.add_argument('--batch-size', type=int, default=128)
     ap.add_argument('--device',     default='auto')
+    ap.add_argument(
+        '--encoder', default='gigapath', choices=encoder_names(),
+        help='which tile encoder. Only the module for THIS one is imported: '
+             'every implementation sets HF_HOME above its own timm import and '
+             'setdefault is first-one-wins, so importing all three would point '
+             'two of them at the wrong weight cache -- silently. See '
+             'TileEncoderFunc._IMPLEMENTATIONS. This is the synthetic '
+             'counterpart of cli/locate_photo, which takes the same two '
+             'options: what runs on real photos has to be measurable here.')
+    ap.add_argument(
+        '--head', default='',
+        help="which exit of the model, empty for its own default. Only CONCH "
+             "has two, and BOTH run here -- the pipeline wants one vector per "
+             "tile and either exit is that -- so this is a choice between two "
+             "embeddings rather than a prerequisite. Its attentional pooler is "
+             "512-d and its trunk 768-d, the shape GigaPath and UNI2 have. The "
+             "head is part of identity_id and of the output directory.")
     mask_grp = ap.add_mutually_exclusive_group()
     mask_grp.add_argument('--mask-all',   action='store_true',
                     help='stage 2 gets ONE region covering the whole scanned '
@@ -601,7 +622,8 @@ def main():
                     help='segment tissue with the HEST DeepLabV3 model instead '
                          'of the default HSV threshold. Costs a full mask build '
                          'per WSI before any shot runs, and shares the GPUs '
-                         'with GigaPath, so watch VRAM alongside --batch-size.')
+                         'with the tile encoder, so watch VRAM alongside '
+                         '--batch-size.')
     ap.add_argument('--resume',     action='store_true',
                     help='carry on from an existing metrics.csv instead of '
                          'replacing it: every shot already recorded there is '
@@ -633,15 +655,18 @@ def main():
                          '4.1 or 8.0 if the log shows a mask the size of the '
                          'whole slide. Default 4.0 (unchanged).')
     ap.add_argument('--multi-gpu',  action='store_true',
-                    help='wrap GigaPath in DataParallel when the allocation has '
-                         'more than one GPU. Raise --batch-size with it: '
+                    help='wrap the tile encoder in DataParallel when the '
+                         'allocation has more than one GPU. Raise --batch-size '
+                         'with it: '
                          'DataParallel splits one batch across the cards, so an '
                          'unchanged batch just halves the work each card gets.')
     ap.add_argument('--precision',  choices=['fp16', 'fp32'], default='fp16',
-                    help='GigaPath autocast precision. fp16 is the validated '
-                         'production setting (~5.5x faster, cos=0.99995, '
-                         'top-5=0.99 vs fp32 — see TODO 2026-07-23 AccuracyV1). '
-                         'Ignored on CPU.')
+                    help='autocast precision for the tile encoder. fp16 is the '
+                         'validated production setting, but the validation is '
+                         "GigaPath's: ~5.5x faster at cos=0.99995 and top-5=0.99 "
+                         'against fp32 (TODO 2026-07-23 AccuracyV1). Nobody has '
+                         'measured the other two, so read fp16 there as an '
+                         'assumption rather than a result. Ignored on CPU.')
     args = ap.parse_args()
 
     # A candidate that was never enumerated cannot be verified, and silently
@@ -651,7 +676,10 @@ def main():
               f'raising --topk to match')
         args.topk = args.sift_topk
 
-    out_dir = args.out or job_result_dir('BenchLocaScope')
+    # Only on the derived path -- an explicit --out is used verbatim, so a
+    # caller that already composes the tag does not get a second one.
+    enc_tag = encoder_tag(args.encoder, args.head)
+    out_dir = args.out or job_result_dir('BenchLocaScope', encoder=enc_tag)
     os.makedirs(out_dir, exist_ok=True)
     print(f'gt-csv     : {args.gt_csv}')
     print(f'images-dir : {args.images_dir}')
@@ -666,8 +694,11 @@ def main():
     print(f'device     : {device}')
     print(f'precision  : {str(dtype).replace("torch.", "")}'
           f'{"  (requested fp16, CPU -> fp32)" if args.precision == "fp16" and dtype is torch.float32 else ""}')
-    print('Loading GigaPath model ...', flush=True)
-    encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
+    print(f'Loading {enc_tag} model ...', flush=True)
+    # Passed only when given, so gigapath and uni2 build byte-identical configs
+    # to before this option existed and their identity_id does not move.
+    over = {'head': args.head} if args.head else {}
+    encoder = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
         .build(device, multi_gpu=args.multi_gpu)
     if args.multi_gpu:
