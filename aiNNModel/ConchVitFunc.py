@@ -112,9 +112,8 @@ import torch  # noqa: E402
 from torch import nn  # noqa: E402
 
 from ConfigIdentity import ModelConfig, register, weights_id  # noqa: E402
-from TileEncoderFunc import (ModelOutputSpec, TileEncoder,  # noqa: E402
-                             TileEncoderConfig, TransformConfig,
-                             model_token_spec)
+from TileEncoderFunc import (TileEncoder,  # noqa: E402
+                             TileEncoderConfig, TransformConfig)
 
 
 CONCH_REPO = 'MahmoodLab/conch'
@@ -437,12 +436,27 @@ class ConchVitEncoder(TileEncoder):
             model = torch.nn.DataParallel(model)
 
         self.model = model
-        token = model_token_spec(model)
-        self.model_spec = ModelOutputSpec(kind='tokens', dim=token['dim'],
-                                          feat_hw=token['feat_hw'],
-                                          num_prefix=token['num_prefix'])
         self._transform = cfg.transform.build()
         self._weights_id = None
+
+    def _compute_model_spec(self):
+        """self.model is the TRUNK for both heads, so the base's reader answers.
+
+        model_spec therefore describes the ViT and not the attentional pooler --
+        768 wide, 28x28 -- whichever head is configured. What the pooler hands
+        back is described by pooled_spec, off the tensor it actually returned.
+        """
+        return self._vit_model_spec()
+
+    def _spatial_forward(self, batch):
+        """The TRUNK's map, 768 wide at 28x28, whichever head is configured.
+
+        The attentional pooler has no spatial output to give -- it reduces 785
+        tokens to one vector -- so head='attn_pool' does not change what this
+        returns. That is consistent with model_spec, which also describes the
+        trunk, and it is what a dense head would want anyway.
+        """
+        return self._vit_spatial_forward(batch)
 
     def identity_parts(self):
         '''Config, trunk weights, and the head's weights as well.

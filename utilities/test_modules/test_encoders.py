@@ -288,8 +288,11 @@ def t_token_count_agrees_with_spec(enc, name, spec):
     """The forward pass returns feat_hw[0]*feat_hw[1] + num_prefix tokens.
 
     Two sources: the length of the tensor the model produced, and what
-    model_token_spec read off its config. Agreement is evidence -- either alone
-    would be a claim. UNI2 is where this earns its cost: eight register tokens
+    _vit_model_spec derived from crop_size and patch_size. Agreement is
+    evidence -- either alone would be a claim, and a feat_hw read back off the
+    output could never disagree with it.
+
+    UNI2 is where this earns its cost: eight register tokens
     sit between the CLS and the patches, and getattr(m, num_prefix_tokens, 1)
     would have said 1.
     """
@@ -345,6 +348,45 @@ def t_pooled_matches_pool_slots(enc, name, spec):
         checked.append(f'{mode}={n}')
     assert checked, 'no pooling was checked'
     return '  '.join(checked)
+
+
+def t_spatial_is_the_tokens_laid_out(enc, name, spec):
+    """spatial() must BE tokens() reshaped, not merely resemble it.
+
+    Two exits of one model, reached by two different methods -- tokens() calls
+    the model, spatial() calls forward_intermediates -- so this is the only
+    thing that says they agree. Three ways they could disagree and none of them
+    raises:
+
+      norm      forward_features ends with self.norm; forward_intermediates
+                applies it only when asked. norm=False here would shift every
+                value by a LayerNorm and still return the right shape.
+      prefix    forward_intermediates strips num_prefix_tokens. Nine for UNI2,
+                and a reshape that dropped one would still divide.
+      grid      it derives H, W from the input; a version that read grid_size
+                would be wrong under dynamic_img_size and right at 224.
+
+    Scored against a decoy rather than a tolerance: the same map with its axes
+    transposed has identical shape, identical statistics, and is wrong. On a
+    square grid nothing else catches it.
+    """
+    tiles = _tiles()
+    toks = enc.tokens(tiles)                       # [N, T, D]
+    smap = enc.spatial(tiles)                      # [N, D, H, W]
+    h, w = enc.model_spec.feat_hw
+    p = enc.model_spec.num_prefix
+
+    assert tuple(smap.shape) == (len(tiles), enc.model_spec.dim, h, w), \
+        f'{tuple(smap.shape)}, expected {(len(tiles), enc.model_spec.dim, h, w)}'
+    enc.spatial_spec(smap)                         # raises if feat_hw disagrees
+
+    want = toks[:, p:].reshape(len(tiles), h, w, -1).permute(0, 3, 1, 2)
+    same = float((smap - want).abs().max())
+    decoy = float((smap - want.transpose(2, 3)).abs().max())
+    assert same * 1000 < decoy, (
+        f'spatial() differs from the reshaped tokens by {same:.3e}, not clear '
+        f'of the transposed decoy at {decoy:.3e}')
+    return f'{tuple(smap.shape)}  max|d| {same:.3e}  transposed decoy {decoy:.3e}'
 
 
 def t_an_inadmissible_pooling_is_refused(enc, name, spec):
@@ -529,6 +571,7 @@ _MODEL_CHECKS = (
     ('token count agrees with spec',    t_token_count_agrees_with_spec),
     ('features() is the cls slot',      t_features_are_the_cls_slot),
     ('pooled matches pool_slots',       t_pooled_matches_pool_slots),
+    ('spatial() is tokens() laid out',  t_spatial_is_the_tokens_laid_out),
     ('an inadmissible pooling raises',  t_an_inadmissible_pooling_is_refused),
 )
 

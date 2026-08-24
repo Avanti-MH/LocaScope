@@ -206,36 +206,16 @@ class EncoderOutputSpec:
 # two functions about tensor shapes. GigaPathFunc re-exports these names, so
 # every existing importer is unaffected.
 
-def model_token_spec(model: torch.nn.Module) -> dict:
-    '''The three numbers any pooling needs, read off a timm ViT, never assumed.
-
-    Named for what it reads and not for who calls it: GigaPath, UNI and UNI2 are
-    all timm VisionTransformers and all answer here. A model that is NOT one --
-    an image tower behind an attentional pooler, a CNN -- builds its
-    ModelOutputSpec another way, and the right way is whatever can be
-    observed rather than recalled.
-
-    Unwraps DataParallel first. nn.DataParallel defines no __getattr__ of its
-    own, so nn.Module's is used, and that searches only _parameters / _buffers /
-    _modules. `embed_dim` and `num_prefix_tokens` are plain ints on the wrapped
-    module, and `patch_embed` is one of ITS submodules -- so all three raise
-    AttributeError through the wrapper, and build(multi_gpu=True) is the
-    default in the benches.
-
-    No defaults, deliberately. `getattr(m, 'num_prefix_tokens', 1)` is right for
-    GigaPath and wrong for every model that carries registers -- 5 for the
-    DINOv2 _reg4 variants, 9 for UNI2-h, where eight register tokens would be
-    averaged in as if they were patches, silently, showing up only as a slightly
-    worse score. Crashing is the better failure.
-    '''
-    m = getattr(model, 'module', model)
-    if not isinstance(m.head, torch.nn.Identity):
-        raise ValueError(
-            f'pooling needs a feature extractor, but model.head is '
-            f'{type(m.head).__name__}. Build the model with num_classes=0.')
-    return {'dim':        int(m.embed_dim),
-            'feat_hw':    tuple(int(v) for v in m.patch_embed.grid_size),
-            'num_prefix': int(m.num_prefix_tokens)}
+# model_token_spec used to live here, reading dim, num_prefix and feat_hw off a
+# timm ViT and handing back a dict. It is TileEncoder._vit_model_spec now, for
+# two reasons that arrived together.
+#
+# feat_hw needs crop_size, which is on the CONFIG, and a free function taking a
+# model plus a crop size is half of each. The encoder holds both halves already.
+#
+# And model_spec had to stop being an attribute: `transform` is variable, so a
+# value computed once in __init__ outlives the config that produced it. A method
+# on the object is what a property can call.
 
 
 def _ring_bins(gh: int, gw: int, n_rings: int,
@@ -608,7 +588,8 @@ class TileEncoderConfig(IdentifiedConfig):
 # ── the encoder ───────────────────────────────────────────────────────────────
 
 class TileEncoder(IdentifiedBuild):
-    """Base for a tile encoder. Subclasses set cfg, device, model, model_spec.
+    """Base for a tile encoder. Subclasses set cfg, device, model, and override
+    _compute_model_spec.
 
     Provides the batch loop, the identity surface, `variant`, and features() for
     the two kinds whose reduction is arithmetic. A token model must say which
@@ -621,9 +602,106 @@ class TileEncoder(IdentifiedBuild):
     _VARIABLE = ('dtype', 'batch_size', 'transform')
 
     cfg: TileEncoderConfig
-    model_spec: ModelOutputSpec
+
+    # ── what this model's output looks like ──────────────────────────────────
+
+    @property
+    def model_spec(self) -> ModelOutputSpec:
+        """Computed on every read, not stored, and that is the point.
+
+        `transform` is in _VARIABLE and `variant` clones by copying __dict__, so
+        an attribute set in __init__ survives a transform change while the
+        config that produced it does not. That was harmless while feat_hw came
+        off patch_embed.grid_size, which is fixed at construction. It stops
+        being harmless the moment feat_hw is derived from crop_size: the clone
+        would report the grid of the transform it no longer has, and every
+        pooling would fold the token axis on those numbers.
+
+        Recomputing costs a handful of attribute reads. `_pool` asks once per
+        BATCH, not once per tile, so at batch 1024 a 200k-tile slide reads this
+        about 200 times.
+
+        Not cached. functools.cached_property would put the staleness straight
+        back, keyed on an object that variant() deliberately reuses.
+        """
+        return self._compute_model_spec()
+
+    def _compute_model_spec(self) -> ModelOutputSpec:
+        """What kind, how wide, how many prefix tokens, what grid.
+
+        The base refuses rather than guessing, for the reason every other
+        refusal in this file exists: a default that happens to fit the first
+        implementation is wrong for the second one and says nothing when it is.
+        A timm ViT gets this from _vit_model_spec below; anything else -- a CNN
+        with a feature map, a tower behind an attentional pooler -- answers
+        differently and must say so here.
+        """
+        raise NotImplementedError(
+            f'{type(self).__name__} must implement _compute_model_spec(). '
+            f'A timm ViT can return self._vit_model_spec().')
+
+    def _vit_model_spec(self) -> ModelOutputSpec:
+        '''The four numbers for a timm VisionTransformer, none of them assumed.
+
+        Unwraps DataParallel first. nn.DataParallel defines no __getattr__ of
+        its own, so nn.Module's is used, and that searches only _parameters /
+        _buffers / _modules. `embed_dim` and `num_prefix_tokens` are plain ints
+        on the wrapped module and `patch_embed` is one of ITS submodules, so all
+        three raise AttributeError through the wrapper -- and build(multi_gpu=
+        True) is the default in the benches.
+
+        num_prefix has no default, deliberately. `getattr(m, 'num_prefix_tokens',
+        1)` is right for GigaPath and wrong for every model carrying registers --
+        5 for the DINOv2 _reg4 variants, 9 for UNI2-h, where eight register
+        tokens would be averaged in as if they were patches, silently, showing
+        up only as a slightly worse score. Crashing is the better failure.
+
+        feat_hw comes from crop_size and patch_size, NOT from
+        patch_embed.grid_size. grid_size is the grid the module was CONSTRUCTED
+        for -- timm calls it `prev_grid_size` when it resamples position
+        embeddings -- so under dynamic_img_size it describes an input this
+        encoder may never see. patch_size is the stable half: it changes only
+        through an explicit set_input_size().
+
+        The two halves also come from two different places on purpose, which is
+        what makes tokens_spec's count check evidence rather than a tautology:
+        this says how many tokens there should be, the forward pass says how
+        many there are. Derive it from the output instead and they can never
+        disagree -- which is exactly how Token Merging went unnoticed.
+        '''
+        m = getattr(self.model, 'module', self.model)
+        if not isinstance(m.head, torch.nn.Identity):
+            raise ValueError(
+                f'pooling needs a feature extractor, but model.head is '
+                f'{type(m.head).__name__}. Build the model with num_classes=0.')
+        ph, pw = (int(v) for v in m.patch_embed.patch_size)
+        crop = int(self.cfg.transform.crop_size)
+        if crop % ph or crop % pw:
+            raise ValueError(
+                f'crop_size {crop} is not a multiple of patch_size ({ph}, {pw}); '
+                f'the patch grid would not divide the input. Either set '
+                f'dynamic_img_pad on the model or pick a crop that divides.')
+        return ModelOutputSpec(kind='tokens', dim=int(m.embed_dim),
+                               feat_hw=(crop // ph, crop // pw),
+                               num_prefix=int(m.num_prefix_tokens))
 
     # ── capability gates ─────────────────────────────────────────────────────
+
+    def _require_grid(self, what: str) -> None:
+        """Anything with a feature grid, whether or not it has tokens.
+
+        Kept apart from _require because the relation is one-way. 'tokens' with
+        a feat_hw can always be laid out as a map; 'spatial' can never be laid
+        out as tokens, because the prefix a token model carries does not exist.
+        Asking _require for 'spatial' would have refused every ViT here, all
+        three of which are 'tokens'.
+        """
+        spec = self.model_spec
+        if spec.kind == 'vector' or spec.feat_hw is None:
+            raise TypeError(
+                f'{what} needs a model with a feature grid and this one is '
+                f'{spec.kind!r} with feat_hw {spec.feat_hw}. features() works '
+                f'for every kind.')
 
     def _require(self, kind: str, what: str) -> None:
         if self.model_spec.kind != kind:
@@ -637,8 +715,17 @@ class TileEncoder(IdentifiedBuild):
     # ── encoding ─────────────────────────────────────────────────────────────
 
     @torch.no_grad()
-    def _run(self, images, reduce: Optional[Callable]) -> torch.Tensor:
+    def _run(self, images, reduce: Optional[Callable],
+             forward: Optional[Callable] = None) -> torch.Tensor:
         """One batch loop. `reduce` decides what crosses to the host.
+
+        `forward` is how the model is asked, defaulting to calling it. Only
+        spatial() passes something else: a ViT's feature map comes out of
+        forward_intermediates, which is a different method rather than a
+        different argument. Everything the loop is for -- the transform, the
+        batching, the autocast context, the .float() before reduce -- is the
+        same whichever exit is being read, and having two copies of it was how
+        one of them would eventually get the dtype order wrong.
 
         Order is fixed here and not left to the callback: .float() runs BEFORE
         reduce. Under autocast the output arrives fp16, and a reduction means
@@ -654,6 +741,7 @@ class TileEncoder(IdentifiedBuild):
         HERE -- by the time _run returns, torch.cat has already built the whole
         thing wherever it was going to live.
         """
+        forward = forward or self.model
         dtype = self.cfg.model.torch_dtype()
         ctx = (torch.autocast(device_type=self.device.type, dtype=dtype)
                if dtype is not torch.float32 else nullcontext())
@@ -664,7 +752,7 @@ class TileEncoder(IdentifiedBuild):
                 for img in images[start:start + self.cfg.batch_size]
             ]).to(self.device)
             with ctx:
-                raw = self.model(batch)
+                raw = forward(batch)
             raw = raw.float()
             out.append(raw.cpu() if reduce is None else reduce(raw))
         return torch.cat(out, dim=0)
@@ -823,9 +911,60 @@ class TileEncoder(IdentifiedBuild):
         return self._run(images, reduce)
 
     def spatial(self, images, reduce: Optional[Callable] = None) -> torch.Tensor:
-        """[N, C, H, W] fp32, NO head. Spatial models only."""
-        self._require('spatial', 'spatial()')
-        return self._run(images, reduce)
+        """[N, C, H, W] fp32, NO head. The model's own feature map.
+
+        Open to a token model as well as a 'spatial' one, and the asymmetry is
+        real: a token model that has a grid IS a spatial model with prefix
+        tokens in front, so the map is its patch tokens dropped into their
+        cells. A spatial model is not a token model -- a CNN has no CLS to
+        return -- which is why tokens() stays closed.
+
+        This is the exit dense prediction wants. Pooling reduces the grid away;
+        a segmentation head needs it intact, and reshaping tokens by hand means
+        knowing where the prefix ends and what the grid is, which is two facts
+        this class already holds and a caller would have to be told.
+        """
+        self._require_grid('spatial()')
+        return self._run(images, reduce, forward=self._spatial_forward)
+
+    def _spatial_forward(self, batch: torch.Tensor) -> torch.Tensor:
+        """One batch to [N, C, H, W]. The base cannot know how.
+
+        A CNN returns a map already; a ViT has to be asked for one. Refusing
+        here rather than guessing is the same rule as _compute_model_spec.
+        """
+        raise NotImplementedError(
+            f'{type(self).__name__} must implement _spatial_forward() to offer '
+            f'spatial(). A timm ViT can return self._vit_spatial_forward(batch).')
+
+    def _vit_spatial_forward(self, batch: torch.Tensor) -> torch.Tensor:
+        """The last block's patch tokens as [N, D, H, W], prefix already gone.
+
+        forward_intermediates does three things by hand-rolling reshape would
+        get wrong. It strips num_prefix_tokens itself; it derives H and W from
+        the INPUT via patch_embed.dynamic_feat_size rather than from grid_size,
+        the same correction _vit_model_spec makes; and it hands back NCHW.
+
+        norm=True is not a detail. forward_features ends with self.norm(x), and
+        that is what tokens() therefore carries. forward_intermediates applies
+        it only when asked, so norm=False would make the two exits of one model
+        return differently normalised features -- silently, and only visible as
+        a segmentation head trained on a distribution the retrieval side never
+        sees. prov-gigapath's own PCA notebook takes the default and gets the
+        un-normed version.
+
+        indices=1 is the last block alone. The default collects every block,
+        which for a 40-layer ViT-g at batch 1024 is 40 copies of the map held at
+        once to use one of them.
+
+        Unwrapped, so this runs on a single card even under DataParallel:
+        forward_intermediates is not forward, and DataParallel replicates only
+        the latter. The same trade GigaPathFunc_old records for its token dump.
+        """
+        m = getattr(self.model, 'module', self.model)
+        return m.forward_intermediates(batch, indices=1, norm=True,
+                                       output_fmt='NCHW',
+                                       intermediates_only=True)[-1]
 
     def pooled(self, images, mode: str) -> torch.Tensor:
         """[N, n, D] slots for one reduction, chosen HERE rather than by cfg.
@@ -918,8 +1057,14 @@ class TileEncoder(IdentifiedBuild):
         return EncoderOutputSpec(shape=self.model_spec, pooling='tokens')
 
     def spatial_spec(self, spatial: torch.Tensor) -> EncoderOutputSpec:
-        """Describe what spatial() returned: the model's own feature map."""
-        self._require('spatial', 'spatial_spec()')
+        """Describe what spatial() returned: the model's own feature map.
+
+        The shape check is the cross-source one again: feat_hw comes from
+        crop_size // patch_size and these two numbers come from the tensor the
+        forward produced. They are computed by different code from different
+        inputs, so agreement is evidence.
+        """
+        self._require_grid('spatial_spec()')
         want = self.model_spec.feat_hw
         if want is not None and tuple(spatial.shape[2:]) != tuple(want):
             raise ValueError(

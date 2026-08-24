@@ -100,7 +100,7 @@ from TileEncoderFunc import (ModelOutputSpec, TileEncoder,  # noqa: E402
 # Re-exported, not owned -- see the "Tokens and pooling" section below for why
 # they moved and why this line has to stay.
 from TileEncoderFunc import (SUMMARY_SLOT, _ring_bins,  # noqa: E402,F401
-                             model_token_spec, pool_slots, pooling_kinds)
+                             pool_slots, pooling_kinds)
 
 
 GIGAPATH_ARCH = 'hf_hub:prov-gigapath/prov-gigapath'
@@ -241,9 +241,13 @@ class GigaPathEncoder(TileEncoder):
             model = torch.nn.DataParallel(model)
 
         self.model = model
-        token = model_token_spec(model)
-        self.model_spec = ModelOutputSpec(kind='tokens', dim=token['dim'],
-                               feat_hw=token['feat_hw'],
-                               num_prefix=token['num_prefix'])
         self._transform = cfg.transform.build()
         self._weights_id = None
+
+    def _compute_model_spec(self):
+        """A plain timm ViT, so the base's reader answers for it."""
+        return self._vit_model_spec()
+
+    def _spatial_forward(self, batch):
+        """Same reason: a timm ViT answers forward_intermediates."""
+        return self._vit_spatial_forward(batch)

@@ -6,9 +6,9 @@
     slots   = encoder.pooled(tiles, 'grid2x2')
 
 The contract, the batch loop, the identity surface, `variant`, `pooling_kinds`
-and `model_token_spec` are all TileEncoderFunc's -- the last two moved there
-when this file was written, because they read a spec and a tensor and know
-nothing about whichever ViT produced them.
+and the shape reader behind `model_spec` are all TileEncoderFunc's -- the last
+two moved there when this file was written, because they read a spec and a
+tensor and know nothing about whichever ViT produced them.
 
 What is here is what is UNI2's.
 
@@ -19,7 +19,7 @@ UNI2-h is built with `reg_tokens=8`, so timm lays the sequence out as
     [CLS] [reg x 8] [patch x 256]        num_prefix_tokens = 9,  T = 265
 
 and this is the first model in the project where `num_prefix` is neither 0 nor
-1. Nothing here hardcodes it: `model_token_spec` reads `num_prefix_tokens` off
+1. Nothing here hardcodes it: `_vit_model_spec` reads `num_prefix_tokens` off
 the model, and pooling_kinds slices `tokens[:, p:]`. That is not defensive
 programming, it is the whole reason the field exists -- averaging eight
 registers in as if they were image content lowers every pooled score by a
@@ -113,9 +113,9 @@ import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
 from ConfigIdentity import ModelConfig, enc, register  # noqa: E402
-from TileEncoderFunc import (ModelOutputSpec, TileEncoder,  # noqa: E402
+from TileEncoderFunc import (TileEncoder,  # noqa: E402
                              TileEncoderConfig, TransformConfig,
-                             model_token_spec, pooling_kinds)
+                             pooling_kinds)
 
 
 UNI2_ARCH = 'hf-hub:MahmoodLab/UNI2-h'
@@ -382,12 +382,18 @@ class Uni2Encoder(TileEncoder):
             model = torch.nn.DataParallel(model)
 
         self.model = model
-        token = model_token_spec(model)
-        self.model_spec = ModelOutputSpec(kind='tokens', dim=token['dim'],
-                               feat_hw=token['feat_hw'],
-                               num_prefix=token['num_prefix'])
         self._transform = cfg.transform.build()
         self._weights_id = None
+
+    def _compute_model_spec(self):
+        """A plain timm ViT, so the base's reader answers for it -- including
+        num_prefix, which is 9 here: one CLS and eight register tokens."""
+        return self._vit_model_spec()
+
+    def _spatial_forward(self, batch):
+        """Same reason. forward_intermediates drops all nine prefix tokens
+        itself, which is the part a hand-rolled reshape gets wrong here."""
+        return self._vit_spatial_forward(batch)
 
     def identity_parts(self):
         '''Config, weights, and the recipe the weights were built into.

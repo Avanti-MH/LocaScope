@@ -15,7 +15,7 @@ identity.
 So the template is checked against a vector model, a token model and a spatial
 model before any of them exist for real.
 
-The pooling and model_token_spec sections at the bottom came from
+The pooling and shape-reader sections at the bottom came from
 what is now test_gigapath_equivalence, and they are here because their SUBJECT
 moved: 923e9e6
 took those functions out of GigaPathFunc into TileEncoderFunc, and the tests
@@ -65,8 +65,7 @@ import torch.nn.functional as F                             # noqa: E402
 from ConfigIdentity import ModelConfig                      # noqa: E402
 from TileEncoderFunc import (ModelOutputSpec, TileEncoder,       # noqa: E402
                              TileEncoderConfig, TransformConfig,
-                             _ring_bins, model_token_spec,
-                             pool_slots, pooling_kinds)
+                             _ring_bins, pool_slots, pooling_kinds)
 
 _RESULTS = []
 
@@ -155,13 +154,31 @@ class FakeEncoder(TileEncoder):
         self.cfg, self.device = cfg, device
         self.model = {'vector': _Vector, 'tokens': _Tokens,
                       'spatial': _Spatial}[cfg.kind]().eval()
-        self.model_spec = {
+        self._transform = cfg.transform.build()
+        self._weights_id = None
+
+    def _spatial_forward(self, batch):
+        """The 'spatial' fake already returns a map, so calling it is the whole
+        of it. The 'tokens' fake deliberately does NOT get one: a token model
+        passes the grid gate and must then say how it makes a map, and
+        t_spatial_needs_a_grid_not_a_kind reads that second refusal."""
+        if self.cfg.kind != 'spatial':
+            return super()._spatial_forward(batch)
+        return self.model(batch)
+
+    def _compute_model_spec(self):
+        """Overridden rather than assigned, because model_spec is a property.
+
+        These three are not timm ViTs, so _vit_model_spec cannot read them --
+        which is the case the base's NotImplementedError is written for. A fake
+        that stands in for a CNN has to say what its output looks like, exactly
+        as a real CNN encoder would.
+        """
+        return {
             'vector':  ModelOutputSpec('vector', DIM),
             'tokens':  ModelOutputSpec('tokens', DIM, GRID, PREFIX),
             'spatial': ModelOutputSpec('spatial', DIM, (2, 2)),
-        }[cfg.kind]
-        self._transform = cfg.transform.build()
-        self._weights_id = None
+        }[self.cfg.kind]
 
 
 @dataclass(frozen=True)
@@ -296,10 +313,22 @@ def t_pooled_reaches_a_feature_map():
     rejects(lambda: enc('vector').pooled(tiles(), 'cls'), "'identity'")
 
 
-def t_spatial_only_for_spatial_models():
-    for kind in ('vector', 'tokens'):
-        e = enc(kind)
-        rejects(lambda: e.spatial(tiles()), kind)
+def t_spatial_needs_a_grid_not_a_kind():
+    """spatial() is gated on having a grid, and the relation is one-way.
+
+    'vector' has no grid and is refused. 'tokens' HAS one -- its patch tokens
+    are a map with a prefix in front -- so it is allowed, which is what lets a
+    ViT answer a dense head at all. tokens() stays closed to 'spatial' for the
+    reason that does not reverse: a CNN has no CLS to hand back.
+
+    The fake token model here has no _spatial_forward, so it refuses one step
+    later and for a different reason. Both refusals are checked, because a
+    single 'it raised' would not tell them apart -- and it is the second that
+    says the gate opened.
+    """
+    rejects(lambda: enc('vector').spatial(tiles()), 'feature grid')
+    rejects(lambda: enc('tokens').spatial(tiles()), '_spatial_forward')
+    rejects(lambda: enc('spatial').tokens(tiles()), 'tokens')
 
 
 def t_the_refusal_names_what_works():
@@ -483,20 +512,20 @@ def t_identity_moves_on_transform():
     assert a.identity_id() != b.identity_id()
 
 
-# ══ pooling and model_token_spec ══════════════════════════════════════════════
+# ══ pooling and the shape reader ══════════════════════════════════════════════
 #
 # These came from what is now test_gigapath_equivalence, and are here because
 # the code
 # they test moved. 923e9e6 took model_token_spec, _ring_bins and pool_tokens
 # out of GigaPathFunc -- which now holds none of them -- and put them in
-# TileEncoderFunc as model_token_spec, _ring_bins, pool_slots and
+# TileEncoderFunc as _vit_model_spec, _ring_bins, pool_slots and
 # pooling_kinds. The tests did not follow, so for one release the only test of
 # this module's pooling arithmetic lived in a file named after one encoder.
 #
 # They were never GigaPath's. Every one reads a spec and a tensor, and several
 # describe models this repo does not have yet: num_prefix=0 is a CNN, and
 # num_prefix=5 is DINOv2 with four register tokens. UNI2-h has eight, which is
-# what turned that from a hypothetical into the reason model_token_spec takes
+# what turned that from a hypothetical into the reason the shape reader takes
 # no default.
 
 SPEC = {'dim': 8, 'feat_hw': (14, 14), 'num_prefix': 1}
@@ -694,18 +723,43 @@ def t_bad_inputs_are_refused():
     rejects(lambda: pooling_kinds(toks(), 'grid3x3', SPEC), 'does not divide')
 
 
-# ── model_token_spec ──────────────────────────────────────────────────────────
+# ── _vit_model_spec ───────────────────────────────────────────────────────────
+#
+# The reader is a method on TileEncoder now rather than a free function, because
+# feat_hw needs crop_size and crop_size is on the config. So these three drive it
+# through an encoder -- still a fake one, still no weights, still a second.
 
 class _Fake(torch.nn.Module):
-    """Enough of a timm ViT for model_token_spec to read, and nothing else."""
+    """Enough of a timm ViT for _vit_model_spec to read, and nothing else.
 
-    def __init__(self, head=None):
+    grid_size is set to a WRONG value on purpose. The reader must not consult
+    it: it is the grid the module was constructed for, which under
+    dynamic_img_size is not the grid of the input. If a future edit reaches for
+    it again, feat_hw comes back (4, 4) here instead of crop_size // patch_size
+    and t_spec_reads_the_config_not_the_grid fails.
+    """
+
+    def __init__(self, head=None, patch=2):
         super().__init__()
         self.embed_dim = 8
         self.num_prefix_tokens = 1
         self.head = head if head is not None else torch.nn.Identity()
         self.patch_embed = torch.nn.Module()
-        self.patch_embed.grid_size = (4, 4)
+        self.patch_embed.patch_size = (patch, patch)
+        self.patch_embed.grid_size = (4, 4)          # the decoy
+
+
+class _VitProbe(TileEncoder):
+    """The smallest thing that can call _vit_model_spec: a config and a model."""
+
+    def __init__(self, model, crop=8):
+        self.cfg = FakeConfig(kind='tokens',
+                              transform=TransformConfig(scale_size=crop,
+                                                        crop_size=crop))
+        self.model = model
+
+    def _compute_model_spec(self):
+        return self._vit_model_spec()
 
 
 def t_spec_unwraps_dataparallel():
@@ -714,13 +768,52 @@ def t_spec_unwraps_dataparallel():
     # The pit itself: DataParallel defines no __getattr__, so nn.Module's is
     # used and it searches only _parameters / _buffers / _modules.
     rejects(lambda: dp.embed_dim, 'embed_dim')
-    assert model_token_spec(dp) == model_token_spec(m) == {
-        'dim': 8, 'feat_hw': (4, 4), 'num_prefix': 1}
+    assert _VitProbe(dp).model_spec == _VitProbe(m).model_spec
 
 
 def t_spec_refuses_a_classifier():
-    rejects(lambda: model_token_spec(_Fake(head=torch.nn.Linear(8, 5))),
+    rejects(lambda: _VitProbe(_Fake(head=torch.nn.Linear(8, 5))).model_spec,
             'num_classes=0')
+
+
+def t_spec_reads_the_config_not_the_grid():
+    """feat_hw is crop_size // patch_size, and grid_size is not consulted.
+
+    _Fake carries grid_size (4, 4) as a decoy. With crop 8 and patch 2 the
+    answer is (4, 4) too -- so the crop is moved to 16, where the two diverge:
+    the config says (8, 8) and the stale attribute still says (4, 4).
+
+    This is the whole point of the change. Under dynamic_img_size grid_size is
+    what timm itself calls prev_grid_size, and reading it made model_spec
+    describe an input the encoder was never given.
+    """
+    assert _VitProbe(_Fake(), crop=8).model_spec.feat_hw == (4, 4)
+    got = _VitProbe(_Fake(), crop=16).model_spec.feat_hw
+    assert got == (8, 8), f'feat_hw {got}; grid_size was read instead of crop'
+
+
+def t_spec_refuses_a_crop_that_does_not_divide():
+    """A crop that is not a multiple of patch_size has no grid to report.
+
+    Integer division would answer anyway -- crop 9 over patch 2 gives (4, 4),
+    the same as crop 8 -- and every pooling downstream would fold the token axis
+    on a grid one row short of the tokens it was handed.
+    """
+    rejects(lambda: _VitProbe(_Fake(), crop=9).model_spec, 'multiple of')
+
+
+def t_spec_follows_a_variant():
+    """variant(transform=...) moves feat_hw, because nothing was stored.
+
+    variant clones by copying __dict__, so an attribute computed in __init__
+    would survive the config that produced it. That was harmless while feat_hw
+    came off grid_size; it is not once feat_hw is derived from crop_size.
+    """
+    a = _VitProbe(_Fake(), crop=8)
+    b = a.variant(transform=TransformConfig(scale_size=16, crop_size=16))
+    assert a.model_spec.feat_hw == (4, 4), a.model_spec
+    assert b.model_spec.feat_hw == (8, 8), \
+        f'the clone reports {b.model_spec.feat_hw}; model_spec was stored'
 
 
 # ── config fields are honoured ────────────────────────────────────────────────
@@ -860,7 +953,7 @@ def main() -> int:
     print('capabilities')
     check('tokens() gated on kind',           t_tokens_only_for_token_models)
     check('pooled() reaches a feature map',   t_pooled_reaches_a_feature_map)
-    check('spatial() gated on kind',          t_spatial_only_for_spatial_models)
+    check('spatial() gated on the grid',      t_spatial_needs_a_grid_not_a_kind)
     check('the refusal names a way forward',  t_the_refusal_names_what_works)
     check('unreduced shapes come through',    t_shapes_come_through_unreduced)
 
@@ -906,9 +999,13 @@ def main() -> int:
     check('cls_avg is refused',               t_no_prefix_refuses_the_mode_that_would_duplicate)
     check('every cell is kept',               t_no_prefix_keeps_every_cell_as_a_patch)
 
-    print('model_token_spec')
+    print('_vit_model_spec')
     check('unwraps DataParallel',             t_spec_unwraps_dataparallel)
     check('refuses a classifier head',        t_spec_refuses_a_classifier)
+    check('reads the config, not grid_size',  t_spec_reads_the_config_not_the_grid)
+    check('refuses a crop that does not divide',
+          t_spec_refuses_a_crop_that_does_not_divide)
+    check('follows a variant',                t_spec_follows_a_variant)
 
     print('config fields are honoured  (builds vit_tiny, 5 MB)')
     check('identity moves only where it should', t_identity_moves_only_where_it_should)

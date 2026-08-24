@@ -61,8 +61,7 @@ from PIL import Image                                       # noqa: E402
 # numbers are: every caller spells `from GigaPathFunc import pooling_kinds`,
 # and 923e9e6 was meant to change where the definition lives, not what anyone
 # imports. Reaching past it here would stop checking that.
-from GigaPathFunc import (model_token_spec, pool_slots,        # noqa: E402
-                          pooling_kinds)
+from GigaPathFunc import pool_slots, pooling_kinds             # noqa: E402
 
 _RESULTS = []
 
@@ -362,7 +361,12 @@ def t_cls_equals_production(n_tiles=8):
 
     dev = _t.device('cuda' if _t.cuda.is_available() else 'cpu')
     model = gigapath_model(dev)                       # single card on purpose
-    spec = model_token_spec(model)
+    # Written out rather than read off the model, and that is right for THIS
+    # file. Both sides of every comparison here would otherwise be described by
+    # the same reader, so a reader that lied would make them agree. These three
+    # numbers are facts about prov-gigapath: 1536 wide, a 14x14 grid at 224 with
+    # patch 16, one CLS and no registers.
+    spec = {'dim': 1536, 'feat_hw': (14, 14), 'num_prefix': 1}
     print(f'        spec = {spec}')
 
     # State the precondition instead of failing obscurely on it. "Production" is
