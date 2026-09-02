@@ -2020,7 +2020,7 @@ teacher 是 COCO domain 的權重，H&E 是 out-of-domain，label 的品質是�
 | 5 | `inspect_ha_labels` 看圖 | 決定：繼續，還是換 teacher | **決策點。** COCO 權重在 H&E 上可能根本不work |
 | 6 | `KeypointNet` + loss + Trainer，VGG backbone | **`model_256_gray` 與 `model_256_rgb` 兩個 student** | 先把管線跑通，用最小的 backbone。兩個 student 共用同一批 HA label（座標不在乎通道數） |
 | 7 | repeatability bench + 誘餌 | 第 1 節第一、四列的數 | 決定要不要 round 2，以及灰階 / RGB 哪個進下一步 |
-| 8 | `TileEncoderBackbone` + `UpsampleDecoder` | foundation model 那條路 | 類別已經寫好（`SuperPoint/EncoderBackbone.py`，5.3），**還沒接進 `KeypointNet`**：`KeypointNetConfig.backbone` 標的是 `VggBackboneConfig`，而 `wired()` 沒有載權重就算不出 `out_channels`。接法本身是一個決定（`KeypointNet` 收一個建好的 backbone，還是這支帶一張寬度表），留到管線跑通再說 |
+| 8 | `TileEncoderBackbone` + `UpsampleDecoder` | foundation model 那條路 | 類別已經寫好（`SuperPoint/EncoderBackbone.py`，5.3），**還沒接進 `KeypointNet`**：`KeypointNetConfig.backbone` 標的是 `VggBackboneConfig`，而 `wired()` 沒有載權重就算不出 `out_channels`。接法本身是一個決定（`KeypointNet` 收一個建好的 backbone，還是這支帶一張寬度表），留到管線跑通再說。撞得到的六件事先想過一輪，見 13 節「換成 pretrain 在 WSI 的 encoder」 |
 | 9 | Stage B：`MppStack` + `SurvivalTable` | 存亡表 + 連續帶的比例 | 需要一個堪用的 detector 才能開始 |
 | 10 | Stage C：resolution head | 第 1 節第三列的數 | 需要存亡表 |
 | 11 | `SuperPathPointLocalizer` + `bench_locascope` | 對 SIFT 的比較 | 最終判準 |
@@ -2212,6 +2212,77 @@ HA label 是**上游 v6** 產的（第 4 節 Teacher）。gray student 從上游
 四個 arm 是六組兩兩比較，而片數沒有變。§1 第四列的「未決」在這裡不是例外而是常態，
 **加 arm 不能解決它**——要嘛加片子，要嘛把這一輪的目標寫成「排除明顯壞的組合」而
 不是「宣告贏家」。
+
+### 換成 pretrain 在 WSI 的 encoder（第 12 節第 8 步）—— 現在就能想清楚的六件事
+
+第 8 步只寫了一句「接法本身是一個決定，留到管線跑通再說」。這裡先把「跑通之後
+會撞到什麼」想過一輪，好讓那一步真的動手時是照計畫走，不是邊做邊發現。
+
+**一、`wired()` 的三件套是釘死給 VGG 的，兩種接法要選一個。**
+`KeypointNetConfig.backbone` 標的是 `VggBackboneConfig`（`KeypointNet.py:130`），
+`wired()`（`:208-222`）在不載入權重的情況下用 `VggBackboneConfig.out_channels`
+算出 detector/descriptor 的寬度——VGG 做得到是因為 channel 數是寫在型別裡的常數。
+`SpatialTrunk`/`TileEncoderBackboneConfig`（`EncoderBackbone.py:186-191`）的輸出
+維度是模型的屬性，要嘛先 build 出來再讀（`KeypointNet` 收一個已經 build 好的
+backbone），要嘛替每個 encoder 名字寫一張寬度表。前者不用維護第二份會過期的表，
+後者不用改 `wired()` 的介面——選哪個是接線當天的決定，不是現在猜。
+
+**二、灰階/RGB 這條軸換了意義，「無預訓練」這條軸消失。**
+`EncoderBackbone.py:179-183` 自己的 docstring 說得很白：灰階/RGB 這條軸不是
+`in_channels`——foundation trunk 吃三通道，灰階是
+`TransformConfig.preprocess='grey'`（luminance 複製成三通道），改
+`in_channels=1` 是換了一個不同的 patch embedding，等於換了一個模型。而現在
+`TrainSuperPathPoint.sh` 的 `ARMS="gray_pre gray"` 是兩軸正交（channels x
+初始化，見上面「四個 arm」節）——foundation encoder 沒有「從零訓」這個選項
+（沒有人在這個資料量上從零訓一個 1.1B 參數的 ViT），初始化這條軸直接消失，
+只剩灰階/RGB 還在，但它現在問的是「哪種 preprocess 進 encoder」不是「哪種
+初始化」。新的 arm 命名要在接線之前先定，不要沿用 `gray`/`gray_pre` 這組名字
+去指一件不同的事。
+
+**三、tile size 和 encoder 選擇不是兩個獨立的決定，而 v1 的 corpus 已經抽好了。**
+`EncoderBackbone.py:54-56` 量過三個 encoder 在 tile 256 legal 不 legal：
+gigapath 和 conch_vit 可以，uni2「no tile size works」。第 12 節 3c 抽的 6,388
+張 pre-tile 是 256 這一族（6.5 節），如果之後選 uni2 當第一個要試的 foundation
+encoder，現有 corpus 用不上，得回頭在 224 抽——這是 6.5 節花那麼多篇幅避免的
+「巢狀抽取」問題的另一個版本：不是同一批 tile 服務三個 tile_size，是同一批
+tile_size 選錯了 encoder。**選第一個要試的 encoder 時，這件事要算進去。**
+
+**四、frozen 不等於免費，批次大小和牆鐘時間是照 VGG 校過的，不能原封不動搬過去。**
+`Trainer.py:138-149` 已經照 `requires_grad` 過濾參數，這部分做對了——一個
+1.1B 參數、`trainable=False` 的 trunk 不會擋住 optimizer。但 HA 的幾何增強是
+每個 sample 現算的（每個 epoch 的 warp 都不同），trunk 沒有梯度不代表可以跳過
+forward——**frozen 省的是 backward，不是 forward**，而一個 1.1B 參數的 forward
+本身就不便宜。`TrainSuperPathPoint.sh` 現在 `gray_pre` 是 batch 64、250 epoch、
+24 小時上限，這幾個數字是照 VGG 這顆幾百萬參數的 backbone 量出來的，foundation
+encoder 這條線要重新校（ClaudeRules §8），不是照搬。
+
+**五、`identity_id` 要在真的訓之前用便宜的斷言釘住，不要等 Stage B 才發現記錯。**
+`EncoderBackbone.py:170-177` 解釋了為什麼 trunk 特意不當 `nn.Module` 的
+child（checkpoint 不會多出幾 GB 的凍結浮點數，靠 `encoder_id` 記是哪份權重）。
+Stage B 的存亡表**必須**記下 detector 的 `identity_id`（本節「四個 arm」上面
+`alpha` 那段），換一個 detector 重跑，兩張表才分得清。不管接法選哪一種（收
+build 好的物件，還是自己算寬度表），wired 進去之後第一件事是斷言：同一份
+config 兩次 build 出**同一個** `identity_id`，換一顆權重（或換一個 HF
+revision）出**不同的** `identity_id`。這是「便宜的斷言擋在貴的跑之前」（第
+10 節）的又一個例子——沒斷言，Stage B 記混的成本是要重跑整個存亡分析才發現。
+
+**六、「F 跟 R 是同一個機制」這條結論是為 VGG 的局部感受野證明的，foundation
+encoder 可能不成立。** 3.2 節的 F/R 等價論證（F stack 讀金字塔的粗解析度、R
+stack 是同一批 pixel 降採樣再插值，兩者「唯一差別是感受野蓋到多少組織」）前提
+是 VGG 84 output px 的**局部**感受野。ViT 的 attention 是全域的（或接近全域），
+一個 output token 在 tile 內就已經看得到整張 tile，F/R 兩個 stack 在
+foundation encoder 底下可能不再是「同一個機制的兩個現場」——這件事現在**沒有
+證據支持也沒有證據反對**，只是提醒：換 encoder 之後，Stage B 若要對 foundation
+detector 重跑存亡分析，3.2 節的論證要重新檢查，不能預設它自動成立。
+
+不在這六件事裡、但同樣要注意的：HA 的 teacher 標籤和 backbone 選擇無關（teacher
+永遠是上游 v6 權重），但 student 吃進去的像素要用**新 encoder 自己的
+normalize**——`Datasets.py:414` 現在只做 `/ 255.0`，foundation encoder 是照自己
+的 mean/std（甚至自己的 resize/crop）訓的，`_spatial_forward` 明講「no
+transform, no host round trip」（`EncoderBackbone.py`），也就是正確的
+normalize 要由呼叫端（這裡是 `Datasets.py`）保證，不是 encoder 自己做。
+`PENDING-MEASUREMENT: encoder-normalize` —— 還沒去查哪個 encoder 用什麼統計量，
+接線時要查。
 
 ### `background_threshold`（UNI2-PCA 遮罩的閾值，notebook 的 0.5）
 
