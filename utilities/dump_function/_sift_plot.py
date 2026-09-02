@@ -144,9 +144,19 @@ def read_anchored_crop(wsi, x0_l0: float, y0_l0: float, ds: float,
     crop_ds    = wsi.level_downsamples[crop_level]
     crop_w = int((query_cols + zoom_pad * 2) * tile_size * ds / crop_ds)
     crop_h = int((query_rows + zoom_pad * 2) * tile_size * ds / crop_ds)
-    crop_img = np.array(
-        wsi.read_region((crop_x0, crop_y0), crop_level, (crop_w, crop_h)).convert('RGB')
-    )
+    # read_region_rgb when the handle offers it. Kept as a fallback rather
+    # than a refusal because this is a plotting helper with three callers
+    # (bench_locascope, slide_win_sift, locate_photo) and it does not open the
+    # slide itself -- what it gets is whoever called it. `.convert('RGB')`
+    # merely drops the alpha, so a hole would come out pure black.
+    if hasattr(wsi, 'read_region_rgb'):
+        crop_img = wsi.read_region_rgb((crop_x0, crop_y0), crop_level,
+                                       (crop_w, crop_h))
+    else:
+        crop_img = np.array(
+            wsi.read_region((crop_x0, crop_y0), crop_level,
+                            (crop_w, crop_h)).convert('RGB')
+        )
     return crop_img, crop_x0, crop_y0, crop_ds
 
 

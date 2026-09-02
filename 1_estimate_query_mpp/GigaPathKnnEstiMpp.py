@@ -16,7 +16,9 @@ sys.path.insert(0, str(ROOT / 'aiNNModel'))
 from PatchingLib import QueryPatchContainer, FeaturesMap
 from SafeSlide import SafeSlide
 from TissuesRegionsMask import TissuesRegionsMask
-from TileSampler import TileSampler
+from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,
+                         TileSampler, caps_for_tissue_ratio,
+                         native_plans)
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -124,14 +126,28 @@ class GigaPathKnnEstiMpp:
     def build_samples(self) -> TileSampler:
         '''Sample n tiles per WSI level within tissue regions.
 
-        `tissue_ratio` is passed explicitly rather than left to TileSampler's
-        default, and kept strict at 0.5. query_sim samples at 0.3 because a
-        whole FoV at a coarse level is far too large to ever be half tissue --
-        do not copy that number here. This bank has the opposite requirement:
-        it is the reference every query's mpp is voted against, so a tile that
-        is mostly background carries no scale information and only adds a wrong
-        neighbour. The rects here are tile_size * ds, small enough for 0.5 to
-        stay reachable at every level.
+        THE GATE IS A RICHNESS CAP NOW, and the behaviour is unchanged. It
+        used to be `tissue_ratio=0.5`; `TileSampler` retired that field on
+        2026-08-27 because it scored the same quantity as the richness buckets
+        -- background fraction -- and the two disagreeing produced the 475/500
+        corpus. Caps of `(1, 1, 1, 0, 0, 0, 0)` against the default edges admit
+        exactly `background < 0.50` and nothing above it, which is what the
+        gate admitted.
+
+        ALL FLOORS ZERO IS THE POINT, not an omission. This bank wants any
+        admissible tile with no preference between buckets, so the fill is
+        first-come over the shuffle -- see `allocate_targets`, which returns
+        the caps unchanged when nothing asked. A bank quotaed into equal thirds
+        would be a different bank, and whether it should be one is the open
+        question already written into `jobscripts/KnnEstiMppTest.sh`.
+
+        Why strict at all: query_sim samples at 0.3 because a whole FoV at a
+        coarse level is far too large to ever be half tissue -- do not copy
+        that number here. This bank has the opposite requirement: it is the
+        reference every query's mpp is voted against, so a tile that is mostly
+        background carries no scale information and only adds a wrong
+        neighbour. The rects here are tile_size * ds, small enough for the
+        strict cut to stay reachable at every level.
         '''
         if self.mask is None:
             # hsv and not '': this samples tiles for a reference bank, and
@@ -141,10 +157,21 @@ class GigaPathKnnEstiMpp:
             from TissueSegFunc import TissueSegConfig
             self.mask = TissuesRegionsMask.from_wsi(
                 self.wsi, method=TissueSegConfig('hsv').build())
-        self.sampler = TileSampler(self.wsi, self.mask,
-                                   tile_size=self.tile_size, seed=self.seed)
-        self.sampler.sample(n=self.samples_per_level,
-                            tissue_ratio=self.tissue_ratio)
+        # One rung per PYRAMID level -- this bank's labels ARE the levels'
+        # mpps, so the magnifications are the slide's own and not a fixed
+        # ladder. A disjoint lattice by default: the reference banks were
+        # measured with up to 13 per cent bit-identical twins in the deep
+        # levels (ReferenceSampler's docstring), all of them holes and blank
+        # canvas that encode to the same vector at every level.
+        cfg = SamplerConfig(
+            tile=self.tile_size, n_per_rung=self.samples_per_level,
+            seed=self.seed,
+            richness=RichnessConfig(
+                floors=(0.0,) * 7,
+                caps=caps_for_tissue_ratio(self.tissue_ratio)),
+            overlap=OverlapConfig())        # 0 == the tile, disjoint
+        self.sampler = TileSampler(self.wsi, self.mask, cfg)
+        self.sampler.sample(native_plans(self.wsi, self.tile_size))
         return self.sampler
 
     # ── Stage 2: encode reference tiles ──────────────────────────────────────
@@ -153,9 +180,15 @@ class GigaPathKnnEstiMpp:
         '''Encode all sampled tiles; build the KnnClassifier.'''
         if self.sampler is None:
             self.build_samples()
-        images = [self.sampler.read_tile(info) for info in self.sampler]
+        images = self.sampler.materialise(self.wsi).images()
         self.ref_feats = self.encoder(images)               # [N, D]
-        self.ref_mpps = [info.mpp for info in self.sampler]
+        # mpp is derived here rather than carried on the tile. It was a copy of
+        # `base_mpp * level_downsample` stored at sampling time, and a stored
+        # copy of a derived number is one that can go stale against the handle
+        # it came from -- which is exactly what a KNN's LABELS must not do.
+        self.ref_mpps = [self.wsi.base_mpp
+                         * self.wsi.level_downsamples[s.meta.level]
+                         for s in self.sampler]
         self.knn = KnnClassifier(
             self.ref_feats, np.array(self.ref_mpps), k=self.k
         )

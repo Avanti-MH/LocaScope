@@ -42,7 +42,6 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
-import openslide
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -206,47 +205,6 @@ def plot_distributions(cases: List[Case], out_path: str) -> None:
     print(f'  {os.path.basename(out_path)}')
 
 
-def plot_vs_level(cases: List[Case], out_path: str, rows: List[dict]) -> None:
-    """Same physical tissue, every pyramid level. Isolates resolution."""
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    for c in cases:
-        if c.wsi_path is None or c.gt_x is None:
-            continue
-        wsi = openslide.OpenSlide(c.wsi_path)
-        base_mpp = float(wsi.properties.get(openslide.PROPERTY_NAME_MPP_X, 0.25))
-        # Fix the level-0 footprint, then read it at each level.
-        w_l0 = c.wsi_crop.shape[1] * (base_mpp * wsi.level_downsamples[c.level]) / base_mpp
-        h_l0 = c.wsi_crop.shape[0] * (base_mpp * wsi.level_downsamples[c.level]) / base_mpp
-        lvls, counts = [], []
-        for lv in range(wsi.level_count):
-            ds = wsi.level_downsamples[lv]
-            w, h = int(w_l0 / ds), int(h_l0 / ds)
-            if w < 32 or h < 32 or w * h > 60e6:
-                continue
-            img = np.array(wsi.read_region((c.gt_x, c.gt_y), lv, (w, h)).convert('RGB'))
-            n = len(detect(img))
-            lvls.append(lv)
-            counts.append(n)
-            rows.append({'case': c.name, 'analysis': 'vs_level', 'level': lv,
-                         'mpp': round(base_mpp * ds, 4), 'width': w, 'height': h,
-                         'contrast': 0.04, 'n_keypoints': n,
-                         'per_MP': round(density_per_mp(n, img), 1)})
-        wsi.close()
-        ax.plot(lvls, counts, 'o-', label=c.name)
-    ax.axhline(BFMATCHER_LIMIT, color='crimson', ls='--', lw=1.2,
-               label=f'BFMatcher limit ({BFMATCHER_LIMIT:,})')
-    ax.set_yscale('log')
-    ax.set_xlabel('pyramid level (same physical area, coarser resolution)')
-    ax.set_ylabel('SIFT keypoints')
-    ax.set_title('Keypoint count vs resolution')
-    ax.grid(True, alpha=0.3, which='both')
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches='tight')
-    plt.close(fig)
-    print(f'  {os.path.basename(out_path)}')
-
-
 def plot_vs_contrast(cases: List[Case], out_path: str, rows: List[dict]) -> None:
     """How far contrastThreshold has to move to get under the limit."""
     thresholds = [0.01, 0.02, 0.04, 0.06, 0.08, 0.12, 0.16, 0.24]
@@ -371,7 +329,6 @@ def main():
     plot_distributions(cases, os.path.join(args.out, 'kp_distributions.png'))
     plot_summary(cases,       os.path.join(args.out, 'kp_summary.png'))
     plot_vs_contrast(cases,   os.path.join(args.out, 'kp_vs_contrast.png'), rows)
-    plot_vs_level(cases,      os.path.join(args.out, 'kp_vs_level.png'), rows)
 
     csv_path = os.path.join(args.out, 'kp_stats.csv')
     with open(csv_path, 'w', newline='') as f:

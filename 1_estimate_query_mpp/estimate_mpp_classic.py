@@ -64,8 +64,21 @@ def level_fingerprint(wsi, level, stat, tile, n=40, min_std=6):
         tries += 1
         x = np.random.randint(0, W - tile)
         y = np.random.randint(0, H - tile)
-        t = np.array(wsi.read_region((int(x * ds), int(y * ds)), level,
-                                     (tile, tile)).convert("L"))
+        # read_region_rgb when the handle offers it. `.convert("L")` drops the
+        # alpha exactly as `.convert('RGB')` does, so an unphotographed pixel
+        # arrives as 0. The `min_std` guard below happens to skip a FULLY black
+        # tile, which is why this never showed -- but a half-hole tile has an
+        # inflated std, passes the guard, and contributes a corrupted statistic.
+        if hasattr(wsi, 'read_region_rgb'):
+            rgb = wsi.read_region_rgb((int(x * ds), int(y * ds)), level,
+                                      (tile, tile))
+            # cv2 rather than PIL: this file already imports cv2 and not PIL,
+            # and BGR2GRAY on an RGB array is ITU-R BT.601 luma -- the same
+            # weights PIL's convert("L") uses, so the two branches agree.
+            t = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        else:
+            t = np.array(wsi.read_region((int(x * ds), int(y * ds)), level,
+                                         (tile, tile)).convert("L"))
         if t.std() < min_std:           # 跳過背景/空白
             continue
         vals.append(stat(t))

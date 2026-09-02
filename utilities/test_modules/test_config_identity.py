@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -232,6 +233,93 @@ def t_registry_round_trip():
     assert CI.config_from_json(CI.config_json(Demo(k=9))) == Demo(k=9)
 
 
+#: MODULE LEVEL ON PURPOSE. This file has `from __future__ import annotations`
+#: at the top, exactly as every module that defines a real config does, so
+#: `_Outer.inner` is annotated with the STRING '_Inner'. A class defined inside
+#: a test function would not reproduce that: `typing.get_type_hints` cannot see
+#: a function's locals, which sends the resolution down its fallback path and
+#: tests the branch that was already working.
+@CI.register('t_inner')
+@dataclass(frozen=True)
+class _Inner(CI.IdentifiedConfig):
+    a: int = 1
+
+
+@CI.register('t_outer')
+@dataclass(frozen=True)
+class _Outer(CI.IdentifiedConfig):
+    inner: _Inner = dataclasses.field(default_factory=_Inner)
+    maybe: Optional[_Inner] = None
+    k: int = 3
+
+
+def t_json_round_trip_rebuilds_a_nested_config():
+    """The one that was missing, and it cost a job.
+
+    `config_from_json` guarded its nested branch with `isinstance(f.type, type)`,
+    which is False for every config in this repo because PEP 563 makes `f.type`
+    a string. So a nested config came back as a plain DICT, the outer dataclass
+    accepted it without complaint, and the failure surfaced later and elsewhere:
+    `'dict' object has no attribute 'kwargs'`, inside a DataLoader worker, four
+    stack frames from anything to do with configs.
+
+    The old `t_registry_round_trip` passed throughout -- its Demo has one int
+    field, so it never had a nested config to lose.
+    """
+    text = CI.config_json(_Outer(inner=_Inner(a=7), k=9))
+    back = CI.config_from_json(text)
+
+    if not isinstance(back.inner, _Inner):
+        raise AssertionError(
+            f'inner came back as {type(back.inner).__name__}, not _Inner. A '
+            f'dict here is accepted by the constructor and fails somewhere '
+            f'else entirely')
+    if back != _Outer(inner=_Inner(a=7), k=9):
+        raise AssertionError(f'round trip changed the value: {back}')
+
+
+def t_an_optional_nested_config_is_rebuilt_too():
+    """`Optional[X]` is not a class, so a bare `issubclass` check misses it.
+
+    Not hypothetical: `KeypointNetConfig.descriptor` is
+    `Optional[DescriptorHeadConfig]`, because a detector with no descriptor
+    head is MagicPoint. Both states have to survive the trip -- None because it
+    is a real configuration, and the present one because that is the branch a
+    class-only check drops.
+    """
+    for value in (None, _Inner(a=5)):
+        back = CI.config_from_json(CI.config_json(_Outer(maybe=value)))
+        if back.maybe != value or (value is not None
+                                   and not isinstance(back.maybe, _Inner)):
+            raise AssertionError(
+                f'Optional nested config came back as {back.maybe!r}, '
+                f'expected {value!r}')
+
+
+def t_a_dict_that_is_not_a_config_is_refused_loudly():
+    """The decoy for the two above: the failure must be an ERROR, not a value.
+
+    What made this expensive was not the wrong branch, it was that the wrong
+    branch RETURNED something. A field annotated as a plain dict cannot be a
+    serialised config -- `_as_plain` only ever writes one for a nested config --
+    so the honest answer is to refuse rather than to hand back the dict and let
+    it fail four frames away.
+    """
+    @CI.register('t_notaconfig')
+    @dataclass(frozen=True)
+    class _NotAConfig(CI.IdentifiedConfig):
+        k: int = 3
+
+    text = json.dumps({'name': 't_notaconfig', 'fields': {'k': {'a': 1}}})
+    try:
+        CI.config_from_json(text)
+    except TypeError:
+        return
+    raise AssertionError(
+        'a dict in a non-config field was accepted. That is the exact shape of '
+        'the bug this section exists for')
+
+
 def t_registry_names_what_it_has():
     """An unknown name must list the known ones.
 
@@ -291,6 +379,9 @@ def main() -> int:
 
     print('registry')
     check('name -> config -> json -> config', t_registry_round_trip)
+    check('json rebuilds a NESTED config',    t_json_round_trip_rebuilds_a_nested_config)
+    check('Optional nested too',              t_an_optional_nested_config_is_rebuilt_too)
+    check('a non-config dict is refused',     t_a_dict_that_is_not_a_config_is_refused_loudly)
     check('an unknown name lists the known',  t_registry_names_what_it_has)
     check('one name, one claimant',           t_registry_refuses_a_second_claim)
 

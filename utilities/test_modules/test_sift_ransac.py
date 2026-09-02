@@ -503,10 +503,11 @@ def main():
     crop_ds_12    = wsi.level_downsamples[crop_level_12]
     crop_w_12     = int((C_q + zoom_pad * 2) * args.tile * retrieval_result.ds / crop_ds_12)
     crop_h_12     = int((R_q + zoom_pad * 2) * args.tile * retrieval_result.ds / crop_ds_12)
-    crop_img_12   = np.array(
-        wsi.read_region((crop_x0_12, crop_y0_12), crop_level_12,
-                        (crop_w_12, crop_h_12)).convert('RGB')
-    )
+    # read_region_rgb, not `.convert('RGB')`. Here it is not only cosmetic:
+    # SIFT runs on this crop, and a hole painted black contributes a straight
+    # maximum-contrast edge with two right angles -- keypoints on an artefact.
+    crop_img_12   = wsi.read_region_rgb((crop_x0_12, crop_y0_12), crop_level_12,
+                                        (crop_w_12, crop_h_12))
 
     tag = f"{'ov' if args.overlap else 'nov'}_{'flt' if args.filter else 'noflt'}"
     # The figure is the encoder's: retrieval picks the window SIFT then refines,

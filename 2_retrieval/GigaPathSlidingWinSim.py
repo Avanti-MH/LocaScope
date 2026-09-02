@@ -84,6 +84,7 @@ def _sim_tensors(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
 def SlidingWindowSimilarity(
     qFeatureMap: FeaturesMap,
     WsiFeatureMap: FeaturesMap,
+    device=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     '''
     Slide qFeatureMap (kernel) over WsiFeatureMap (input), computing per-patch cosine similarity.
@@ -96,11 +97,38 @@ def SlidingWindowSimilarity(
       overlap_sim shape [H_out-1, W_out-1, R_q, C_q]  WSI overlap grid, origin (region.x + tile/2·ds, ...)
                         (empty tensor when WSI has no overlap patches)
       H_out = R_wsi - R_q + 1,  W_out = C_wsi - C_q + 1
+
+    `device` moves the three grids before the similarity runs, so the einsum and
+    the window slicing happen there. None leaves them where the FeaturesMap put
+    them, which is the host -- TileEncoderFunc.features() ends its reduction
+    with .cpu() (TileEncoderFunc.py:898) and nothing in this path moves them
+    back. That default exists so the four callers which do not pass a device
+    keep the behaviour they were measured with; the retrieval path
+    (GigaPathSlidingWinSimRot.compute_sim_maps) passes one unconditionally.
+
+    ORDER MATTERS, and not for style. The three grid builders below are Python
+    double loops -- one `out[r, c] = self[idx]` per cell, PatchingLib.py:608 and
+    :615 -- so they are built on whatever device the features already live on
+    and moved AFTERWARDS, in one transfer each. Building them on a GPU instead
+    would turn a few thousand memory copies into a few thousand kernel launches,
+    per call, 172 calls per photo.
+
+    What this costs, measured against log/BenchMarkV2 (S1104233, uni2): the
+    einsum was 4.2 s over the whole 71-photo run and the grids total about
+    160 MB per rotation, so moving them per call uploads roughly 45 GB across
+    the run. The transfer is expected to exceed what the einsum saves. That is
+    the reason the timers below exist rather than an argument against the move.
     '''
     q_grid  = qFeatureMap.main_feature_grid()       # fixed: always main query kernel
-    main_sim = _sim_tensors(q_grid, WsiFeatureMap.main_feature_grid())
-
+    wsi_main = WsiFeatureMap.main_feature_grid()
     wsi_ov  = WsiFeatureMap.overlap_feature_grid()
+
+    if device is not None:
+        q_grid   = q_grid.to(device)
+        wsi_main = wsi_main.to(device)
+        wsi_ov   = wsi_ov.to(device)
+
+    main_sim = _sim_tensors(q_grid, wsi_main)
     overlap_sim = _sim_tensors(q_grid, wsi_ov) if wsi_ov.numel() > 0 \
                   else torch.empty(0)
 

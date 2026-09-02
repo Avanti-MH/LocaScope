@@ -51,6 +51,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import typing
 from typing import Any, Dict, List, Optional, Type
 
 import torch
@@ -416,16 +417,66 @@ def _as_plain(cfg) -> dict:
     return out
 
 
+def _field_types(cls) -> dict:
+    """`{field: resolved type}`, working under `from __future__ import annotations`.
+
+    THIS IS NOT A REFINEMENT, IT IS THE WHOLE NESTED PATH. Under PEP 563 --
+    which every module in this project turns on -- `dataclasses.fields(cls)`
+    reports `f.type` as the STRING `'HomographyConfig'`, never the class. The
+    `isinstance(f.type, type)` test that used to guard the nested branch is
+    therefore False for every config in the repo, and a nested config came back
+    as a plain dict. Silently: `PairDatasetConfig(**...)` accepts it, and the
+    failure surfaces later and elsewhere as `'dict' object has no attribute
+    'kwargs'`, inside a DataLoader worker.
+
+    `get_type_hints` re-evaluates the strings in the defining module's
+    namespace. It can still fail for a class defined inside a function body, so
+    the raw annotations are the fallback -- that path was already correct
+    before PEP 563 and stays correct for anything it can resolve.
+    """
+    try:
+        return typing.get_type_hints(cls)
+    except Exception:                                             # noqa: BLE001
+        return {f.name: f.type for f in dataclasses.fields(cls)}
+
+
+def _config_type(hint):
+    """The `IdentifiedConfig` a field holds, seen through `Optional[...]`.
+
+    `KeypointNetConfig.descriptor` is `Optional[DescriptorHeadConfig]` -- None
+    is MagicPoint, a detector with no descriptor head -- so a check for a bare
+    class would miss it and hand back the dict again.
+    """
+    if isinstance(hint, type) and issubclass(hint, IdentifiedConfig):
+        return hint
+    for arg in typing.get_args(hint):
+        if isinstance(arg, type) and issubclass(arg, IdentifiedConfig):
+            return arg
+    return None
+
+
 def _from_plain(cls, fields: dict):
     kwargs = {}
     by_name = {f.name: f for f in dataclasses.fields(cls)}
+    hints = _field_types(cls)
     for name, value in fields.items():
-        f = by_name.get(name)
-        if f is None:
+        if name not in by_name:
             continue          # a field this build no longer has; see rule 1
-        if isinstance(value, dict) and isinstance(f.type, type) \
-                and issubclass(f.type, IdentifiedConfig):
-            kwargs[name] = _from_plain(f.type, value)
+        if isinstance(value, dict):
+            nested = _config_type(hints.get(name, by_name[name].type))
+            if nested is None:
+                # LOUD, because the silent version is what this cost. No
+                # registered config has a plain dict field -- `_as_plain` only
+                # ever writes one for a nested config -- so a dict whose type
+                # cannot be resolved means the annotation did not come back,
+                # and returning it unconverted builds a config that is wrong in
+                # a way nothing downstream checks.
+                raise TypeError(
+                    f'{cls.__name__}.{name} was serialised as a nested config '
+                    f'but its annotation {hints.get(name, by_name[name].type)!r} '
+                    f'does not resolve to an IdentifiedConfig, so it cannot be '
+                    f'rebuilt. Leaving it as a dict is how this failed before')
+            kwargs[name] = _from_plain(nested, value)
         elif isinstance(value, list):
             kwargs[name] = tuple(value)
         else:

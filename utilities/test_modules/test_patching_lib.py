@@ -1021,11 +1021,14 @@ def test_real_roi(path: str, size: int) -> TissuePatchContainer:
 
 def test_real_wsi(path: str, level: int, size: int) -> TissuePatchContainer:
     """Load the full WSI level image."""
-    import openslide
-    wsi = openslide.OpenSlide(path)
+    # SafeSlide, not a plain OpenSlide. A hole read through `.convert('RGB')`
+    # is a pure black rectangle, and this test then asserts things about the
+    # patches extracted from it -- so the fixture would be testing the bug.
+    from SafeSlide import SafeSlide
+    wsi = SafeSlide(path)
     W_l, H_l = wsi.level_dimensions[level]
     ds = wsi.level_downsamples[level]
-    arr = np.array(wsi.read_region((0, 0), level, (W_l, H_l)).convert('RGB'))
+    arr = wsi.read_region_rgb((0, 0), level, (W_l, H_l))
     wsi.close()
 
     tc = TissuePatchContainer(arr, img_ds=ds)
@@ -1039,9 +1042,14 @@ def test_real_wsi(path: str, level: int, size: int) -> TissuePatchContainer:
 
 
 def test_real_wsi_from_openslide(path: str, level: int, size: int) -> TissuePatchContainer:
-    """Test from_openslide factory method."""
-    import openslide
-    wsi = openslide.OpenSlide(path)
+    """Test from_openslide factory method.
+
+    SafeSlide rather than a plain OpenSlide, so the container's slide branch
+    takes its `read_region_rgb` path -- which is the path production uses and
+    therefore the one worth testing.
+    """
+    from SafeSlide import SafeSlide
+    wsi = SafeSlide(path)
     level = min(level, wsi.level_count - 1)
     W_l, H_l = wsi.level_dimensions[level]
     tc = TissuePatchContainer.from_openslide(wsi, at_level=level)

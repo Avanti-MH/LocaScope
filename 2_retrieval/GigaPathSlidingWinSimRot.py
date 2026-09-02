@@ -324,10 +324,19 @@ class GigaPathSlidingWinSimRot:
             raise RuntimeError('call build_wsi_features() first')
         if not self.query_features_by_rot:
             raise RuntimeError('call build_query_features() first')
+        # The similarity runs on the encoder's device. The grids themselves are
+        # still built on the host -- SlidingWindowSimilarity says why the order
+        # cannot be the other way round -- and moved once each, per call.
+        #
+        # Unconditional, and the cost is known rather than hoped for: the grids
+        # are rebuilt per (rotation, region), so this uploads them 4 times per
+        # photo instead of once. `sim.upload[cuda]` against `sim.einsum[cuda]`
+        device = getattr(self.encoder, 'device', None)
         self.sim_maps_by_rot = {}
         for rot, qfm in self.query_features_by_rot.items():
             self.sim_maps_by_rot[rot] = [
-                SlidingWindowSimilarity(qfm, wf) for wf in self.wsi_features
+                SlidingWindowSimilarity(qfm, wf, device=device)
+                for wf in self.wsi_features
             ]
         return self.sim_maps_by_rot
 

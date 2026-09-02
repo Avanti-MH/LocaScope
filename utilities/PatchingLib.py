@@ -1028,9 +1028,19 @@ class TissuePatchContainer(PatchContainerBase):
         elif isinstance(source, openslide.OpenSlide):
             if at_level is None:
                 raise ValueError('at_level must be provided when source is openslide.OpenSlide')
-            self.img = as_rgb_uint8(np.array(
-                source.read_region((0, 0), at_level, source.level_dimensions[at_level])
-            ))
+            # read_region_rgb when the handle offers it. This branch never
+            # wrote `.convert('RGB')` -- it hands the RGBA array straight to
+            # as_rgb_uint8, which slices `[..., :3]` -- but that is the SAME
+            # bug spelled differently: dropping the alpha leaves unphotographed
+            # pixels at RGB 0, so every scanner hole is a pure black rectangle
+            # in the patches this container then extracts.
+            size = source.level_dimensions[at_level]
+            if hasattr(source, 'read_region_rgb'):
+                self.img = as_rgb_uint8(source.read_region_rgb((0, 0), at_level,
+                                                               size))
+            else:
+                self.img = as_rgb_uint8(np.array(
+                    source.read_region((0, 0), at_level, size)))
         else:
             raise ValueError(f'Unsupported source type: {type(source)}')
 
@@ -1202,7 +1212,20 @@ class WsiTissuesContainer():
         for i, region in enumerate(self.tissue_regions):
             size = (int(region.w / self.ds), int(region.h / self.ds))
             try:
-                tissue_img = wsi.read_region((region.x, region.y), self.level, size)
+                # read_region_rgb when the handle offers it. This is the
+                # main tiling path -- every patch the retrieval stages encode
+                # comes through here -- and it never wrote `.convert('RGB')`
+                # itself, so the defect was invisible to a grep: the RGBA image
+                # goes to `from_pil`, which converts, drops the alpha, and
+                # leaves every unphotographed pixel at RGB 0. A scanner hole
+                # then reaches the encoder as a pure black rectangle with two
+                # right-angled corners.
+                if hasattr(wsi, 'read_region_rgb'):
+                    tissue_img = wsi.read_region_rgb((region.x, region.y),
+                                                     self.level, size)
+                else:
+                    tissue_img = wsi.read_region((region.x, region.y),
+                                                 self.level, size)
             except Exception as e:
                 # One read covers a whole region bbox, so a single MIRAX tile the
                 # scanner never acquired takes the entire region -- and openslide
@@ -1215,7 +1238,13 @@ class WsiTissuesContainer():
                     f'w={region.w} h={region.h} level={self.level} '
                     f'read_size={size[0]}x{size[1]}]'
                 ) from e
-            tpc = TissuePatchContainer.from_pil(tissue_img, region=region, img_ds=self.ds, is_crop=True, at_level=self.level)
+            # from_array or from_pil, by what the read returned. The two take
+            # the same keywords and land in the same __init__ branch table.
+            # comparable with the runs already recorded under it.
+            make = (TissuePatchContainer.from_array
+                    if isinstance(tissue_img, np.ndarray)
+                    else TissuePatchContainer.from_pil)
+            tpc = make(tissue_img, region=region, img_ds=self.ds, is_crop=True, at_level=self.level)
             self.tissue_patches.append(tpc.extract_all(tile_size=self.tile_size, overlap=overlap))
 
     @staticmethod

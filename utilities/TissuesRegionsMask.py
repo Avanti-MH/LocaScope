@@ -169,13 +169,49 @@ class TissuesRegionsMask:
         canvas, so on a cropped mask it squeezes the entire slide into the frame
         the mask uses for the scanned rectangle alone -- the picture looks
         plausible and every overlay is wrong.
+
+        `read_region_rgb` when the handle offers it, never a bare
+        `.convert('RGB')`. This function is a BACKDROP, so the failure is
+        cosmetic rather than numerical -- but it is the misleading kind: convert
+        merely drops the alpha, unphotographed pixels carry RGB 0, and every
+        MIRAX hole comes out pure black. A black rectangle under a set of region
+        boxes reads as densely stained tissue that the mask somehow missed,
+        which is the opposite of what happened. `_segment_plane` two hundred
+        lines below has made the same choice since it was written; this one had
+        not caught up.
         """
         H, W = self.main_mask.shape
         lv = wsi.get_best_level_for_downsample(self.mask_ds_x)
-        return np.array(
-            wsi.read_region((self.origin_x, self.origin_y), lv, (W, H))
-               .convert('RGB')
-        )
+        ds_lv = float(wsi.level_downsamples[lv])
+
+        # The READ SIZE is in level-`lv` pixels and the mask's shape is in mask
+        # pixels, and those are the same number only when `mask_ds` happens to
+        # BE a pyramid level. Reading (W, H) directly -- which this did -- backs
+        # the picture with `W * ds_lv` level-0 px while the mask covers
+        # `W * mask_ds`, so the backdrop is zoomed by `mask_ds / ds_lv` and
+        # every overlay drawn in mask coordinates lands somewhere else.
+        #
+        # It went unseen because every mask here used to sit on a level: the
+        # HSV and Otsu masks are ds 32, which is a level on both pyramids. The
+        # PCA masks are ds 14 -- UNI2's patch grid, not a pyramid step -- and on
+        # a 4x pyramid the best level is ds 4, so the backdrop came out 3.5x
+        # zoomed. `region_box` and `to_mask_xy` were right the whole time; only
+        # the picture under them was wrong.
+        read_w = max(1, int(round(W * self.mask_ds_x / ds_lv)))
+        read_h = max(1, int(round(H * self.mask_ds_y / ds_lv)))
+        loc = (self.origin_x, self.origin_y)
+        if hasattr(wsi, 'read_region_rgb'):
+            img = wsi.read_region_rgb(loc, lv, (read_w, read_h))
+        else:
+            img = np.array(
+                wsi.read_region(loc, lv, (read_w, read_h)).convert('RGB'))
+        if (read_h, read_w) != (H, W):
+            import cv2                                       # noqa: PLC0415
+            # INTER_AREA down, which is what the ds ladder uses: anything else
+            # invents high-frequency texture, and this is a backdrop for
+            # judging a mask against the tissue under it.
+            img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+        return img
 
     # ── Regions mutation history ─────────────────────────────────────────────
 
@@ -661,6 +697,49 @@ class TissuesRegionsMask:
         # the canvas: pairing the canvas width with a cropped mask width would
         # inflate mask_ds by 1/crop_fraction and silently misplace everything.
         # Without a crop span_* IS the canvas, so this is the old formula.
+        return cls.from_mask(wsi, main_mask,
+                             origin=(origin_x, origin_y), span=(span_w, span_h))
+
+    @classmethod
+    def from_mask(cls, wsi: openslide.OpenSlide, mask,
+                  origin: tuple = (0, 0), span: tuple = None) -> 'TissuesRegionsMask':
+        '''Everything that happens AFTER a mask exists, for a caller that made
+        its own.
+
+        `from_wsi` reads a plane, calls a segmenter, and then does this; a
+        segmenter that reads the slide ITSELF only needs this half. That is not
+        a hypothetical shape -- `aiNNModel/Uni2PcaSegFunc.py` is one. Its unit
+        of work is a whole slide rather than an image, because it fits a PCA
+        across the slide before it can threshold any part of it, so `method=`
+        was never the right door for it.
+
+        Args:
+            mask:   [H, W] bool or uint8. ANY resolution -- mask_ds is DERIVED
+                    from its shape against `span`, so a mask at ds 14 and a mask
+                    at ds 32 both work and neither has to say which it is.
+            origin: (x, y) LEVEL-0, where the mask's top-left sits. Not (0, 0)
+                    on a MIRAX: `openslide.bounds-*` is the scanned rectangle
+                    and the canvas around it holds no image data.
+            span:   (w, h) LEVEL-0 that the mask COVERS. Defaults to the whole
+                    canvas from `origin`.
+
+                    Pass what the mask actually covers, not what was asked for.
+                    A tiler that drops partial tiles at the right and bottom
+                    edge covers slightly less: 276 tiles of 224 is 61,824 level-0
+                    px against a 61,879 px scanned rectangle, and dividing the
+                    larger by the mask width gives mask_ds 14.012 instead of 14.
+                    It is 0.09 percent, and it is 55 level-0 px of drift by the
+                    far edge -- the kind of thing that is invisible until a
+                    region boundary lands on the wrong side of a tile.
+        '''
+        main_mask = np.asarray(mask).astype(bool)
+        wsi_width, wsi_height = wsi.level_dimensions[0]
+        wsi_mpp_x = float(wsi.properties.get('openslide.mpp-x', 0))
+        wsi_mpp_y = float(wsi.properties.get('openslide.mpp-y', 0))
+        origin_x, origin_y = int(origin[0]), int(origin[1])
+        span_w, span_h = (span if span is not None
+                          else (wsi_width - origin_x, wsi_height - origin_y))
+
         mask_ds_x = span_w / main_mask.shape[1]
         mask_ds_y = span_h / main_mask.shape[0]
         mask_mpp  = (wsi_mpp_x + wsi_mpp_y) / 2 * (mask_ds_x + mask_ds_y) / 2
@@ -679,7 +758,7 @@ class TissuesRegionsMask:
                    wsi_height=wsi_height,
                    wsi_mpp_x=wsi_mpp_x,
                    wsi_mpp_y=wsi_mpp_y,
-                   wsi_level_downsamples=wsi_level_downsamples,
+                   wsi_level_downsamples=wsi.level_downsamples,
                    origin_x=origin_x,
                    origin_y=origin_y)
 

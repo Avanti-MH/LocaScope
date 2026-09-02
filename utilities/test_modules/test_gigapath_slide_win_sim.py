@@ -795,9 +795,11 @@ def main():
     crop_ds    = wsi.level_downsamples[crop_level]
     crop_w_n   = int((C_q + pad * 2) * args.tile * ds_est / crop_ds)
     crop_h_n   = int((R_q + pad * 2) * args.tile * ds_est / crop_ds)
-    crop_img   = np.array(
-        wsi.read_region((crop_x0, crop_y0), crop_level, (crop_w_n, crop_h_n)).convert('RGB')
-    )
+    # read_region_rgb, not `.convert('RGB')`: convert paints every scanner
+    # hole black, and a black rectangle under the drawn quads reads as dense
+    # tissue the retrieval somehow skipped.
+    crop_img   = wsi.read_region_rgb((crop_x0, crop_y0), crop_level,
+                                     (crop_w_n, crop_h_n))
 
     wsi.close()
 

@@ -43,6 +43,19 @@ from TissuesRegionsMask import TissuesRegionsMask
 
 _LEVEL_COLORS = ['#2196F3', '#4CAF50', '#FF9800', '#F44336', '#9C27B0', '#00BCD4']
 
+def _level_mpp(est, level: int) -> float:
+    """A level's mpp, derived. One definition for the legend and the titles."""
+    return float(est.wsi.base_mpp * est.wsi.level_downsamples[int(level)])
+
+
+def _mpp_of(est, sample) -> float:
+    """The tile's mpp, DERIVED. It used to be stored on the tile, and a stored
+    copy of `base_mpp * level_downsample` is one that can go stale against the
+    handle it came from -- which for a KNN's labels is the one thing that must
+    not happen."""
+    return _level_mpp(est, sample.meta.level)
+
+
 def _level_color(level: int) -> str:
     return _LEVEL_COLORS[level % len(_LEVEL_COLORS)]
 
@@ -59,7 +72,7 @@ def _add_border(img: np.ndarray, color_hex: str, width: int = 6) -> np.ndarray:
 
 def plot_reference_bank(est: GigaPathKnnEstiMpp, n_per_level: int = 8, out: str = None):
     """Show sample tiles from each pyramid level in the reference bank."""
-    levels = sorted(set(t.level for t in est.sampler.tiles))
+    levels = sorted({x.meta.level for x in est.sampler})
     n_levels = len(levels)
 
     fig, axes = plt.subplots(n_levels, n_per_level,
@@ -68,14 +81,17 @@ def plot_reference_bank(est: GigaPathKnnEstiMpp, n_per_level: int = 8, out: str 
         axes = axes[np.newaxis, :]
 
     for row, lv in enumerate(levels):
-        lv_tiles = est.sampler.tiles_at_level(lv)
+        # `where(level=...)` rather than a `tiles_at_level` method: level is a
+        # column like any other now, so the filter is the general one and there
+        # is no second way to ask the same question.
+        lv_tiles = list(est.sampler.where(level=lv))
         color = _level_color(lv)
-        mpp = lv_tiles[0].mpp if lv_tiles else 0.0
+        mpp = _mpp_of(est, lv_tiles[0]) if lv_tiles else 0.0
 
         for col in range(n_per_level):
             ax = axes[row, col]
             if col < len(lv_tiles):
-                img = np.array(est.sampler.read_tile(lv_tiles[col]))
+                img = lv_tiles[col].materialise(est.wsi).image
                 ax.imshow(_add_border(img, color))
                 ax.set_title(f'#{col}', fontsize=6)
             else:
@@ -129,16 +145,22 @@ def plot_knn_debug(est: GigaPathKnnEstiMpp, gt_mpp: float,
         # ── k nearest reference tiles ─────────────────────────────────────────
         for ci, ref_idx in enumerate(indices[row]):
             ax = axes[row, 1 + ci]
-            tile = est.sampler.tiles[ref_idx]
-            img  = np.array(est.sampler.read_tile(tile))
-            ax.imshow(_add_border(img, _level_color(tile.level)))
+            sample = est.sampler[ref_idx]
+            img = sample.materialise(est.wsi).image
+            ax.imshow(_add_border(img, _level_color(sample.meta.level)))
             ax.set_xticks([]); ax.set_yticks([])
-            ax.set_title(f'L{tile.level}\n{tile.mpp:.3f}', fontsize=6)
+            ax.set_title(f'L{sample.meta.level}\n{_mpp_of(est, sample):.3f}',
+                         fontsize=6)
 
-    # Legend: level → color
+    # Legend: level → color. The mpp comes off the SLIDE, not off the sampler:
+    # `level_mpps` was a list the old sampler cached at construction, i.e. a
+    # stored copy of `base_mpp * level_downsample`. A stored copy of a derived
+    # number can go stale against the handle it came from, and these are the
+    # KNN's labels.
     legend_handles = [
         mpatches.Patch(color=_level_color(lv),
-                       label=f'Level {lv}  MPP={est.sampler.level_mpps[lv]:.3f}')
+                       label=f'Level {lv}  '
+                             f'MPP={_level_mpp(est, lv):.3f}')
         for lv in range(est.wsi.level_count)
     ]
     fig.legend(handles=legend_handles, loc='lower center',

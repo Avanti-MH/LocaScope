@@ -154,11 +154,15 @@ class QueryFromWSI:
         wsi_w, wsi_h = self.wsi.dimensions   # level-0 (W, H)
         if x < 0 or y < 0 or x + self.rect_w_l0 > wsi_w or y + self.rect_h_l0 > wsi_h:
             return None
-        img = self.wsi.read_region(
+        # read_region_rgb, not `.convert('RGB')`. This image BECOMES a
+        # synthetic query -- it is photographed, augmented and matched -- and
+        # convert merely drops the alpha, so a scanner hole would arrive as a
+        # pure black rectangle whose border is a perfect corner. Back to PIL
+        # because the resize below and every caller expect one.
+        img = Image.fromarray(self.wsi.read_region_rgb(
             (int(x), int(y)),
             self.chosen_level,
-            (self._read_w, self._read_h),
-        ).convert('RGB')
+            (self._read_w, self._read_h)))
         if img.size != (self.output_w, self.output_h):
             img = img.resize((self.output_w, self.output_h), Image.LANCZOS)
         return img
@@ -196,11 +200,10 @@ class QueryFromWSI:
                 or origin_y + self.rect_h_l0 + 2 * margin_l0 > wsi_h):
             return None
 
-        img = self.wsi.read_region(
+        img = Image.fromarray(self.wsi.read_region_rgb(
             (origin_x, origin_y),
             self.chosen_level,
-            (self._read_w + 2 * margin_n, self._read_h + 2 * margin_n),
-        ).convert('RGB')
+            (self._read_w + 2 * margin_n, self._read_h + 2 * margin_n)))
         target = (self.output_w + 2 * margin, self.output_h + 2 * margin)
         if img.size != target:
             img = img.resize(target, Image.LANCZOS)
@@ -226,11 +229,10 @@ class QueryFromWSI:
                 or sq_x + self.bounding_square_side_l0 > wsi_w
                 or sq_y + self.bounding_square_side_l0 > wsi_h):
             return None
-        img = self.wsi.read_region(
+        img = Image.fromarray(self.wsi.read_region_rgb(
             (sq_x, sq_y),
             self.chosen_level,
-            (self._sq_read_side, self._sq_read_side),
-        ).convert('RGB')
+            (self._sq_read_side, self._sq_read_side)))
         target = self.bounding_square_side_out
         if img.size != (target, target):
             img = img.resize((target, target), Image.LANCZOS)

@@ -51,14 +51,16 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import numpy as np
-import openslide
+from SafeSlide import SafeSlide
 import torch
 
 from _paths import setup_import_paths, PROJECT_ROOT, RESULT_DIR, job_result_dir
 setup_import_paths()
 
 from TissuesRegionsMask import TissuesRegionsMask
-from TileSampler import TileSampler
+from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,
+                         TileSampler, caps_for_tissue_ratio,
+                         native_plans)
 from GigaPathFunc import (
     GigaPathEncoderConfig,
 )
@@ -99,7 +101,11 @@ def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
     Returns list of PIL images (in-order matching the JSON).
     '''
     print(f'\n── {wsi_path.name} ──', flush=True)
-    wsi = openslide.OpenSlide(str(wsi_path))
+    # SafeSlide, not a plain OpenSlide. This was ALREADY broken: TileSampler
+    # below reads `wsi.base_mpp`, which only SafeSlide has, so this bench has
+    # raised AttributeError since that line was added. The refusal TileSampler
+    # now makes at construction says so; this is the fix it points at.
+    wsi = SafeSlide(str(wsi_path))
     n_lv = wsi.level_count
     per_level = max(1, per_wsi // n_lv)
     print(f'  levels={n_lv}  wsi_budget={per_wsi}  per_level={per_level}',
@@ -114,19 +120,32 @@ def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
     print(f'  tissue_fraction={mask.tissue_fraction() * 100:.1f}%  '
           f'regions={len(mask)}', flush=True)
 
-    if resume and tile_json.exists():
-        sampler = TileSampler.from_json(wsi, mask, tile_json,
-                                        tile_size=tile_size, seed=seed)
-        print(f'  [resume] loaded {len(sampler)} tiles from {tile_json.name}',
+    # One rung per PYRAMID level: this bench compares the SAME tiles across
+    # encoder precisions, so the magnifications are the slide's own.
+    # `tissue_ratio` retired from SamplerConfig on 2026-08-27; the same gate
+    # is a cap of zero on the richness buckets above it, and all-zero floors
+    # keep the fill first-come rather than quotaed.
+    cfg = SamplerConfig(tile=tile_size, n_per_rung=per_level, seed=seed,
+                        richness=RichnessConfig(
+                            floors=(0.0,) * 7,
+                            caps=caps_for_tissue_ratio(tissue_ratio)),
+                        overlap=OverlapConfig())   # 0 == disjoint
+    store = Path(str(tile_json)).with_suffix('')
+    if resume and (store / 'index.csv').exists():
+        sampler = TileSampler.load(store, wsi=wsi, mask=mask, cfg=cfg)
+        print(f'  [resume] loaded {len(sampler)} tiles from {store.name}',
               flush=True)
     else:
-        sampler = TileSampler(wsi, mask, tile_size=tile_size, seed=seed)
-        sampler.sample(n=per_level, tissue_ratio=tissue_ratio)
-        sampler.save(tile_json)
-        print(f'  saved tile coords -> {tile_json}', flush=True)
+        sampler = TileSampler(wsi, mask, cfg)
+        sampler.sample(native_plans(wsi, tile_size))
+        # A directory rather than one JSON: the coordinates now carry the three
+        # axes, and `load` checks the stored sampler_id against the config it
+        # is handed. Resuming under a different config was silent before.
+        sampler.save(store)
+        print(f'  saved tile coords -> {store}', flush=True)
 
     sampler.summary()
-    images = sampler.read_all()
+    images = sampler.materialise(wsi).images()
     wsi.close()
     return images
 

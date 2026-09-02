@@ -1,5 +1,47 @@
 """Choose which tiles become a slide's reference set, and say why for each one.
 
+TODO (2026-08-27): RETIRE THIS INTO `utilities/TileSampler.py`'s CONFIG
+=======================================================================
+TileSampler was rewritten to carry the three axes this module invented --
+richness (buckets and quotas), overlap (a lattice with a bounded top-up), and
+inheritance (a set of level-0 centres carried to every rung). Almost everything
+here is now a `SamplerConfig` away:
+
+    BUCKETS, edges, the quota fields   -> RichnessConfig
+    JITTER_OFFSETS, jitter_cap, over   -> OverlapConfig
+    inherit_frac, inherit_over         -> InheritConfig
+    sampler_id                         -> SamplerConfig.sampler_id
+    preflight / LevelPlan / BucketPlan -> TileSampler.preflight / RungReport
+
+Two things were genuinely unique and one of them has moved:
+
+    min_valid, the per-level hole check    -> TileSampler.drop_holes(), added
+                                              as a separate pass so that
+                                              `preflight` keeps being answerable
+                                              before any pixel is read
+    to_store_args, grid_rc / kind          still here. `kind` is derivable from
+                                           a position (`(x-x0) % tile == 0` in
+                                           both axes is a main-grid position)
+                                           and `grid_rc` from the same
+                                           arithmetic.
+
+THE ONE CHECK THAT HAS TO COME FIRST is an equivalence test between
+`PatchGrid.from_size(...)` here and `TileSampler._lattice(...)` there: the same
+region and tile must give the same set of level-0 positions. The worry that
+blocked this once -- that `PatchGrid` might add a flush-right tile at the region
+edge, which `arange` would not -- turned out to be unfounded:
+`_full_grid_starts` (`PatchingLib.py:197`) is `range(0, length, tile)` filtered
+to the starts that fit, and drops the partial exactly as `arange` does. So the
+two agree, and the test is to PIN that rather than to discover it. Score it
+against three decoys, because what it catches is an off-by-one: the range end
+moved by one, the dropped partial added back, and `overlap=True` against
+`grid_step = tile // 2`.
+
+Nothing here is wrong today; it is a second implementation of one idea, and the
+cost of keeping both is that a fix to one is a bug in the other. See
+`log/TODO.log` 2026-08-27.
+
+
 The reference bank behind stage 1 is currently 40 tiles per level drawn at random
 from inside the tissue mask. That is enough to be saturated for a KNN
 (result/MppEstimate: 40 -> 640 buys 2.7 points) but it controls nothing about

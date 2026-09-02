@@ -2382,3 +2382,155 @@
         合理的數字——classify_region 就是那樣死的。
 
 ================================================================================
+
+================================================================================
+
+[ ] 2026-08-27 | ReferenceSampler 退成 TileSampler 的一組 config
+                 先寫等價測試，再退。阻擋它的那個顧慮查完是假的
+
+    TileSampler 原地改寫之後，ReferenceSampler 發明的三個軸都在 SamplerConfig
+    裡了：桶與配額 -> RichnessConfig，JITTER_OFFSETS 與 jitter_cap ->
+    OverlapConfig，inherit_frac -> InheritConfig，sampler_id 與 preflight 各有
+    對應。剩下的獨有能力只有兩個，其中一個已經搬走：
+
+        min_valid 的逐層孔洞檢查  -> TileSampler.drop_holes()，獨立一個 pass，
+                                    這樣 preflight 仍然是「讀任何像素之前就
+                                    答得出來」
+        to_store_args / grid_rc   還在。kind 可從位置推（兩軸都整除 tile 就是
+                                    主格），grid_rc 同一套算術
+
+    ● 要先做的是等價測試，不是重構
+        PatchGrid.from_size(region, tile) 和 TileSampler._lattice(plan) 對同一
+        個 region 必須給出同一組 level-0 位置。
+
+        我原本以為 PatchGrid 會在區域邊緣「補一個貼齊右邊的 tile」（於是和倒數
+        第二個重疊），而 np.arange 不會 —— 那會改變 n_in(bucket) 的計數並打壞
+        test_reference_sampler。查完是假的：_full_grid_starts
+        （PatchingLib.py:197）就是 range(0, length, tile) 過濾掉放不下的，和
+        arange 丟掉尾巴的方式一模一樣。
+
+        所以測試是去「釘住」而不是去「發現」。三個誘餌，因為它要抓的是差一格：
+          range 的結束點差一 / 把放不下的那塊加回去 / overlap=True 對
+          grid_step = tile//2
+
+    ● 為什麼值得做
+        今天兩邊都沒有錯，但那是一個想法的兩份實作 —— 代價是修好其中一個等於
+        在另一個裡種一個 bug。
+
+    ● 順序
+        1. test_patching_lib 補 PatchGrid 邊緣行為的檢查
+        2. test_tile_sampler 加一個 equivalence section
+        3. ReferenceSampler 的候選生成委派過去，桶與繼承留著
+        4. 確認 test_reference_sampler 全過，再談要不要整支退掉
+
+================================================================================
+
+================================================================================
+
+[ ] 2026-08-27 | stage 1 的參考庫換了取樣器，但配置沒人選過
+                 293 張、err 0.0%，而 ReferenceSampler 就是為了這件事寫的
+
+    GigaPathKnnEstiMpp.build_samples 原本是「均勻抽 region、均勻抽位置、過閘
+    就收」。TileSampler 重寫之後改走**不重疊格點**，其他什麼都沒開 —— 沒有豐富
+    度分桶、沒有繼承，就是 SamplerConfig(overlap=OverlapConfig())。
+
+    那是暫解，不是決定。這一次跑量到的：
+
+        reference tiles: 293        （--samples 100 x 4 層，要的是 400）
+        KNN err 0.0%                所以 293 張仍然work
+
+    格點拿產量換不重疊，而深層是它咬得最緊的地方：level 3 的一塊蓋 8 倍的
+    level-0 面積，同一塊 region 放得下的不重疊位置就少很多。
+
+    293 不見得是錯的 —— ReferenceSampler 自己的 docstring 記著「每層 40 張對
+    這個 KNN 就已經飽和」（result/MppEstimate：40 -> 640 只買到 2.7 分）。但
+    沒有人「選」過 293。
+
+    ● 真正還沒決定的三件
+        1. 不再重複之後，一個參考庫每層要幾張。舊的數字被灌水過 —— 深層最多
+           13% 是位元相同的雙胞胎（ReferenceSampler docstring），全是孔洞和
+           空白畫布，在每一層都編碼成同一個向量
+        2. 背景比例的**分桶**要不要進來。全是組織密集的 tile 組成的庫，遇到
+           偏空的 query 會路由得很差 —— 那正是 ReferenceSampler 立論的地方
+        3. 這裡到底該不該用 ReferenceSampler。那支模組就是為了「好好挑參考庫」
+           寫的，而它現在沒有任何呼叫端；退成 TileSampler config 的計畫在
+           2026-08-27 那條，而這支 jobscript 會是它第一個真正的消費者
+
+    ● 不屬於這條 TODO 的：level_mpps 是永久移除
+        它是舊 sampler 在 __init__ 快取的一個 list，也就是
+        base_mpp * level_downsample 的副本。推導值的副本會和它來源的 handle
+        走散，而這些是 KNN 的**標籤**。現在由一個 helper 推導，圖例和標題共用
+        同一個定義。那是正解不是暫解。
+
+    ● 動之前先看 sampler.summary()
+        它逐階印 cand -> gate -> took，哪一層短了是一個數字而不是猜測。
+
+================================================================================
+
+## 2026-08-27  richness floors/caps, and two decisions the 3b probe reversed
+
+The sampler's `tissue_ratio` gate is gone. It scored the same quantity as the
+richness buckets -- background fraction -- and the two disagreeing produced the
+475/500 corpus of 2026-08-26, which was read at the time as a property of the
+slides. A cap of zero on the top buckets says the same thing once.
+
+Seven buckets, each with a FLOOR and a CAP (two constraints of different
+natures: a cap is always achievable, a floor demands the slide has the tiles):
+
+    bucket     background   floor   cap    target
+    bg00_15      < 15 %       5 %   15 %    15 %      the unassigned 30 % is
+    bg15_30     15 - 30 %    15 %   25 %    25 %      split evenly over the
+    bg30_50     30 - 50 %    50 %   60 %    60 %      three buckets that ASKED
+    bg50_70     50 - 70 %      -    20 %     0        -- a cap forbids, it does
+    bg70_85     70 - 85 %      -    20 %     0        not request. So 50_70 and
+    bg85_95     85 - 95 %      -     0       0        70_85 receive nothing
+    bg95_100     > 95 %        -     0       0        unless something falls
+                                                      short: they are spillway.
+
+A zero cap binds the INHERITANCE set too, and truncates the chain rather than
+letting it hole. Everything else is advisory for a carried centre; a gate the
+carried centres walk through is not a gate.
+
+### What the 12-slide probe measured (tile 256, each cell asked 500)
+
+    ds   admissible   taken |  bg00_15    bg15_30    bg30_50   below  spill
+    1       461,141    6,000 |  ->900      ->1,500    ->3,600       0      0
+    2       123,624    6,000 |  ->900      ->1,500    ->3,600       0      0
+    4        32,474    6,000 |  ->900      ->1,500    ->3,366      84    234
+    8         8,465    5,104 |  ->798      ->1,166    ->1,618   1,505  1,522
+    16        2,242    2,064 |  ->345      ->  312    ->  524   3,150    883
+    32          583      578 |  -> 76      ->   71    ->  148   3,922    283
+
+The contract holds exactly where supply allows. From ds 16 up, `taken` is
+essentially `admissible`: the binding constraint is no longer the quotas but
+how many DISJOINT positions a rung holds on a finite slide.
+
+### Reversed: align-min is out
+
+spec.md 6.5's rule was "align-min if the worst rung still has hundreds,
+loss-weight if it has forty". The 2026-08-26 answer was 1784 of 2000 -- but
+that was the tissue gate exhausting a rejection budget, not a count of
+positions. The real worst cell is 18 (S1104233 at ds 32). align-min truncates
+every rung to 18: 1,296 tiles against 8,465 available at ds 8 alone.
+
+So `--balance none` for v1, unbalanced and recorded as such. Not loss-weight
+either: the rung weights are a second decision and the corpus has to exist
+first. The lever is more slides -- ds 32 needs about 25 to reach the 1,200 that
+12 reach at ds 16.
+
+### Left as a switch: RichnessConfig.floor_frame
+
+At ds 32 the floors are a share of `n_per_rung` while `n_taken` is a twentieth
+of it, so they have no object: the realised mix is 13/12/26/33/16 against a
+target of 15/25/60/0/0 -- nearly half the rung above 50 per cent background.
+
+    'ask'    (default, chosen for v1) floors are a share of what was asked.
+             Keeps the tiles, the mix drifts.
+    'taken'  floors are a share of what is ACHIEVABLE; the rung scales down to
+             the largest count whose mix the supply can hold. Same ds 32
+             becomes ~250 tiles at 15/25/60.
+
+Both frames agree exactly wherever supply exceeds the ask, which is ds 1-4, so
+the default costs nothing there. `probe_tile_yield` runs BOTH arms every cell
+and records `n_got_if_taken`, so the number that would decide the switch is in
+front of whoever flips it.

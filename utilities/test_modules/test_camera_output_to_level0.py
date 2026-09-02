@@ -91,7 +91,10 @@ def read_at(wsi, level, ds, cx, cy):
     """A TILE-sized crop of the WSI centred on level-0 point (cx, cy)."""
     x0 = int(round(cx - TILE * ds / 2.0))
     y0 = int(round(cy - TILE * ds / 2.0))
-    return np.asarray(wsi.read_region((x0, y0), level, (TILE, TILE)).convert('RGB'),
+    # read_region_rgb: `.convert('RGB')` drops the alpha and paints every
+    # unphotographed pixel black, which this check would then compare against
+    # a rotated copy of the same black and call agreement.
+    return np.asarray(wsi.read_region_rgb((x0, y0), level, (TILE, TILE)),
                       dtype=np.float32)
 
 
