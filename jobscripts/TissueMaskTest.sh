@@ -37,6 +37,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # | tiling mask ds            | 32              | tiling seam/grid mask ds               | --tiling-ds           |
 # | tiling seg_chunk_px sweep   | 16M,4M,1M       | tiling budget sweep list               | --seg-chunk-px-sweep   |
 # | tiling overlap            | 128             | per-tile margin px                     | --tiling-overlap      |
+# | pca    fit tiles          | 200             | Uni2PcaSeg fit sample (level 0, no ds) | --pca-fit-tiles       |
 # | hest   mask ds            | 64              | HEST-only mask ds                      | --hest-ds             |
 # | hest   seg_chunk_px         | 4M              | HEST tile budget (hest/ops/sweep)      | --seg-chunk-px     |
 # | vis    per row            | 4               | panels per figure row                  | --per-row             |
@@ -49,6 +50,25 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #   --sweep / --no-sweep      : ds/level matrix panel
 #   --ops / --no-ops          : filter/filter/merge pipeline
 #   --tiling / --no-tiling    : tiled-inference test (seam + grid + budget sweep)
+#   --pca  / --no-pca         : Uni2PcaSegFunc, the segmenter the pre-tile
+#                               corpus was cut with. Adds a mask+thumb pair to
+#                               row 0 AND a second set of ops rows -- the same
+#                               filter_regions / merge_overlapping /
+#                               filter_patchable, run on the PCA mask, beside
+#                               the ones run on the HSV or HEST mask.
+#
+#                               It does NOT feed sweep or tiling. Those two vary
+#                               a `method=` handed to from_wsi (ds, level,
+#                               seg_chunk_px), and this segmenter has no such
+#                               shape: it fits a PCA across the WHOLE slide
+#                               first, reads at level 0, and derives its own
+#                               mask ds. There is nothing there to sweep.
+#
+#                               The ops comparison is the reason to look:
+#                               min_ratio is a fraction of the mask AREA, and a
+#                               mask_ds 14 PCA plane has about five times the
+#                               pixels of a mask_ds 32 HSV one, so the same
+#                               cutoff keeps a different set of regions.
 #   --hest / --no-hest        : HEST DL seg used by hest-only / ops / sweep / tiling
 #   --region-index / --no-region-index : show region-idx labels on bboxes
 #
@@ -74,6 +94,25 @@ OPS_PATCH_DS=1.0                    # filter_patchable target level ds
 TILING_DS=64                        # tiling seam/grid mask ds
 SEG_CHUNK_PX_SWEEP="16M,4M,1M"       # tiling sweep budgets
 TILING_OVERLAP=128                  # per-tile margin px
+
+# --- PCA (aiNNModel/Uni2PcaSegFunc.py) ---
+#
+# The segmenter the pre-tile corpus was actually cut with, and the only one
+# here that does NOT go through `from_wsi(method=...)`: it fits a PCA across
+# the whole slide before it can threshold any part of it, so `mask_wsi(wsi)`
+# is its entry point and `from_mask` is the half that follows. Every other
+# method in this script is an image-in-mask-out callable.
+#
+# It reads at level 0 and derives its own mask ds from the patch grid
+# (Uni2PcaSegFunc.LEVEL), so there is no --pca-ds to pass. There was a plane_ds
+# and then a level argument; both are gone, and passing one is what made the
+# 2026-08-26 run exit 1.
+#
+# 200 rather than the config default of 1000 keeps the fit to minutes. It is a
+# hashed field, so a run at 200 and a production run at 1000 correctly get
+# different identity ids -- this figure is not the mask in result/cache/masks/.
+PCA="--pca"                       # alternative: --no-pca
+PCA_FIT_TILES=200
 
 # --- HEST ---
 HEST_DS=4                           # HEST-only mask ds (bigger ds -> smaller image, safer)
@@ -102,6 +141,7 @@ python utilities/test_modules/test_tissues_regions_mask.py \
           --ops-patch-tile $OPS_PATCH_TILE --ops-patch-ds $OPS_PATCH_DS \
   $TILING --tiling-ds  $TILING_DS        --seg-chunk-px-sweep "$SEG_CHUNK_PX_SWEEP" \
           --tiling-overlap $TILING_OVERLAP \
+  $PCA    --pca-fit-tiles $PCA_FIT_TILES \
   $HEST   --hest-ds    $HEST_DS          --seg-chunk-px $SEG_CHUNK_PX \
   --per-row            $PER_ROW \
   --dpi                $DPI \

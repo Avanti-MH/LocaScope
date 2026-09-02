@@ -393,6 +393,269 @@ def validate_origin_offset():
           'no negative-index read from the far corner')
 
 
+# -- 7d. from_mask: the half of from_wsi that a caller with its own mask uses --
+#
+# `aiNNModel/Uni2PcaSegFunc.py` fits a PCA across the whole slide before it can
+# threshold any part of it, so it reads the slide ITSELF and hands the finished
+# mask here. `utilities/MaskStore.py` does the same on the way back OUT of the
+# cache, and `cli/probe_tile_yield.py` and `cli/extract_pretiles.py` are its two
+# readers. Nothing above covers it: every validator up to here builds a
+# TissuesRegionsMask through `make_trm`, which calls `_search_tissue_regions`
+# directly and therefore never exercises the three things from_mask decides --
+# what mask_ds is, where the mask starts, and what the slide contributes.
+
+
+class _Slide:
+    """The three things `from_mask` reads off a slide, and nothing else.
+
+    Not an `openslide.OpenSlide`, and it does not need to be: the annotation on
+    from_mask is a hint, and what the body actually asks for is
+    `level_dimensions[0]`, `properties.get('openslide.mpp-*')` and
+    `level_downsamples`. A real slide here would make these checks depend on a
+    file, on a reader, and on 60 seconds of IO to assert arithmetic.
+    """
+
+    def __init__(self, width: int, height: int,
+                 mpp: float = 0.25, downsamples=(1.0, 4.0, 16.0)):
+        self.level_dimensions = [(int(width), int(height))]
+        self.level_downsamples = list(downsamples)
+        self.properties = {'openslide.mpp-x': str(mpp),
+                           'openslide.mpp-y': str(mpp)}
+
+
+def validate_from_mask_geometry():
+    """mask_ds is DERIVED, and `span` is what the mask covers -- not the canvas.
+
+    Both are silent when wrong. A mask handed over at ds 14 and read as though
+    it were at ds 32 puts every region in the wrong place with the right shape,
+    and the 0.09 percent error from pairing a cropped mask with the full canvas
+    is invisible until a region boundary lands on the wrong side of a tile.
+    """
+    # 1. The SAME level-0 blob, described by two masks at two resolutions, has
+    #    to come back at the same level-0 box. This is the whole claim of
+    #    "ANY resolution -- mask_ds is DERIVED from its shape against span".
+    W0, H0 = 4480, 2240
+    wsi = _Slide(W0, H0)
+    boxes = {}
+    for ds in (14.0, 28.0):
+        mask = make_mask_with_blobs(int(H0 / ds), int(W0 / ds),
+                                    [(int(560 / ds), int(1120 / ds),
+                                      int(560 / ds), int(1120 / ds))])
+        trm = TissuesRegionsMask.from_mask(wsi, mask, span=(W0, H0))
+        assert trm.mask_ds_x == ds and trm.mask_ds_y == ds, \
+            f'ds {ds}: derived ({trm.mask_ds_x}, {trm.mask_ds_y})'
+        assert len(trm.tissue_regions) == 1
+        r = trm.tissue_regions[0]
+        boxes[ds] = (r.x, r.y, r.w, r.h)
+    assert boxes[14.0] == (1120, 560, 1120, 560), boxes[14.0]
+    assert boxes[28.0] == boxes[14.0], \
+        f'ds 14 gave {boxes[14.0]} and ds 28 gave {boxes[28.0]}'
+
+    # 2. span is what the mask COVERS. The docstring's own case: 276 tiles of
+    #    224 cover 61,824 level-0 px inside a 61,879 px scanned rectangle, so
+    #    the canvas is the decoy and it is only 0.09 percent away.
+    COVERED, CANVAS = 276 * 224, 61879
+    wsi_b = _Slide(CANVAS, 2240)
+    mask_b = make_mask_with_blobs(100, 276, [(0, 270, 100, 6)])   # the far edge
+    right = TissuesRegionsMask.from_mask(wsi_b, mask_b, span=(COVERED, 2240))
+    wrong = TissuesRegionsMask.from_mask(wsi_b, mask_b, span=(CANVAS, 2240))
+    assert right.mask_ds_x == 224.0, f'got {right.mask_ds_x}'
+    assert wrong.mask_ds_x != 224.0
+    drift = abs(right.tissue_regions[0].x - wrong.tissue_regions[0].x)
+    assert drift >= 50, \
+        (f'the canvas decoy should displace the far edge by ~54 level-0 px and '
+         f'moved it {drift}; if this is 0 the span argument is being ignored')
+
+    # 3. x and y are derived independently. A mask that is not square against a
+    #    span that is not square is the only shape where swapping them shows.
+    wsi_c = _Slide(4480, 2240)
+    mask_c = make_mask_with_blobs(80, 320, [(20, 80, 20, 80)])
+    trm_c = TissuesRegionsMask.from_mask(wsi_c, mask_c, span=(4480, 2240))
+    assert (trm_c.mask_ds_x, trm_c.mask_ds_y) == (14.0, 28.0)
+    r_c = trm_c.tissue_regions[0]
+    assert (r_c.x, r_c.y) == (1120, 560), (r_c.x, r_c.y)
+    assert r_c.y != 280, 'y went through mask_ds_x -- the two were swapped'
+    assert (r_c.w, r_c.h) == (1120, 560), (r_c.w, r_c.h)
+
+    # 4. span defaults to the canvas MINUS the origin, not to the canvas.
+    wsi_d = _Slide(4480 + 100, 2240 + 50)
+    mask_d = np.ones((160, 320), dtype=bool)
+    trm_d = TissuesRegionsMask.from_mask(wsi_d, mask_d, origin=(100, 50))
+    assert (trm_d.mask_ds_x, trm_d.mask_ds_y) == (14.0, 14.0), \
+        f'default span used the canvas, not the canvas from the origin: ' \
+        f'{trm_d.mask_ds_x}'
+
+    # 5. mask_mpp is the mean level-0 mpp times the mean mask_ds.
+    assert abs(trm_c.mask_mpp - 0.25 * 21.0) < 1e-9, trm_c.mask_mpp
+
+    # 6. What the SLIDE contributes comes from the slide, not from the mask.
+    assert (trm_c.wsi_width, trm_c.wsi_height) == (4480, 2240)
+    assert trm_c.wsi_level_downsamples == [1.0, 4.0, 16.0]
+    assert trm_c.wsi_mpp_x == 0.25 and trm_c.wsi_mpp_y == 0.25
+
+    # 7. The mask arrives in whatever dtype its maker used. Uni2PcaSegFunc
+    #    returns bool, MaskStore reads uint8 back out of safetensors, and the
+    #    two must give the same regions.
+    ref = [(r.x, r.y, r.w, r.h) for r in trm_c.tissue_regions]
+    for arr in (mask_c.astype(np.uint8), mask_c.astype(np.uint8) * 255):
+        got = TissuesRegionsMask.from_mask(wsi_c, arr, span=(4480, 2240))
+        assert got.main_mask.dtype == np.bool_
+        assert [(r.x, r.y, r.w, r.h) for r in got.tissue_regions] == ref, \
+            'uint8 and bool disagreed about the regions'
+
+    # 8. from_wsi hands a READ-ONLY broadcast array when the segmenter says it
+    #    does not run (`np.broadcast_to(True, ...)`, 0 bytes). from_mask is the
+    #    line that has to accept it.
+    trm_e = TissuesRegionsMask.from_mask(
+        _Slide(1024, 1024), np.broadcast_to(True, (64, 64)), span=(1024, 1024))
+    assert trm_e.tissue_fraction() == 1.0
+    assert trm_e.main_mask.shape == (64, 64)
+
+    print('[PASS] from_mask geometry: ds derived at 14 and 28, the canvas decoy '
+          f'displaces the far edge by {drift} px, x/y independent, '
+          'dtypes and the broadcast mask agree')
+
+
+def validate_read_matching_rgb():
+    """The BACKDROP has to cover what the mask covers, at a mask_ds that is
+    NOT a pyramid level.
+
+    This is the check that would have caught a real bug, and the decoy is the
+    whole point: at mask_ds 32 on a 4x pyramid the broken version is CORRECT,
+    because 32 is a level and the read size and the mask shape are then the
+    same number. Testing there proves nothing. The PCA masks are ds 14 -- UNI2's
+    patch grid, not a pyramid step -- and on a 4x pyramid the best level is
+    ds 4, so the old code backed the picture with 4/14 of the extent and every
+    region box landed 3.5x off.
+
+    Nothing in the pipeline reads pixels through this: sampling, gating and
+    patching go through `has_tissue_l0`, `region_box` and `filter_patchable`,
+    which are mask arithmetic. So the bug was confined to figures -- but a
+    figure whose overlay is wrong is worse than no figure, because it is
+    believed.
+    """
+    class _ReadSlide(_Slide):
+        """Records the read it was asked for, and answers with a gradient whose
+        value says WHERE it came from, so a wrong extent is visible as a wrong
+        value rather than only as a wrong shape."""
+
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.asked = None
+
+        def get_best_level_for_downsample(self, ds):
+            best = 0
+            for i, d in enumerate(self.level_downsamples):
+                if d <= ds:
+                    best = i
+            return best
+
+        def read_region_rgb(self, location, level, size):
+            self.asked = (location, level, size)
+            w, h = size
+            out = np.zeros((h, w, 3), np.uint8)
+            out[..., 0] = 200
+            return out
+
+    # 4x pyramid, mask at ds 14: the best level is ds 4, so the read has to be
+    # 14/4 = 3.5x the mask's width and then come back down to it.
+    DS, W, H = 14.0, 200, 100
+    wsi = _ReadSlide(int(W * DS), int(H * DS), downsamples=(1., 4., 16., 32.))
+    trm = TissuesRegionsMask.from_mask(wsi, np.ones((H, W), bool),
+                                       span=(int(W * DS), int(H * DS)))
+    out = trm.read_matching_rgb(wsi)
+
+    (loc, lv, size) = wsi.asked
+    assert lv == 1, f'best level for ds 14 on a 4x pyramid is 1, got {lv}'
+    assert size == (int(round(W * DS / 4)), int(round(H * DS / 4))), (
+        f'read {size} at level 1; to cover the mask it must be '
+        f'{(int(W * DS / 4), int(H * DS / 4))}. Reading ({W}, {H}) is the bug: '
+        f'it backs the picture with 4/14 of the extent')
+    assert out.shape[:2] == (H, W), (
+        f'the backdrop came back {out.shape[:2]} and the mask is {(H, W)}; '
+        f'anything drawn in mask coordinates would be scaled by the ratio')
+
+    # And the case that would have passed either way, kept as the decoy: at
+    # ds 32 the read size and the mask shape ARE the same number.
+    wsi32 = _ReadSlide(int(W * 32), int(H * 32), downsamples=(1., 4., 16., 32.))
+    trm32 = TissuesRegionsMask.from_mask(wsi32, np.ones((H, W), bool),
+                                         span=(int(W * 32), int(H * 32)))
+    trm32.read_matching_rgb(wsi32)
+    assert wsi32.asked[2] == (W, H), (
+        'at a mask_ds that IS a level the read is the mask shape -- if this '
+        'moved, the fix changed the case that was already right')
+
+    print(f'[PASS] read_matching_rgb: ds 14 reads {size} at level 1 and comes '
+          f'back {out.shape[:2]}; ds 32 still reads ({W}, {H})')
+
+
+def validate_from_mask_tissue_gate(tissue_ratio: float = 0.5):
+    """The gate the sampler actually uses, on a mask that came through from_mask.
+
+    `tissue_ratio` is 0.5 for step 3c (spec.md 6.5): the probe measured both
+    0.5 and 0.75 and 0.75 leaves the ds 32 rung with 27 tiles on the worst
+    slide, so 0.5 is the value the pre-tile extraction runs at. It is the
+    DEFAULT of `has_tissue`, which is why it is the one worth pinning.
+
+    The comparison is `>=`, so a footprint that is exactly half tissue passes.
+    That boundary is a decision and not an accident -- flipping it to `>` would
+    change which tiles the sampler keeps without changing any number anyone
+    reads.
+    """
+    DS, TILE = 16.0, 256          # 256 level-0 px is 16 mask px at ds 16
+    CELL = int(TILE / DS)
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[:CELL // 2,          0 * CELL:1 * CELL] = True   # 8/16 -> exactly 0.5
+    mask[:CELL // 2 - 1,      1 * CELL:2 * CELL] = True   # 7/16 -> 0.4375
+    mask[:CELL // 2 + 2,      2 * CELL:3 * CELL] = True   # 10/16 -> 0.625
+    wsi = _Slide(1024, 1024)
+    trm = TissuesRegionsMask.from_mask(wsi, mask, span=(1024, 1024))
+    assert trm.mask_ds_x == DS
+
+    assert trm.has_tissue_l0(0 * TILE, 0, TILE, TILE, tissue_ratio), \
+        'exactly half must pass: has_tissue compares with >='
+    assert not trm.has_tissue_l0(1 * TILE, 0, TILE, TILE, tissue_ratio), \
+        '7/16 is below 0.5 and must be rejected'
+    assert trm.has_tissue_l0(2 * TILE, 0, TILE, TILE, tissue_ratio)
+
+    # The same three, one mask pixel of tissue removed from the first, must
+    # flip only the first. A gate reading the wrong rectangle would not.
+    mask2 = mask.copy()
+    mask2[CELL // 2 - 1, 0] = False
+    trm2 = TissuesRegionsMask.from_mask(wsi, mask2, span=(1024, 1024))
+    assert not trm2.has_tissue_l0(0 * TILE, 0, TILE, TILE, tissue_ratio), \
+        'one mask pixel below half still passed -- the gate is reading a ' \
+        'different rectangle than the one the coordinates name'
+    assert trm2.has_tissue_l0(2 * TILE, 0, TILE, TILE, tissue_ratio)
+
+    # An ORIGIN, which is what a MIRAX gives. The same three footprints move
+    # with it, and a footprint entirely before the origin must not wrap round
+    # to the far corner of the mask -- put tissue exactly there and require
+    # False. from_mask is what passes origin down to _search_tissue_regions,
+    # so this is the only place the pair is tested together.
+    # The trap is placed where the unclamped slice would LAND, not just
+    # somewhere else: a footprint two tiles before the origin converts to mask
+    # columns -32..-16, and `main_mask[-32:-16, -32:-16]` is a real, non-empty
+    # slice of rows 32..48 -- so that is where the tissue goes. One tile before
+    # the origin would give `[-16:0]`, which is empty and would pass whatever
+    # the code did.
+    OX, OY = 1000, 500
+    far = np.zeros((64, 64), dtype=bool)
+    far[32:48, 32:48] = True
+    trm3 = TissuesRegionsMask.from_mask(_Slide(1024 + OX, 1024 + OY), far,
+                                        origin=(OX, OY), span=(1024, 1024))
+    assert len(trm3.tissue_regions) == 1
+    r = trm3.tissue_regions[0]
+    assert (r.x, r.y) == (OX + int(32 * DS), OY + int(32 * DS)), (r.x, r.y)
+    assert trm3.has_tissue_l0(r.x, r.y, TILE, TILE, tissue_ratio)
+    assert not trm3.has_tissue_l0(OX - 2 * TILE, OY - 2 * TILE, TILE, TILE,
+                                  tissue_ratio), \
+        'a negative mask index read the far corner and reported its tissue'
+
+    print(f'[PASS] from_mask tissue gate at ratio {tissue_ratio}: 8/16 passes, '
+          '7/16 does not, one pixel flips it, and the origin does not wrap')
+
+
 # ── 7c. regions_view: filtering without touching the caller's mask ───────────
 #
 # `regions_view()` exists because a per-level filter is a per-CALLER view, not
@@ -557,6 +820,73 @@ def test_hest_seg(path: str, method: callable, ds: float = 64.0,
     return trm, thumb
 
 
+def test_pca_seg(path: str, segmenter, fit_tiles: int = None) -> tuple:
+    '''aiNNModel/Uni2PcaSegFunc.py, which does NOT go through from_wsi.
+
+    Every other segmenter here is a `method=` handed to `from_wsi`: an image
+    goes in, a mask comes out, and `from_wsi` decides the magnification, reads
+    the plane and calls it. Uni2PcaSegmenter cannot be one of those. It fits a
+    PCA ACROSS the slide before it can threshold any part of it, so its unit of
+    work is a whole slide rather than an image, and `mask_wsi(wsi)` is its
+    entry point -- fit and project in one call, which is what makes the two
+    impossible to disagree about magnification.
+
+    So the two halves come apart here and `from_mask` is the second one:
+
+        from_wsi   read a plane -> method(plane) -> from_mask
+        this       segmenter.mask_wsi(wsi) -> from_mask
+
+    `ds` is deliberately absent from the signature. The other segmenters take
+    one; this reads at level 0 and derives the mask ds from its own patch grid
+    (Uni2PcaSegFunc.LEVEL), so passing a ds here would be a parameter that is
+    accepted and ignored -- which is how the 2026-08-26 run exited 1.
+    '''
+    # SafeSlide, NOT openslide.OpenSlide, and this is not interchangeable here.
+    # `Uni2PcaSegFunc._read_rgb` refuses a plain handle by name (`:332`), and
+    # the reason is the same one `demo_homography.wsi_tile` gives: a plain
+    # OpenSlide returns unphotographed pixels as TRANSPARENT, `.convert('RGB')`
+    # merely drops the alpha, and every scanner hole becomes a black rectangle
+    # -- whose border is a perfect corner. `build_mask_store.py:135` opens the
+    # production masks the same way, so this figure and the store agree about
+    # what a hole is.
+    from SafeSlide import SafeSlide
+
+    print(f'\n[PCA] Uni2PcaSegFunc, level 0, fit on {fit_tiles} tiles')
+
+    wsi = SafeSlide(path)
+    try:
+        slide_mask = segmenter.mask_wsi(wsi)
+        trm = TissuesRegionsMask.from_mask(wsi, slide_mask.mask,
+                                           origin=slide_mask.origin,
+                                           span=slide_mask.span)
+        thumb = trm.read_matching_rgb(wsi)
+        holes = wsi.hole_summary()
+    finally:
+        wsi.close()
+
+    # Worth printing next to the mask: a hole is a position the reader could
+    # not decode, and the two panels handle one differently. The MASK is right
+    # -- the segmenter read through `read_region_rgb`, which fills holes with
+    # the slide's background colour. The THUMB may not be:
+    # `TissuesRegionsMask.read_matching_rgb` uses `read_region(...).convert(
+    # 'RGB')`, which drops the alpha and paints every hole black. That is true
+    # of the HSV and HEST thumbs on this figure as well, so a black rectangle
+    # in a thumb is an artefact of the backdrop and not something the mask saw.
+    print(f'  {holes}')
+
+    report = segmenter.fit_report or {}
+    print(f'  tissue={trm.tissue_fraction() * 100:.1f}%  '
+          f'{len(trm.tissue_regions)} regions  mask={trm.main_mask.shape}  '
+          f'mask_ds={trm.mask_ds_x:.2f}')
+    if report:
+        print(f"  fit: foreground {report.get('foreground_fraction', 0):.1%}  "
+              f"explained {report.get('explained_variance', 0):.1%}")
+    print('  Read that fraction against the measured tissue -- BRACS 23-38 per '
+          'cent, Ki67 3.5-9. Near 0.5 on a Ki67 slide means PC1 found banding '
+          'or position rather than tissue.')
+    return trm, thumb
+
+
 def test_real_wsi(path: str, ds: float = 32.0) -> tuple:
     import openslide
     wsi = openslide.OpenSlide(path)
@@ -651,47 +981,65 @@ def test_operations_pipeline(path: str,
                              tile_size: int = 256,
                              ds_for_patchable: float = 4.0,
                              method: callable = None,
-                             seg_chunk_px: int = None) -> list:
+                             seg_chunk_px: int = None,
+                             base: TissuesRegionsMask = None,
+                             tag: str = None) -> list:
     '''
     Ops pipeline: baseline mask -> each of filter_regions / filter_patchable /
     merge_overlapping in isolation -> all three combined.
 
     method=None -> HSV; method=<callable> -> HEST or custom (with tiled
     inference if seg_chunk_px is set).
-    Returns list of (label, trm) for figure rendering.
+    Returns list of (tag, label, trm) for figure rendering.
+
+    `base` HANDS IN AN ALREADY-BUILT MASK and skips the segmentation, which is
+    the only way Uni2PcaSegFunc gets in here. Every `method=` above is an
+    image-in-mask-out callable that `from_wsi` drives; the PCA segmenter fits
+    across the WHOLE slide before it can threshold any part of it, so its mask
+    comes from `mask_wsi(wsi)` and arrives already assembled. The three
+    operations care about none of that -- they act on `tissue_regions`, and
+    where those came from is not their business, which is why this is one
+    parameter and not a second copy of the function.
+
+    `ds` is then only a LABEL: a handed-in base carries its own mask_ds and the
+    one in the signature is not applied to it. `ds_for_patchable` still does
+    something, because `filter_patchable` asks whether a region can supply a
+    tile at a TARGET rung, which is a question about the rung and not about the
+    mask.
     '''
     import openslide
     from copy import deepcopy
 
-    method_tag = 'HEST' if method is not None else 'HSV'
-    wsi = openslide.OpenSlide(path)
-    base = TissuesRegionsMask.from_wsi(
-        wsi, ds=ds, method=method, seg_chunk_px=seg_chunk_px,
-    )
-    wsi.close()
+    method_tag = tag or ('HEST' if method is not None else 'HSV')
+    if base is None:
+        wsi = openslide.OpenSlide(path)
+        base = TissuesRegionsMask.from_wsi(
+            wsi, ds=ds, method=method, seg_chunk_px=seg_chunk_px,
+        )
+        wsi.close()
     n0 = len(base)
     print(f'\n[ops pipeline {method_tag}] baseline: {n0} regions')
 
-    results = [(f'baseline ({n0})', base)]
+    results = [(method_tag, f'baseline ({n0})  mask_ds {base.mask_ds_x:.1f}', base)]
 
     t = deepcopy(base); t.filter_regions(min_ratio=min_ratio)
     print(f'  [1] filter_regions({min_ratio}): {n0} -> {len(t)}')
-    results.append((f'[1] filter_regions({min_ratio})  {n0}->{len(t)}', t))
+    results.append((method_tag, f'[1] filter_regions({min_ratio})  {n0}->{len(t)}', t))
 
     t = deepcopy(base); t.merge_overlapping()
     print(f'  [2] merge_overlapping: {n0} -> {len(t)}')
-    results.append((f'[2] merge_overlapping  {n0}->{len(t)}', t))
+    results.append((method_tag, f'[2] merge_overlapping  {n0}->{len(t)}', t))
 
     t = deepcopy(base); t.filter_patchable(tile_size=tile_size, ds=ds_for_patchable)
     print(f'  [3] filter_patchable({tile_size}, ds={ds_for_patchable}): {n0} -> {len(t)}')
-    results.append((f'[3] filter_patchable({tile_size},ds={ds_for_patchable:g})  {n0}->{len(t)}', t))
+    results.append((method_tag, f'[3] filter_patchable({tile_size},ds={ds_for_patchable:g})  {n0}->{len(t)}', t))
 
     t = deepcopy(base)
     t.filter_regions(min_ratio=min_ratio)
     t.merge_overlapping()
     t.filter_patchable(tile_size=tile_size, ds=ds_for_patchable)
     print(f'  pipeline [1]->[2]->[3]: {n0} -> {len(t)}')
-    results.append((f'pipeline [1]->[2]->[3]  {n0}->{len(t)}', t))
+    results.append((method_tag, f'pipeline [1]->[2]->[3]  {n0}->{len(t)}', t))
 
     print(f'[PASS] ops pipeline: {len(results)} states rendered')
     return results
@@ -974,6 +1322,13 @@ def main():
     ap.add_argument('--out', default=None, help='output figure path')
 
     # -- Sub-test toggles --
+    ap.add_argument('--pca', action=argparse.BooleanOptionalAction, default=False,
+                    help='also segment with aiNNModel/Uni2PcaSegFunc.py, the '
+                         'segmenter the pre-tile corpus was actually cut with. '
+                         'Loads UNI2 and fits per slide, so it is minutes')
+    ap.add_argument('--pca-fit-tiles', type=int, default=200,
+                    help='the fit sample. A hashed field, so 200 and the config '
+                         'default of 1000 are correctly different identities')
     ap.add_argument('--hest', action=argparse.BooleanOptionalAction, default=False,
                     help='enable HEST DeepLabV3 seg (also feeds sweep/ops/tiling)')
     ap.add_argument('--sweep', action=argparse.BooleanOptionalAction, default=False,
@@ -1038,11 +1393,25 @@ def main():
     validate_mpp_converter()
     validate_loc_methods()
     validate_origin_offset()
+    validate_from_mask_geometry()
+    validate_from_mask_tissue_gate()
+    validate_read_matching_rgb()
     validate_merge_overlapping()
     validate_regions_view_isolation()
     validate_regions_view_roundtrip()
 
     # HEST model loaded once, shared across all sub-tests
+    pca_trm = None
+    pca_thumb = None
+    if args.pca and args.wsi and os.path.exists(args.wsi):
+        import torch
+        from Uni2PcaSegFunc import Uni2PcaSegConfig
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f'\n[PCA] loading UNI2 on {device}')
+        segmenter = Uni2PcaSegConfig(fit_tiles=args.pca_fit_tiles).build(device)
+        pca_trm, pca_thumb = test_pca_seg(args.wsi, segmenter,
+                                          fit_tiles=args.pca_fit_tiles)
+
     hest_method = None
     if args.hest:
         import torch
@@ -1090,6 +1459,22 @@ def main():
             method=hest_method,
             seg_chunk_px=seg_chunk_px if hest_method is not None else None,
         )
+    # The same three operations on the PCA mask, appended as further panels
+    # rather than replacing the others -- the COMPARISON is the point.
+    # `min_ratio` is a fraction of the mask area, and a mask_ds 14 PCA plane
+    # has about five times the pixels of a mask_ds 32 HSV one, so the same
+    # cutoff keeps a different set of regions. Which is right for the mask the
+    # corpus was actually cut with is exactly what these rows are for.
+    if args.ops and pca_trm is not None:
+        ops_results += test_operations_pipeline(
+            args.wsi,
+            ds=args.ops_ds,
+            min_ratio=args.ops_min_ratio,
+            tile_size=args.ops_patch_tile,
+            ds_for_patchable=args.ops_patch_ds,
+            base=pca_trm,
+            tag='PCA',
+        )
 
     # tiling effect (HEST if enabled, else HSV)
     tiling_seam = tiling_grid = tiling_sweep = None
@@ -1117,7 +1502,9 @@ def main():
     bd = bounds
 
     # Row 0: synthetic + Otsu (+thumb) + HEST (+thumb)
-    row0_cells = 1 + (2 if real_trm is not None else 0) + (2 if hest_trm is not None else 0)
+    row0_cells = (1 + (2 if real_trm is not None else 0)
+                  + (2 if hest_trm is not None else 0)
+                  + (2 if pca_trm is not None else 0))
     n_top_cols = max(row0_cells, 1)
 
     # Sweep rows
@@ -1164,6 +1551,9 @@ def main():
     if hest_trm is not None:
         draw_mask_with_regions( ax_all[0, col], hest_trm, f'HEST mask ({wsi_name})', show_index=si, linewidth=lw, bounds=bd); col += 1
         draw_thumb_with_regions(ax_all[0, col], hest_trm, hest_thumb, 'HEST thumb',  show_index=si, linewidth=lw, bounds=bd); col += 1
+    if pca_trm is not None:
+        draw_mask_with_regions( ax_all[0, col], pca_trm, f'PCA mask ({wsi_name})',  show_index=si, linewidth=lw, bounds=bd); col += 1
+        draw_thumb_with_regions(ax_all[0, col], pca_trm, pca_thumb, 'PCA thumb',    show_index=si, linewidth=lw, bounds=bd); col += 1
 
     # Sweep rows
     row_base = 1
@@ -1174,10 +1564,10 @@ def main():
     row_base += n_sweep_rows
 
     # Ops rows
-    for i, (label, trm) in enumerate(ops_results):
+    for i, (tag, label, trm) in enumerate(ops_results):
         r = row_base + i // PER_ROW
         c = i %  PER_ROW
-        draw_mask_with_regions(ax_all[r, c], trm, f'[ops] {label}', show_index=si, linewidth=lw, bounds=bd)
+        draw_mask_with_regions(ax_all[r, c], trm, f'[ops {tag}] {label}', show_index=si, linewidth=lw, bounds=bd)
     row_base += n_ops_rows
 
     # Tiling rows: seam panels, grid overlay, sweep panels

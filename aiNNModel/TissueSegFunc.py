@@ -157,6 +157,40 @@ class TissueSegmenter(IdentifiedBuild):
         """
         return self.cfg.method != ''
 
+    def fit(self, wsi, level: Optional[int] = None) -> 'TissueSegmenter':
+        """Look at the whole slide, once, before any tile is segmented.
+
+        A no-op here and for HEST, because their answer does not depend on the
+        slide: hsv and otsu carry their rule in a constant, and HEST's fit
+        happened at MahmoodLab. Returning self so `cfg.build(dev).fit(wsi)`
+        reads as one expression.
+
+        It exists because one segmenter genuinely needs it. Uni2PcaSegFunc fits
+        a PCA on the slide's own features, and where that fit happens decides
+        whether the segmenter is tiling-safe at all:
+
+            fitted HERE      __call__ becomes a pure transform, so every tile
+                             gets the same basis and from_wsi's seg_chunk_px /
+                             read_chunk_px paths are sound
+            fitted in
+            __call__         each tile gets its own basis. This is exactly the
+                             failure from_wsi already documents for _mask_otsu
+                             -- "per tile it would threshold blank glass
+                             against its own noise" -- and worse, because
+                             MinMaxScaler maps a tile's own extremes to 0 and 1,
+                             so an all-tissue tile lands its threshold inside
+                             tissue
+
+        So the split is: `fit` is where segmenters differ, `__call__` is where
+        they are the same. A caller that always calls `fit` before `from_wsi`
+        works with every method and pays nothing for the ones that ignore it.
+
+        `level` is the pyramid level the masking pass will read, when the
+        implementation needs its fit to come from the same magnification it will
+        be applied at. None means "decide from the config".
+        """
+        return self
+
     def __call__(self, image: Union[np.ndarray, Image.Image]) -> np.ndarray:
         if not self.runs:
             raise RuntimeError(
@@ -182,3 +216,10 @@ class TissueSegmenter(IdentifiedBuild):
 # and registers itself either way.
 if 'HestSegFunc' not in sys.modules:
     from HestSegFunc import HestSegConfig, HestSegmenter   # noqa: E402,F401
+
+if 'Uni2PcaSegFunc' not in sys.modules:
+    # Cheap to import: it holds its `from TileEncoderFunc import encoder_config`
+    # inside build(), so naming it here costs no timm and touches no HF_HOME.
+    # That laziness is the reason it can be listed alongside HEST at all.
+    from Uni2PcaSegFunc import (Uni2PcaSegConfig,          # noqa: E402,F401
+                                Uni2PcaSegmenter)

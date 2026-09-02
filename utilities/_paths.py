@@ -39,9 +39,17 @@ RETRIEVAL_DIR = os.path.join(PROJECT_ROOT, '2_retrieval')
 LOCALIZATION_DIR = os.path.join(PROJECT_ROOT, '3_localization')
 AINM_DIR = os.path.join(PROJECT_ROOT, 'aiNNModel')
 
+#: The SuperPathPoint training package, NOT its parent `training/`. What goes on
+#: sys.path is the directory whose children are importable subpackages -- so
+#: `from common.Homography import ...` and `from cli import job_result_dir`
+#: resolve, exactly as `query_sim/` on the path makes `from augment.geometry
+#: import ...` resolve. `training/` itself holds no modules and adding it would
+#: put the useless name `SuperPathPoint` in the import namespace instead.
+SUPERPATHPOINT_DIR = os.path.join(PROJECT_ROOT, 'training', 'SuperPathPoint')
+
 def setup_import_paths():
-    """Make utilities/, query_sim/, 1_estimate_query_mpp/, 2_retrieval/, 3_localization/, aiNNModel/ and project root importable."""
-    for path in (UTILITIES_DIR, QUERY_SIM_DIR, ESTIMATE_MPP_DIR, RETRIEVAL_DIR, LOCALIZATION_DIR, AINM_DIR, PROJECT_ROOT):
+    """Make utilities/, query_sim/, 1_estimate_query_mpp/, 2_retrieval/, 3_localization/, aiNNModel/, training/SuperPathPoint/ and project root importable."""
+    for path in (UTILITIES_DIR, QUERY_SIM_DIR, ESTIMATE_MPP_DIR, RETRIEVAL_DIR, LOCALIZATION_DIR, AINM_DIR, SUPERPATHPOINT_DIR, PROJECT_ROOT):
         if path not in sys.path:
             sys.path.insert(0, path)
 
