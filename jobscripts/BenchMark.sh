@@ -127,7 +127,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # its own directory, so nothing races.
 
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
-DATA=/work/u26130998/datasets/Ki67
+DATA=/work/u26130998/datasets/Ki67_with_photo
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
 CORPUS="$RESULT_ROOT/MultiBatch1440"
 
@@ -159,8 +159,8 @@ OUT="$RESULT_ROOT/BenchMarkV2/$MODE/$TAG"
 case "$MODE" in
   ki67)
     STEM=S1104233
-    WSI=$(ls "$DATA/$STEM",*.mrxs 2>/dev/null | head -1)
-    PHOTO_DIR="$DATA/${STEM}_ki67"
+    WSI=$(ls "$DATA/${STEM}_mrxs/$STEM",*.mrxs 2>/dev/null | head -1)
+    PHOTO_DIR="$DATA/${STEM}_mrxs/${STEM}_ki67"
     KIND="real photographs"
     ;;
   bracs)

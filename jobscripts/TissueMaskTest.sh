@@ -75,7 +75,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # =============================================================================
 
 # ---------------- Parameters ----------------
-WSI=/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs
+WSI=/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs
 
 # --- Otsu baseline ---
 OTSU_DS=32                          # Otsu mask ds

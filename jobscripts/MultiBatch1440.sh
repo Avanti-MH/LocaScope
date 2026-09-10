@@ -70,7 +70,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 export PYTHONFAULTHANDLER=1
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-KI67=/work/u26130998/datasets/Ki67
+KI67=/work/u26130998/datasets/Ki67_with_photo
 
 # Tile budget for the segmentation forward pass, and for the read too since
 # from_wsi takes the smaller of the two budgets. It was dropped to 2M while the
@@ -124,19 +124,19 @@ python query_sim/cli/multi_batch.py "$BRACS/Group_MT/Type_DCIS/BRACS_1476.svs" $
 echo "exit=$?"
 
 echo "################ 4/7  S1104233 ################"
-python query_sim/cli/multi_batch.py "$KI67/S1104233,G7E,110208.mrxs" $ARGS
+python query_sim/cli/multi_batch.py "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs" $ARGS
 echo "exit=$?"
 
 echo "################ 5/7  S1104360 ################"
-python query_sim/cli/multi_batch.py "$KI67/S1104360,G7E,110208.mrxs" $ARGS
+python query_sim/cli/multi_batch.py "$KI67/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs" $ARGS
 echo "exit=$?"
 
 echo "################ 6/7  S1137178 ################"
-python query_sim/cli/multi_batch.py "$KI67/S1137178,G7E,110926.mrxs" $ARGS
+python query_sim/cli/multi_batch.py "$KI67/S1137178_G7E_110926_mrxs/S1137178,G7E,110926.mrxs" $ARGS
 echo "exit=$?"
 
 echo "################ 7/7  S1151088 ################"
-python query_sim/cli/multi_batch.py "$KI67/S1151088,G7E,111220.mrxs" $ARGS
+python query_sim/cli/multi_batch.py "$KI67/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs" $ARGS
 echo "exit=$?"
 
 echo ""

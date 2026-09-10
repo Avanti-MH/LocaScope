@@ -38,8 +38,8 @@ as broken. SlideProbe replaces the handle on each failure, which is also why
 
 Usage:
     python utilities/cli/scan_wsi_holes.py \\
-        "/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs" \\
-        "/work/u26130998/datasets/Ki67/S1104360,G7E,110208.mrxs" \\
+        "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
+        "/work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs" \\
         --levels 0,1,2,3,4 --block 4096 --out result/WsiHoles
 
 Figure: one ROW per slide, one COLUMN per level.

@@ -39,13 +39,13 @@ photo failed.
 Usage:
     # one photo
     python utilities/cli/locate_photo.py \\
-        /work/u26130998/datasets/Ki67/S1104360_ki67/1.bmp \\
-        /work/u26130998/datasets/Ki67/S1104360,G7E,110208.mrxs
+        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/1.bmp \\
+        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs
 
     # every photo of one slide
     python utilities/cli/locate_photo.py \\
-        /work/u26130998/datasets/Ki67/S1104360_ki67 \\
-        /work/u26130998/datasets/Ki67/S1104360,G7E,110208.mrxs \\
+        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67 \\
+        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs \\
         --out result/RealTest/S1104360_ki67
 """
 

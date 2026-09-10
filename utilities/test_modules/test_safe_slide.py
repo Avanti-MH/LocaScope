@@ -324,9 +324,9 @@ def validate_valid_mask(path, good, bad):
 
 
 def main():
-    KI67 = '/work/u26130998/datasets/Ki67'
+    KI67 = '/work/u26130998/datasets/Ki67_with_photo'
     ap = argparse.ArgumentParser()
-    ap.add_argument('--wsi', default=f'{KI67}/S1103037,G7E,110122.mrxs')
+    ap.add_argument('--wsi', default=f'{KI67}/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs')
     # tissue region index=2, whose full bbox read is the failure that blocked
     # the retriever build
     ap.add_argument('--bad-x', type=int, default=59264)

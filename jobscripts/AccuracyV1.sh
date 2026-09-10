@@ -22,7 +22,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # ---------------- Parameters ----------------
 SVS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
-MRXS=/work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs
+MRXS=/work/u26130998/datasets/Ki67_with_photo/S1104043_G7E_110207_mrxs/S1104043,G7E,110207.mrxs
 
 TOTAL_PATCHES=4096
 HEST_DS=4

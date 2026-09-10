@@ -1317,7 +1317,7 @@ def _parse_pixel_list(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--wsi', default='/work/u26130998/datasets/Ki67/S1151088,G7E,111220.mrxs',
+    ap.add_argument('--wsi', default='/work/u26130998/datasets/Ki67_with_photo/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs',
                     help='real WSI path for integration test')
     ap.add_argument('--out', default=None, help='output figure path')
 

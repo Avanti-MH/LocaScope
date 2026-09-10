@@ -139,15 +139,15 @@ fi
 # 1 until a figure has been looked at.
 if [ "$RUN_REAL" -eq 1 ]; then
   run_swsift real \
-    /work/u26130998/datasets/Ki67/S1103627_ki67/2.bmp \
-    "/work/u26130998/datasets/Ki67/S1103627,G7E,110127.mrxs" \
+    /work/u26130998/datasets/Ki67_with_photo/S1103627_G7E_110127_mrxs/S1103627_ki67/2.bmp \
+    "/work/u26130998/datasets/Ki67_with_photo/S1103627_G7E_110127_mrxs/S1103627,G7E,110127.mrxs" \
     "" \
     0 1
 fi
 if [ "$RUN_REAL" -eq 1 ]; then
   run_swsift real \
-    /work/u26130998/datasets/Ki67/S1103627_ki67/1.bmp \
-    "/work/u26130998/datasets/Ki67/S1103627,G7E,110127.mrxs" \
+    /work/u26130998/datasets/Ki67_with_photo/S1103627_G7E_110127_mrxs/S1103627_ki67/1.bmp \
+    "/work/u26130998/datasets/Ki67_with_photo/S1103627_G7E_110127_mrxs/S1103627,G7E,110127.mrxs" \
     "" \
     0 1
 fi

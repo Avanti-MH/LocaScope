@@ -44,9 +44,9 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # needs no edit here beyond widening --array.
 #
 # To run one slide only:   sbatch --array=5 realtest.sh
-# To list the mapping:     ls -d /work/u26130998/datasets/Ki67/*_ki67 | sort | cat -n
+# To list the mapping:     ls -d /work/u26130998/datasets/Ki67_with_photo/*_mrxs/*_ki67 | sort | cat -n
 
-DATA=/work/u26130998/datasets/Ki67
+DATA=/work/u26130998/datasets/Ki67_with_photo
 
 # One encoder per run, and the output directory carries it. predictions.csv has
 # no encoder column and resume skips on photo name alone (locate_photo.py:472),
@@ -83,7 +83,7 @@ NO_RESUME=1
 RESUME_FLAG=""
 [ "$NO_RESUME" = "1" ] && RESUME_FLAG="--no-resume"
 
-mapfile -t DIRS < <(ls -d "$DATA"/*_ki67 | sort)
+mapfile -t DIRS < <(ls -d "$DATA"/*_mrxs/*_ki67 | sort)
 
 IDX=${SLURM_ARRAY_TASK_ID:-0}
 if [ "$IDX" -ge "${#DIRS[@]}" ]; then
@@ -97,7 +97,7 @@ STEM=${STEM%_ki67}
 
 # The .mrxs carries scanner suffixes the photo folder does not, e.g.
 # S1103037_ki67 -> "S1103037,G7E,110122.mrxs", so match on the stem prefix.
-WSI=$(ls "$DATA/$STEM",*.mrxs 2>/dev/null | head -1)
+WSI=$(ls "$DATA/${STEM}_mrxs/$STEM",*.mrxs 2>/dev/null | head -1)
 if [ -z "$WSI" ]; then
   echo "[skip] no .mrxs matching $STEM in $DATA"
   exit 0

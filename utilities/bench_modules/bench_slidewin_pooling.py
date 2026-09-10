@@ -288,15 +288,15 @@ MAX_SINGLE_GRID_DISTANCE = math.hypot(HALF_TILE, HALF_TILE)      # 181.02
 MAX_TRUTH_DISTANCE = float(HALF_TILE)                            # 128.00
 
 BRACS = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test'
-KI67 = '/work/u26130998/datasets/Ki67'
+KI67 = '/work/u26130998/datasets/Ki67_with_photo'
 SLIDES = (
     f'{BRACS}/Group_AT/Type_ADH/BRACS_1228.svs',
     f'{BRACS}/Group_MT/Type_DCIS/BRACS_1476.svs',
     f'{BRACS}/Group_AT/Type_FEA/BRACS_1936.svs',
-    f'{KI67}/S1104233,G7E,110208.mrxs',
-    f'{KI67}/S1104360,G7E,110208.mrxs',
-    f'{KI67}/S1137178,G7E,110926.mrxs',
-    f'{KI67}/S1151088,G7E,111220.mrxs',
+    f'{KI67}/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs',
+    f'{KI67}/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs',
+    f'{KI67}/S1137178_G7E_110926_mrxs/S1137178,G7E,110926.mrxs',
+    f'{KI67}/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs',
 )
 
 

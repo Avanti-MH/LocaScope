@@ -43,7 +43,7 @@ could not be read against the regions.
 
 Usage:
     python utilities/cli/diag_wsi_coverage.py \\
-        "/work/u26130998/datasets/Ki67/S1103037,G7E,110122.mrxs" \\
+        "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
         --hest --mask-ds 4 --grid 48 --out result/DiagWsiCoverage
 
 Without --hest the regions come from the default HSV threshold, which is enough

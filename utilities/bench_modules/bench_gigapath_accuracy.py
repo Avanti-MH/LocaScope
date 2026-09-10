@@ -301,7 +301,7 @@ def save_cos_hist(cos_by_cfg, out_path):
 
 def parse_args():
     default_svs  = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs'
-    default_mrxs = '/work/u26130998/datasets/Ki67/S1104043,G7E,110207.mrxs'
+    default_mrxs = '/work/u26130998/datasets/Ki67_with_photo/S1104043_G7E_110207_mrxs/S1104043,G7E,110207.mrxs'
     default_out  = Path(job_result_dir('AccuracyV1'))
     default_tmp  = Path(RESULT_DIR) / 'tmp'
 

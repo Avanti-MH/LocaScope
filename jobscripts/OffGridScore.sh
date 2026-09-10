@@ -86,16 +86,16 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #               columns of one row and cost nothing at all.
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-KI67=/work/u26130998/datasets/Ki67
+KI67=/work/u26130998/datasets/Ki67_with_photo
 
 SLIDES=(
   "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"
   "$BRACS/Group_MT/Type_DCIS/BRACS_1476.svs"
   "$BRACS/Group_AT/Type_FEA/BRACS_1936.svs"
-  "$KI67/S1104233,G7E,110208.mrxs"
-  "$KI67/S1104360,G7E,110208.mrxs"
-  "$KI67/S1137178,G7E,110926.mrxs"
-  "$KI67/S1151088,G7E,111220.mrxs"
+  "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"
+  "$KI67/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs"
+  "$KI67/S1137178_G7E_110926_mrxs/S1137178,G7E,110926.mrxs"
+  "$KI67/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs"
 )
 
 # One slide per array task. Each writes its own result directory, so nothing

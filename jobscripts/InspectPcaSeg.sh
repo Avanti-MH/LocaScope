@@ -57,12 +57,12 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # than a choice. See Uni2PcaSegFunc.LEVEL.
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-KI67=/work/u26130998/datasets/Ki67
+KI67=/work/u26130998/datasets/Ki67_with_photo
 
 SLIDES=(
   "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"     # 20.8% tissue measured, the one
                                                 # the 68.0% came from
-  "$KI67/S1104233,G7E,110208.mrxs"              # DAB brown, and a 2x pyramid
+  "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"              # DAB brown, and a 2x pyramid
 )
 
 # 200 rather than the config default of 1000: the basis only has to be good

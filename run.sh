@@ -32,10 +32,10 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs \
 #   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_FEA/BRACS_1936.svs \
 #   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_MT/Type_DCIS/BRACS_1476.svs \
-#   /work/u26130998/datasets/Ki67/S1151088,G7E,111220.mrxs \
-#   /work/u26130998/datasets/Ki67/S1104233,G7E,110208.mrxs \
-#   /work/u26130998/datasets/Ki67/S1104360,G7E,110208.mrxs \
-#   /work/u26130998/datasets/Ki67/S1137178,G7E,110926.mrxs \
+#   /work/u26130998/datasets/Ki67_with_photo/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs \
+#   /work/u26130998/datasets/Ki67_with_photo/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs \
+#   /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs \
+#   /work/u26130998/datasets/Ki67_with_photo/S1137178_G7E_110926_mrxs/S1137178,G7E,110926.mrxs \
 #   --per-camera 20 --jitter 0.05 \
 #   --out $CORPUS
 
@@ -55,4 +55,4 @@ python utilities/test_modules/test_EoMT.py \
     --tile-figure /work/u26130998/prov-gigapath/images/01581x_25327y.png \
                   /work/u26130998/prov-gigapath/images/01581x_25583y.png \
     --wsi /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs \
-          /work/u26130998/datasets/Ki67/S1103520,G7E,110126.mrxs
+          /work/u26130998/datasets/Ki67_with_photo/S1103520_G7E_110126_mrxs/S1103520,G7E,110126.mrxs

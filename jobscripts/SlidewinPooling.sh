@@ -99,10 +99,10 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 
 if [ "$MODE" = "smoke" ]; then
   BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-  KI67=/work/u26130998/datasets/Ki67
+  KI67=/work/u26130998/datasets/Ki67_with_photo
   SLIDES=(
     "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"
-    "$KI67/S1104233,G7E,110208.mrxs"
+    "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"
   )
   ARGS="--slides ${SLIDES[*]} --levels 1 2 --n-fov ${N_FOV:-25}"
   ARGS="$ARGS --encoder $ENCODER${HEAD:+ --head $HEAD}"

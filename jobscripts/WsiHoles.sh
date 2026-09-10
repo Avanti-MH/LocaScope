@@ -56,7 +56,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # =============================================================================
 
 # ---------------- Parameters ----------------
-DATA=/work/u26130998/datasets/Ki67
+DATA=/work/u26130998/datasets/Ki67_with_photo
 
 LEVELS="0,1,2,3,4"   # one column per level in the grid figure
 BLOCK=128            # level-0 px; the finest size actually scanned
@@ -67,7 +67,7 @@ mkdir -p "$OUT"
 
 # Every .mrxs in the dataset, one figure row each. An array keeps the commas in
 # the filenames from being resplit.
-mapfile -t SLIDES < <(ls -1 "$DATA"/*.mrxs)
+mapfile -t SLIDES < <(ls -1 "$DATA"/*_mrxs/*.mrxs)
 echo "found ${#SLIDES[@]} slides in $DATA"
 printf '  %s\n' "${SLIDES[@]}"
 
