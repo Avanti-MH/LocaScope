@@ -974,7 +974,8 @@ def t_materialise_takes_the_reader_and_release_keeps_the_meta():
 
 def t_an_R_sample_is_degraded_and_restored_to_the_tile_size():
     wsi, mask = _one_big_block()
-    s = TileSampler(wsi, mask, _cfg()).sample([resolution_plan(4.0, TILE)])
+    cfg = _cfg(inherit=InheritConfig(stack_kind='R'))
+    s = TileSampler(wsi, mask, cfg).sample([resolution_plan(4.0, TILE)])
     img = s[0].materialise(wsi).image
     assert img.shape == (TILE, TILE, 3), (
         f'an R tile came back {img.shape}; the whole point is that the output '
