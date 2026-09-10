@@ -29,8 +29,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from PointsAnalysisByMpp import Attribution, NullModel
-from PointsAnalysisByMpp.Patterns import (EMPTY, PATTERNS, alive_from,
+from SurvivalAnalysis import Attribution, NullModel
+from SurvivalAnalysis.Patterns import (EMPTY, PATTERNS, alive_from,
                                           band_fraction, classify)
 
 

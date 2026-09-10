@@ -57,20 +57,9 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #      actually supply, and N below has been set from it, and no floor is
 #      reported unmet
 
-# THE TISSUE GATE STOPPED BEING A SECOND MECHANISM, 2026-08-27. It scored the
-# same quantity as the richness buckets -- background fraction -- and the two
-# disagreeing produced the 475/500 corpus of 2026-08-26: 22.5 per cent of every
-# rung was reserved for buckets the gate had already emptied, and the shortfall
-# was read as a property of the slides.
-#
-# `--tissue-ratio` came back on 2026-09-01 pointing at the mechanism that
-# actually runs: it is written INTO the caps (`caps_for_tissue_ratio`), so
-# there is one place a tile can be refused rather than two that can disagree.
-# The floors go with it -- a floor asking for a share of a bucket the caps just
-# closed is the same shortfall by another route.
-#
-# WHAT REPLACED IT, as seven buckets on the background fraction with a floor and
-# a cap each (utilities/TileSampler.py, RichnessConfig):
+# NO `tissue_ratio`/`TISSUE_RATIO` -- richness is seven buckets on the
+# background fraction with a floor and a cap each (utilities/TileSampler.py,
+# RichnessConfig):
 #
 #   bucket     background   floor   cap        the unassigned 30 per cent is
 #   bg00_15      < 15 %       5 %   15 %       split evenly over the three
@@ -93,47 +82,31 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # misses a floor -- run 3b before trusting this step's mix.
 
 # =============================================================================
-#  TWO CORPORA, ONE SCRIPT. `CORPUS` names which.
+#  THE TRAINING CORPUS. This script does only this now (2026-09-06).
 # =============================================================================
 #
-# The knobs below decide what gets cut, and the two answers are far apart -- one
-# corpus trains Stage A and the other feeds Stage B's survival analysis. Every
-# one of them is in `sampler_id`, so getting one wrong does not fail: it writes
-# a THIRD corpus under a name nobody meant, in its own directory, indefinitely.
-# Naming the two is what keeps that from being six things to remember.
+# F's and C's own extractions used to also go through a `CORPUS=` switch
+# here (`stageB-fOwn`/`stageB-cOwn`), each with its own copy of the sampling
+# knobs -- a second definition of numbers `cli/prepare_chain_stack.py` also
+# needed in Python to compute `sampler_id()` without running anything, so
+# the two could drift from each other silently. Reverted: F's and C's own
+# corpora are now sampled directly in `prepare_chain_stack.py` (`TileSampler`
+# + `PreTileStore`, no subprocess, no second copy of the knobs) -- this
+# script goes back to being the one thing it was before that detour, the
+# `stageA` training corpus, human-run.
 #
-#   stageA  the training corpus. No chains, the seven-bucket contract, a
-#           disjoint lattice. These are the values of 2026-08-27, and they have
-#           to stay these values: `_rng` is reset per rung so that this mode
-#           reproduces that corpus bit for bit (utilities/TileSampler.py).
-#
-#   stageB  the chain corpus. Every centre carried to every rung, the gate at
-#           50 per cent background, an overlapping lattice to put back the
-#           candidates the gate removes. NOT a training corpus -- the gate and
-#           `share=1.0` between them mean the bucket mix is ds 16's rather than
-#           the contract's (see BUCKET_FRAME below).
+# `sampler_id` is still what would tell two corpora under one root apart if
+# there ever were more than one here (`ChainStack.chains()`/`Datasets.py`'s
+# loader both take an optional `sampler_id=`), but there is only `stageA`
+# again as far as this script is concerned.
 #
 # Any single knob can still be overridden on top, which is what a smoke run is:
 #
-#   CORPUS=stageB N=20 DS="1 2 4 8 16" WSI=<path> ROOT=<scratch> sbatch ...
+#   N=20 DS="1 2 4 8 16" WSI=<path> ROOT=<scratch> sbatch ...
 #
-CORPUS="${CORPUS:-stageB}"
-case "$CORPUS" in
-  stageA)
-    _share=0     ; _source=      ; _frame=per_rung   ; _ratio=
-    _step=0      ; _overlap=0    ; _ovshare=0
-    _n=100       ; _root=/work/u26130998/result/cache/tiles
-    ;;
-  stageB)
-    _share=1.0   ; _source=16    ; _frame=at_inherit ; _ratio=0.5
-    _step=128    ; _overlap=0.5  ; _ovshare=1.0
-    _n=200       ; _root=/work/u26130998/result/cache/tiles_chains
-    ;;
-  *)
-    echo "unknown CORPUS: $CORPUS   (known: stageA stageB)" >&2
-    exit 1
-    ;;
-esac
+_share=0     ; _source=      ; _frame=per_rung
+_step=0      ; _overlap=0    ; _ovshare=0
+_n=100       ; _root=/work/u26130998/result/cache/tiles
 
 # 100 per (slide, rung), across TWELVE slides rather than six: five per stain
 # in train and one per stain held out. The corpus is therefore 12 x 6 x 100
@@ -146,12 +119,6 @@ esac
 # see the same slide, so the slide's own character cancels. What does not
 # cancel is having sampled two Ki67 batches out of ten.
 #
-# RAISED TO 200 FOR THE CHAIN CORPUS, 2026-09-01. Under `share=1.0` this number
-# IS the chain count: `_choose_centres` asks for `share * n` centres and gets
-# `min(that, what the source rung admits)`. ds 16 admits 187 a slide on
-# average, so N=100 would leave 87 of them unused. The cost is linear and it is
-# mostly not this job -- the extraction doubles, and so does MakeHaLabels,
-# which was 72 cells x 1.1 min and becomes about 160.
 N="${N:-$_n}"
 
 # v1 is 256. 512 and 1024 are separate models, separate extractions and, at
@@ -179,15 +146,24 @@ MAX_TRIES=2500
 # openslide's "Unsupported or missing image file", which reads as a corrupt
 # slide. The CLI now says so by name and suggests the path.
 #
-# A SEPARATE ROOT FOR THE SMOKE RUN. `sampler_id` differs, so the directories
-# would not collide -- but they would sit beside the real ones and `Datasets`
-# refuses two stores for one (slide, rung). Keeping the smoke corpus somewhere
-# else means deleting it is `rm -rf` of one directory.
+# A SEPARATE ROOT FOR THE SMOKE RUN, still -- not because `Datasets`/`chains()`
+# would refuse the real corpus sitting beside it (both now take `sampler_id=`
+# to pick one out), but because keeping the smoke corpus somewhere else means
+# deleting it is `rm -rf` of one directory instead of hunting one `sampler_id`
+# out of the real corpus.
+#
 DS="${DS:-}"
 WSI="${WSI:-}"
 # =============================================================================
-#  CHAINS, added 2026-09-01. spec.md 3.2, plan.md P1.
+#  CHAINS, added 2026-09-01, REMOVED FROM THIS SCRIPT 2026-09-06.
 # =============================================================================
+#
+# F's/C's own extractions (what this section's knobs were FOR) now sample
+# directly in `cli/prepare_chain_stack.py` -- this script builds `stageA`
+# only. Kept here as history for why `INHERIT_SHARE`/`INHERIT_SOURCE_RUNG`/
+# `BUCKET_FRAME` exist as overridable knobs at all (a `stageA` smoke run can
+# still legitimately want a different value on top), not as a description of
+# what a normal run of this script does today.
 #
 # A chain is ONE level-0 centre with a tile at every rung -- the same physical
 # tissue at every magnification -- and it is what Stage B's survival analysis
@@ -215,35 +191,21 @@ WSI="${WSI:-}"
 # source yields ~48 chains a slide and ds 16 yields the full 200. ds 32 is
 # still IN the ladder -- a chain that also fits there gets a sixth member -- so
 # the six-rung analysis runs on that subset and the five-rung one on all of it.
-# `MppStack.chains` takes the rung list to be complete over, so both are reads
+# `ChainStack.chains` takes the rung list to be complete over, so both are reads
 # of one corpus.
 INHERIT_SHARE="${INHERIT_SHARE:-$_share}"
 INHERIT_SOURCE_RUNG="${INHERIT_SOURCE_RUNG:-$_source}"
 
-# WHERE THE CENTRES COME FROM, and the smoke run of 2026-09-01 is why this is
-# set at all. `_choose_centres` draws UNIFORMLY from whatever the caps admit,
-# and the settled contract admits up to 85 per cent background -- so on
-# BRACS_1598 (24 per cent tissue) nine of fifteen chains were seeded from
-# windows already more than half glass, and five of twenty centres had their
-# FINEST tile land in a zero-capped bucket and truncate. 20 asked, 13 complete.
-#
-# 0.5 writes the gate into the caps instead: background <= 50 per cent, which
-# is a bucket edge (a ratio that is not one is refused rather than rounded).
-# The floors go with it -- a floor asking for a share of a bucket the caps just
-# closed is the 475/500 shortfall of 2026-08-26 by another route.
-#
-# IT GATES EVERY TILE, NOT ONLY THE CENTRES. So this corpus is NOT the one to
-# train Stage A on: that wants the seven-bucket contract's mix, and it is still
-# on disk under `cache/tiles` with its own sampler_id.
-# EMPTY MEANS THE SEVEN-BUCKET CONTRACT, which is what reproducing the
-# 2026-08-27 corpus needs -- the flag is then not passed at all rather than
-# passed as an empty string. That corpus is the Stage A one and it has to stay
-# regenerable: `_rng` is reset per rung so that at `inherit.share = 0` the
-# tiles come out bit-identical (utilities/TileSampler.py, sample()).
+# WHERE THE CENTRES COME FROM, and the smoke run of 2026-09-01 is why
+# `--inherit-source-rung` above matters at all. `_choose_centres` draws
+# UNIFORMLY from whatever the richness caps admit -- so on BRACS_1598 (24 per
+# cent tissue) nine of fifteen chains were seeded from windows already more
+# than half glass, and five of twenty centres had their FINEST tile land in a
+# zero-capped bucket and truncate. 20 asked, 13 complete.
 #
 #   REPRODUCE THE 2026-08-27 CORPUS, one slide, into a scratch root:
 #
-#     N=100 INHERIT_SHARE=0 BUCKET_FRAME=per_rung TISSUE_RATIO= \
+#     N=100 INHERIT_SHARE=0 BUCKET_FRAME=per_rung \
 #       GRID_STEP=0 MAX_OVERLAP=0 OVERLAPPING_SHARE=0 \
 #       WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_BT/Type_N/BRACS_1598.svs \
 #       ROOT=/work/u26130998/result/cache/tiles_repro \
@@ -254,7 +216,6 @@ INHERIT_SOURCE_RUNG="${INHERIT_SOURCE_RUNG:-$_source}"
 #   row for row. The RUNGS AFTER ds 1 ARE THE TEST: ds 1 is the first consumer
 #   of the stream and was never affected, so a check that stops there proves
 #   nothing.
-TISSUE_RATIO="${TISSUE_RATIO:-$_ratio}"
 
 # AN OVERLAPPING LATTICE, because the gate above shrinks the candidate pool and
 # this is what puts it back. grid_step 128 on a 256 tile halves the step in
@@ -288,17 +249,19 @@ OVERLAPPING_SHARE="${OVERLAPPING_SHARE:-$_ovshare}"
 # contract's mix.
 BUCKET_FRAME="${BUCKET_FRAME:-$_frame}"
 
-# A SEPARATE ROOT, and not tidiness. `sampler_id` is in the directory name, so
-# re-extracting adds directories beside the old ones rather than replacing
-# them -- and `Datasets` used to read EVERY store matching (slide, ds) and call
-# the union a corpus. It now refuses two, but a separate root means the
-# situation never arises.
+# ONE ROOT FOR ALL FOUR CORPORA (2026-09-05). `sampler_id` is in the directory
+# name, so re-extracting at another setting adds a directory beside the old
+# ones rather than replacing it -- and used to mean `Datasets`/`chains()` would
+# read EVERY store matching (slide, ds) and call the union a corpus. Both now
+# take an optional `sampler_id=` to pick one out instead, which is what lets
+# stage A, stage B, `rOwn` and `cOwn` share `result/cache/tiles/` rather than
+# each needing its own root to avoid that collision.
 ROOT="${ROOT:-$_root}"
 
-echo "======== ExtractPreTiles  corpus: $CORPUS ========"
+echo "======== ExtractPreTiles  corpus: stageA ========"
 echo "  tile $TILE   pre-tile $((TILE * 3))   n $N"
 echo "  chains: share $INHERIT_SHARE   source ds $INHERIT_SOURCE_RUNG   bucket $BUCKET_FRAME"
-echo "  gate  : tissue >= $TISSUE_RATIO   lattice step $GRID_STEP   max overlap $MAX_OVERLAP"
+echo "  lattice step $GRID_STEP   max overlap $MAX_OVERLAP"
 echo "  root  : $ROOT"
 echo "  slides: ${WSI:-every mask in result/cache/masks/}   rungs: ${DS:-DsLadder default}"
 echo ""
@@ -310,7 +273,6 @@ python training/SuperPathPoint/cli/extract_pretiles.py \
   --inherit-share "$INHERIT_SHARE" \
   ${INHERIT_SOURCE_RUNG:+--inherit-source-rung "$INHERIT_SOURCE_RUNG"} \
   --bucket-frame "$BUCKET_FRAME" \
-  ${TISSUE_RATIO:+--tissue-ratio "$TISSUE_RATIO"} \
   --grid-step "$GRID_STEP" \
   --max-overlap "$MAX_OVERLAP" \
   --overlapping-share "$OVERLAPPING_SHARE" \

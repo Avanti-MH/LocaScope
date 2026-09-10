@@ -137,10 +137,11 @@ class PairDatasetConfig(IdentifiedConfig):
 
     def build(self, tiles_root, labels_root, *, wsi_stems: Sequence[str],
               rungs: Optional[Sequence[float]] = None,
-              ha_id: Optional[str] = None) -> 'HomographyPairDataset':
+              ha_id: Optional[str] = None,
+              sampler_id: Optional[str] = None) -> 'HomographyPairDataset':
         return HomographyPairDataset(self, tiles_root, labels_root,
                                      wsi_stems=wsi_stems, rungs=rungs,
-                                     ha_id=ha_id)
+                                     ha_id=ha_id, sampler_id=sampler_id)
 
 
 @dataclass
@@ -174,7 +175,8 @@ class HomographyPairDataset(Dataset):
     def __init__(self, cfg: PairDatasetConfig, tiles_root, labels_root, *,
                  wsi_stems: Sequence[str],
                  rungs: Optional[Sequence[float]] = None,
-                 ha_id: Optional[str] = None):
+                 ha_id: Optional[str] = None,
+                 sampler_id: Optional[str] = None):
         if cfg.balance not in BALANCE_MODES:
             raise ValueError(
                 f'balance must be one of {BALANCE_MODES}, got {cfg.balance!r}')
@@ -184,18 +186,25 @@ class HomographyPairDataset(Dataset):
         rung_values = sorted({float(r) for r in rungs}) if rungs else None
         found_rungs: List[float] = []
 
-        # ONE STORE PER (slide, rung), REFUSED RATHER THAN UNIONED. A root
-        # legitimately holds two corpora of the same slides -- `sampler_id` is
-        # in the directory name, so re-extracting at another setting adds a
-        # directory rather than replacing one -- and this loop would then read
-        # BOTH and call the union a corpus. It would not error: it would report
-        # twice the tiles and a bucket distribution that is neither corpus's.
+        # ONE STORE PER (slide, rung, sampler_id), REFUSED RATHER THAN UNIONED.
+        # A root legitimately holds two corpora of the same slides -- stage A
+        # and stage B share `result/cache/tiles/` on purpose (2026-09-05) --
+        # and `sampler_id` (passed in by the caller, not stored on `cfg`: it
+        # selects a corpus, it is not a property of the training distribution)
+        # is what tells them apart. Left unset, this loop falls back to the
+        # old behaviour: any second folder for the same (slide, ds) raises,
+        # because reading both would call the union a corpus. It would not
+        # error on its own: it would report twice the tiles and a bucket
+        # distribution that is neither corpus's.
         #
         # `KeypointLabelStore.find_one` refuses the same shape for the same
         # reason ("a labels root legitimately holds round-1 and round-2 labels
         # of the same tiles"); this side had no guard until 2026-09-01.
         seen: Dict[Tuple[str, float], Path] = {}
-        for folder in sorted(PreTileStore.find(tiles_root, tile=int(cfg.tile))):
+        find_kwargs = dict(tile=int(cfg.tile))
+        if sampler_id is not None:
+            find_kwargs['sampler_id'] = sampler_id
+        for folder in sorted(PreTileStore.find(tiles_root, **find_kwargs)):
             meta = PreTileStore.load_meta(folder)
             if meta.wsi_stem not in set(wsi_stems):
                 continue
@@ -210,8 +219,8 @@ class HomographyPairDataset(Dataset):
                     f'  {seen[key].name}\n  {folder.name}\n'
                     f'They were cut at different sampler settings, so their '
                     f'union is not a corpus -- it is two corpora with one '
-                    f'name. Point --tiles-root at one of them, or move the '
-                    f'other aside')
+                    f'name. Pass sampler_id=... to build(), or point '
+                    f'--tiles-root at one of them')
             seen[key] = folder
 
             query = dict(wsi_stem=meta.wsi_stem, ds=meta.ds,

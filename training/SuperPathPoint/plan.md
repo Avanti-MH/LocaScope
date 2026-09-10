@@ -1,17 +1,40 @@
-# SuperPathPoint — 2026-08-31 之後的計畫
+# SuperPathPoint — 計畫
 
-`spec.md` 是規格，這份是**現在要做什麼、按什麼順序**。決定的理由留在這裡，
-量測的結論進 `log/TODO.log`。
+`spec.md` 是規格：名詞、每個階段的程序、code 的 interface、code 對應哪個階段的哪個
+步驟。這份是**現在要做什麼、按什麼順序、做到哪**。決定的理由留在這裡，量測的結論
+進 `log/TODO.log`。
+
+**三個階段，這是現況（2026-09-03 跟使用者對過）：**
+
+```
+1. 訓自己的 wsi superpoint
+   1.1 先模仿上游 backbone + detector + descriptor
+   1.2 換 backbone
+2. 分析六種 survival 樣態、相鄰響應、新生死亡歸因
+   2.1 建構語料：F/R/C 三軸的 stack 要先能建構起來（unit test → demo smoke
+       test → 正式建語料，順序寫死，2026-09-05 定案）
+   2.2 分析六種 survival 樣態（tau、alpha）—— 語料建好才做
+   2.3 相鄰響應 + 相依型 keypoint 比對 —— 2.2 有數字才做，不是現在
+   2.4 新生死亡歸因
+   2.5 再決定要訓練哪一種語意 —— 還沒決定，等 2.2-2.4 有數字再選
+3. 訓練有語意的 keypoint
+```
+
+下面每一節底下都標了它屬於哪一步。
 
 ---
 
-## A. 現況：ReEvalSuperPathPoint 的讀數
+## 1. 訓自己的 wsi superpoint
+
+### 1.1 先模仿上游 backbone + detector + descriptor
+
+#### 現況：ReEvalSuperPathPoint 的讀數
 
 四個 arm 的 checkpoint（2026-08-31，50 epoch、batch 128、2,050 步）在**對齊過的
 點數**下重新評分。對齊的方式是 `score_threshold=0` + `max_points=N`，也就是取分數
 最高的 N 個，密度被構造性地釘死，`decoy` 因此對每個 arm 是同一個量。
 
-### 欄位
+**欄位**
 
 | 欄位 | 意思 |
 |---|---|
@@ -21,7 +44,7 @@
 | `margin` | `repeat / decoy` —— 扣掉密度紅利之後剩下的，**這才是分數** |
 | `ceiling` | `1/decoy`，`margin` 的上限。`repeat ≤ 1` 所以 decoy 就是天花板 |
 
-### A.1 有一個乾淨的交叉
+**A.1 有一個乾淨的交叉**
 
 `margin`（全部 1044 對 pair）：
 
@@ -42,7 +65,7 @@
 
 一個 N 看不到這件事。ladder 是為了這個存在的。
 
-### A.2 RGB 不是空結果 —— 先前的判斷被推翻
+**A.2 RGB 不是空結果 —— 先前的判斷被推翻**
 
 **10 次比較，RGB 全部小贏：**
 
@@ -62,7 +85,7 @@
 **不改變「先用 gray」的決定**（省一半算力換 2-5% 不划算），但這是一個 OPEN 的
 發現，不是關掉的問題。
 
-### A.3 點是聚集的，而且聚集程度隨 N 變
+**A.3 點是聚集的，而且聚集程度隨 N 變**
 
 | N | `unif` | gray | gray_pre |
 |---|---|---|---|
@@ -73,7 +96,7 @@
 小 N 兩個都明顯聚集（點集中在組織區而非散在整張 tile，合理）。大 N 時 pre 反而
 比 gray 散。
 
-### A.4 從頭那組為什麼點數會飆到 NMS 的幾何上限
+**A.4 從頭那組為什麼點數會飆到 NMS 的幾何上限**
 
 detector 是每個 cell 的 65 類 softmax：64 個位置 + 1 個 **dustbin**（「這裡沒有
 點」）。`Decoders.py:76` 做完 softmax 丟掉 dustbin **且不重新正規化**，所以一個
@@ -93,12 +116,9 @@ cell 的 64 個像素值加起來是 `1 - d`，平均像素值是
 約 150 點，內容決定）；對從頭它壓在自己圖的平均值上，等於沒過濾，剩下全靠 NMS 砍
 —— 那是幾何決定的，約 10³ 個。
 
-閾值要開始有作用需要 `v̄ < 0.015`，即 `d > 0.04`，即 **CE < 3.22**。從頭那組最後是
-3.27、中途最低 3.12，**整輪都在這條線上來回穿**。
-
 一句話：**它不是想要更多點，它是還沒學會拒絕。**
 
-### A.5 從頭那組連「不看圖」的水準都還沒到
+**A.5 從頭那組連「不看圖」的水準都還沒到**
 
 CE 有三個算得出來的刻度：
 
@@ -117,9 +137,7 @@ CE 有三個算得出來的刻度：
 而 pre 的 0.19 遠低於 1.0，證明它不是靠猜基本比例過關 —— 也證明**這個架構在這批
 資料上做得到 0.19**，不是容量或 label 噪音的限制。
 
----
-
-## B. 方向：先做 pretrain，但不關掉另一條路
+#### 方向：先做 pretrain，但不關掉另一條路
 
 **決定：接受。理由：保留。**
 
@@ -135,9 +153,9 @@ augmentation 凍住、CE 3.27。**用一個沒跑完的實驗否定一條路，�
 2. 它現在就能用（CE 0.19，足以當 Stage B 的 detector）
 3. 它便宜 —— 不用等收斂
 
-所以 P0 裡保留一個**只改一個變數**的從頭消融（見 P0-c），把問題留著開口。
 
-### 名詞：sp_v6 是這個專案的 MagicPoint
+
+**名詞：sp_v6 是這個專案的 MagicPoint**
 
 | 上游 | 這裡 |
 |---|---|
@@ -147,11 +165,7 @@ augmentation 凍住、CE 3.27。**用一個沒跑完的實驗否定一條路，�
 **要保留的結論限制**：`gray_pre` 是「從 bootstrap detector 熱啟動」，所以它贏過
 `gray` 只能說「跳過冷啟動有代價」，**不能說「預訓練有幫助」**。
 
----
-
-## C. 優先順序
-
-### P0 — 下一次重訓，六項一次改完
+#### 下一次重訓，六項一次改完
 
 | | 改什麼 | 為什麼擋路 |
 |---|---|---|
@@ -170,7 +184,7 @@ augmentation 凍住、CE 3.27。**用一個沒跑完的實驗否定一條路，�
 `points_available` 說話。但它的註解已經改正：420 的出處是 `BRACS_1228 ds4` 一個
 rung，不是語料最大值（72 格的 `n_kp` 平均 3 到 527，最大 906）。
 
-#### 三個讀數的預期，以及各自指向什麼
+**三個讀數的預期，以及各自指向什麼**
 
 | 看到什麼 | 意思 | 下一步 |
 |---|---|---|
@@ -180,141 +194,9 @@ rung，不是語料最大值（72 格的 `n_kp` 平均 3 到 527，最大 906）
 | 逐 rung CE 一起降 | 稀釋不是問題 | 不動 loss |
 | 稠密降、稀疏卡住 | 稀釋是真的 | 才輪到 rung weight |
 
-### P1 — Stage B（重訓在跑的時候寫）
+### 1.2 換 backbone
 
-用現有的 `gray_pre` checkpoint 當 detector。spec.md 1700 說 Stage B「需要一個堪用
-的 detector」—— CE 0.19、repeatability 0.79，夠用。
-
-**第一張存亡表當拋棄式的。** 目的是把 τ 校準完（`alpha` 起始 1.5，第一次跑當校準
-跑不當結果）、把 `SurvivalTable` 的格式定下來、把 Stage C 的頭接上去。
-`identity_id` 會讓過期的表自己說出來，所以重跑是安全的，而重跑是這條線上最便宜
-的一步。
-
-#### P1 的目標：三個決定，不是一張表
-
-Stage B 存在的理由是**替 Stage C 的設計做決定**。三個：
-
-| | 由哪個數字決定 | 決定什麼 |
-|---|---|---|
-| **A** | 連續帶比例 | Stage C 的頭能不能簡化成 `(j_lo, j_hi)` 兩個輸出。0.97 可以，0.6 不行（spec.md 3.3） |
-| **B** | 晚生型比例 | 這個頭**有沒有東西可學**。接近零的話 Stage C 不用做 |
-| **C** | 只在一階比例 | Stage 1 的 mpp 估計用不用得上尺度簽章 |
-
-**「做完」的定義**：這三個數字各自附著一個**閾值敏感度**和一個**虛無基準線**。
-沒有那兩樣，數字不能用來做決定。
-
-前置目標：
-
-| **D** | tau 的校準曲線 | A/B/C 全部在 tau 下游。tau 沒定，三個都是在報 1.5 |
-
-#### 已經寫好的（2026-09-01，test_survival 18/18）
-
-| 檔案 | 內容 |
-|---|---|
-| `PointsAnalysisByMpp/Patterns.py` | 六種樣態、`alive_from`、`band_fraction`。**純函式** |
-| `PointsAnalysisByMpp/Attribution.py` | 四種歸因、`outranked`、`NONE` 哨兵。**純函式** |
-| `PointsAnalysisByMpp/MppStack.py` | 讀 'F'、推導 'R'、`rung_scale` / `rung_shrink` |
-| `PointsAnalysisByMpp/SurvivalTable.py` | safetensors store，無 `alive` 欄位 |
-| `PointsAnalysisByMpp/SurvivalProcess.py` | `detect`（找位置）+ `probe`（量數值） |
-| `cli/build_survival.py`、`jobscripts/.../BuildSurvival.sh` | |
-| `test_modules/TestSuperPathPoint/test_survival.py` | 18 個，每個歸因分支各有誘餌 |
-
-寫的過程中改變計畫的三件事，記在這裡因為它們都會被重新提出：
-
-1. **'R' 軸不用抽取。** 一個 'R' rung 是 `tile` 個 level-0 px 縮小再放大，而 'F'
-   鏈的 ds 1 那張**就是** `tile` 個 level-0 px。所以 'R' 從它推導。這不是省事：
-   新生歸因要求兩軸講同一個實體點，兩次獨立抽取會各自按可容納性挑中心，事後只能
-   空間 join，而那個容差正是分析要量的東西。`StackCentres` 這個部件因此不存在。
-2. **`rung_scale` 和 `rung_shrink` 是兩個量。** 都從 `ds` 來，在 'F' 上相等、在
-   'R' 上不等（1.0 對 `ds`）。用錯的話粗階的 'R' 點被撒到 `ds` 倍遠，表照樣填滿。
-3. **偵測和量測要分開。** `score` 原本只在配對到的階有值，把「機率低」和「沒被
-   偵測到」記成同一件事 —— 而那正是 (i)/(ii) 要分的。改成兩趟：`detect` 找哪些
-   位置值得問，`probe` 對每個位置每一階量 `(score, offset, rival)`。
-
-#### 要先修的設計缺陷
-
-**`anchors_of` 用 tau 合併錨點，所以換 tau 錨點集就變 —— store 不是真的可以重切。**
-這違背整個 store 的設計前提（不存 `alive`、事後重切）。
-
-| | 現在 | 改成 |
-|---|---|---|
-| 合併半徑 | `tau[j]` | **固定 `nms_radius` 個 level-0 px** —— 那是「同一個位置」的定義，和跨階容差無關 |
-| tau 在哪裡作用 | 建表時 | **只在讀表時**（`Patterns.alive_from` 的 `dist <= tau`） |
-
-代價是錨點變多（tau 本來會合併的近似重複各自成列），那些改在讀的時候合併 —— 幾
-毫秒，而且可以換 tau 重做。**這一項先做，否則每次換 tau 都要重跑 GPU。**
-
-#### 還要寫的
-
-| # | 檔案 | 職責 | 完成判準 |
-|---|---|---|---|
-| ① | `PointsAnalysisByMpp/Report.py` | 表 → 指標。`merge_anchors`、`pattern_table`、`attribution_table`、`cross_table`、`tau_curve`。**回傳資料結構，不 print 不 plot 不寫檔** | 每個函式能用手寫的小表測，不需要 GPU 或 store |
-| ② | `PointsAnalysisByMpp/NullModel.py` | `null_patterns(p_per_rung)` → 六種樣態的期望比例 | 64 個機率加總為 1；全 `p=0.5` 對上手算 |
-| ③ | `cli/inspect_survival.py` | **第一輪：校準**。配對率 vs tau 曲線（含平移誘餌）、`offset` 與 `score` 的逐階分布 | 曲線上有 knee，且 knee 在誘餌之上 |
-| ④ | `cli/report_survival.py` | **第二輪：分析**。`patterns.csv`、`attribution.csv`、`cross.csv` + 三張圖 | A/B/C 各有敏感度、基準線、逐片 |
-| ⑤ | `test_modules/TestSuperPathPoint/test_survival_report.py` | ①② 的測試 | `merge_anchors` 隨 tau 單調；tau=0 一個都不合併 |
-| ⑥ | `jobscripts/SuperPathPointJobs/ReportSurvival.sh` | | |
-
-**③ 不產出六種樣態和歸因。報了就是在報 1.5。**
-
-#### 虛無基準線用窮舉，不用誘餌
-
-L=6 只有 64 個存活向量。給定每一階**實測**的存活率 `p_j`，把 64 個向量的機率算
-出來、按樣態加總，就得到「各階獨立擲硬幣的話六種樣態該是多少」。
-
-它比誘餌好，因為它是**精確的**而不是抽樣的；而且它保留了實測的每階存活率，所以
-「帶比隨機多多少」問的是結構而不是密度。
-
-誘餌仍然留著 —— 用在**配對**上（平移超過 tau 之後還配得到多少），那個沒有封閉解。
-
-#### 三張必要的圖，其餘是輔助
-
-| 圖 | 回答什麼 |
-|---|---|
-| **存活矩陣熱圖** | 列=點（按樣態排序）、行=6 階、色=`score`。一眼看出帶不帶 |
-| **閾值敏感度** | 三條線（連續帶／晚生型／只在一階）vs 閾值。**線陡就代表結論不成立** |
-| **貼圖範例** | 每種樣態抽點，把它在各階的 tile 排成一列 |
-
-第三張是**唯一能證偽「晚生型 = 腺體導管這類大結構」的東西** —— 前面所有數字都做
-不到。挑點的規則要寫死在 docstring 裡：**固定隨機種子，每種樣態按 `score` 的
-10/50/90 分位數各抽一個**。「作者挑的例子」和「規則挑的例子」在圖上長得一樣。
-
-#### 放置
-
-| 東西 | 位置 | 依據 |
-|---|---|---|
-| 純邏輯（`Report`、`NullModel`） | `PointsAnalysisByMpp/` | stage 模組：輸入資料+設定，輸出結構化的東西 |
-| 兩個 CLI | `training/SuperPathPoint/cli/` | 驅動與診斷都在該套件的 `cli/` |
-| 測試 | `test_modules/TestSuperPathPoint/` | 一個 jobscript 擁有一整組測試 |
-| 輸出 | `/work/u26130998/result/<job>/` | 產出全部在 repo 外 |
-
-**不進 `bench_modules/`** —— 那是端到端的品質量測，而 Stage B 量的是資料的性質。
-
-#### P1 的順序
-
-```
-修 anchors_of（脫鉤 tau）        ← 先做
-      ↓
-① Report.py   ② NullModel.py     ← 純邏輯，語料還沒好就能寫能測
-      ↓
-⑤ test_survival_report.py
-      ↓
-③ inspect_survival.py  →  第一輪，定 tau
-      ↓
-④ report_survival.py   →  第二輪，A/B/C
-```
-
-**整條卡在語料**：現在 0 條 chain，要先重抽（開 `InheritConfig`）+ 重跑 HA label。
-純邏輯那三項不受影響。
-
-### P2 — Stage C
-
-硬依賴：label 就是 B 的輸出。
-
-**P1 + P2 是「先鋒隊」—— 把 SuperPathPoint 的整體框架打通。框架的價值不取決於
-detector 有多好。**
-
-### P3 — encoder 搜尋：先 CNN，再 ViT
+#### encoder 搜尋：先 CNN，再 ViT
 
 理由是 stride：
 
@@ -336,7 +218,339 @@ ViT 那條多一個要學的隨機模組，結果會混進「upsample 學不學�
 **還有一個限制不會因為換 encoder 而消失**：label 是 sp_v6 挑的點，所以任何學生的
 天花板都是「同意 sp_v6」，不是「找到好點」。
 
-### P4 — soft label（teacher-student）
+換成 pretrain 在 WSI 的 encoder 會撞到的六件事，已經想過一輪寫進 `spec.md` §13
+「換成 pretrain 在 WSI 的 encoder」——那是介面/程序層級的風險清單，屬於 spec，不
+重複列在這裡。
+
+---
+
+## 2. 分析六種 survival 樣態、相鄰響應、新生死亡歸因
+
+**Stage B與 Stage C是「先鋒隊」—— 把 SuperPathPoint 的整體框架打通。
+框架的價值不取決於 detector 有多好，可以在 1.1 的重訓跑的時候並行寫。**
+
+### 2.1 建構語料：F/R/C 三軸的 stack 要先能建構起來
+
+**這是 2.2 以下全部的前提，順序寫死在這裡，不要跳著做（2026-09-05 定案）：**
+
+```
+① unit test（純幾何 + 本地快取，不用真的語料、不用 GPU）
+      ↓
+② demo_survival_analysis.py（chains_stack 部分）當 smoke real test（對著一片真的 WSI 跑，不是只驗證合成座標）
+      ↓
+③ 正式把語料建出來（F/R/C 三種形式都要能建）
+      ↓
+   （語料建好才進 2.2——分析 tau/alpha/survival；相依型比對邏輯更晚，見 2.3）
+```
+
+**① 做完（2026-09-06）**：`FStack`/`RStack`/`CStack` 三個 class 都在
+`SurvivalAnalysis/ChainStack.py`，各自拆「純幾何」（`footprint`/`pyramid`/
+`mother`/`nearest`）跟「IO」（`read`/`derive`/`read_one`/`read_tree`）。
+
+| 檔案 | 內容 |
+|---|---|
+| `SurvivalAnalysis/ChainStack.py` | 見下 |
+| `test_modules/TestSuperPathPoint/test_chain_stack.py` | 21 個測試：幾何/本地快取（原本在 `test_survival.py` 的部分）+ `own`（`from_tile`/`base_rung`/三個 `from_own`，都對著假 `PreTileStore` fixture） |
+| `jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh` | `chain-stack` stage |
+| `cli/prepare_chain_stack.py` / `jobscripts/.../PrepareChainStack.sh` | 一條龍入口，見下 |
+
+**三軸的原料怎麼來：**
+
+- **F**：唯一需要「繼承」的軸，本質上也是一種 own（`inherit.share=1.0`，R/C
+  的 own 是 `share=0`）。`FStack.read(chain)` 是 store-backed，需要一條真的
+  chain（own 語料 `stageB-fOwn`，12 片，還沒抽）。
+- **R**：不需要一整條 chain，只要一張真實 tile 當底，三選一：
+  1. `source='F'`——重用 F 的某一階，`base_rung` 參數決定哪一階（不侷限 ds=1）
+  2. `source='C'`——重用 C 的母 tile 或任一子嗣，同一個 `base_rung` 機制
+  3. `own`——直接指向既有的 `stageA`（2026-08-27，獨立多階 `share=0` 的真實
+     tile，正是 R 需要的東西），不另外抽
+
+  `base_rung` 的降解語意：`degrade_resolution` 只在 `ds<=1.0` 跳過降解，
+  `base_rung=B` 時每一階 `1<X<=B` 都是在已經模糊的底上**再**跑一次絕對 `ds`
+  的降解——比 `base_rung=1` 更模糊，不是「差不多模糊」，確認過是刻意的。
+  `footprint(..., base_rung=...)` 要跟著回報真正的窗口大小。（`SurvivalMeta`
+  還沒有 `base_rung` 欄位，等真的有非 1.0 的呼叫端再補。）
+- **C**：子嗣純幾何算出來（`CStack.pyramid`），不需要 TileSampler/PreTileStore/
+  inherit。母 tile 兩個來源：重用 F 讀過的同中心同階，或 own（`stageB-cOwn`，
+  單一階、只抽 5 張，還沒抽）。
+
+**own 的兩層架構**：`RStack.from_tile(image, base_rung, rungs, tile=...)` 是
+三個來源共用的底層原語——一張已讀進來的圖 + 它自己的 ds → 一個 RStack，純函式，
+不吃 `Chain`/`wsi`/store。`derive(chain, ..., source=...)` 是 F/C 來源的單條
+chain 便利包裝，內部呼叫 `from_tile`；**`source='own'` 故意不是這裡的分支**——
+own 的 tile 是獨立的 `PreTileStore` record，沒有 `Chain` 可餵，傳
+`source='own'` 進 `derive` 直接 `ValueError`。
+
+列舉層 `from_own`（`FStack`/`RStack`/`CStack` 各自一個，留在 `ChainStack.py`
+裡，不是集中放進 `prepare_chain_stack.py`——三軸的 own store 長相不同，列舉
+邏輯跟著各自的 class 走）都接受 `sampler_id`，都是 LAZY（仿 `TileSampler.Sample`：
+metadata 一直都在，pixel 只有 `__getitem__` 才讀）：
+
+- `FStack.from_own` → `OwnChains`，`x[inherit_id]` 呼叫 `FStack.read`
+- `RStack.from_own` → `OwnTiles`，位置索引（不是 `record.index`——own 的批次
+  可能橫跨好幾階、好幾個資料夾，`record.index` 只在同一資料夾內唯一），`x[i]`
+  讀 `PreTileStore.read_tile` 再呼叫 `from_tile`。`cache_root` 預設關——
+  `degrade_resolution` 只是記憶體裡的 resize，不像 WSI 讀取那麼貴，大規模跑
+  的時候開它只是白花磁碟 IO，只有 demo/小量重複讀才需要
+- `CStack.from_own` → `OwnForest`，跟 F/R 不一樣的地方：整片森林的幾何在
+  `from_own()` 當下就全部建好，`x[i]` 才讀像素——母 tile 直接是這筆 record
+  自己的 store 像素，子嗣仍要 `wsi`（子嗣永遠沒有 store 版本）。回傳
+  `(mother, mother_image, groups_by_ds, images_by_ds)`，母子的圖都在
+
+其他順手做的：`CStack.read` 改名 `read_tree`（跟 `FStack.read`/`RStack.derive`
+同名不同形狀的問題，`OwnForest.__getitem__` 開始呼叫它之後不再是死碼）；
+`PreTileStore.read_tile`+`centre_crop` 抽成共用的 `_read_store_tile`（原本在
+`FStack.read`/`OwnTiles`/`OwnForest` 三處各寫一次）；`chains()`/
+`Datasets.py`（`HomographyPairDataset.build()`）都加了可選的 `sampler_id`
+參數，`result/cache/tiles/` 現在一個根目錄裝下 stageA 跟全部 own 語料，不用
+`tiles_chains` 這種另開目錄的方式分開。
+
+**`cli/prepare_chain_stack.py`**：決定三軸各自的 `sampler_id`，直接從
+`_RECIPES`（F/C own 兩份 `SamplerConfig` 的唯一定義）算出 `sampler_id()`，不
+猜磁碟上哪個 store 屬於誰。找不到就直接用 `MaskStore`/`TissuesRegionsMask` 讀
+mask，呼叫（重構成吃關鍵字參數的）`extract_pretiles._extract_slide` 現場抽——
+同一個 process，不開 subprocess，不碰 `ExtractPreTiles.sh`。R 一律指向
+`stageA`，找不到就報錯請人去跑 `ExtractPreTiles.sh`，不會現抽——那是獨立、
+人工跑的訓練語料，不該是這裡的 side effect。
+
+寫的過程中抓到的真的 bug（供以後參考）：`OwnTiles.__getitem__` 一度少了
+`centre_crop`（會把整張 pre-tile 硬縮成 tile，不是裁中心那塊）；重構
+`extract_pretiles.py` 的關鍵字參數時漏改一行 `args.n`（`_write_rung` 最後的
+print，runtime `NameError`）；第一版 `base_rung` 測試餵了同一張沒模糊過的圖
+兩次，驗證不到任何東西，改成先把圖真的降到目標 ds 畫質再餵。
+
+**② 做完（2026-09-06）**：`_pick_record`（`find_one` 不傳 `sampler_id`，一旦
+`stageB-fOwn` 抽出來會因兩個 store 都符合 ds=1 而報錯）整個拿掉，改成跟
+`prepare_chain_stack.py` 一樣直接算 `sampler_id`
+（`_sampler_config_for('stageB-fOwn'/'stageA'/'stageB-cOwn', tile).sampler_id()`），
+不猜、不查磁碟內容——上面那條風險現在不存在了。
+
+demo 現在跑五條路徑，每條都是真正的類別入口，不是 workaround：
+
+| 路徑 | 入口 |
+|---|---|
+| F | `FStack.from_own` |
+| R own | `RStack.from_own` |
+| R reuse-F | `RStack.derive(chain, source='F')` |
+| C own | `CStack.from_own` |
+| C reuse-F | `CStack.from_mother`（母 tile 吃 `FStack.read(chain)` 的 ds16，不重讀） |
+
+own 跟 reuse-F 對 R/C 而言中心點本來就不同（own 是獨立抽樣落點，reuse-F 是 F
+own chain 的中心），兩條路徑不互比，但都各自完整跑完＋各自留下圖，不再是「reuse-F
+畫圖、own 只印數字就丟」——六張圖：`r_stack_{own,reuseF}.png`、
+`pyramid_{lineage,overview}_{own,reuseF}.png`。C 的 mother-crop vs 真子嗣的
+decoy 相關性檢定（幾何/像素一致性，不是 own vs reuse-F 互比）現在兩棵樹都做。
+
+**真的跑過了（2026-09-06，`AXES=F R C` 之後，`BRACS_1228`，exit 0）**：五條
+路徑全部對著真實 slide 跑完。`F own` chain 0 六階 99.3ms；`R own`/`R reuse-F`
+都 OK；`C own`/`C reuse-F` 的 mother-crop vs 真子嗣 decoy 檢定都是 real 明顯贏
+decoy（0.902 vs 0.104、0.923 vs 0.020）。六張圖都產出。
+
+**③ 做完（2026-09-06，`BRACS_1228`，`AXES=F R C` 一次跑完，exit 0）**：三軸都
+真的建出語料了。
+
+| 軸 | corpus | sampler_id | 結果 |
+|---|---|---|---|
+| F | `stageB-fOwn`（現抽） | `578e0d1b` | 1095 tiles / 6 階，145 條 chain 湊到 inherit，其中 84 條六階都齊（完整） |
+| R | `stageA`（既有，直接命中未現抽） | `d4366c49` | 543 筆 own tiles |
+| C | `stageB-cOwn`（現抽） | `42e55094` | 5 棵樹，母 tile ds 16 |
+
+「三軸都能建出語料」這句話現在成立。下一步是 2.2（分析六種 survival 樣態）；
+目前只在 `BRACS_1228` 一片 slide 上跑過，`stageB-fOwn`/`stageB-cOwn` 真正的
+12 片語料還沒批次抽——這是 2.2 開工前的最後一件事。
+
+`_RECIPES`（F/R/C 唯一的 `SamplerConfig` 定義）跟 `--rungs` 預設之後又動過，上表的
+`sampler_id`/`578e0d1b`/`d4366c49` 已經不是現在的值；12 片批次會用當時的
+`_RECIPES`/`--rungs` 統一重抽。
+
+### 2.2 分析六種 survival 樣態
+
+**目標：六種樣態分類 + 歸因，前提是 alpha 先定案——tau 沒定，下游每個比例都是
+在報 1.5。這一節先只展開 alpha 校準這一步，其餘（正式建表、樣態統計、報告
+圖）等 alpha 定案後再寫。**
+
+**① alpha 校準（2026-09-06 定案）**：核心是「F/R/C stack → 存活分析 → 歸因」
+本身；alpha 校準是為了知道 tau 該多寬另外做的支線分析，兩者分屬不同抽象層
+次，分成兩個檔案。`[新]` = 還沒寫，`[留]` = 沿用現有的：
+
+```
+設計
+│
+├── 0. 桶(bucket)= F/R/C
+│       cli/survival_alpha_analysis.py:main()
+│
+├── 1. 每個 ChainStack
+│   │
+│   ├── [C 專屬子流程]
+│   │   SurvivalAnalysis/SurvivalProcess.py:
+│   │     anchors_of_generations(per_rung_tiles, order, tile_merge_radius, cross_rung_base)   [新]
+│   │     _merge_within_radius(points, radius) -> keep_idx        (私有,anchors_of/
+│   │                                              anchors_of_generations 共用)   [新]
+│   │
+│   ├── 建錨點清單(核心,不管有沒有要校準 alpha 都要做)
+│   │     F/R:  SurvivalProcess.py:anchors_of(...)                 [留]
+│   │     C:    SurvivalProcess.py:anchors_of_generations(...)     [新]
+│   │
+│   ├── 對每一階:真實探測(核心)
+│   │     SurvivalProcess.py:
+│   │       detect / nearest_detection / rival_at                 [留]
+│   │       probe_real(anchors, per_rung_detections)
+│   │         -> dist, score, rival                                [新,取代 run() 的真實那半]
+│   │
+│   ├── 對每一階:誘餌探測(支線,只有校準 alpha 才做這步)
+│   │     SurvivalAnalysis/AlphaCalibration.py:
+│   │       probe_decoy(anchors, per_rung_detections, decoy_shift)
+│   │         -> decoy_dist, decoy_score
+│   │         (內部呼叫 SurvivalProcess.nearest_detection,decoy_shift 決定 shifted 座標)  [新]
+│   │
+│   │     cli/survival_alpha_analysis.py:
+│   │       decoy_shift_fixed(offset_xy) -> Callable
+│   │       decoy_shift_random(min_mag, max_mag, rng) -> Callable
+│   │       decoy_shift_rotate(angle_range, rng) -> Callable       [新,傳進 probe_decoy]
+│   │
+│   ├── merge_radius_2nd(迴圈外,一次,支線專用旋鈕)
+│   │     AlphaCalibration.py:merge_anchors(anchors, merge_radius_2nd)
+│   │       (內部呼叫 SurvivalProcess._merge_within_radius)        [新,從 Report.py 搬過來]
+│   │
+│   └── alphas_sweep + tau_floor(支線)
+│         AlphaCalibration.py:alpha_curve(dist, score, decoy_dist, decoy_score, *,
+│                                        rungs, alphas, tau_floor, threshold)
+│           -> 這個 ChainStack 的 match_rate/decoy_rate/gap/margin,[L, len(alphas)]   [新]
+│
+├── 2. 桶內彙總(支線)
+│       AlphaCalibration.py:aggregate_curves(list_of_每ChainStack結果)
+│         -> 桶內平均矩陣 + 標準差矩陣(margin 取 log 再平均)         [新]
+│
+├── 3. 圖:1D 三格(match+decoy、gap、margin 對 alpha)
+│       cli/survival_alpha_analysis.py:_plot_alpha_curves(...)      [新]
+│
+└── 4. offset_quantiles 等價物(支線)
+        AlphaCalibration.py:offset_quantiles_of(dist, *, rungs, quantiles)
+          (彙總邏輯重用 aggregate_curves)                          [新]
+        cli/survival_alpha_analysis.py:_plot_heatmaps(...)
+          gap/margin：y=ds x=alpha 深淺圖
+          offset_quantiles：offset_quantiles 不吃 alpha，畫成「ds 對分位數值」
+            的曲線圖，不是熱圖                                     [新]
+```
+
+其餘核心檔案（`ChainStack.py`/`SurvivalTable.py`/`Patterns.py`/`Attribution.py`/
+`Report.py`/`NullModel.py`）不受這次重寫影響，見「alpha 定案之後才要做的事」。
+`SurvivalProcess.py` 不知道「誘餌」這個概念——誘餌只有校準 alpha 才需要，alpha
+定案後核心流程只用 `probe_real`。
+
+**C 軸的錨點怎麼建**：每一世代（=每一階）先把該世代所有 tile（main + overlap）
+的偵測合併出該世代的共識錨點（overlap 一律併入，`overlap_mode='intersection'`
+2026-09-11 移除——曾經是個死分支，寫測試時抓到的，overlap 收進來的點必然會被
+收尾合併判成重複而刪掉，從來沒有真的貢獻過任何點）；世代之間再聯集成跨世代
+錨點清單，之後每一階都用同一份清單探測。
+
+**F 軸不用**：footprint 隨階數變大（`tile × ds`），粗階邊緣的 anchor 在細階根
+本沒被讀過，`dist` 永遠 `NONE`（spec.md 327-332）——這正是 C 軸存在的理由，不
+是新發現。
+
+**其他釐清（供以後參考）**：
+
+- `match_rate` 分母是錨點數，不是這一階自己的偵測點數。
+- 誘餌位移的是錨點座標，不是這一階的偵測清單；`decoy_shift` 是
+  `callable(anchors) -> shifted`，可換固定方向/隨機/繞中心旋轉。
+- `gap = match_rate - decoy_rate` 本來就有號，不用 `abs()`。
+- `nms_radius` 沿用偵測器自己的 NMS 設定（`KeypointNetConfig.nms_radius=4`），
+  不是另外選的——這句對 Step A/B（`tile_merge_radius`，同 ds 跨 tile）跟 R 軸的
+  跨 rung 合併仍然成立；F/C 軸的跨 rung 合併（`cross_rung_base`）2026-09-11 改成
+  0，理由見 spec.md「同一個點的定義」。
+- `merge_radius_2nd` 是合併半徑的敏感度檢查，不是要調到某個「對」的值。
+- `margin` 是乘性量，跨 ChainStack 平均前先取 log；`match_rate`/`decoy_rate`/
+  `gap` 有界，不取 log。
+
+**測試（2026-09-06，23/23；2026-09-11 補「同一個點的定義」、移除
+`overlap_mode='intersection'` 後 26/26）**：
+`test_modules/TestSuperPathPoint/test_survival_process.py`（14 個，`SurvivalProcess.py`
+純邏輯那半：合併、`anchors_of`/`anchors_of_generations`、`nearest_detection`,
+2026-09-11 新增 5 個（同 rung 排除、跨 rung 加法公式的邊界、`rung_scale` 覆寫
+[R 軸用]、C 軸多階場景真的合併到一個粗階重複點）、移除 2 個（`overlap_mode`
+相關，`intersection` 分支本身已刪除，見上）、`test_alpha_calibration.py`
+（12 個，`AlphaCalibration.py` 全部：`alpha_curve` 的門檻/tau_floor/gap 有號、
+`aggregate_curves` 的 log 空間、`offset_quantiles_of`）。兩個都掛進
+`jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh`（`survival-process`/
+`alpha-calibration` 兩個 stage）。`detect`/`detect_all_rungs`/
+`detect_all_generations`/`rival_at` 需要真的 net，沒有涵蓋。
+
+**卡在語料**：見 2.1③，正式的 12 片 chain 語料還沒抽。純邏輯部分
+（`SurvivalProcess.py`/`AlphaCalibration.py` 新函式）不受影響，先寫先測。
+
+**alpha 定案之後才要做的事，先不展開**：建正式的六樣態分類 + 歸因表、
+`NullModel`/`Report.py` 的樣態統計、三張報告圖。
+
+### 2.3 相鄰響應 + 相依型 keypoint 比對
+
+**在 2.2 有 tau/alpha/六種樣態的數字之後才開始寫這一節——不是現在，2026-09-05
+跟使用者對過的順序。** 理由：相依型比對本身也要吃 tau（同一個位置算不算「配對
+上」），tau 沒校準之前寫這裡的比對邏輯，跟 2.2 沒校準前就分析六種樣態是同一種錯誤。
+
+`spec.md` §3.2「第三個軸：C（子嗣／組合 stack）」已經把切法定案——沿用
+`utilities/PatchingLib.py` 的 `PatchGrid.from_size(..., overlap=True)`，main 格
+精確不重疊密鋪，overlap 格是內角格，跟周圍 4 個 main 格各共用 1/4 面積。子嗣的
+幾何跟抽取本身已經在 2.1 做完（`ChainStack.CStack`），這裡要做的只剩比對邏輯：
+
+**要做的事，還沒拆成檔案清單：**
+
+- 覆蓋率確認：粗階 tile 裡的某個 anchor，有沒有真的被某張子嗣 tile 的 footprint
+  覆蓋到——純幾何，`SurvivalProcess.run` 本身大概不用改
+- **相依型 keypoint** 的比對邏輯：同一階、overlap 格跟角落 main 格共用的那 1/4
+  範圍裡，同一個位置只有一邊測到 = 相依型。這是新的比對，`SurvivalTable` 現有
+  欄位（跨 rung 的 `alive[L]`）不覆蓋跨「同階不同框」這個軸——2026-09-05 定案：
+  **開一張新表**（不是加欄位進 `SurvivalTable`），理由是語意乾淨、不用碰 F/R 的
+  identity_id 邏輯，代價是要跟 `SurvivalTable` 用 chain/anchor id 對得起來
+- 這一節能不能證偽 spec.md §3.2「(i) 尺度結構 / (ii) 上下文」現有靠 NMS 分支的
+  判準——同一階、只換周圍框住的組織，理論上乾淨地只測得到 (ii)
+
+### 2.4 新生死亡歸因
+
+**新生歸因已經有：** `Attribution.py`（四種歸因、`outranked`、`NONE` 哨兵，見
+2.2「已經寫好的」）——模糊新生 / 鄰域新生（分數）/ 鄰域新生（壓制解除）/ 未定，
+spec.md §3.2「歸因」一節。2.3 的相依型比對能替「鄰域新生（分數）」提供獨立證據
+（同階不同框的自然對照組），屬於補強不是重寫。
+
+**死亡歸因還沒有對應的邏輯。** 一個點在某一階消失，現有欄位（`suppressed_by`）
+只回答「是不是被鄰居壓過去」，跟新生那邊的四分法不是對稱的——這裡列成待做，還沒
+拆解。
+
+### 2.5 再決定要訓練哪一種語意
+
+**還沒決定，等 2.2-2.4 有數字再選。** 候選：
+
+- 相依型 keypoint（2.3）
+- 只在一階、帶尺度資訊的 keypoint（2.2 的 C 判準）
+- 晚生型（原本 spec.md 假設它是頭最有機會學到東西的地方；這個假設本身要不要
+  留著，也是這裡才決定，不在 spec 裡先寫死）
+
+這一步的產物是「Stage C 的 label 定義」，往下接 3.
+
+---
+
+## 3. 訓練有語意的 keypoint
+
+### 3.0 pretile 抽取要不要能在 process 內跑（還沒決定）
+
+2.1③ 的 `prepare_chain_stack.py` 現在用**選項 A**：subprocess 呼叫
+`extract_pretiles.py` 做現抽現用，不動它的程式碼。**選項 B** 記在這裡，還沒決定
+要不要做：把 `extract_pretiles.py` 的 `_plans_for`/`_sampler_config`/
+`_extract_slide` 從吃 `argparse.Namespace` 改成吃關鍵字參數，讓抽取能在同一個
+process 內跑，不用開 subprocess。等 Stage C 真的要把三軸包成 dataset 餵
+dataloader、subprocess 的開銷（每個 sample 開一個新 python process）撐不住的
+那天，再回頭做 B。
+
+硬依賴：label 就是 2.5 的決定 + 2.2-2.4 的輸出。
+
+在 2.5 定案之前，這裡沒有可以動工的東西。`spec.md` §3.3 的 multi-label sigmoid /
+相對階梯 label / K 讀出 vs K 學出 三個介面決定已經寫在 spec 裡，是通用的頭部設計，
+跟訓練目標選哪個無關，可以先讀。
+
+---
+
+## 側支：soft label（teacher-student）
+
+**不在上面三個階段的主線上，先擱著，還沒決定要不要留。**
 
 先講清楚：**我們現在已經是 teacher-student** —— sp_v6 是 teacher，HA label 是它的
 輸出。
@@ -362,13 +576,13 @@ hinge。軟標籤是實驗。
 
 ## 順序圖
 
-    P0 重訓（gray_pre 250ep + gray 消融 50ep）
+    1.1 重訓（gray_pre 250ep + gray 消融 50ep）
           │
-          ├──並行──> P1 Stage B ──> P2 Stage C     ← 框架先鋒隊
+          ├──並行──> 2.1 → 2.2 → 2.3 → 2.4 → 2.5 → 3     ← 框架先鋒隊
           │
-          └──之後──> P3 CNN encoder（凍住）──> ViT
+          └──之後──> 1.2 CNN encoder（凍住）──> ViT
                             │
-                            └──> P4 soft label
+                            └──> 側支 soft label
 
 ---
 
@@ -385,10 +599,17 @@ hinge。軟標籤是實驗。
   引用、stem 是目錄名的一部分、而且進了 `PreTileMeta` / `LabelMeta` / `StoreMeta` 的
   雜湊 —— 等於整批 cache 作廢重建。等下次有理由重建 cache 時一起。
 - `utilities/test_modules/test_config_identity.py` 沒有任何 jobscript 在跑它。
-- spec.md 還有四段過時：`tile_size`/`tissue_ratio 0.75` 那節、`17,784 / 14.2 GB`
-  的落地大小表、「`tissue_ratio` 套在 tile 的 footprint 上」、「探針要回答的三件
-  事」；split 那節還寫 6 片而程式是 12 片。
 - `log/TODO.log` 要補 reference bank 的純玻璃表（刪掉 44 GB 之前要留的五個數字）。
 - ReferenceSampler 退役進 TileSampler：bucket 換成新的七個、jitter 換成
   `OverlapConfig` 的比例、`over` 不帶過去、`ConfigIdentity` 用自我驗證的改名腳本
   遷移。
+- ~~spec.md 還有四段過時：`tile_size`/`tissue_ratio 0.75` 那節、`17,784 / 14.2 GB`
+  的落地大小表、「`tissue_ratio` 套在 tile 的 footprint 上」、「探針要回答的三件
+  事」；split 那節還寫 6 片而程式是 12 片~~ —— 2026-09-03 修掉，見 spec.md §6.5/§6.6/§13。
+- `spec.md` §13「四個 arm」底下的執行細節（載入斷言、RGB 複製除以三、`gray+pretrain`
+  是自蒸餾、兩片撐不起四個 arm）還留在 spec 裡，內容跟 1.1 現在的「現況讀數」與
+  「下一次重訓」兩節重疊——之後要對一次要不要搬到這裡，這次沒動它。
+- ~~`MppStack.py`/`CompositeStack.py` 兩個檔案~~ —— 2026-09-05 整併成
+  `ChainStack.py`（`FStack`/`RStack`/`CStack` 三個 class），`test_survival.py`
+  裡跟 F/R 幾何有關的兩節（`rung_scale`/`rung_shrink`、'R' 的降解）搬進新的
+  `test_chain_stack.py`，一起補了 `CStack` 原本完全沒有的單元測試。見 2.1。

@@ -87,8 +87,7 @@ import cv2                                                        # noqa: E402
 import MaskStore                                                  # noqa: E402
 from SafeSlide import SafeSlide                                    # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,             # noqa: E402
-                         RichnessConfig, SamplerConfig, TileSampler,
-                         caps_for_tissue_ratio)
+                         RichnessConfig, SamplerConfig, TileSampler)
 from TissuesRegionsMask import TissuesRegionsMask                  # noqa: E402
 
 import PreTileStore                                    # noqa: E402
@@ -151,22 +150,6 @@ def main():
                          'window is glass is refused by the zero caps and the '
                          'chain truncates. `n_inherit_refused` per rung is how '
                          'much that costs')
-    ap.add_argument('--tissue-ratio', type=float, default=None,
-                    help='admit only tiles with at least this much tissue, as '
-                         'CAPS on the richness buckets -- every bucket wholly '
-                         'at or below 1-ratio background gets cap 1 and the '
-                         'rest get 0 (`caps_for_tissue_ratio`). The ratio must '
-                         'land on a bucket edge or it is refused rather than '
-                         'rounded. Default: the settled seven-bucket contract, '
-                         'whose gate is at 85 per cent background.\n'
-                         'IT ALSO DECIDES WHERE CHAIN CENTRES COME FROM: '
-                         '`_choose_centres` draws uniformly from whatever the '
-                         'caps admit, so under the default a centre may sit in '
-                         'a window that is 84 per cent glass -- and its tile '
-                         'at the finest rung then lands in a zero-capped '
-                         'bucket and truncates the chain. Measured on '
-                         'BRACS_1598 (24 per cent tissue): 20 centres asked, '
-                         '13 complete chains')
     ap.add_argument('--bucket-frame', default='per_rung',
                     choices=('per_rung', 'at_inherit'),
                     help="where a chain's richness bucket is decided. "
@@ -273,8 +256,31 @@ def main():
             # one, which is why the 2026-08-27 corpus has `inherit_id = -1` on
             # all 6,388 rows. Per-rung resume still works -- the sampling is
             # redone, the writes are skipped -- see `_extract_slide`.
-            rows += _extract_slide(wsi, trm, slide_mask, mask_meta, args,
-                                   stem, failures)
+            #
+            # `cfg` IS BUILT HERE, NOT INSIDE `_extract_slide` (2026-09-06) --
+            # see that function's docstring: it takes a finished config now,
+            # the same one `cli/prepare_chain_stack.py` builds a different
+            # way for F's/C's own corpora. `_plans_for` is still called twice
+            # per slide (once here just for the `tile_size` `cfg` needs, again
+            # inside `_extract_slide`) -- cheap, no IO, and it keeps
+            # `_extract_slide` self-contained rather than threading `plans`
+            # through as a second parameter that has to agree with the first.
+            plans, _pre_plans, _pre_px = _plans_for(
+                wsi, tile=args.tile, pre_tile_factor=args.pre_tile_factor,
+                ds=args.ds)
+            cfg = _sampler_config(
+                plans, n=args.n, seed=args.seed, candidates=args.candidates,
+                max_tries=args.max_tries, grid_step=args.grid_step,
+                max_overlap=args.max_overlap,
+                overlapping_share=args.overlapping_share,
+                bucket_frame=args.bucket_frame,
+                inherit_share=args.inherit_share,
+                inherit_source_rung=args.inherit_source_rung)
+            rows += _extract_slide(
+                wsi, trm, slide_mask, mask_meta, cfg,
+                tile=args.tile, pre_tile_factor=args.pre_tile_factor,
+                ds=args.ds, n=args.n, root=args.root,
+                overwrite=args.overwrite, stem=stem, failures=failures)
 
     summary = os.path.join(out_dir, 'extract_pretiles.csv')
     if rows:
@@ -303,7 +309,7 @@ def main():
     return 1 if failures else 0
 
 
-def _plans_for(wsi, args):
+def _plans_for(wsi, *, tile: int, pre_tile_factor: int, ds):
     """`(sampler plans, per-rung pre-tile plans, pre_px)`, all rungs at once.
 
     Two plans per rung and they are not interchangeable:
@@ -319,11 +325,22 @@ def _plans_for(wsi, args):
     truncates at the rung where it first lands in a zero-capped bucket and
     every coarser rung is then skipped, which is only expressible if the
     coarser ones have not been filled yet.
+
+    KEYWORD ARGUMENTS, NOT `args` (2026-09-06) -- this and the three
+    functions after it used to take an `argparse.Namespace` because only
+    `main()`'s CLI ever called them. `cli/prepare_chain_stack.py` (plan.md
+    2.1, F's/C's own extractions) needs to call the same functions directly,
+    in-process, with values that never went through argparse -- a second,
+    parallel implementation of "mask -> plans -> sample -> write" was the
+    alternative, and that is the exact kind of duplication this whole
+    session's `ChainStack.py`/`ExtractPreTiles.sh` work has been removing
+    everywhere else. `main()`'s own behaviour is unchanged -- it now unpacks
+    `args` into keywords at the call site instead of passing `args` through.
     """
-    pre_px = pre_tile_px(args.tile, args.pre_tile_factor)
-    rungs = sorted(float(d) for d in args.ds)
+    pre_px = pre_tile_px(tile, pre_tile_factor)
+    rungs = sorted(float(d) for d in ds)
     ladder = DsLadder(rungs=tuple(rungs))
-    tiles = ladder.plan(wsi.level_downsamples, args.tile)
+    tiles = ladder.plan(wsi.level_downsamples, tile)
     pres = ladder.plan(wsi.level_downsamples, pre_px)
 
     plans, pre_plans = [], {}
@@ -342,35 +359,19 @@ def _plans_for(wsi, args):
         # being a repair for something the geometry could have refused.
         plans.append(dataclasses.replace(
             plan_tile,
-            reserve_l0=plan_tile.footprint_l0 * args.pre_tile_factor))
+            reserve_l0=plan_tile.footprint_l0 * pre_tile_factor))
         pre_plans[float(plan_tile.rung_ds)] = plan_pre
     return plans, pre_plans, pre_px
 
 
-def _richness(args) -> RichnessConfig:
-    """The seven-bucket contract, with `--tissue-ratio` as caps if given.
-
-    THE FLAG IS BACK AND IT MEANS SOMETHING ELSE NOW. The old `--tissue-ratio`
-    was a SECOND gate that scored the same quantity as the buckets, and the two
-    disagreeing produced the 475/500 corpus of 2026-08-26: 22.5 per cent of
-    every rung was reserved for buckets the gate had already emptied. This one
-    is not a second gate -- it is written INTO the caps, so there is one
-    mechanism and one place a tile can be refused.
-
-    THE FLOORS ARE DROPPED WITH IT. A floor asks a rung to supply a share of a
-    bucket the caps have just closed, which no slide can do, and the run comes
-    back short with the shortfall reported as a property of the slides -- the
-    2026-08-26 failure again, by a different route. So a ratio replaces the
-    whole contract rather than being layered on it.
-    """
-    if args.tissue_ratio is None:
-        return RichnessConfig(bucket_frame=args.bucket_frame)
-    caps = caps_for_tissue_ratio(float(args.tissue_ratio))
-    return RichnessConfig(caps=caps, floors=tuple(0.0 for _ in caps),
-                          bucket_frame=args.bucket_frame)
+def _richness(*, bucket_frame: str) -> RichnessConfig:
+    return RichnessConfig(bucket_frame=bucket_frame)
 
 
-def _sampler_config(plans, args) -> SamplerConfig:
+def _sampler_config(plans, *, n: int, seed: int, candidates: str,
+                    max_tries: int, grid_step: int, max_overlap: float,
+                    overlapping_share: float, bucket_frame: str,
+                    inherit_share: float, inherit_source_rung) -> SamplerConfig:
     """One config for every rung, which is what inheritance requires.
 
     ONE SAMPLER OVER ALL RUNGS, NOT ONE PER RUNG, and that is the change that
@@ -382,7 +383,7 @@ def _sampler_config(plans, args) -> SamplerConfig:
     because it was never reachable.
 
     `tile` is taken from the FINEST plan. Every plan has the same
-    `tile_size` -- it is `args.tile` in level pixels -- and asserting that here
+    `tile_size` -- it is `tile` in level pixels -- and asserting that here
     beats letting one rung's differing value decide the whole config silently.
     """
     sizes = {int(q.tile_size) for q in plans}
@@ -393,18 +394,20 @@ def _sampler_config(plans, args) -> SamplerConfig:
             f'rung would be gated on a square the others are not')
 
     return SamplerConfig(
-        tile=sizes.pop(), n_per_rung=args.n, seed=args.seed,
-        candidates=args.candidates,
-        max_tries_per_tile=max(1, args.max_tries // max(args.n, 1)),
-        overlap=OverlapConfig(grid_step=args.grid_step,
-                              max_overlap_ratio=args.max_overlap,
-                              overlapping_share=args.overlapping_share),
-        richness=_richness(args),
-        inherit=InheritConfig(stack_kind='F', share=args.inherit_share,
-                              source_rung=args.inherit_source_rung))
+        tile=sizes.pop(), n_per_rung=n, seed=seed,
+        candidates=candidates,
+        max_tries_per_tile=max(1, max_tries // max(n, 1)),
+        overlap=OverlapConfig(grid_step=grid_step,
+                              max_overlap_ratio=max_overlap,
+                              overlapping_share=overlapping_share),
+        richness=_richness(bucket_frame=bucket_frame),
+        inherit=InheritConfig(stack_kind='F', share=inherit_share,
+                              source_rung=inherit_source_rung))
 
 
-def _extract_slide(wsi, trm, slide_mask, mask_meta, args, stem, failures):
+def _extract_slide(wsi, trm, slide_mask, mask_meta, cfg: SamplerConfig, *,
+                   tile: int, pre_tile_factor: int, ds, n: int, root,
+                   overwrite: bool, stem: str, failures: list):
     """Every rung of one slide, from ONE sampler. Returns a row per rung written.
 
     The sampler runs once and is then split by rung into the per-rung stores.
@@ -418,9 +421,14 @@ def _extract_slide(wsi, trm, slide_mask, mask_meta, args, stem, failures):
     inheritance set is chosen across all rungs at once and cannot be rebuilt
     from a subset. So a re-run after a walltime kill pays the sampling again
     and none of the reads, which is where the hours are.
+
+    `cfg` IS BUILT BY THE CALLER, NOT HERE (2026-09-06) -- `main()`'s CLI
+    builds it from argparse via `_sampler_config`; `cli/prepare_chain_stack.py`
+    builds it from `_sampler_config_for` (F's/C's own corpora, plan.md 2.1).
+    Neither is this function's business; it only needs the finished config.
     """
-    plans, pre_plans, pre_px = _plans_for(wsi, args)
-    cfg = _sampler_config(plans, args)
+    plans, pre_plans, pre_px = _plans_for(wsi, tile=tile,
+                                          pre_tile_factor=pre_tile_factor, ds=ds)
     sampler = TileSampler(wsi, trm, cfg).sample(plans)
 
     by_rung = {}
@@ -434,38 +442,41 @@ def _extract_slide(wsi, trm, slide_mask, mask_meta, args, stem, failures):
 
     rows = []
     for plan in plans:
-        ds = float(plan.rung_ds)
+        ds_ = float(plan.rung_ds)
         try:
-            rows.append(_write_rung(wsi, slide_mask, mask_meta, args, cfg,
-                                    pre_plans[ds], pre_px, ds,
-                                    by_rung.get(ds, []),
-                                    sampler.reports.get(ds)))
+            rows.append(_write_rung(wsi, slide_mask, mask_meta, cfg,
+                                    pre_plans[ds_], pre_px, ds_,
+                                    by_rung.get(ds_, []),
+                                    sampler.reports.get(ds_),
+                                    tile=tile, pre_tile_factor=pre_tile_factor,
+                                    n=n, root=root, overwrite=overwrite))
         except PreTileStore.PreTileMismatch as e:
             # An existing finished directory. Not a failure -- it is what
             # --overwrite is for, and skipping is what makes this script safe
             # to re-run after a walltime kill.
-            print(f'    ds {ds:g}: have it   '
+            print(f'    ds {ds_:g}: have it   '
                   f'({e.args[0].splitlines()[0]})', flush=True)
         except Exception as e:                                   # noqa: BLE001
-            print(f'    ds {ds:g}: FAILED  {type(e).__name__}: {e}',
+            print(f'    ds {ds_:g}: FAILED  {type(e).__name__}: {e}',
                   flush=True)
-            failures.append((f'{stem} ds{ds:g}', f'{type(e).__name__}: {e}'))
+            failures.append((f'{stem} ds{ds_:g}', f'{type(e).__name__}: {e}'))
     return rows
 
 
-def _write_rung(wsi, slide_mask, mask_meta, args, cfg, plan_pre, pre_px, ds,
-                samples, report):
+def _write_rung(wsi, slide_mask, mask_meta, cfg: SamplerConfig, plan_pre,
+                pre_px, ds, samples, report, *, tile: int,
+                pre_tile_factor: int, n: int, root, overwrite: bool):
     """One (slide, ds) directory, from samples the shared sampler already chose."""
     # BUILT BEFORE THE META, because `sampler_id` is part of the store's
     # identity and the meta cannot be assembled without it. It replaced
     # `tissue_ratio`, which named a gate the sampler no longer has -- and which
     # covered only one of the three axes, so two corpora differing in their
     # bucket floors used to share a directory.
-    meta = PreTileMeta.of(wsi, plan_pre, tile=args.tile,
-                          sampler_id=cfg.sampler_id(), seed=args.seed,
+    meta = PreTileMeta.of(wsi, plan_pre, tile=tile,
+                          sampler_id=cfg.sampler_id(), seed=cfg.seed,
                           segmenter_id=mask_meta.segmenter_id,
-                          factor=args.pre_tile_factor, n_requested=args.n)
-    folder = PreTileStore.create(args.root, meta, overwrite=args.overwrite)
+                          factor=pre_tile_factor, n_requested=n)
+    folder = PreTileStore.create(root, meta, overwrite=overwrite)
     origin, span = slide_mask.origin, slide_mask.span
 
     records, written = [], 0
@@ -531,7 +542,7 @@ def _write_rung(wsi, slide_mask, mask_meta, args, cfg, plan_pre, pre_px, ds,
     breaching = int(getattr(report, 'n_inherit_breaching', 0)) if report else 0
 
     print(f'    ds {ds:g}  level {plan_pre.level}  read '
-          f'{plan_pre.read_size} -> {pre_px}   {len(records)}/{args.n} tiles, '
+          f'{plan_pre.read_size} -> {pre_px}   {len(records)}/{n} tiles, '
           f'{chains} in chains, {refused} refused, {written / 1e6:.0f} MB',
           flush=True)
 
@@ -539,7 +550,7 @@ def _write_rung(wsi, slide_mask, mask_meta, args, cfg, plan_pre, pre_px, ds,
             'pre_px': pre_px, 'sampler_id': meta.sampler_id,
             'level': meta.level, 'read_size': meta.read_size,
             'footprint_l0': int(meta.tile_footprint_l0),
-            'n_requested': args.n, 'n_got': len(records), 'n_clipped': 0,
+            'n_requested': n, 'n_got': len(records), 'n_clipped': 0,
             'n_chain': chains, 'n_inherit_refused': refused,
             'n_inherit_breaching': breaching,
             'bytes': written, 'dir': os.path.basename(str(folder))}

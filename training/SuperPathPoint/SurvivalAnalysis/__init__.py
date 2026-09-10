@@ -1,6 +1,9 @@
 """Stage B — 存亡分析. spec.md 3.2.
 
-    MppStack        read a co-registered stack ('F' from the store, 'R' derived)
+    ChainStack      FStack / RStack / CStack -- the three axes, each split
+                    into pure geometry (`footprint`/`pyramid`) + IO (`read`/
+                    `derive`); `chains()` and `rung_scale`/`rung_shrink` are
+                    shared across all three
     SurvivalProcess stack + detector -> the [N, L] columns
     SurvivalTable   the store those columns live in
     Patterns        存活向量 -> one of the six 樣態      PURE
@@ -15,9 +18,9 @@ vectors, with no GPU and no slide.
 """
 
 # NOTHING IS IMPORTED HERE, AND THAT IS THE DECISION, NOT AN OMISSION.
-# `from PointsAnalysisByMpp import Patterns` already works -- Python imports the
+# `from SurvivalAnalysis import Patterns` already works -- Python imports the
 # submodule -- so an `__init__` that re-exported the five would add nothing
-# except a cost: it would make importing `Patterns` also import `MppStack` and
+# except a cost: it would make importing `Patterns` also import `ChainStack` and
 # `SurvivalTable`, and with them safetensors, `PreTileStore` and `TileSampler`.
 # The two pure modules would stop being cheap to import, which is the property
 # that lets their tests run on a login node in a second with no GPU and no

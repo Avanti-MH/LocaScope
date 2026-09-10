@@ -132,7 +132,7 @@ coverage-weighted mean。我們這邊的欄位就叫 `mean_prob`，選項就叫
 偵測到點」和「這個像素是 0，因為根本沒有 homography 看得到它」。這兩件事在
 tile 邊緣附近完全不同，而且錯了不會有人報錯。
 
-### 3.2 Stage B — 存亡分析（`PointsAnalysisByMpp/`）
+### 3.2 Stage B — 存亡分析（`SurvivalAnalysis/`）
 
 #### 詞彙表——這一節用到的每一個名詞
 
@@ -239,10 +239,11 @@ tile 邊緣附近完全不同，而且錯了不會有人報錯。
 | **誘餌**（decoy） | 把點集整體平移超過 `tau` 之後再算一次同樣的數字。任何比例都要贏過它才算數（第 1 節） |
 | **閾值敏感度** | 換一個偵測閾值重算，看結論移動多少。**「只在一階」對它最敏感**：那一類要求兩側都死，是兩個否定判斷 |
 
-#### 兩個軸，兩個 process，一張表
+#### 三個軸，一張表
 
-中心固定之後，`footprint_l0 = tile * ds` 這條式子還剩一個自由度。
-`TileSampler` 已經把兩種取法命名了，而且 `stack_kind` 進了 identity：
+中心固定之後，`footprint_l0 = tile * ds` 這條式子還剩一個自由度。'F' 和 'R' 兩種
+取法 `TileSampler` 已經命名了，而且 `stack_kind` 進了 identity；'C' 是設計上的
+第三種取法，切法定案（沿用 `PatchGrid`），還沒實作進 `TileSampler`：
 
 ```
 stack_kind = 'R'   resolution stack   footprint 固定 tile 個 level-0 px，
@@ -251,15 +252,18 @@ stack_kind = 'R'   resolution stack   footprint 固定 tile 個 level-0 px，
 stack_kind = 'F'   FoV stack          tile 像素數固定，footprint 隨 ds 變大。
                                       讀該階自己的金字塔層。ds 32 的 tile 包含
                                       ds 1 的 tile：同樣像素數、更多組織、細節更粗。
+stack_kind = 'C'   composite stack    footprint 隨 ds 變大（同 'F'），但每一階不是
+                                      獨立重讀 WSI 一次，是往下鋪滿真正抽出來的
+                                      子嗣 tile。見「第三個軸：C」一節。
 ```
 
 三個層次要分得開，因為它們是三種東西：
 
-| 層次 | R 軸 | F 軸 |
-|---|---|---|
-| **操作**（process） | `resolution survival process` | `FoV survival process` |
-| **產物** | `SurvivalTable`，欄位 `stack_kind='R'` | 同一張表，`stack_kind='F'` |
-| **問題** | 這個角點禁不禁得起失去細節 | 這個角點禁不禁得起被縮小 |
+| 層次 | R 軸 | F 軸 | C 軸 |
+|---|---|---|---|
+| **操作**（process） | `resolution survival process` | `FoV survival process` | 未命名——`SurvivalProcess.run` 本身不用改，要多的是子嗣格的抽取與覆蓋率確認 |
+| **產物** | `SurvivalTable`，欄位 `stack_kind='R'` | 同一張表，`stack_kind='F'` | 同一張表，`stack_kind='C'`；相依型另需比對 overlap/main 格的欄位，見「第三個軸：C」 |
+| **問題** | 這個角點禁不禁得起失去細節 | 這個角點禁不禁得起被縮小 | 這個角點在粗階 tile 裡的位置，有沒有真的被細階看過 |
 
 **產物是一張表不是兩張。** `stack_kind` 本來就是欄位而且在 identity 裡；拆成兩張
 會讓「同一個點在兩個軸上的行為」變成要 join 才看得到的東西。而**不說是哪個軸的
@@ -309,6 +313,36 @@ footprint 內有定義**——那是所有 rung 的交集。這個限制寫進 `
 docstring，不是留給讀者推。
 
 **'R' 沒有這個代價**：每一階的 footprint 都是 `tile` 個 level-0 px，交集就是整張。
+
+#### 第三個軸：C（子嗣／組合 stack）
+
+**子嗣**（descendant tile）：'C' 軸底下，rung `j-1` 上落在 rung `j` 某張 tile 地理
+範圍**內部**、真正被獨立抽出來的 tile。往下遞迴到最細的 rung，整組稱為一個
+**金字塔**：最上面是被抽到的母 tile，每一層都是上一層的子嗣。
+
+跟 'F' 的差別：'F' 是「同一個中心，每一階各自獨立讀一張」；'C' 是「同一塊範圍，
+往下鋪滿好幾張」。跟 'R' 的差別：'C' 的每一階都是真的從 WSI 讀出來的像素（跟
+'F' 一樣），不是靠模糊化推出來的（'R' 才是）。
+
+**為什麼要它。** 'F' 底下，存亡只在最細那階的 footprint 內有定義（見上「co-registered
+stack 的定義」段落）——中心固定、細階 footprint 遠小於粗階，粗階 tile 裡大部分位置的
+anchor 根本沒有被任何細階 tile 讀過，探測時 `dist` 永遠是 `NONE`（`SurvivalProcess.py`
+`run()`：每一階只對那一階自己的 `detections[ds]` 探測，206-259 行）。'C' 用真正
+鋪滿粗階範圍的細階 tile，取代那一張置中的小 tile，讓粗階 tile 裡任何位置的 anchor
+都有機會被某張真的細階 tile 探測到。
+
+**子嗣格子的切法：沿用 `PatchGrid`，不是新排列。** `utilities/PatchingLib.py:79`
+的 `PatchGrid.from_size(..., overlap=True)` 已經回答「怎麼切」這件事：main grid
+是精確不重疊的整格，overlap grid 是內角格——每個 overlap 格跟周圍 4 個 main 格
+各共用 1/4 面積（`PatchingLib.py:250-263`：overlap 格的起點是 main 格起點加
+`tile_size // 2`，所以四個角落分別落進四個相鄰 main 格的四分之一）。'C' 軸的
+子嗣就是這個 main + overlap 混合格，不是精確不重疊的 2x2 密鋪。
+
+**相依型 keypoint**：一個 overlap 格跟它角落的 main 格共用同一塊 1/4 面積的
+地理範圍；那塊範圍裡的同一個位置，如果在兩張 tile（同一階、同解析度，只有
+周圍框住的組織不同）各自跑 detector 之後只有一邊測到，這個點叫**相依型**——
+它的死活跟「從哪一張 tile 的哪個框看它」有關，不是它自己的性質。兩邊都測到
+或兩邊都沒測到，不算相依型。
 
 #### sub-tile 的對應是精確的，但「看起來的大小」不是
 
@@ -394,6 +428,56 @@ head    -> 84
 **而 `max_keypoints` 在存亡分析時必須關掉。** 上限製造全域競爭：一個點掉出前 N
 名看起來就像被上下文殺死，但那是我們自己訂的名額。它會偽裝成 (ii) 而且無法從表
 裡分辨。
+
+#### 建錨點：合併半徑，跟「配對」用的 tau 是兩個不同的判準
+
+「配對」（下一節）問的是：一個已經固定下來的錨點，在某一階有沒有偵測到跟它
+一致的點——用 tau，讀資料的時候才問。這一節問的是更早的問題：**在錨點清單本
+身還沒定案之前**，兩筆原始偵測（可能來自不同階）算不算同一個實體，要不要合
+併成一個錨點——用合併半徑，`anchors_of`/`anchors_of_generations` 建清單的時候
+就要決定，決定完之後錨點座標就固定了，之後每次 tau 掃描都不會重跑這一步
+（`SurvivalProcess.py` `anchors_of` docstring）。
+
+**同一個點的定義**（`_merge_within_radius` 的 `rung_id`/`rung_scale` 模式，
+2026-09-11）：
+
+| | 判準 |
+|---|---|
+| 同一階（`rung_id` 相同） | **永遠不是同一個點**，不管距離多近——那一階自己的 NMS 早就把它自己的存活點彼此分開了 |
+| 不同階 | 是同一個點，僅當 level-0 距離 <= `base + max(scale_i, scale_j) // 2` |
+
+`base` 是合併半徑的下限；`max(scale_i, scale_j) // 2`（floor，因為 level-0 座標
+是整數像素）是**較粗那一階自己的降採樣量化半寬**——`cv2.INTER_AREA`
+（`ChainStack.py:153`）是區塊平均降採樣，rung=ds 的一個輸出像素代表 level-0 上
+一整塊 `ds x ds` 的平均，所以那個峰值真正對應的次像素位置，天生就有 `±ds/2`
+量級的不確定。
+
+**F/C 軸：`base = 0`。** 兩階報告同一個特徵，唯一系統性的差異來源就是較粗那階
+自己的降採樣量化——量化項已經把它吃掉了，`base` 不用再加任何東西。不能設成
+單一固定半徑（舊做法）：那樣在最細那階可能誤合併兩個貨真價實的相異點（同階
+NMS 保證的間隔在 ds=1 時剛好等於舊半徑，沒有安全邊際），在粗階又可能漏合併
+真正的重複點（固定半徑通常遠小於粗階自己的量化半寬）。
+
+**R 軸：`base = net.cfg.nms_radius`（不是 0），且 `rung_scale` 恆為 1.0。** R 軸
+的每一階都是同一張基底圖做 `degrade_resolution`（模糊化再降採樣升採樣回同解
+析度），footprint 跟座標尺度永遠不變（`ChainStack.rung_scale('R', ds) == 1.0`，
+所有階都一樣）——`order` 裡的數字只是退化程度的標籤，不是真的縮放倍率，套用
+上面的量化公式沒有物理意義。所以量化項固定收斂成 0（`rung_scale=lambda ds:
+1.0`，標籤仍然彼此不同、同階排除規則照常運作），R 軸兩階偵測到同一個特徵的
+位置差異，全部要靠 `base` 承接——這裡量的是 `degrade_resolution` 本身的模糊造
+成的峰值飄移，跟降採樣量化是兩個不同的物理機制。R 軸的初始（未退化）圖可能
+來自 WSI 任意一個真實金字塔階，其他 R 階只是相對這張初始圖退化多少，不是相
+對 level-0 退化多少。
+
+**C 軸多一層：Step A/B 用另一個獨立的半徑，`tile_merge_radius`（同 ds、跨 tile
+的合併，不是跨階）。** main tile 彼此不重疊，各自排除自己的 `border` 邊界
+（`KeypointLabelStore.py`），所以兩張 main tile 幾乎不可能各自獨立偵測到同一
+個近邊界特徵；真正會遇到的是 overlap tile（專門蓋住 main tile 的 `border` 死角，
+跟每個相鄰 main tile 共用 1/4 面積）跟 main tile 的重複偵測，位置差異來源是
+**裁切邊界/感受野截斷造成的峰值飄移**，跟降採樣量化無關，維持 `net.cfg.
+nms_radius`（`anchors_of_generations` 的 `tile_merge_radius` 參數，預設值不變）。
+跨世代（跨 ds）才用上面「同一個點的定義」那條新公式（`cross_rung_base` 參數，
+預設 0）。
 
 #### 配對
 
@@ -494,7 +578,7 @@ tau(d_fine, d_coarse) = max(tau_floor_um / mpp_0, alpha * d_coarse)
 算一次同樣的比例。** 真效應要贏過誘餌。這和 repeatability 的 decoy 是同一個手法
 （第 1 節：每個判準都是勝過誘餌，不是超過某個絕對值）。
 
-#### 一個免費的檢查，寫 `MppStack` 時第一個寫
+#### 一個免費的檢查，寫 `FStack`/`RStack` 時第一個寫
 
 **ds=1 的時候 'F' 和 'R' 是同一張圖。** 所以 'R' 在 ds=1 的偵測結果和 'F' 在 ds=1
 的必須**逐點完全一致**。
@@ -541,8 +625,8 @@ j 屬於 {+1, +2, +3}，可選加上 {-1, -2}
 
 **那個比例是 Stage B 量的，不是 Stage C**（3.2 節「六種存活樣態」）。六種裡五種
 是連續帶、一種不是，而其中一種——**晚生型**（`j_lo` 在中間、`j_hi` 在最粗）——是
-「只有縮小才看得見的大結構」，也就是這個頭最有機會學到東西的地方。若晚生型的比例
-接近零，這個頭沒有東西可學，而那是 Stage B 就該發現的事，不是訓練完才發現。
+「只有縮小才看得見的大結構」。訓練目標要選哪一種樣態不是 spec 要回答的問題，見
+`plan.md` 2.4。
 
 而閃爍要先扣掉閾值抖動造成的那一半再報（3.2 節噪音 B），否則「不是連續帶」的比例
 會被高估，把一個可以簡化的頭判成不能簡化。
@@ -615,8 +699,8 @@ training/SuperPathPoint/
     Datasets.py                # WsiTileDataset / HomographyPairDataset
     HomographicAdaptation.py   # label 產生器
     Trainer.py
-  PointsAnalysisByMpp/         # Stage B
-    MppStack.py                # co-registered stack 的取樣與讀取
+  SurvivalAnalysis/         # Stage B
+    ChainStack.py              # FStack/RStack/CStack 三個 class，各自幾何+IO 分開
     SurvivalTable.py           # 配對、落表
   SemanticPoints/              # Stage C
     ResolutionHead.py
@@ -929,9 +1013,9 @@ class KeypointOutput:
 
 | 要的東西 | 現成的 |
 |---|---|
-| 名字 -> config 類別 | `@register(name)`（`:359`）、`config_from(name, **over)`（`:378`）、`registered()`（`:374`） |
-| config -> 物件 | `ModelConfig.build()`（`:308`），`source='local'` 吃 `'package.module:Class'` |
-| 「這個模型是什麼」的短 id | `IdentifiedBuild.identity_id()`（`:253`）、`identity_json()`（`:262`） |
+| 名字 -> config 類別 | `@register(name)`（`:360`）、`config_from(name, **over)`（`:379`）、`registered()`（`:375`） |
+| config -> 物件 | `ModelConfig.build()`（`:309`），`source='local'` 吃 `'package.module:Class'` |
+| 「這個模型是什麼」的短 id | `IdentifiedBuild.identity_id()`（`:254`）、`identity_json()`（`:263`） |
 | 哪些欄位不進雜湊 | `NOT_IDENTITY`（`batch_size` 那類） |
 
 範本是 `aiNNModel/TileEncoderFunc.py:1111` 開始那段「choosing an implementation
@@ -1033,8 +1117,10 @@ class DsLadder(IdentifiedConfig):
 `finer_level_for_downsample`。**這是新寫的，不是重用**，寫的時候把上面這段理由
 放進 docstring，否則下一個人會以為漏用了現成的東西。
 
-**`MppStack`** — co-registered stack 的取樣與讀取（Stage B）。`TileSampler` 各
-level 獨立取樣，沒有東西在做「同一個 level-0 中心、每階各一張」。
+**`ChainStack`** — Stage B 的三個軸（`FStack`/`RStack`/`CStack`）。`FStack`/
+`RStack` 是 co-registered stack 的取樣與讀取，同一個 level-0 中心、每階各一張；
+`CStack` 是子嗣金字塔的純幾何，每階很多張，見「第三個軸：C」一節。`TileSampler`
+各 level 獨立取樣，沒有東西在做「同一個中心跨階對齊」這件事，才需要這個模組。
 
 **`WsiTileDataset` / `HomographyPairDataset`** — 前者一個 rung 的 tile + 它的 HA
 label；後者把前者包起來，每次吐 `(img, warp(img, H), H, valid_mask)` 給
@@ -1194,19 +1280,25 @@ warp 與各自的偵測 / 累積的 `mean_prob` / `counts` 圖 / 最後 top-M �
 
 #### 片子
 
-3 片 HE + 3 片 Ki67，取自這個 repo 其他地方已經在用的那一組：
+**12 片，不是最初的 6 片。** 原始計畫是 3 片 HE + 3 片 Ki67，取自這個 repo 其他
+地方已經在用的那一組；`jobscripts/SuperPathPointJobs/BuildMaskStore.sh:74-112`
+把它擴到 12 片，每次新增都回答一件原本六片答不出來的問題：
 
-| 資料集 | 片 |
-|---|---|
-| BRACS（HE, SVS） | `BRACS_1228`、`BRACS_1476`、`BRACS_1936` |
-| Ki67（MRXS） | `S1104233`、`S1104360`、`S1151088` |
+| 資料集 | 片 | 新增理由 |
+|---|---|---|
+| BRACS（HE, SVS） | `BRACS_1228`、`BRACS_1476`、`BRACS_1936` | 最初的三片 |
+| ↑ 新增 | `BRACS_1579`（Group_BT） | 原本完全沒有 Group_BT——Type_N 是正常組織，架構上離 ADH/FEA/DCIS 最遠，而 keypoint 存活問的正是架構 |
+| ↑ 新增 | `BRACS_1284`（Type_IC） | 測試集裡最大的類型，invasive carcinoma 跟另外四型都不一樣 |
+| Ki67（MRXS） | `S1104233`、`S1104360`、`S1151088` | 最初的三片，都是掃描批次 110208 |
+| ↑ 新增 | `S1103520`（110126）、`S1140701`（111018） | 原本三片只有兩個掃描批次；scanner/batch drift 幾乎沒被抽到 |
 
-Ki67 現有四片，這裡要三片。**捨棄 `S1137178`**，理由是它是目前僅知的兩片有掃描
-空洞的玻片之一（`log/TODO.log` 2026-08-22 那條）。空洞在 `read_region_rgb` 之下
-會被填成背景色，形成一塊高對比的人工邊界——對 keypoint detector 而言那是完美的
-角點，會產生大量高分假點，而且看起來很像模型學會了。這是刻意的取捨，不是隨手挑：
-空洞是真實存在的，之後要處理它就用 `SafeSlide.read_region_valid`（`:386`）拿有效
-遮罩，把無效區當 HA 的 invalid 一起遮掉。那是另一次的事。
+Ki67 現有四片以上，這裡挑的都排除 `S1137178`——它是目前僅知的兩片有掃描空洞的
+玻片之一（`log/TODO.log` 2026-08-22 那條，另一片是 `S1103037`，見 `log/TODO.log:2373`）。
+空洞在 `read_region_rgb` 之下會被填成背景色，形成一塊高對比的人工邊界——對
+keypoint detector 而言那是完美的角點，會產生大量高分假點，而且看起來很像模型
+學會了。這是刻意的取捨，不是隨手挑：空洞是真實存在的，之後要處理它就用
+`SafeSlide.read_region_valid`（`:386`）拿有效遮罩，把無效區當 HA 的 invalid 一起
+遮掉。那是另一次的事。
 
 #### 階梯：按 ds 取樣，不按 native level
 
@@ -1238,9 +1330,10 @@ ladder = (1, 2, 4, 8, 16, 32)
 在 2x 金字塔是 x2，兩個資料集問的不是同一個問題——相對階梯的整個好處就沒了
 （見 3.3）。
 
-#### `tile_size` 三種，`tissue_ratio` 0.75，而這張表不是矩形
+#### `tile_size` 三種，而這張表不是矩形
 
-`tile_size` 用 256 / 512 / 1024 三種，`tissue_ratio` 取 0.75。
+`tile_size` 用 256 / 512 / 1024 三種。（`tissue_ratio` 後來整個退役，見下「`tissue_ratio`
+同一天退役」一節——這裡的表格只是量 footprint 的牆，跟 `tissue_ratio` 取哪個值無關。）
 
 **`tile_size` 和 `ds` 是相乘的。** mask 要容納的是 level-0 footprint =
 `tile_size * ds`，而這正是 `TileSampler._sample_level` 的拒絕取樣在檢查的東西。
@@ -1411,9 +1504,8 @@ floors <= caps        逐元素
 `n_goal = min(supply_b / target_b)`：混合比例準，張數少。v1 用 `'ask'`。
 
 **這些值寫在程式碼的 `RichnessConfig` 預設裡，jobscript 只把它印出來當表頭。**
-`ExtractPreTiles.sh` 已經沒有 `TISSUE_RATIO` 這個變數，`--tissue-ratio` 被
-`ap.error` 指名拒收；`TrainSuperPathPoint.sh` 的 `BALANCE=none` 帶著上一節第二張表
-當理由。
+`ExtractPreTiles.sh`/`extract_pretiles.py` 都沒有 `tissue_ratio` 這個參數；
+`TrainSuperPathPoint.sh` 的 `BALANCE=none` 帶著上一節第二張表當理由。
 
 `tissue_ratio` 這個名字在別處還活著，而那些是別的東西：
 `TissuesRegionsMask.has_tissue(...)` 是一個對矩形的述詞（`query_sim` 的 Camera 用
@@ -1461,10 +1553,18 @@ label 有 4.6% 的面積是被侵蝕掉的，`model_1024` 只有 1.2%。比較�
 
 #### 切分：按片，不按 tile
 
+12 片版的切分（`BuildMaskStore.sh:77`「五片一種染色進 train，兩片外加一片一種染色
+held out」）：
+
 | 用途 | 片 |
 |---|---|
-| train | `BRACS_1228`、`BRACS_1476`、`S1104233`、`S1104360` |
-| held-out | `BRACS_1936`、`S1151088` |
+| train（10） | `BRACS_1228`、`BRACS_1476`、`BRACS_1936`、`BRACS_1579`、`BRACS_1284`、`S1104233`、`S1104360`、`S1151088`、`S1103520`、`S1140701` |
+| held-out（2） | `BRACS_1598`（seen type）、`S1103627` |
+
+**held-out 換過一次。** 最初 6 片版的 held-out 是 `BRACS_1936`/`S1151088`；擴到 12
+片時這兩片併進 train（湊到五片一種染色），held-out 換成兩片「原本的六片之外」的新
+面孔（`BuildMaskStore.sh:77`）——理由和上面「片子」一節新增那四片一樣：held-out
+也要留新的組織/批次，不能一直用最早選的那兩片。
 
 **held-out 是完全不參與訓練、也不參與任何調參的片子，只在量測時打開。** 它回答的
 是「模型在沒看過的**玻片**上還行不行」。第 1 節的 repeatability 判準都在它上面量。
@@ -1526,17 +1626,21 @@ cfg hash 的理由見 `PreTileStore.PreTileMeta.dirname`：`tissue_ratio`、seed
 | 1024 | 4 | 12000 | 3072 | 113 G px | 340 GB |
 | 合計 | | 45000 | | 159 G px | 477 GB |
 
-**量到了，2026-08-27（第 3c 步跑完）：PNG 是原始的 45.1%。**
+**量到了，2026-08-27（第 3c 步跑完，12 片版）：PNG 是原始的 45.1%。**
 
 | | 張數 | 未壓縮 | 落地 |
 |---|---|---|---|
-| **256（v1，實際）** | **17,784** | 31.5 G | **14.2 GB** |
+| **256（v1，實際）** | **6,388** | 約 12.7 G | **4.4 GB** |
 | 512（按 45.1% 推） | 15000 | 106 G | 約 48 GB |
 | 1024（同上） | 12000 | 340 G | 約 153 GB |
 
-比先前猜的「二十幾 GB」好 —— 玻璃背景大片同色，PNG 吃得很乾淨。三個尺寸全做完
-約 215 GB，`result/cache/` 承受得住（那裡已經有過 60 GB 的 feature store），但
-1024 那一族單獨就 153 GB，不是零頭。
+**這張表原本寫的是 17,784 張 / 14.2 GB，作廢——那是 2026-08-26 六片版、`tissue_ratio=0.5`
++ `align-min` 的算法，量的是拒絕預算而不是候選池（上面「探針跑了兩次」一節）。
+6,388 / 4.4 GB 才是 12 片版、`BALANCE=none` 實際落地的數字，跟「3c 實際切出來的
+語料」一節一致。**512 / 1024 兩列還是按 45.1% 推算的上界，沒有實測，數字本身沒變。
+
+三個尺寸全做完約 205 GB，`result/cache/` 承受得住（那裡已經有過 60 GB 的 feature
+store），但 1024 那一族單獨就 153 GB，不是零頭。
 
 推算用同一個 45.1% 有一個保留：粗階的 tile 組織佔比較低、glass 較多，壓得更兇
 （實測 ds 32 那一格 191 MB / 500 張，ds 4 是 402 MB / 500 張，差一倍）。512 和
@@ -1677,7 +1781,8 @@ valid_mask(shape, H) 在中央 tile x tile 的區域上必須全部為 True
 6.5 那道實測的牆是 footprint = `tile x ds`：8192 可以、16384 是 0/100、32768 連 region
 都放不下。
 
-若 `tissue_ratio` 的檢查套在 **pre-tile** 上，footprint 變成 `2.9 x tile x ds`：
+若豐富度桶（`RichnessConfig`，取代了 `tissue_ratio`，見 6.5）的檢查套在 **pre-tile**
+上，footprint 變成 `2.9 x tile x ds`：
 
 ```
 tile 256 @ ds 32  ->  256 x 2.9 x 32 = 23757     過牆，死
@@ -1688,7 +1793,7 @@ tile 256 的上限   ->  8192 / (256 x 2.9) = ds 11  ->  只剩 rung 1, 2, 4, 8
 
 所以兩件事分開：
 
-- **`tissue_ratio` 套在 tile 的 footprint 上。** 我們訓練的是那個 tile，要求它是組織是對的。
+- **豐富度桶套在 tile 的 footprint 上，不是 pre-tile。** 我們訓練的是那個 tile，要求它是組織是對的。
 - **pre-tile 只是 warp 的上下文**，不需要是組織，只需要讀得到。
 
 這樣可達性表完全不變。代價是：靠近組織邊緣或玻片邊緣的位置，pre-tile 會被裁到，那些 draw
@@ -2021,7 +2126,7 @@ teacher 是 COCO domain 的權重，H&E 是 out-of-domain，label 的品質是�
 | 6 | `KeypointNet` + loss + Trainer，VGG backbone | **`model_256_gray` 與 `model_256_rgb` 兩個 student** | 先把管線跑通，用最小的 backbone。兩個 student 共用同一批 HA label（座標不在乎通道數） |
 | 7 | repeatability bench + 誘餌 | 第 1 節第一、四列的數 | 決定要不要 round 2，以及灰階 / RGB 哪個進下一步 |
 | 8 | `TileEncoderBackbone` + `UpsampleDecoder` | foundation model 那條路 | 類別已經寫好（`SuperPoint/EncoderBackbone.py`，5.3），**還沒接進 `KeypointNet`**：`KeypointNetConfig.backbone` 標的是 `VggBackboneConfig`，而 `wired()` 沒有載權重就算不出 `out_channels`。接法本身是一個決定（`KeypointNet` 收一個建好的 backbone，還是這支帶一張寬度表），留到管線跑通再說。撞得到的六件事先想過一輪，見 13 節「換成 pretrain 在 WSI 的 encoder」 |
-| 9 | Stage B：`MppStack` + `SurvivalTable` | 存亡表 + 連續帶的比例 | 需要一個堪用的 detector 才能開始 |
+| 9 | Stage B：`ChainStack`（`FStack`/`RStack`）+ `SurvivalTable` | 存亡表 + 連續帶的比例 | 需要一個堪用的 detector 才能開始。`CStack` 是後續加的第三軸，不在這一步的範圍 |
 | 10 | Stage C：resolution head | 第 1 節第三列的數 | 需要存亡表 |
 | 11 | `SuperPathPointLocalizer` + `bench_locascope` | 對 SIFT 的比較 | 最終判準 |
 
@@ -2345,37 +2450,9 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 
 完全的未知數。已在第 12 節第 5 步設成決策點。
 
-### 每格實際取得到幾張 tile —— 探針要回答的三件事
-
-第 12 節第 3b 步的探針跑 216 格（2 個 `tissue_ratio` x 3 個 tile_size x 6 個 ds
-x 6 片）。它一次決定三件事，這是它值得先跑的原因：
-
-1. **`tissue_ratio` 取 0.5 還是 0.75。** 0.75 在 ds=14 的 PCA 遮罩上比在舊 log 那種
-   ds=32 的 HSV 遮罩上更難通過，而那個差距沒有量過（6.1 末段）。舊 log 的數字說明
-   機制，不預測我們會拿到幾張。
-2. **rung 平衡用 `align-min` 還是 `loss-weight`。** 最差的格有 300 張就用前者，
-   只有 40 張就得用後者（6.5）。
-3. **`model_512` / `model_1024` 各自剩幾個 rung。** footprint 表說有 3 格先天是空的，
-   但那是 `tissue_ratio=0.5` 的成績；0.75 可能再吃掉幾格。
-
-三件事都不是用挑的。探針的成本是幾秒，而挑錯任何一件的成本是整批重抽。
-
-**2026-08-26 跑完，三件都有答案**（`result/BuildMaskStore/tile_yield.csv`）：
-
-1. **0.5。** 0.75 把 ds 16 / ds 32 壓到 87 / 27 張。表在 6.5。
-2. **`align-min`。** 四片訓練片的最差階有 1784 張，砍齊丟 9%。
-3. **那道牆是分片的，不是一致的**——這是預測沒說中的地方。footprint 16384 與
-   32768 兩格在 BRACS 上滿額，在 Ki67 上塌掉：
-
-   | tile / ds | footprint | BRACS x3 | Ki67 x3 |
-   |---|---|---|---|
-   | 512 / 32、1024 / 16 | 16384 | 500 / 500 / 500 | **0** / 281 / 500 |
-   | 1024 / 32 | 32768 | 500 / 500 / 500 | **0 / 0 / 0** |
-
-   所以 `model_512` 的 ds 32 少一片、`model_1024` 的 ds 32 是 BRACS-only。那不是
-   「這一格沒有資料」，是「這一格只有一種染色的資料」——拿它訓出來的粗階行為會和
-   染色綁在一起，而**沒有任何東西會顯示這件事**。512 / 1024 真的要做的時候，這
-   一格要嘛丟掉，要嘛在結論裡明講。
+**（原本這裡有一節「探針要回答的三件事」，記的是 2026-08-26 六片版探針的答案
+——`tissue_ratio=0.5`、`align-min`。兩者都被 2026-08-27 的十二片版推翻，見 6.5
+「探針跑了兩次，答案相反，而第二次是對的」。刪掉，不留錯的答案在 spec 裡。）**
 
 ---
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=TestSuperPathPoint     # -> log/%x, result/%x/
-#SBATCH --partition=normal2               # Partition
+#SBATCH --partition=normal                # Partition
 #SBATCH --time=01:00:00                   # every stage here is seconds; the WSI
 #SBATCH --account=MST114560               # reads are the only slow part
 #SBATCH --nodes=1                         # Number of nodes
@@ -133,16 +133,21 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #   STAGES=demo sbatch --job-name=TestSuperPathPoint_demo \
 #       jobscripts/TestSuperPathPoint.sh
 
-STAGES="${STAGES:-homography ladder mask sampler store decoder ha student pretrained pretrained-weights reeval survival survival-report backbone backbone-model ladder-wsi demo seg}"
+STAGES="${STAGES:-homography ladder mask sampler store decoder ha student pretrained pretrained-weights reeval chain-stack survival survival-report survival-process alpha-calibration alive-candidates backbone backbone-model ladder-wsi demo seg}"
 
 # Every test this jobscript owns lives in one directory, named after the
 # jobscript that runs them. The two that do NOT are deliberate: their subjects
 # are shared modules, not SuperPathPoint's -- `TissuesRegionsMask` is used by
 # LocaScopePipeline and PatchingLib, and `Uni2PcaSegFunc` is an encoder.
+# `SurvivalAnalysis`'s tests (chain-stack/survival/survival-report) stay HERE
+# even though the package itself was renamed from `PointsAnalysisByMpp`
+# 2026-09-05 -- its only consumer is this jobscript's own pipeline
+# (`build_survival.py`/`report_survival.py`/`inspect_survival.py`), so it does
+# not meet the "shared subject" bar the two exceptions above do.
 TESTS=utilities/test_modules/TestSuperPathPoint
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-KI67=/work/u26130998/datasets/Ki67
+KI67=/work/u26130998/datasets/Ki67_with_photo
 
 # One of each pyramid shape, because that is the whole point of the ladder.
 # Measured in spec.md 6.5: BRACS steps 4x and has four levels (ds 1, 4, 16, 32),
@@ -151,7 +156,7 @@ KI67=/work/u26130998/datasets/Ki67
 # silent failure -- ladder-wsi is where a human sees which level each rung
 # actually resolved to.
 WSI_4X="$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"
-WSI_2X="$KI67/S1104233,G7E,110208.mrxs"
+WSI_2X="$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"
 
 # The demo's tile. ds 4 is native on both pyramids, so the picture is the
 # homography and not a resampling artefact.
@@ -397,6 +402,30 @@ for stage in $STAGES; do
         python "$TESTS"/test_reeval_density.py
       ;;
 
+    chain-stack)
+      # spec.md 3.2's three axes -- `FStack`/`RStack`/`CStack` -- checked
+      # before any real tile is ever extracted (ClaudeRules 8), because
+      # everything downstream (`SurvivalProcess`, tau calibration, the
+      # eventual 相依型 comparison) reads coordinates this module produces.
+      #
+      #   `rung_scale`   level-0 px per output pixel is `ds` on 'F'/'C' and
+      #                  1.0 on 'R'. Using `ds` for R scatters every coarse
+      #                  point `ds` times too far from the centre, the table
+      #                  fills, and the survival numbers become a picture of
+      #                  the bug.
+      #   `CStack`       the reconstruction property (children union == parent,
+      #                  exact integer level-0 px), the overlap's exact 1/4
+      #                  share with each of its 4 mains, 4**k growth, and the
+      #                  refusal on a non-2x step -- none of this was asserted
+      #                  anywhere before 2026-09-05, only hand-verified once
+      #                  in conversation.
+      #
+      # numpy, a temp directory for the local tile cache, and PatchInfo.
+      # Seconds, no GPU, no store, no slide.
+      run "chain-stack  (scale/shrink, the pyramid geometry, the local cache)" \
+        python "$TESTS"/test_chain_stack.py
+      ;;
+
     survival)
       # spec.md 3.2, and it gates Stage B for the same reason `reeval` gates
       # the re-scoring: the two numbers Stage B exists to produce come out of
@@ -410,15 +439,10 @@ for stage in $STAGES; do
       #   `Attribution`   a branch that reads the wrong column still returns a
       #                   label. Every branch here is scored against a decoy
       #                   that must NOT trigger it.
-      #   `rung_scale`    level-0 px per output pixel is `ds` on the F axis and
-      #                   1.0 on the R axis. Using `ds` for R scatters every
-      #                   coarse point `ds` times too far from the centre, the
-      #                   table fills, and the survival numbers become a
-      #                   picture of the bug.
       #
       # numpy and a temp directory. Seconds, no GPU, no store, no slide --
       # which is the property the pure modules exist to have.
-      run "survival  (the six patterns, the four causes, scale vs shrink)" \
+      run "survival  (the six patterns, the four causes)" \
         python "$TESTS"/test_survival.py
       ;;
 
@@ -442,6 +466,72 @@ for stage in $STAGES; do
       # numpy only. Seconds, no GPU, no store, no slide.
       run "survival-report  (the null, the merge, the sweep, the tau curve)" \
         python "$TESTS"/test_survival_report.py
+      ;;
+
+    survival-process)
+      # plan.md 2.2① -- `SurvivalAnalysis/SurvivalProcess.py`'s core, GPU-free
+      # half: the anchor-merge/dedup arithmetic and `nearest_detection`'s
+      # nearest-point pick, which every later number (real or decoy) is built
+      # on. `detect`/`rival_at`/the two `detect_all_*` functions need a real
+      # net and are not covered here.
+      #
+      # numpy only. Seconds, no GPU, no net, no store.
+      run "survival-process  (merge, anchors_of, anchors_of_generations, nearest)" \
+        python "$TESTS"/test_survival_process.py
+      ;;
+
+    alpha-calibration)
+      # plan.md 2.2① -- `SurvivalAnalysis/AlphaCalibration.py`, the alpha
+      # side-quest split out of `SurvivalProcess.py`/`Report.py` so that
+      # neither's own core shape has to carry a decoy or a cross-ChainStack
+      # aggregation it does not otherwise need.
+      #
+      #   `alpha_curve`      tau = max(tau_floor, alpha*ds) crossed at the
+      #                      exact alpha hand arithmetic predicts; `gap` left
+      #                      SIGNED (a decoy beating a real match must show as
+      #                      negative, not be swallowed by an `abs()`)
+      #   `aggregate_curves` `margin` aggregated in LOG space -- a linear mean
+      #                      across ChainStacks would let one ChainStack's
+      #                      near-zero decoy_rate blow the whole bucket's
+      #                      number up past anything the rest report
+      #   `offset_quantiles_of` a NONE row excluded from the quantile, not
+      #                      counted as offset 0
+      #
+      # numpy only. Seconds, no GPU, no net, no store.
+      run "alpha-calibration  (curve, decoy, log-space aggregation)" \
+        python "$TESTS"/test_alpha_calibration.py
+      ;;
+
+    alive-candidates)
+      # AlphaSelectionNotes.md section 14/15 -- five alive[j] algorithms
+      # compared against the production one (`Patterns.alive_from`).
+      # Candidates 1 (probability map, both steps A/C), 2 (scale local
+      # extremum, depends on 1), 3 (exp-decay joint score, already in the
+      # sweep), 4 (two-component Rayleigh mixture) were all written without
+      # ever being run (ClaudeRules 2 -- only py_compile runs directly here)
+      # -- THIS is the first time any of them actually execute. Every check
+      # is hand-constructed synthetic data with a known right answer:
+      #   assemble_generation_map  main-tile stitching is pure placement;
+      #                            overlap union/intersection is max/min at
+      #                            the pixel level, not a set operation
+      #                            anymore; an out-of-bounds tile raises
+      #   probe_via_probability_map  a Gaussian bump found within radius,
+      #                            missed when the window is too small,
+      #                            -inf off the map edge, and bilinear
+      #                            interpolation checked against a planar
+      #                            function's closed-form value (the one
+      #                            case where interpolation has an exact
+      #                            right answer to check against)
+      #   alive_scale_local_extremum  a true peak/dip/edge-rung case each
+      #   alive_exp_decay_joint_score  combined(dist=0)==score exactly, the
+      #                            NONE sentinel still gates
+      #   alive_two_component_mixture  a synthetic two-Rayleigh mixture
+      #                            recovers sigma_genuine < sigma_background
+      #                            and scores a near point above a far one
+      #
+      # numpy only. Seconds, no GPU, no net, no store.
+      run "alive-candidates  (candidates 1/2/3/4 vs production, synthetic data)" \
+        python "$TESTS"/test_alive_candidates.py
       ;;
 
     backbone)

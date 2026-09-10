@@ -45,7 +45,7 @@ from typing import Dict, Sequence
 
 import numpy as np
 
-from PointsAnalysisByMpp.Patterns import EMPTY, PATTERNS, classify
+from SurvivalAnalysis.Patterns import EMPTY, PATTERNS, classify
 
 
 def null_patterns(alive_rate: Sequence[float]) -> Dict[str, float]:
@@ -86,8 +86,9 @@ def alive_rate_of(alive_rows: np.ndarray) -> np.ndarray:
     the null is then asked to model.
     """
     rows = np.asarray(alive_rows, dtype=bool)
+    n_rungs = rows.shape[1] if rows.ndim == 2 else 0
     if not len(rows):
-        return np.zeros(0, np.float64)
+        return np.zeros(n_rungs, np.float64)
     return rows.mean(axis=0).astype(np.float64)
 
 

@@ -17,9 +17,12 @@ Sections:
   patterns     the six 樣態, every one by hand, plus the boundaries between them
   alive        `alive` is derived from score and dist, and both cuts bite
   attribution  the four causes, each against a decoy that must NOT get it
-  scale        `rung_scale` vs `rung_shrink` -- two quantities, equal on 'F'
   table        the store round-trips, and refuses a rung count that disagrees
-  degrade      the 'R' degradation is the one in TileSampler, not a copy
+
+`ChainStack` (`rung_scale`/`rung_shrink`, the 'R' degradation) has its own
+test file now -- `test_chain_stack.py` -- because it is tested with no store
+and no GPU either, the same reason `Patterns`/`Attribution` are here and not
+folded into a file that needs a slide. Moved 2026-09-05, not deleted.
 """
 
 from __future__ import annotations
@@ -39,9 +42,7 @@ setup_import_paths()
 
 import numpy as np                                           # noqa: E402
 
-from TileSampler import degrade_resolution                   # noqa: E402
-from PointsAnalysisByMpp import Attribution, MppStack        # noqa: E402
-from PointsAnalysisByMpp import Patterns, SurvivalTable      # noqa: E402
+from SurvivalAnalysis import Attribution, Patterns, SurvivalTable  # noqa: E402
 
 _RESULTS = []
 
@@ -313,32 +314,7 @@ def t_the_summary_carries_the_denominator():
             'as a statement about all points unless the rest is beside it')
 
 
-# ── 4. scale vs shrink ───────────────────────────────────────────────────────
-
-def t_scale_and_shrink_agree_on_F_and_disagree_on_R():
-    """The two quantities that are both `ds` on one axis and are not the same.
-
-    `rung_scale` is level-0 px per output PIXEL -- the mapping. `rung_shrink`
-    is how far a position can be off -- the tolerance. On 'F' both are `ds`; on
-    'R' the mapping is 1.0 (the frame never moves) while the tolerance is still
-    `ds` (the image was degraded). Using `ds` as the 'R' mapping scatters every
-    coarse point `ds` times too far and the table still fills.
-    """
-    for ds in (1.0, 4.0, 32.0):
-        if MppStack.rung_scale(ds, 'F') != ds:
-            raise AssertionError(f"F scale at ds {ds} is not ds")
-        if MppStack.rung_shrink(ds, 'F') != ds:
-            raise AssertionError(f"F shrink at ds {ds} is not ds")
-        if MppStack.rung_scale(ds, 'R') != 1.0:
-            raise AssertionError(
-                f"R scale at ds {ds} came back "
-                f"{MppStack.rung_scale(ds, 'R')}, not 1.0")
-        if MppStack.rung_shrink(ds, 'R') != ds:
-            raise AssertionError(f"R shrink at ds {ds} is not ds")
-    return "F: scale == shrink == ds.  R: scale 1.0, shrink ds"
-
-
-# ── 5. the store ─────────────────────────────────────────────────────────────
+# ── 4. the store ─────────────────────────────────────────────────────────────
 
 def _batch(n=5, length=6):
     rng = np.random.default_rng(0)
@@ -423,36 +399,6 @@ def t_tau_grows_with_the_rung_and_never_collapses():
     return f'tau {tau[0]:.1f} .. {tau[-1]:.1f} level-0 px'
 
 
-# ── 6. the degradation is shared ─────────────────────────────────────────────
-
-def t_the_r_degradation_loses_detail_and_keeps_the_frame():
-    """'R' at ds d: same size out, `tile/d` real samples in it.
-
-    Checked against a decoy that would pass a shape assertion: an image that
-    was resized and resized back with the SAME filter both ways keeps more
-    high-frequency content than the INTER_AREA/INTER_LINEAR pair, so a
-    'degradation' that lost nothing would show up here as a variance that did
-    not drop.
-    """
-    rng = np.random.default_rng(0)
-    img = rng.integers(0, 256, (256, 256, 3), dtype=np.uint8)
-    out = degrade_resolution(img, 8.0, 256)
-    if out.shape != img.shape:
-        raise AssertionError(f'{out.shape} != {img.shape}; the frame moved')
-    before = float(np.var(np.diff(img[..., 0].astype(np.float32), axis=1)))
-    after = float(np.var(np.diff(out[..., 0].astype(np.float32), axis=1)))
-    if after >= before * 0.25:
-        raise AssertionError(
-            f'horizontal detail variance {before:.0f} -> {after:.0f}; a ds 8 '
-            f'degradation should remove most of it')
-    same = degrade_resolution(img, 1.0, 256)
-    if not np.array_equal(same, img):
-        raise AssertionError(
-            'ds 1 changed the image. ds 1 is the identity on both axes, and '
-            'that is the assertion the whole F/R comparison rests on')
-    return f'detail variance {before:.0f} -> {after:.0f}, ds 1 is exact'
-
-
 _SECTIONS = {
     'patterns':    ['t_the_six_patterns_by_hand',
                     't_width_one_at_the_coarsest_end_is_not_late_born',
@@ -468,12 +414,10 @@ _SECTIONS = {
                     't_a_released_suppressor_is_the_other_neighbourhood_branch',
                     't_nothing_that_fits_is_undecided_and_not_silently_bucketed',
                     't_the_summary_carries_the_denominator'],
-    'scale':       ['t_scale_and_shrink_agree_on_F_and_disagree_on_R'],
     'table':       ['t_the_store_round_trips_and_keeps_the_rung_order',
                     't_a_column_count_that_disagrees_with_the_rungs_is_refused',
                     't_an_unnamed_axis_is_refused',
                     't_tau_grows_with_the_rung_and_never_collapses'],
-    'degrade':     ['t_the_r_degradation_loses_detail_and_keeps_the_frame'],
 }
 
 

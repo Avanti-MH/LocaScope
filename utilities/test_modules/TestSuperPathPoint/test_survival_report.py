@@ -40,9 +40,9 @@ setup_import_paths()
 
 import numpy as np                                           # noqa: E402
 
-from PointsAnalysisByMpp import NullModel, Report            # noqa: E402
-from PointsAnalysisByMpp.Patterns import EMPTY, PATTERNS     # noqa: E402
-from PointsAnalysisByMpp.SurvivalTable import (SurvivalBatch,  # noqa: E402
+from SurvivalAnalysis import NullModel, Report            # noqa: E402
+from SurvivalAnalysis.Patterns import EMPTY, PATTERNS     # noqa: E402
+from SurvivalAnalysis.SurvivalTable import (SurvivalBatch,  # noqa: E402
                                                SurvivalMeta)
 
 _RESULTS = []
@@ -348,7 +348,7 @@ def t_the_nearest_detection_has_no_window_in_it():
     this is the assertion that it stays that way: the same points, queried from
     the same place, must give the same distance whatever else is in the tile.
     """
-    from PointsAnalysisByMpp.SurvivalProcess import nearest_detection
+    from SurvivalAnalysis.SurvivalProcess import nearest_detection
 
     points = np.array([[10.0, 0.0], [200.0, 0.0]])
     score = np.array([0.2, 0.9])

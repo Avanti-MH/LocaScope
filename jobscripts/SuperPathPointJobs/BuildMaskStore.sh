@@ -69,7 +69,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # this run puts on disk so the question can be asked properly.
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-KI67=/work/u26130998/datasets/Ki67
+KI67=/work/u26130998/datasets/Ki67_with_photo
 
 # The six slides of spec.md 6.5. Four train, two held out -- but the mask store
 # does not know or care which is which: a mask is a property of the slide, and
@@ -102,13 +102,13 @@ SLIDES=(
   "$BRACS/Group_AT/Type_FEA/BRACS_1936.svs"      # train
   "$BRACS/Group_BT/Type_N/BRACS_1579.svs"        # train  (new: Group_BT)
   "$BRACS/Group_MT/Type_IC/BRACS_1284.svs"       # train  (new: Type_IC)
-  "$KI67/S1104233,G7E,110208.mrxs"               # train
-  "$KI67/S1104360,G7E,110208.mrxs"               # train
-  "$KI67/S1151088,G7E,111220.mrxs"               # train
-  "$KI67/S1103520,G7E,110126.mrxs"               # train  (new: earliest batch)
-  "$KI67/S1140701,G7E,111018.mrxs"               # train  (new: middle batch)
+  "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"               # train
+  "$KI67/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs"               # train
+  "$KI67/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs"               # train
+  "$KI67/S1103520_G7E_110126_mrxs/S1103520,G7E,110126.mrxs"               # train  (new: earliest batch)
+  "$KI67/S1140701_G7E_111018_mrxs/S1140701,G7E,111018.mrxs"               # train  (new: middle batch)
   "$BRACS/Group_BT/Type_N/BRACS_1598.svs"        # HELD OUT  (seen type)
-  "$KI67/S1103627,G7E,110127.mrxs"               # HELD OUT
+  "$KI67/S1103627_G7E_110127_mrxs/S1103627,G7E,110127.mrxs"               # HELD OUT
 )
 
 # The config default, unlike InspectPcaSeg's 200. That run only had to answer a
