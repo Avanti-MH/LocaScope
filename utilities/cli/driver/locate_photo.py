@@ -38,12 +38,12 @@ photo failed.
 
 Usage:
     # one photo
-    python utilities/cli/locate_photo.py \\
+    python utilities/cli/driver/locate_photo.py \\
         /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/1.bmp \\
         /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs
 
     # every photo of one slide
-    python utilities/cli/locate_photo.py \\
+    python utilities/cli/driver/locate_photo.py \\
         /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67 \\
         /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs \\
         --out result/RealTest/S1104360_ki67
@@ -69,7 +69,7 @@ import matplotlib.patches as mpatches
 from PIL import Image
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
+_ROOT = _HERE.parent.parent.parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_ROOT / 'utilities'))
 from _paths import encoder_tag, job_result_dir                      # noqa: E402

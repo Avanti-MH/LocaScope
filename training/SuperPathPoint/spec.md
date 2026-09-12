@@ -2468,8 +2468,8 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 | # | 檔案 | 做什麼 |
 |---|---|---|
 | 1 | `utilities/MaskStore.py` | `SlideMask` + 落地格式 + `build_one(wsi, segmenter)`。遮罩之外還存 `components` |
-| 2 | `utilities/cli/build_mask_store.py` | 對 6 片跑分割器、寫 store |
-| 3 | `utilities/cli/probe_tile_yield.py` | 3b 探針，`(片, ratio, tile, ds)` 216 格 |
+| 2 | `utilities/cli/build_cache/build_mask_store.py` | 對 6 片跑分割器、寫 store |
+| 3 | `utilities/cli/diagnostics/probe_tile_yield.py` | 3b 探針，`(片, ratio, tile, ds)` 216 格 |
 | 4 | `training/SuperPathPoint/common/PreTileStore.py` | pre-tile 的落地格式與索引 |
 | 5 | `training/SuperPathPoint/cli/extract_pretiles.py` | 3c 抽取 |
 
@@ -2478,7 +2478,7 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 分割器無關——存 hsv 或 hest 的遮罩用同一個。
 
 第 2 支薄到只剩 argparse、迴圈、印進度；建構邏輯在 `MaskStore.build_one`。`FeatureStore`
-與 `cli/build_reference_store.py` 是同一個分法，而 CLAUDE.md 說庫層不放 CLI 解析與 print。
+與 `utilities/cli/build_cache/build_reference_store.py` 是同一個分法，而 CLAUDE.md 說庫層不放 CLI 解析與 print。
 
 **每個遮罩檔存兩個 tensor**：`mask`（一片一個 bit / cell）與 `components`
 （`[rows, cols, k]` float16，581-814 MB）。理由在 §13 的 `background_threshold`：

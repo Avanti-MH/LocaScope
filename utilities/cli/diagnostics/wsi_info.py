@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Usage:
-    python wsi_info.py <wsi_path>
+    python utilities/cli/diagnostics/wsi_info.py <wsi_path>
 """
 
 import argparse

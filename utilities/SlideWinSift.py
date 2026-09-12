@@ -70,7 +70,7 @@ from SafeSlide import SafeSlide
 # The one exception to the dependency list above. is_invertible lives with the
 # other RANSAC caller, and reaching it pulls 3_localization -> 2_retrieval ->
 # torch and the encoder config into this file. Taken deliberately: this module
-# has exactly one importer, cli/slide_win_sift.py:80, and it is the brute-force
+# has exactly one importer, cli/driver/slide_win_sift.py:80, and it is the brute-force
 # baseline rather than anything the pipeline runs, so the import cost buys
 # convenience at no risk to production. 3_localization is not on sys.path when
 # that CLI loads us -- it inserts utilities/ only -- so put it there here.

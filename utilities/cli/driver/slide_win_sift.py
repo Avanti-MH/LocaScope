@@ -33,20 +33,20 @@ dropped. Passing the folder is therefore the correct thing to do, not a shortcut
 
 Usage:
     # does it work, against query_sim ground truth
-    python utilities/cli/slide_win_sift.py \\
+    python utilities/cli/driver/slide_win_sift.py \\
         result/MultiBatch1440/images \\
         /path/to/BRACS_1228.svs \\
         --gt-csv result/MultiBatch1440/gt.csv --level 0 --limit 3
 
     # how fast -- same thing, capped at 300 windows
-    python utilities/cli/slide_win_sift.py \\
+    python utilities/cli/driver/slide_win_sift.py \\
         result/MultiBatch1440/images \\
         /path/to/BRACS_1228.svs \\
         --gt-csv result/MultiBatch1440/gt.csv --level 0 --limit 1 \\
         --max-windows 300
 
     # no ground truth: one photo, one slide, draw the best 5 and look
-    python utilities/cli/slide_win_sift.py \\
+    python utilities/cli/driver/slide_win_sift.py \\
         /work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037_ki67/1.bmp \\
         "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs"
 
@@ -73,7 +73,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
+_ROOT = _HERE.parent.parent.parent
 sys.path.insert(0, str(_ROOT / 'utilities'))
 from _paths import job_result_dir                                   # noqa: E402
 

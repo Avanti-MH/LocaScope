@@ -1228,7 +1228,7 @@ def main() -> int:
         slide.close()
 
     print('\ndone. inspect with:')
-    print(f'  python utilities/cli/inspect_feature_store.py {out_root}/*.safetensors')
+    print(f'  python utilities/cli/inspect_cache_store/inspect_feature_store.py {out_root}/*.safetensors')
     return 0
 
 

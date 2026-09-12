@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which side of PC1 is tissue -- and is PC1 tissue at all?
 
-    python utilities/cli/inspect_pca_seg.py <wsi>... [--fit-tiles 200] [--workers 8]
+    python utilities/cli/diagnostics/inspect_pca_seg.py <wsi>... [--fit-tiles 200] [--workers 8]
 
 Outputs (in result/<SLURM_JOB_NAME or InspectPcaSeg>/):
     pca_seg_polarity__<slide>_L0.png
@@ -74,7 +74,8 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..'), os.path.join(_HERE, '..', '..', 'aiNNModel')):
+for _p in (os.path.join(_HERE, '..', '..'),
+          os.path.join(_HERE, '..', '..', '..', 'aiNNModel')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

@@ -106,7 +106,7 @@ fi
 echo "======== [$IDX] $(basename "$PHOTO_DIR")  ->  $(basename "$WSI")  enc=$TAG ========"
 echo "photos: $(ls "$PHOTO_DIR"/*.bmp 2>/dev/null | wc -l)"
 
-python utilities/cli/locate_photo.py \
+python utilities/cli/driver/locate_photo.py \
   "$PHOTO_DIR" \
   "$WSI" \
   --out "$OUT/$TAG/$(basename "$PHOTO_DIR")" \

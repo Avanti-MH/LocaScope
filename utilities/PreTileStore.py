@@ -102,7 +102,7 @@ SCHEMA_VERSION = '1'
 #: pays for the one approximation in the derivation (a projective map is not
 #: exactly a scaling about the centre, so the 1/patch_ratio term is nominal).
 #:
-#: `utilities/cli/probe_tile_yield.py` imports it from here rather than holding
+#: `utilities/cli/diagnostics/probe_tile_yield.py` imports it from here rather than holding
 #: its own 3. The probe reports how many sampled positions have their PRE-TILE
 #: running off the scanned rectangle, and that number is only about this store
 #: if it is about the same factor.

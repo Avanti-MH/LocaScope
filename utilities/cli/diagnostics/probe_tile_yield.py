@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How many tiles does each (slide, tile_size, ds) yield, and in which buckets?
 
-    python utilities/cli/probe_tile_yield.py [--mask-root ...] [--n 500]
+    python utilities/cli/diagnostics/probe_tile_yield.py [--mask-root ...] [--n 500]
 
 Outputs (in result/<SLURM_JOB_NAME or ProbeTileYield>/):
     tile_yield.png
@@ -67,7 +67,8 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..'), os.path.join(_HERE, '..', '..', 'aiNNModel')):
+for _p in (os.path.join(_HERE, '..', '..'),
+          os.path.join(_HERE, '..', '..', '..', 'aiNNModel')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -310,7 +311,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--mask-root', default=DEFAULT_MASK_ROOT,
-                    help='where build_mask_store.py wrote the masks')
+                    help='where utilities/cli/build_cache/build_mask_store.py wrote the masks')
     ap.add_argument('--wsi', nargs='*', default=None,
                     help='slide paths. Default: every mask in the store')
     # NO --tissue-ratio: the gate it swept is gone, and the axis with it. What
@@ -369,7 +370,7 @@ def main():
         found = MaskStore.find(args.mask_root)
         if not found:
             print(f'no masks under {args.mask_root}. Run '
-                  f'utilities/cli/build_mask_store.py first.')
+                  f'utilities/cli/build_cache/build_mask_store.py first.')
             return 1
         paths = [MaskStore.load_meta(p).wsi_path for p in found]
         print(f'{len(paths)} slides from the mask store', flush=True)

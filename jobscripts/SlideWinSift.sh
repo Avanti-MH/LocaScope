@@ -79,7 +79,7 @@ run_swsift () {
   echo "out  : $out"
   echo "args : $args"
   echo
-  python utilities/cli/slide_win_sift.py "$photo" "$wsi" $args
+  python utilities/cli/driver/slide_win_sift.py "$photo" "$wsi" $args
   echo "[$tag] exit=$?"
   echo
 }

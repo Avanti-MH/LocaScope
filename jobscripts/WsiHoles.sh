@@ -141,7 +141,7 @@ EOF
 # ---------------- Step 2: the scan ----------------
 echo ""
 echo "======== scan: block=$BLOCK level-0 px, levels=$LEVELS ========"
-python utilities/cli/scan_wsi_holes.py \
+python utilities/cli/diagnostics/scan_wsi_holes.py \
   "${SLIDES[@]}" \
   --levels "$LEVELS" \
   --block "$BLOCK" \

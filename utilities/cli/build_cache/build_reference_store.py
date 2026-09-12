@@ -46,7 +46,7 @@ import traceback
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
+_ROOT = _HERE.parent.parent.parent
 for _d in ('utilities', 'aiNNModel'):
     p = str(_ROOT / _d)
     if p not in sys.path:

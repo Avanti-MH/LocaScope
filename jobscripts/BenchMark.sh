@@ -209,7 +209,7 @@ run_pass () {          # $1 = label   $2 = --figures value   $3 = OMP threads
   # whole job, and this has to vary WITHIN it or the two numbers would come
   # from two queue slots on two machines.
   OMP_NUM_THREADS=$3 MKL_NUM_THREADS=$3 \
-  python utilities/cli/locate_photo.py \
+  python utilities/cli/driver/locate_photo.py \
     "$PHOTO_DIR" \
     "$WSI" \
     --out "$OUT/pass$1" \

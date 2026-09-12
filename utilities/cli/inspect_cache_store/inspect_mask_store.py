@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Look at the masks the pre-tiles were actually cut from. No model, no re-fit.
 
-    python utilities/cli/inspect_mask_store.py
-    python utilities/cli/inspect_mask_store.py --with-thumb
+    python utilities/cli/inspect_cache_store/inspect_mask_store.py
+    python utilities/cli/inspect_cache_store/inspect_mask_store.py --with-thumb
 
 One row per stored mask: the mask itself, the tissue regions drawn on it, and
 optionally the slide thumbnail beside it at the same extent.
@@ -46,7 +46,7 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(_HERE))          # utilities/
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))          # utilities/
 
 import numpy as np                                              # noqa: E402
 import matplotlib                                               # noqa: E402

@@ -44,15 +44,15 @@ shot mis-routed to L6 would show a huge px error as a fraction of a tile and
 look accurate.
 
 Usage:
-    python utilities/cli/analyze_locascope_metrics.py \\
+    python utilities/cli/metrics/analyze_locascope_metrics.py \\
         result/BenchLocaScope/metrics.csv
 
     # a stricter idea of "correct", and deeper verification
-    python utilities/cli/analyze_locascope_metrics.py \\
+    python utilities/cli/metrics/analyze_locascope_metrics.py \\
         result/BenchLocaScope/metrics.csv --tol-um 10
 
     # one slide only
-    python utilities/cli/analyze_locascope_metrics.py \\
+    python utilities/cli/metrics/analyze_locascope_metrics.py \\
         result/BenchLocaScope/metrics.csv --wsi BRACS_1936
 """
 
@@ -69,7 +69,7 @@ import sys
 #: login node. Deriving OUTPUT_ROOT a second time here would have been the
 #: version that eventually disagrees with the first.
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
+    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 import _paths                                                       # noqa: E402
 
 BAR = '=' * 74

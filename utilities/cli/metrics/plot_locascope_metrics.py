@@ -6,9 +6,9 @@ so you can iterate on the visualisation (or re-plot a filtered subset) without
 paying for another pipeline run.
 
 Usage:
-    python utilities/cli/plot_locascope_metrics.py \\
+    python utilities/cli/metrics/plot_locascope_metrics.py \\
         result/BenchLocaScope/metrics.csv                       # in place
-    python utilities/cli/plot_locascope_metrics.py \\
+    python utilities/cli/metrics/plot_locascope_metrics.py \\
         result/BenchLocaScope/metrics.csv --out result/Replot    # elsewhere
 
 Filters (applied before plotting, all optional):
@@ -34,7 +34,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # utilities/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))   # utilities/
 
 from dump_function._locascope_plots import (load_metrics_csv,   # noqa: E402
                                             render_all)

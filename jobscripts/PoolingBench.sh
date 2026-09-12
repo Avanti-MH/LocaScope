@@ -131,7 +131,7 @@ fi
 # than a bug. Cheap enough to always run.
 echo ""
 echo "======== verifying answer indices ========"
-python utilities/cli/inspect_feature_store.py "$OUT/$TAG" --pairs
+python utilities/cli/inspect_cache_store/inspect_feature_store.py "$OUT/$TAG" --pairs
 PAIR_RC=$?
 
 if [ $PAIR_RC -ne 0 ]; then
@@ -170,7 +170,7 @@ echo "  Re-eval without re-dumping:"
 echo "    python utilities/bench_modules/bench_gigapath_pooling.py --phase eval \\"
 echo "        --encoder $ENCODER${HEAD:+ --head $HEAD}"
 echo "  Delta histograms:"
-echo "    python utilities/cli/inspect_feature_store.py --pairs --hist"
+echo "    python utilities/cli/inspect_cache_store/inspect_feature_store.py --pairs --hist"
 
 # ---------------- reading a root that holds more than one sampling rule -------
 #

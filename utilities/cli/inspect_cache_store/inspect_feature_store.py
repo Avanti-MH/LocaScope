@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Say what a feature store contains, and whether its answers point anywhere.
 
-    python utilities/cli/inspect_feature_store.py result/cache/features/*.safetensors
-    python utilities/cli/inspect_feature_store.py result/cache/features --pairs
+    python utilities/cli/inspect_cache_store/inspect_feature_store.py result/cache/features/*.safetensors
+    python utilities/cli/inspect_cache_store/inspect_feature_store.py result/cache/features --pairs
 
 Reading the metadata is header-only, so listing a directory of 30 GB stores is
 instant. `--pairs` is the part that costs anything: it loads the index tensors of
@@ -58,7 +58,7 @@ import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent))
+sys.path.insert(0, str(_HERE.parent.parent))          # utilities/
 
 import numpy as np                                          # noqa: E402
 import FeatureStore as FS                                   # noqa: E402

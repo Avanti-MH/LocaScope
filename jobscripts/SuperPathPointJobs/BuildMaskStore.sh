@@ -123,7 +123,7 @@ echo "======== 3a  BuildMaskStore ========"
 echo "  slides: ${#SLIDES[@]}   level 0, mask ds 14, fit on $FIT_TILES tiles"
 echo ""
 
-python utilities/cli/build_mask_store.py \
+python utilities/cli/build_cache/build_mask_store.py \
   "${SLIDES[@]}" \
   --fit-tiles $FIT_TILES \
   --workers $WORKERS
@@ -147,7 +147,7 @@ echo ""
 # No --out: both CLIs resolve theirs with job_result_dir(), which prefers
 # SLURM_JOB_NAME, so the mask table and the yield table land in the same
 # result/BuildMaskStore/ without either of them being told where that is.
-python utilities/cli/probe_tile_yield.py
+python utilities/cli/diagnostics/probe_tile_yield.py
 probe=$?
 
 echo ""

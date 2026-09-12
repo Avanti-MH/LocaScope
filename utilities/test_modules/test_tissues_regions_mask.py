@@ -398,7 +398,7 @@ def validate_origin_offset():
 # `aiNNModel/Uni2PcaSegFunc.py` fits a PCA across the whole slide before it can
 # threshold any part of it, so it reads the slide ITSELF and hands the finished
 # mask here. `utilities/MaskStore.py` does the same on the way back OUT of the
-# cache, and `cli/probe_tile_yield.py` and `cli/extract_pretiles.py` are its two
+# cache, and `cli/diagnostics/probe_tile_yield.py` and `cli/extract_pretiles.py` are its two
 # readers. Nothing above covers it: every validator up to here builds a
 # TissuesRegionsMask through `make_trm`, which calls `_search_tissue_regions`
 # directly and therefore never exercises the three things from_mask decides --

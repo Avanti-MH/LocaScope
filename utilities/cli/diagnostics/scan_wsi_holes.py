@@ -37,7 +37,7 @@ as broken. SlideProbe replaces the handle on each failure, which is also why
 `reopens` equals the number of broken blocks.
 
 Usage:
-    python utilities/cli/scan_wsi_holes.py \\
+    python utilities/cli/diagnostics/scan_wsi_holes.py \\
         "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
         "/work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs" \\
         --levels 0,1,2,3,4 --block 4096 --out result/WsiHoles
@@ -60,7 +60,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
+    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 from _paths import job_result_dir                                   # noqa: E402
 
 import numpy as np

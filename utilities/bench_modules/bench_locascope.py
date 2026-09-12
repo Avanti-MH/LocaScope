@@ -594,7 +594,7 @@ def main():
              'setdefault is first-one-wins, so importing all three would point '
              'two of them at the wrong weight cache -- silently. See '
              'TileEncoderFunc._IMPLEMENTATIONS. This is the synthetic '
-             'counterpart of cli/locate_photo, which takes the same two '
+             'counterpart of cli/driver/locate_photo, which takes the same two '
              'options: what runs on real photos has to be measurable here.')
     ap.add_argument(
         '--head', default='',
@@ -899,7 +899,7 @@ def main():
               f'   modes={" ".join(args.draw_failures)}  '
               f'tol={args.fail_tol_um:g}um')
     print(f'\nRe-plot later without re-running the pipeline:\n'
-          f'  python utilities/cli/plot_locascope_metrics.py '
+          f'  python utilities/cli/metrics/plot_locascope_metrics.py '
           f'{os.path.join(out_dir, "metrics.csv")}')
 
 

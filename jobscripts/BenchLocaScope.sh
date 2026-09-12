@@ -51,7 +51,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #
 # SIZE THE RUN BEFORE COMMITTING TO IT. SIFT cost per crop varies by more than
 # an order of magnitude -- some crops blow past the BFMatcher descriptor cap of
-# 262144 (see utilities/cli/analyze_sift_keypoints.py). Set LIMIT to 30 first
+# 262144 (see utilities/cli/diagnostics/analyze_sift_keypoints.py). Set LIMIT to 30 first
 # and read t_verify_s out of metrics.csv, rather than estimating.
 
 GT_CSV="$RESULT_ROOT"/MultiBatch1440/gt.csv

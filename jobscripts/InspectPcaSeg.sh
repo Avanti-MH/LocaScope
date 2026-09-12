@@ -78,7 +78,7 @@ echo "======== InspectPcaSeg ========"
 echo "  slides: ${#SLIDES[@]}   level 0, whole slide, mask ds 14"
 echo ""
 
-python utilities/cli/inspect_pca_seg.py \
+python utilities/cli/diagnostics/inspect_pca_seg.py \
   "${SLIDES[@]}" \
   --workers $WORKERS \
   --fit-tiles $FIT_TILES

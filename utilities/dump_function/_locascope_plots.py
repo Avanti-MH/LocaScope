@@ -2,7 +2,7 @@
 
 Lives in utilities/ rather than beside either caller because both need it:
 `bench_modules/bench_locascope.py` (writes metrics during the run) and
-`cli/plot_locascope_metrics.py` (re-plots an existing metrics.csv offline).
+`cli/metrics/plot_locascope_metrics.py` (re-plots an existing metrics.csv offline).
 
 Every function takes `metrics: List[dict]` — the same row shape that
 bench_locascope.compute_metrics produces, and that `load_metrics_csv`

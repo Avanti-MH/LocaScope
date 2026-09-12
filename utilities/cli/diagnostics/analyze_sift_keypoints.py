@@ -12,7 +12,7 @@ QueryFromWSI, so the query image and the WSI crop are the exact pair SIFT
 would have been handed.
 
 Usage:
-    python utilities/cli/analyze_sift_keypoints.py \\
+    python utilities/cli/diagnostics/analyze_sift_keypoints.py \\
         --gt-csv     result/MultiBatch/gt.csv \\
         --images-dir result/MultiBatch/images \\
         --case BRACS_1936_L0_syn00000.png \\
@@ -48,7 +48,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
+_ROOT = _HERE.parent.parent.parent
 sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'query_sim'))
 from _paths import job_result_dir                                   # noqa: E402

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fill the mask store: one tissue mask per slide, written once and reused.
 
-    python utilities/cli/build_mask_store.py <wsi>... [--fit-tiles 1000]
+    python utilities/cli/build_cache/build_mask_store.py <wsi-path>... [--fit-tiles 1000]
+    python utilities/cli/build_cache/build_mask_store.py --wsi-names Ki67_pure_0001 ...
 
 Outputs (in result/cache/masks/ by default):
     <wsi_stem>__<method>__<cfg8>.safetensors
@@ -10,7 +11,7 @@ Outputs (in result/cache/masks/ by default):
 argparse, a loop, and printed progress. Everything that decides anything is in
 `utilities/MaskStore.py` -- `build_one` runs the segmenter, `MaskMeta.of`
 assembles the identity, `save` validates and writes atomically. The split is
-`FeatureStore` and `cli/build_reference_store.py`'s, and CLAUDE.md's reason: a
+`FeatureStore` and `cli/build_cache/build_reference_store.py`'s, and CLAUDE.md's reason: a
 library layer that prints cannot be called by a bench.
 
 WHY THIS RUNS ONCE AND NOT THREE TIMES
@@ -42,7 +43,8 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..'), os.path.join(_HERE, '..', '..', 'aiNNModel')):
+for _p in (os.path.join(_HERE, '..', '..'),
+          os.path.join(_HERE, '..', '..', '..', 'aiNNModel')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -53,6 +55,7 @@ setup_import_paths()
 import torch                                                    # noqa: E402
 
 import MaskStore                                                # noqa: E402
+from AccessDatasets import locate                                 # noqa: E402
 from MaskStore import MaskMeta                                   # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from Uni2PcaSegFunc import Uni2PcaSegConfig                      # noqa: E402
@@ -72,7 +75,13 @@ _REFERENCE = 'BRACS 20.8-38.2%, Ki67 3.5-9.2%'
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('wsi', nargs='+', help='one or more slides')
+    ap.add_argument('wsi', nargs='*', default=[],
+                    help='one or more slide PATHS')
+    ap.add_argument('--wsi-names', nargs='*', default=[],
+                    help='one or more utilities/AccessDatasets.py names '
+                        '(e.g. Ki67_pure_0001), resolved to paths -- an '
+                        'alternative to the positional paths, not a '
+                        'replacement; the two lists are concatenated')
     ap.add_argument('--root', default=DEFAULT_ROOT,
                     help='where the store lives (default: result/cache/masks/)')
     ap.add_argument('--fit-tiles', type=int, default=1000,
@@ -87,7 +96,7 @@ def main():
     ap.add_argument('--larger-pca-as-fg', action=argparse.BooleanOptionalAction,
                     default=None,
                     help='which side of PC1 is tissue. Decided by '
-                         'utilities/cli/inspect_pca_seg.py and now the config'
+                         'utilities/cli/diagnostics/inspect_pca_seg.py and now the config'
                          "'s own default, so this flag is here to override it "
                          'rather than to repeat it. default=None and not False: '
                          'a CLI default that restates a config default is a '
@@ -98,6 +107,10 @@ def main():
                     help='directory for the summary CSV. Empty means '
                          'result/<SLURM_JOB_NAME or BuildMaskStore>/')
     args = ap.parse_args()
+
+    paths = list(args.wsi) + [locate(name).path for name in args.wsi_names]
+    if not paths:
+        ap.error('give at least one slide, as a path or via --wsi-names')
 
     out_dir = args.out or job_result_dir('BuildMaskStore')
     os.makedirs(out_dir, exist_ok=True)
@@ -118,9 +131,9 @@ def main():
     print(f'store     {args.root}', flush=True)
 
     rows, failures = [], []
-    for index, wsi_path in enumerate(args.wsi, 1):
+    for index, wsi_path in enumerate(paths, 1):
         stem = MaskStore.wsi_stem_of(wsi_path)
-        print(f'\n[{index}/{len(args.wsi)}] {stem}', flush=True)
+        print(f'\n[{index}/{len(paths)}] {stem}', flush=True)
 
         existing = MaskStore.find(args.root, wsi_stem=stem,
                                   segmenter_id=segmenter.identity_id())

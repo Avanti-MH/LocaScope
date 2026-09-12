@@ -42,7 +42,7 @@ over the 1:2.8 bounds rect would stretch the slide sideways and the failures
 could not be read against the regions.
 
 Usage:
-    python utilities/cli/diag_wsi_coverage.py \\
+    python utilities/cli/diagnostics/diag_wsi_coverage.py \\
         "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
         --hest --mask-ds 4 --grid 48 --out result/DiagWsiCoverage
 
@@ -70,7 +70,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
+_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..', '..'))
 for _d in ('utilities', 'aiNNModel'):
     p = os.path.join(_ROOT, _d)
     if p not in sys.path:

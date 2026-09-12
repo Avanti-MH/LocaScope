@@ -238,7 +238,7 @@ def build_one(wsi, segmenter) -> SlideMask:
 
     The building logic is here rather than in the CLI so that a bench, a test or
     a later pipeline stage can produce a mask without shelling out -- and so the
-    CLI is argparse plus a loop, which is all `cli/build_reference_store.py` is
+    CLI is argparse plus a loop, which is all `cli/build_cache/build_reference_store.py` is
     next to `FeatureStore`.
 
     Only the segmenters whose unit of work is a SLIDE. `Uni2PcaSegFunc` is one:
@@ -355,7 +355,7 @@ def load(path, *, require: Optional[Dict[str, object]] = None,
         raise MaskMismatch(
             f'{path} holds no components -- it was built before they were '
             f'stored, or by a segmenter that has none. Rebuild it with '
-            f'utilities/cli/build_mask_store.py --overwrite')
+            f'utilities/cli/build_cache/build_mask_store.py --overwrite')
 
     # safe_open rather than load_file: load_file reads every tensor, which would
     # pull 500-800 MB of components off disk for a reader that asked for the
