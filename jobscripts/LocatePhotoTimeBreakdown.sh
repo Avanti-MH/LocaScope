@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=BenchMarkV2            # Job name
+#SBATCH --job-name=LocatePhotoTimeBreakdown            # Job name
 #SBATCH --partition=normal2               # Partition
 #SBATCH --time=08:00:00                   # per TASK; bracs is the long one (~2h)
 #SBATCH --account=MST114560               # Account
@@ -103,7 +103,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # ---------------------------------------------------------------------------
 #  HOW TO SUBMIT
 # ---------------------------------------------------------------------------
-#     sbatch jobscripts/BenchMark.sh          # all four combinations at once
+#     sbatch jobscripts/LocatePhotoTimeBreakdown.sh          # all four combinations at once
 #
 # An ARRAY and not a loop inside one job, because the four are independent and
 # the serial cost is real: locate_photo never passes feature_store_root, so
@@ -118,8 +118,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #     task 3   bracs + gigapath     ~2 h
 #
 # One combination on its own, or one outside the table:
-#     sbatch --array=2 jobscripts/BenchMark.sh
-#     MODE=bracs ENCODER=conch_vit HEAD=trunk sbatch --array=0 jobscripts/BenchMark.sh
+#     sbatch --array=2 jobscripts/LocatePhotoTimeBreakdown.sh
+#     MODE=bracs ENCODER=conch_vit HEAD=trunk sbatch --array=0 jobscripts/LocatePhotoTimeBreakdown.sh
 #
 # An explicit MODE / ENCODER / HEAD in the environment WINS over the table, so
 # the second form works whatever index it lands on. SLURM exports the
@@ -154,7 +154,7 @@ HEAD="${HEAD:-$_HEAD}"
 TAG="$ENCODER${HEAD:+_$HEAD}"
 ENC_FLAG="--encoder $ENCODER${HEAD:+ --head $HEAD}"
 
-OUT="$RESULT_ROOT/BenchMarkV2/$MODE/$TAG"
+OUT="$RESULT_ROOT/LocatePhotoTimeBreakdown/$MODE/$TAG"
 
 case "$MODE" in
   ki67)
@@ -250,21 +250,6 @@ echo "  by construction; in MODE=ki67 every real photo routed to L0, so it is"
 echo "  one there too. A second build.retriever call means a photo routed"
 echo "  somewhere else and the per-photo averages below it are mixing scales."
 
-
-# ---------------- the encoder throughput sweep this file used to drive -------
-# Kept because it is a different question -- batch size and dtype against
-# tiles/s, with no WSI and no pipeline -- and its parameters took a while to
-# settle. Restore this body when the timing question above is answered and the
-# TEMP-MEASURE instrument is removed.
-#
-# WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
-# WARMUP=2
-# COMPARE_PATCHES=40960
-# COMPARE_BS="8 16 64 128 512 1024 4096"
-#
-# python utilities/bench_modules/bench_gigapath_infer.py \
-#   --compare \
-#   --no-wsi \
-#   --compare-patches  $COMPARE_PATCHES \
-#   --compare-bs       $COMPARE_BS \
-#   --warmup $WARMUP
+# The encoder-throughput sweep this file used to drive (batch size and dtype
+# against tiles/s, no WSI, no pipeline) now lives in its own jobscript:
+# jobscripts/GigapathEncoderConfigExp.sh, EXP=speed.
