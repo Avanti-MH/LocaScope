@@ -41,6 +41,34 @@ def _uniform(rng: random.Random, lo_hi: Tuple[float, float]) -> float:
     return lo if lo == hi else rng.uniform(lo, hi)
 
 
+def _coin(rng: random.Random, p: float) -> bool:
+    """Is this op present on this shot?
+
+    NO DRAW AT ALL at p >= 1.0 (nor at p <= 0.0). That is what keeps the rng
+    sequence byte-identical for every config that leaves these probabilities
+    at their 1.0 default -- i.e. every corpus generated before they existed
+    still reproduces exactly.
+    """
+    if p >= 1.0:
+        return True
+    if p <= 0.0:
+        return False
+    return rng.random() < p
+
+
+def _maybe(rng: random.Random, p: float, lo_hi: Tuple[float, float]) -> float:
+    """`_uniform` with probability `p`, else 0.0 -- the neutral value for both
+    ops that use this (`apply_vignette(strength=0)` and
+    `apply_distortion(k1=0, k2=0)` are identities).
+
+    The strength is NOT drawn when the coin says absent, so the recorded
+    parameter is the value that was ACTUALLY applied rather than a value drawn
+    beside the one applied. That second shape is the `stage_shift_dx/dy` bug
+    (`augment/field.py`), and it is worth not repeating.
+    """
+    return _uniform(rng, lo_hi) if _coin(rng, p) else 0.0
+
+
 def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
     """Sample one concrete set of augment values from a cfg's ranges."""
     dx = rng.randint(-cfg.stage_shift_max, cfg.stage_shift_max) if cfg.stage_shift_max > 0 else 0
@@ -54,6 +82,12 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
     else:
         scale = _uniform(rng, cfg.scale_range)
 
+    # The whole lens distortion is one coin, not two: k2 is a cfg constant
+    # rather than a drawn value, so deciding it from `k1 == 0` would read the
+    # coin off a value that can legitimately be zero on its own. Drawn once
+    # here and both terms take it.
+    lens_on = _coin(rng, cfg.distortion_p)
+
     return {
         'rot_deg':           rng.choice(cfg.rotation_choices),
         'angle_jitter':      _uniform(rng, (-cfg.angle_jitter_deg, cfg.angle_jitter_deg)),
@@ -62,16 +96,28 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
         'brightness':        _uniform(rng, cfg.brightness_range),
         'contrast':          _uniform(rng, cfg.contrast_range),
         'color_temp':        _uniform(rng, cfg.color_temp_range),
-        'vignette_strength': _uniform(rng, cfg.vignette_range),
-        'distortion_k1':     _uniform(rng, cfg.distortion_k1_range),
+        'vignette_strength': _maybe(rng, cfg.vignette_p, cfg.vignette_range),
+        'distortion_k1':     _uniform(rng, cfg.distortion_k1_range) if lens_on else 0.0,
         'defocus_radius':    cfg.defocus_radius,
         'chromatic_shift':   cfg.chromatic_shift,
         'stage_shift_dx':    dx,
         'stage_shift_dy':    dy,
         'noise_sigma':       cfg.noise_sigma,
+        # Which noise, not how much: a shot's noise is img.shape worth of
+        # values, so it cannot be recorded the way every other parameter here
+        # is. The seed can, and it comes off the same `rng` as everything else
+        # -- which is what puts the noise under `Camera(seed=)`/`capture(rng=)`
+        # instead of under the process-global numpy state it used until
+        # 2026-09-16. Nothing is expected to READ this back (see
+        # training/MppRoutingHead/spec.md on recording for reproducibility
+        # rather than for correction); it exists so the same seed reproduces
+        # the same shot.
+        'noise_seed':        rng.getrandbits(32),
         'jpeg_quality':      cfg.jpeg_quality,
         'saturation':        cfg.saturation,
-        'distortion_k2':     cfg.distortion_k2,
+        # k2 rides on the SAME coin: `distortion_p` turns the lens distortion
+        # off, and leaving a non-zero k2 behind would leave it half on.
+        'distortion_k2':     cfg.distortion_k2 if lens_on else 0.0,
     }
 
 
@@ -155,7 +201,8 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
         # the other framing decisions. It used to sit between the vignette and
         # the lens, which meant the frame was lit and THEN moved -- shifting the
         # vignette's centre off the optical axis, where it is physically fixed.
-        img = apply_stage_shift(img, max_shift=cfg.stage_shift_max)
+        img = apply_stage_shift(img, dx=p['stage_shift_dx'],
+                                dy=p['stage_shift_dy'])
 
     img = _centre_crop(img, out_w + 2 * SENSOR_MARGIN, out_h + 2 * SENSOR_MARGIN)
 
@@ -186,7 +233,7 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
     # vignette's falloff is then measured against the real half-width, and
     # JPEG's blocks tile the delivered image rather than a padded one.
     img = apply_vignette(img, strength=p['vignette_strength'])
-    img = apply_noise(img, sigma=p['noise_sigma'])
+    img = apply_noise(img, sigma=p['noise_sigma'], seed=p['noise_seed'])
     img = apply_jpeg(img, quality=p['jpeg_quality'])
     return img
 

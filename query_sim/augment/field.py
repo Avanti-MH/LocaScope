@@ -100,12 +100,26 @@ def apply_vignette(img, strength=0.4):
     return _apply_vignette_legacy(img, strength)
 
 
-def apply_stage_shift(img, max_shift=3):
-    """Random sub-pixel stage mechanical jitter."""
-    if max_shift <= 0:
+def apply_stage_shift(img, dx: int = 0, dy: int = 0):
+    """Translate by (dx, dy) whole pixels: stage mechanical jitter.
+
+    THE OFFSETS ARE THE CALLER'S, NOT DRAWN HERE. Until 2026-09-16 this
+    function drew its own pair from the global `np.random` while
+    `pipeline._sample_params` drew ANOTHER pair from the caller's rng and
+    recorded it in `params` -- so every shot's recorded `stage_shift_dx/dy`
+    named a displacement the image had never been given, and the real one
+    obeyed no `seed` any caller could pass. Both halves are fixed by this
+    function no longer having randomness of its own: `_apply_params` hands
+    it `p['stage_shift_dx'/'dy']`, the same values `params` reports, so the
+    record cannot diverge from the pixels because there is only one pair.
+
+    Whole pixels, not sub-pixel: `_sample_params` draws integers, so this is
+    a pure re-indexing with no resampling. The old docstring said "sub-pixel"
+    and the old code drew `np.random.randint`, which is integer -- the name
+    was wrong about its own implementation, not just about this one.
+    """
+    if dx == 0 and dy == 0:
         return img
-    dx = np.random.randint(-max_shift, max_shift + 1)
-    dy = np.random.randint(-max_shift, max_shift + 1)
     M = np.float32([[1, 0, dx], [0, 1, dy]])
     h, w = img.shape[:2]
     return cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT)

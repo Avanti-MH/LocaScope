@@ -774,7 +774,7 @@ class TileEncoder(IdentifiedBuild):
         pooling='cls' for whatever it was handed -- correct for GigaPath, and a
         false claim about every CNN, whose features() is a global average.
 
-        It is also what _vector_from reduces BY, which is the point: the label
+        It is also what vector_from reduces BY, which is the point: the label
         and the arithmetic read the same attribute, so a store cannot say one
         thing while holding another.
         """
@@ -789,7 +789,7 @@ class TileEncoder(IdentifiedBuild):
 
     # ── head and pooling ─────────────────────────────────────────────────────
 
-    def _apply_head(self, raw: torch.Tensor) -> torch.Tensor:
+    def apply_head(self, raw: torch.Tensor) -> torch.Tensor:
         """cfg.head, applied to the trunk's output. Base: there is no head.
 
         self.model is ALWAYS the trunk, never the trunk with something bolted
@@ -800,18 +800,18 @@ class TileEncoder(IdentifiedBuild):
         """
         return raw
 
-    def _pool(self, x: torch.Tensor, mode: str) -> torch.Tensor:
+    def pool(self, x: torch.Tensor, mode: str) -> torch.Tensor:
         """[B, ...] -> [B, n, D] slots, each L2-normalised. Runs on the device.
 
         A step, not an exit. pooled() is the exit and calls this inside the
-        batch loop; _vector_from calls it in the same place. The distinction
-        matters because _vector_from is handed a TENSOR and has no images to
+        batch loop; vector_from calls it in the same place. The distinction
+        matters because vector_from is handed a TENSOR and has no images to
         start a second batch loop with.
 
         It branches on the RANK of what it was handed, and not on
         model_spec.kind. That is the whole difference between this version and
         the one before it. model_spec describes the MODEL's output; by the time
-        this runs, _apply_head may have replaced it with something else --
+        this runs, apply_head may have replaced it with something else --
         CONCH's attentional pooler turns [B, 785, 768] into [B, 512], so a
         'tokens' kind would send a two-dimensional tensor into pooling_kinds and
         get told it is not [N, T, D]. Reading the tensor cannot go stale that
@@ -853,7 +853,7 @@ class TileEncoder(IdentifiedBuild):
             x = x.flatten(2).transpose(1, 2)
         return pooling_kinds(x, mode, self.model_spec)
 
-    def _vector_from(self, raw: torch.Tensor) -> torch.Tensor:
+    def vector_from(self, raw: torch.Tensor) -> torch.Tensor:
         """One [B, ...] batch of model output -> [B, D], L2-normalised.
 
         head, then pooling, then one vector. Not a branch in sight: which head
@@ -878,8 +878,46 @@ class TileEncoder(IdentifiedBuild):
         the id has to carry it.
         """
         return F.normalize(
-            self._pool(self._apply_head(raw), self.feature_pooling).flatten(1),
+            self.pool(self.apply_head(raw), self.feature_pooling).flatten(1),
             dim=-1)
+
+    # ── model mode ───────────────────────────────────────────────────────────
+
+    def train(self, mode: bool = True) -> 'TileEncoder':
+        """Put the trunk in training or eval mode. Returns self, as
+        `nn.Module.train` does, so it chains.
+
+        A passthrough and not an override: this class is NOT an `nn.Module`.
+        It exists because the reflex every training loop has -- `model.train()`
+        before the loop, `model.eval()` after -- CANNOT REACH THE TRUNK from
+        outside without it. A caller fine-tuning through `features_with_grad`
+        holds two objects: the head, which is an `nn.Module` they built and
+        put in the optimizer, so `head.train()` is written without thinking;
+        and this encoder, which is not one, so `enc.train()` would have been
+        an AttributeError and `self.model` is a level in.
+
+        Two things then line up to make the omission invisible. Every encoder
+        here constructs with `.eval()`, so the trunk's default is the opposite
+        of a fresh `nn.Module`'s. And a FROZEN-encoder loop is correct with no
+        trunk `.train()` in it at all -- so the fine-tuning loop that gets
+        written by copying that one inherits a gap that was right to be there
+        before.
+
+        Nothing registered today notices the difference: the three ViTs and
+        ConvNeXt V2 carry no BatchNorm and leave drop_path at 0. A trunk that
+        does carry them would fine-tune against frozen running statistics with
+        stochastic depth switched off, and neither of those raises.
+
+        Mode is NOT hashed. It decides how the model runs, not what was built,
+        and `variant()`'s `_VARIABLE` is the list of things a second view over
+        one set of weights may differ in -- mode is not on it because a mode
+        is not a second view, it is a state of the one model both views share.
+        """
+        self.model.train(mode)      # DataParallel recurses; no unwrap needed
+        return self
+
+    def eval(self) -> 'TileEncoder':
+        return self.train(False)
 
     # ── exits: five ways out, each handing back ONE tensor ───────────────────
     #
@@ -895,7 +933,7 @@ class TileEncoder(IdentifiedBuild):
         The reduction runs inside the batch loop, so what crosses to the host is
         a few KB per tile rather than the full output.
         """
-        return self._run(images, lambda t: self._vector_from(t).cpu())
+        return self._run(images, lambda t: self.vector_from(t).cpu())
 
     def tokens(self, images, reduce: Optional[Callable] = None) -> torch.Tensor:
         """[N, T, D] fp32, NOT normalised, NO head. Token models only.
@@ -926,6 +964,84 @@ class TileEncoder(IdentifiedBuild):
         """
         self._require_grid('spatial()')
         return self._run(images, reduce, forward=self._spatial_forward)
+
+    def features_with_grad(self, batch: torch.Tensor,
+                           exit_name: str = 'spatial') -> torch.Tensor:
+        """`spatial()`'s or `tokens()`' computation WITHOUT the inference
+        wrapper: a BATCH in, fp32 out, on the device it arrived on and with
+        GRADIENTS INTACT. The exit a training loop needs.
+
+            exit_name='spatial'   [N, C, H/stride, W/stride]  prefix dropped,
+                                  patches laid into their cells
+            exit_name='tokens'    [N, T, D]                   prefix KEPT, so
+                                  this is the one that can reach a CLS
+
+        Both are offered because `spatial` cannot substitute for `tokens`: it
+        drops the prefix, so a trunk being fine-tuned with a head on its CLS
+        has no way to see that token through the spatial exit. `features()`
+        needs no twin here -- pooling and L2-normalising a map or a token
+        sequence is differentiable tensor arithmetic the caller can do itself.
+
+        WHY THE PUBLIC EXITS CANNOT BE USED FOR THIS. Four things `_run` does
+        are each independently disqualifying:
+
+            @torch.no_grad()            no gradient reaches the trunk
+            _to_pil(img) per image      takes a LIST of images, not a batch
+            self._transform             Resize(scale) then CenterCrop(crop),
+                                        so a 256 px tile silently becomes a
+                                        224 px centre crop
+            raw.cpu()                   the result comes back to the host
+
+        None of that is wrong for inference; all of it is wrong for a trunk
+        being fine-tuned. What IS shared is the forward itself, so that is the
+        only thing this calls -- the normalisation, the batching and the
+        device are the caller's, which is what lets a DataLoader's tensor go
+        straight in.
+
+        `.float()` after the autocast block, matching `_run`'s order and
+        reason: whatever reads this is being trained, and fp16 features would
+        put its gradients in half precision for no saving, since the trunk's
+        own activations are the memory.
+
+        TRAIN/EVAL MODE IS THE CALLER'S, and `train()`/`eval()` above are how
+        it is set -- this method does not touch it. Every encoder here
+        constructs with `.eval()`, which is right for the inference exits and
+        wrong for a trunk being fine-tuned, so a fine-tuning caller says
+        `enc.train()` the way it says `head.train()`. No registered encoder
+        notices today (no BatchNorm, drop_path 0, so both modes compute the
+        same thing); a trunk that carries either would fine-tune against
+        frozen running statistics with stochastic depth off, silently.
+
+        Lives here rather than in a subclass. `training/SuperPathPoint/
+        SuperPoint/EncoderBackbone.py` reached the same computation by
+        re-parenting a built encoder into a dynamic class, because the two
+        options it saw were "private access across a package boundary" and
+        "change aiNNModel/TileEncoderFunc.py" -- and it declined the second.
+        That was a boundary decision, not a technical one: this method needs
+        only `self.cfg` and the forwards this class already declares.
+        Declared public here, every encoder gets it.
+        """
+        if exit_name == 'spatial':
+            self._require_grid("features_with_grad(exit_name='spatial')")
+            forward = self._spatial_forward
+        elif exit_name == 'tokens':
+            self._require('tokens', "features_with_grad(exit_name='tokens')")
+            # The trunk's own forward, which is what tokens() runs too:
+            # `_run`'s `forward or self.model`. No head, not normalised.
+            forward = self.model
+        else:
+            raise ValueError(
+                f"exit_name must be 'spatial' or 'tokens', got {exit_name!r}. "
+                f"features() has no twin here on purpose -- reducing a map or "
+                f"a token sequence to one vector is differentiable arithmetic "
+                f"the caller can do itself")
+
+        dtype = self.cfg.model.torch_dtype()
+        ctx = (torch.autocast(device_type=batch.device.type, dtype=dtype)
+               if dtype is not torch.float32 else nullcontext())
+        with ctx:
+            out = forward(batch)
+        return out.float()
 
     def _spatial_forward(self, batch: torch.Tensor) -> torch.Tensor:
         """One batch to [N, C, H, W]. The base cannot know how.
@@ -978,12 +1094,12 @@ class TileEncoder(IdentifiedBuild):
         twice to learn the names.
         """
         return self._run(images,
-                         lambda t: self._pool(self._apply_head(t), mode).cpu())
+                         lambda t: self.pool(self.apply_head(t), mode).cpu())
 
     def __call__(self, images) -> torch.Tensor:
         """features(), under the name EncodeFn expects.
 
-        PatchingLib's FeaturesMap.from_patch_container, GigaPathKnnEstiMpp and
+        PatchingLib's FeaturesMap.from_patch_container, KnnEstMpp and
         several plain functions in the tests all speak `Callable[[List], Any]`,
         which has nowhere to put a mode and nothing to receive a second return
         value. That is exactly why pooling is a CONFIG field: this call honours
@@ -1020,7 +1136,7 @@ class TileEncoder(IdentifiedBuild):
     def feature_spec(self, features: torch.Tensor) -> EncoderOutputSpec:
         """Describe what features() returned. One slot, whatever cfg.pooling was.
 
-        ONE slot even for a multi-slot pooling, because _vector_from flattened
+        ONE slot even for a multi-slot pooling, because vector_from flattened
         them: the file holds one vector per tile and `pooling` is the only
         record of what went into it. pool_slots(pooling, model_spec) recovers
         the internal structure for anyone who wants it.
@@ -1124,9 +1240,10 @@ class TileEncoder(IdentifiedBuild):
 #: gigabytes re-fetched, and a directory name that no longer says what is in it.
 #: Nothing raises. Importing only the one asked for is the whole fix.
 _IMPLEMENTATIONS = {
-    'gigapath':  'GigaPathFunc',
-    'uni2':      'Uni2Func',
-    'conch_vit': 'ConchVitFunc',
+    'gigapath':    'GigaPathFunc',
+    'uni2':        'Uni2Func',
+    'conch_vit':   'ConchVitFunc',
+    'convnext_v2': 'ConvNeXtV2Func',
 }
 
 

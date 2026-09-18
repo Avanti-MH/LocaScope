@@ -39,6 +39,17 @@ RETRIEVAL_DIR = os.path.join(PROJECT_ROOT, '2_retrieval')
 LOCALIZATION_DIR = os.path.join(PROJECT_ROOT, '3_localization')
 AINM_DIR = os.path.join(PROJECT_ROOT, 'aiNNModel')
 
+#: Generic encoder+head plumbing (`Heads.py`, `common/Head.py`/`Features.py`/
+#: `Checkpoints.py`) shared by any task built on an encoder+head pair --
+#: `training/MppRoutingHead/` today, `1_estimate_query_mpp/ClassifierEstMpp.py`
+#: and the planned retrieval work (GraphNN/tree/reranking NN) after it. Two
+#: entries, not one, for the same reason `AINM_DIR` and `SUPERPATHPOINT_DIR`
+#: are separate from `PROJECT_ROOT`: what goes on sys.path is the directory
+#: whose children are DIRECTLY importable modules, and `Head.py` lives one
+#: level below `Heads.py`, not beside it.
+AINM_MODELS_DIR = os.path.join(AINM_DIR, 'models')
+AINM_MODELS_COMMON_DIR = os.path.join(AINM_MODELS_DIR, 'common')
+
 #: The SuperPathPoint training package, NOT its parent `training/`. What goes on
 #: sys.path is the directory whose children are importable subpackages -- so
 #: `from common.Homography import ...` and `from cli import job_result_dir`
@@ -47,9 +58,19 @@ AINM_DIR = os.path.join(PROJECT_ROOT, 'aiNNModel')
 #: put the useless name `SuperPathPoint` in the import namespace instead.
 SUPERPATHPOINT_DIR = os.path.join(PROJECT_ROOT, 'training', 'SuperPathPoint')
 
+#: Same rule as SUPERPATHPOINT_DIR, same reason: the training package itself,
+#: not `training/`, so `from Datasets import ...` and `from Runtime import
+#: ...` resolve for `Runtime.py`/`cli/train.py`/`cli/evaluate.py`.
+MPPROUTINGHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'MppRoutingHead')
+
 def setup_import_paths():
-    """Make utilities/, query_sim/, 1_estimate_query_mpp/, 2_retrieval/, 3_localization/, aiNNModel/, training/SuperPathPoint/ and project root importable."""
-    for path in (UTILITIES_DIR, QUERY_SIM_DIR, ESTIMATE_MPP_DIR, RETRIEVAL_DIR, LOCALIZATION_DIR, AINM_DIR, SUPERPATHPOINT_DIR, PROJECT_ROOT):
+    """Make utilities/, query_sim/, 1_estimate_query_mpp/, 2_retrieval/,
+    3_localization/, aiNNModel/ (+ its models/ and models/common/),
+    training/SuperPathPoint/, training/MppRoutingHead/ and project root
+    importable."""
+    for path in (UTILITIES_DIR, QUERY_SIM_DIR, ESTIMATE_MPP_DIR, RETRIEVAL_DIR,
+                LOCALIZATION_DIR, AINM_DIR, AINM_MODELS_DIR, AINM_MODELS_COMMON_DIR,
+                SUPERPATHPOINT_DIR, MPPROUTINGHEAD_DIR, PROJECT_ROOT):
         if path not in sys.path:
             sys.path.insert(0, path)
 

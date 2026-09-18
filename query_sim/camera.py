@@ -105,9 +105,18 @@ class Camera:
 
         self._py_rng = random.Random(seed)
         self._np_rng = np.random.default_rng(seed)
-        # augment fns still using np.random.* are seeded once for reproducibility
-        if seed is not None:
-            np.random.seed(seed)
+        # There used to be an `np.random.seed(seed)` here, for "augment fns
+        # still using np.random.*". There are none left as of 2026-09-16:
+        # `apply_stage_shift` now takes the offsets `_sample_params` drew off
+        # `_py_rng`, and `apply_noise` takes a seed drawn the same way, so the
+        # whole augment chain is downstream of this object's own generators.
+        #
+        # Removing it matters beyond tidiness. That line made a CONSTRUCTOR
+        # mutate process-global state, so the last Camera built decided the
+        # noise of every other one, and a caller that built several (a bank of
+        # one Camera per rung, say) or forked DataLoader workers got neither
+        # reproducibility nor independence. It also silently re-seeded numpy
+        # for every other library in the process.
 
     # ── Attribute forwards to QFW ────────────────────────────────────────────
     @property
@@ -151,8 +160,9 @@ class Camera:
     # cfg-driven rotation still governs `__iter__` (random exposures).
     def capture(
         self, x: int, y: int, rotation: Optional[float] = None,
+        rng: Optional[random.Random] = None,
     ) -> Optional[np.ndarray]:
-        img, _ = self.capture_with_gt(x, y, rotation=rotation)
+        img, _ = self.capture_with_gt(x, y, rotation=rotation, rng=rng)
         return img
 
     def _rotates(self, rotation: Optional[float]) -> bool:
@@ -177,7 +187,22 @@ class Camera:
 
     def capture_with_gt(
         self, x: int, y: int, rotation: Optional[float] = None,
+        rng: Optional[random.Random] = None,
     ) -> Tuple[Optional[np.ndarray], Optional[dict]]:
+        """`rng`, if given, is used INSTEAD of `self._py_rng` for this one
+        call's augmentation draw -- `self._py_rng`'s own sequence (and every
+        existing caller, none of which passes `rng`) is untouched.
+
+        Exists for a caller that needs the SAME (x, y) to always render the
+        SAME augmented photo regardless of call order -- `self._py_rng`
+        advances with every capture, so two calls on one `Camera` never repeat
+        a draw by construction, which is right for building a corpus and
+        wrong for reproducibly re-scoring one (`training/MppRoutingHead/
+        spec.md`'s "Camera: train vs eval"): pass
+        `rng=random.Random(derived_from_this_samples_own_identity)` there
+        instead of constructing a fresh `Camera` (and reopening the WSI) per
+        sample.
+        """
         # The bounding square is headroom for rotating about the FoV centre --
         # side = the rect's diagonal, so 2.12x its area. A shot that does not
         # rotate needs none of it: the rect plus the sensor margin is the whole
@@ -191,7 +216,7 @@ class Camera:
         if raw is None:
             return None, None
         arr, params = simulate_with_gt(
-            raw, cfg=self.cfg, rng=self._py_rng, rotation=rotation,
+            raw, cfg=self.cfg, rng=rng or self._py_rng, rotation=rotation,
             output_wh=(self.qfw.output_w, self.qfw.output_h),
         )
         return arr, params
@@ -218,9 +243,20 @@ class Camera:
             source = C + (s / scale) * R(-rot) . (du, dv)
 
         Exact for rot in {0, 90, 180, 270}, which is what this experiment uses;
-        `angle_jitter` and lens distortion are NOT inverted here, so a caller
-        that leaves them on gets a position off by their magnitude rather than
-        an error. test_camera_output_to_level0.py pins the whole thing against
+        `angle_jitter`, lens distortion and the mechanical STAGE SHIFT are NOT
+        inverted here, so a caller that leaves them on gets a position off by
+        their magnitude rather than an error.
+
+        The stage shift is not inverted ON PURPOSE, unlike the other two,
+        which are simply unimplemented: it models the jitter a real operator
+        cannot see, so a localiser is meant to eat it as irreducible error
+        rather than undo it. `params` records `stage_shift_dx/dy` anyway --
+        recorded so the same seed reproduces the same shot, not so anyone can
+        correct a coordinate with it. It went unlisted here until 2026-09-16,
+        which read as an exhaustive list that happened to omit one: a caller
+        who zeroed `angle_jitter_deg` and the distortion range would have
+        concluded this returns an exact answer while `stage_shift_max` was
+        still at its default 3. test_camera_output_to_level0.py pins the whole thing against
         pixels rather than against this derivation -- the sign convention of
         `R(-rot)` is the part most likely to be wrong, and a sign error is
         invisible at 0 and 180.

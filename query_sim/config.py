@@ -44,6 +44,25 @@ class DomainGapConfig:
     # ── Lens ──────────────────────────────────────────────────────────────────
     distortion_k1_range: Tuple[float, float] = (-0.04, 0.04)
     distortion_k2:       float               = 0.0
+
+    # ── Per-shot presence of the two FRAME-REFERENCED optics ──────────────────
+    # Probability that the vignette / the distortion is applied AT ALL. 1.0 is
+    # "always", and is the default so that every existing config and every
+    # corpus already generated keeps its exact behaviour -- `_sample_params`
+    # does not even draw when the probability is 1.0, so the rng sequence is
+    # byte-identical to before this field existed.
+    #
+    # A probability rather than a wider range, because these two are not
+    # continuous in the way brightness is. `apply_vignette`'s falloff and
+    # `apply_distortion`'s k1 are normalised to the SENSOR's half-width
+    # (`pipeline._apply_params` says so), so their meaning depends on what the
+    # frame is. A caller rendering one tile rather than a whole field of view
+    # is rendering something that may be a tile from the CENTRE of a frame --
+    # where there is no vignette at all -- or from its edge. Drawing strength
+    # from (0, 0.45) models only the second kind, ever more weakly; a
+    # probability models both kinds.
+    vignette_p:   float = 1.0
+    distortion_p: float = 1.0
     defocus_radius:      int                 = 2
     chromatic_shift:     int                 = 2
 
@@ -63,3 +82,7 @@ class DomainGapConfig:
             lo, hi = getattr(self, name)
             if lo > hi:
                 raise ValueError(f'{name}={lo, hi}: lo must be <= hi')
+        for name in ('vignette_p', 'distortion_p'):
+            p = getattr(self, name)
+            if not 0.0 <= p <= 1.0:
+                raise ValueError(f'{name}={p}: must be a probability in [0, 1]')

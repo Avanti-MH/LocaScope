@@ -54,7 +54,7 @@ Upstream, verified in /work/u26130998/CONCH
 
 Two deliberate deviations
 -------------------------
-The head runs in fp32. _run calls .float() before the reduce (and _apply_head
+The head runs in fp32. _run calls .float() before the reduce (and apply_head
 is part of the reduce), while upstream runs the whole tower under one autocast.
 That is why conch's LayerNorm subclass -- whose only job is casting back to the
 input dtype -- is not copied: at fp32 in, it and nn.LayerNorm are the same
@@ -397,7 +397,7 @@ class ConchVitEncoder(TileEncoder):
 
     self.model is the TRUNK, as it is for every encoder here, so tokens() hands
     back the ViT's own 785 tokens whichever head is configured. The head lives
-    in _apply_head and only exists when cfg.head asks for it -- which is also
+    in apply_head and only exists when cfg.head asks for it -- which is also
     what keeps weights_id from covering parameters that never run.
     '''
 
@@ -472,7 +472,7 @@ class ConchVitEncoder(TileEncoder):
             parts.append(f'head_weights={weights_id(self.head)}')
         return parts
 
-    def _apply_head(self, raw: torch.Tensor) -> torch.Tensor:
+    def apply_head(self, raw: torch.Tensor) -> torch.Tensor:
         '''The attentional pooler, or nothing.
 
         vision_tower.py:121-130 in three lines: pool, take the single query,

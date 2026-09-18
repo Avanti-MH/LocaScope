@@ -145,6 +145,52 @@ class QueryFromWSI:
     def query_FoV(self) -> tuple:
         return self.output_w * self.mpp, self.output_h * self.mpp
 
+    @property
+    def reads_natively(self) -> bool:
+        """Does the crop come off a pyramid level at the requested mpp, with no
+        MEANINGFUL software downsampling?
+
+        True when the chosen level's own mpp is within `_REL_TOL` of the
+        requested mpp. It is a property of the SLIDE'S PYRAMID, not of the
+        request: on a 2x pyramid every power-of-two mpp lands on a native
+        level, while on a 4x pyramid the odd powers do not -- `chosen_level`
+        steps back to the next FINER level and the read is 2x too big, then
+        resampled down BY A FACTOR OF 2, unambiguously a real resampling
+        event (`diff` computed below lands at 1.0, i.e. 100%, for that case).
+
+        NOT `(self._read_w, self._read_h) == (self.output_w, self.output_h)`,
+        which this was until 2026-09-16 and which real BRACS pyramids fail
+        almost everywhere except rung 1. `_read_w = int(w_um /
+        self.chosen_mpp)` TRUNCATES, and a measured level downsample is
+        essentially never a bit-exact integer -- `utilities/SafeSlide.py`'s
+        own `_LEVEL_REL_TOL` comment says so: "pyramid downsamples are derived
+        from rounded level dimensions, so a '4x' level reports 4.00003 as
+        readily as 4.0". A level at ds=4.0000226 (diff from the target of six
+        PARTS PER MILLION) made `int(255.9985)` truncate to 255, one pixel
+        short of 256, and the pixel-count comparison called that "resampled" --
+        indistinguishable, by this property's own stated purpose (a
+        DETECTABLE resampling signature), from the genuinely-2x-different case
+        one rung over. `chosen_level`'s own selection loop already tolerates
+        up to 5% before it even reads a different level; `_REL_TOL` here is
+        tighter on purpose, so a real few-percent resize still counts as
+        resampled while sub-0.1%-off measurement noise does not.
+
+        Worth reading back, because a genuine extra resampling stage leaves
+        its own high-frequency signature and it is not distributed evenly over
+        a request set: a caller sweeping a 1-2-4-8-16-32 ladder gets every
+        rung native on a 2x pyramid and alternating rungs resampled on a 4x
+        one, so the signature correlates with the rung rather than averaging
+        out. See `training/MppRoutingHead/cli/train.py`'s `score()`, which
+        splits its accuracy on this.
+        """
+        # Same value and same reason as SafeSlide.py's `_LEVEL_REL_TOL` --
+        # duplicated rather than imported (that name is private to SafeSlide,
+        # and this module already carries its own small constants), but the
+        # two must never disagree about what "close enough to call native"
+        # means for this project's pyramids.
+        _REL_TOL = 1e-3
+        return abs(self.chosen_mpp - self.mpp) / self.mpp < _REL_TOL
+
     # ── Main hot path ────────────────────────────────────────────────────────
     def crop(self, x: int, y: int) -> Optional[Image.Image]:
         """Return one FoV-shaped PIL RGB crop at level-0 (x, y).

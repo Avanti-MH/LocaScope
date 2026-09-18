@@ -157,7 +157,7 @@ class GigaPathEncoderConfig(TileEncoderConfig):
     #: written. It is GigaPath's own answer and not a default, and 'cls' rather
     #: than 'token' because it is the CLS specifically -- pooling_kinds' slot 0
     #: is tokens[:, 0] and timm's pool(pool_type='token') is x[:, 0], the same
-    #: arithmetic under two names, which is why the _vector_from override that
+    #: arithmetic under two names, which is why the vector_from override that
     #: used to sit in this file could be deleted rather than rewritten.
     #:
     #: 'cls' appears twice because it is both the canonical value and a spelling

@@ -114,7 +114,7 @@ def main():
         ('defocus',               apply_defocus(img.copy())),
         ('chromatic',             apply_chromatic(img.copy())),
         ('vignette',              apply_vignette(img.copy())),
-        ('stage_shift',           apply_stage_shift(img.copy())),
+        ('stage_shift (+3, -3)',  apply_stage_shift(img.copy(), dx=3, dy=-3)),
         ('color',                 apply_color(img.copy())),
         ('color_temp (+0.12)',    apply_color_temp(img.copy(), temp=0.12)),
         ('brightness_contrast',   apply_brightness_contrast(img.copy(), 0.1, 0.1)),
