@@ -283,23 +283,37 @@ def dataset_ids() -> List[str]:
     return [d.id for d in _DATASETS]
 
 
-def list_names(*, stain: Optional[str] = None, n: Optional[int] = None
-              ) -> List[str]:
+def list_names(*, stain: Optional[str] = None, dataset: Optional[str] = None,
+              n: Optional[int] = None) -> List[str]:
     """Every name currently found across every registered dataset,
-    optionally narrowed to one `stain`, optionally capped at the first `n`
-    (dataset registration order, then each dataset's own sorted order --
-    not globally sorted, so this stays stable as a dataset gains names).
+    optionally narrowed to one `stain` and/or one `dataset` id, optionally
+    capped at the first `n` (dataset registration order, then each dataset's
+    own sorted order -- not globally sorted, so this stays stable as a
+    dataset gains names).
+
+    `dataset=` exists for the case `stain=` cannot resolve: `Ki67_with_photo`
+    and `Ki67_pure` share a stain (both `'Ki67'`) but are two different
+    datasets a caller may need enumerated separately -- e.g. a training split
+    that draws every WSI in `Ki67_pure` and nothing from its `photos`-bearing
+    sibling. Raises on an unregistered id, same as `locate(name,
+    dataset=...)`, rather than silently returning an empty list a caller
+    could mistake for "this dataset really is empty".
 
     A FRESH SCAN EVERY CALL, ON PURPOSE: this is the one function whose
     whole job is "what is actually there right now", not a lookup in a
     static table -- a name this returns is guaranteed findable by `locate`
     at the same moment (modulo a concurrent transfer).
     """
+    if dataset is not None and dataset not in dataset_ids():
+        raise KeyError(f'{dataset!r} is not a registered dataset id. '
+                       f'Known dataset ids: {dataset_ids()}')
     names: List[str] = []
-    for dataset in _DATASETS:
-        if stain is not None and dataset.stain != stain:
+    for entry in _DATASETS:
+        if stain is not None and entry.stain != stain:
             continue
-        names.extend(dataset.list_fn())
+        if dataset is not None and entry.id != dataset:
+            continue
+        names.extend(entry.list_fn())
     return names if n is None else names[:n]
 
 
