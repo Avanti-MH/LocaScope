@@ -38,6 +38,10 @@ result/
 *.png
 *.jpg
 
+# wandb run directories (jobscripts/_env.sh points WANDB_DIR outside the
+# checkout, but a local/manual run without that env var still writes here)
+wandb/
+
 # else
 Note
 .env
