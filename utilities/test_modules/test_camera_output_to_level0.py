@@ -26,6 +26,7 @@ resampling in the bounding-square read, not augmentation.
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from pathlib import Path
 
@@ -46,6 +47,25 @@ from augment.geometry import apply_rotation                 # noqa: E402
 
 TILE = 256
 ROTS = (0, 90, 180, 270)
+
+#: A decoy position only counts as BEATING the computed one if it wins by
+#: both of these -- a decoy that merely ties is not evidence of a wrong map.
+#:
+#: Why two conditions and not just the ratio: on a near-blank tile every
+#: candidate matches to within rounding, so the two MADs are both noise and
+#: their RATIO is unbounded -- 0.01 against 0.02 is a coin flip that happens
+#: to read as "twice as good". A ratio test alone cannot tell that regime
+#: from a real one at any constant. The absolute term is what says "both of
+#: these are zero, so neither won"; it is measured on the DECISION (how far
+#: apart the two matches landed), not on the tile's texture.
+#:
+#: The margins are wide because the real signal is not subtle. A wrong
+#: inverse rotation scored MAD 5.2 against the correct position's 47.5 when
+#: this file caught it (see output_to_level0's docstring) -- ratio 0.11, gap
+#: 42.3. A correct map on textured tissue scores 0.02 against a decoy's 0.32.
+#: Both regimes sit an order of magnitude clear of these cuts.
+DECOY_RATIO = 0.5    # decoy must match at least twice as well ...
+DECOY_ABS = 1.0      # ... and by more than 1 MAD unit on a 0-255 scale
 
 
 def geometry_only_cfg(query_mpp: float) -> DomainGapConfig:
@@ -87,6 +107,82 @@ def pick_textured_position(cam, wsi, tries=40, seed=0):
     return best, best_std
 
 
+def full_gap_cfg(query_mpp: float) -> DomainGapConfig:
+    """Every augmentation ON -- the opposite of `geometry_only_cfg`.
+
+    The mapping test wants a camera that only moves pixels, so it turns the
+    photometric stage off. The reproducibility check below wants the exact
+    opposite: `photometric=False` returns before the sensor stage runs, so it
+    would never execute `apply_noise` at all, and a check that never runs the
+    noise cannot notice the noise being irreproducible.
+    """
+    return DomainGapConfig(wh_ratio='45:32', MPixels=1.47456,
+                           query_mpp=query_mpp)
+
+
+def check_same_seed_same_pixels(wsi, query_mpp, x, y, seed) -> list:
+    """Two Cameras, one seed, one position -> must be BIT-IDENTICAL.
+
+    Nothing asserted this until 2026-09-16, which is how `apply_stage_shift`
+    and `apply_noise` drew from the process-global `np.random` for as long as
+    they did: `Camera.__init__` used to call `np.random.seed(seed)`, so in the
+    build-one-camera-then-shoot order every existing caller happens to use,
+    the global draws came out reproducible anyway and nothing looked wrong.
+
+    So the order here is deliberate and is the part that must not be
+    "simplified": BOTH cameras are built BEFORE EITHER shoots. Under the old
+    code that alone breaks it -- building B re-seeds the global, A's shot then
+    consumes it, and B's shot gets the advanced state. Building A, shooting A,
+    building B, shooting B would have passed on the buggy code and tested
+    nothing. The `np.random` call between the two shots is the same argument
+    made louder: a shot must not depend on global state at all, so disturbing
+    it must not change the pixels.
+
+    That interleaved order is not hypothetical -- it is exactly what
+    `training/MppRoutingHead/Datasets.py`'s `_CameraBank` does (one Camera per
+    rung of a slide, all built before any of them shoots).
+    """
+    failures = []
+    cfg = full_gap_cfg(query_mpp)
+
+    cam_a = Camera(wsi, cfg=cfg, seed=seed)
+    cam_b = Camera(wsi, cfg=cfg, seed=seed)          # built BEFORE a shoots
+    img_a, params_a = cam_a.capture_with_gt(x, y)
+    np.random.random(1000)                            # disturb the global state
+    img_b, params_b = cam_b.capture_with_gt(x, y)
+
+    if img_a is None or img_b is None:
+        failures.append(('same-seed', 'capture returned None'))
+    elif not np.array_equal(img_a, img_b):
+        differing = int((np.asarray(img_a) != np.asarray(img_b)).any(axis=2).sum())
+        failures.append((
+            'same-seed',
+            f'{differing} px differ; '
+            f'stage_shift a={params_a["stage_shift_dx"]},{params_a["stage_shift_dy"]} '
+            f'b={params_b["stage_shift_dx"]},{params_b["stage_shift_dy"]}  '
+            f'noise_seed a={params_a["noise_seed"]} b={params_b["noise_seed"]}'))
+    print(f'  {"ok  " if not failures else "FAIL"} two Cameras, same seed, '
+          f'built before either shoots -> identical pixels')
+
+    # The property training/MppRoutingHead/Datasets.py's eval split depends on:
+    # one Camera, a per-call rng derived from the sample's identity, same
+    # answer every time regardless of what ran in between.
+    before = len(failures)
+    cam_c = Camera(wsi, cfg=cfg, seed=None)
+    img_1 = cam_c.capture(x, y, rng=random.Random(99))
+    np.random.random(1000)
+    img_2 = cam_c.capture(x, y, rng=random.Random(99))
+    if img_1 is None or img_2 is None:
+        failures.append(('per-call-rng', 'capture returned None'))
+    elif not np.array_equal(img_1, img_2):
+        differing = int((np.asarray(img_1) != np.asarray(img_2)).any(axis=2).sum())
+        failures.append(('per-call-rng', f'{differing} px differ'))
+    print(f'  {"ok  " if len(failures) == before else "FAIL"} one Camera, same '
+          f'capture(rng=) twice -> identical pixels')
+
+    return failures
+
+
 def read_at(wsi, level, ds, cx, cy):
     """A TILE-sized crop of the WSI centred on level-0 point (cx, cy)."""
     x0 = int(round(cx - TILE * ds / 2.0))
@@ -100,6 +196,12 @@ def read_at(wsi, level, ds, cx, cy):
 
 def mad(a, b):
     return float(np.abs(a - b).mean())
+
+
+def beats(here: float, decoy: float) -> bool:
+    """Did `decoy` match the tile better than the computed position, by
+    enough that it cannot be noise? See DECOY_RATIO / DECOY_ABS."""
+    return decoy < here * DECOY_RATIO and (here - decoy) > DECOY_ABS
 
 
 def main() -> int:
@@ -147,7 +249,7 @@ def main() -> int:
                                      2 * (y + q.rect_h_l0 / 2) - cy))
             shift = mad(back, read_at(wsi, q.chosen_level, ds,
                                       cx + TILE * ds, cy))
-            if here < flip and here < shift:
+            if not any(beats(here, decoy) for decoy in (flip, shift)):
                 wins += 1
             else:
                 failures.append((rot, r, c, here, flip, shift))
@@ -160,12 +262,33 @@ def main() -> int:
         print('\nfirst few mismatches (MAD: computed / sign-flipped / shifted):')
         for rot, r, c, a, b, cc in failures[:6]:
             print(f'  rot={rot:3d} tile({r},{c})  {a:7.2f} / {b:7.2f} / {cc:7.2f}')
-        print('\nIf 0 and 180 pass but 90 and 270 fail, the inverse rotation in '
+        print(f'\nA decoy only counts as winning if it matches at least '
+              f'{1 / DECOY_RATIO:.0f}x better AND by more than {DECOY_ABS} MAD, '
+              f'so anything listed above is a decisive loss, not a tie.')
+        print('If the SIGN-FLIPPED column is the one winning, and it wins at 90 '
+              'and 270 while 0 and 180 pass, the inverse rotation in '
               'Camera.output_to_level0 has the wrong sign -- swap the signs on '
-              'du_s / dv_s.')
+              'du_s / dv_s. (0 and 180 cannot see that error: the two forms '
+              'coincide there.) If the SHIFTED column is the one winning, the '
+              'offset is wrong rather than the rotation, and the sign is not '
+              'the thing to touch.')
         return 1
 
     print('\nall rotations map back to the right place')
+
+    print('\nseed reproducibility (every augmentation ON):')
+    seed_failures = check_same_seed_same_pixels(wsi, level_mpp, x, y, args.seed)
+    if seed_failures:
+        print('\nmismatches:')
+        for what, detail in seed_failures:
+            print(f'  {what}: {detail}')
+        print('\nA shot must depend only on the rng it was given. If this fails, '
+              'something in the augment chain is drawing from the process-global '
+              '`np.random` again -- grep query_sim/ for `np.random.` and check '
+              'that every draw goes through `_sample_params`\'s rng (an offset '
+              'recorded in `params`, or a seed recorded there) instead.')
+        return 1
+    print('  same seed and same capture(rng=) both reproduce exactly')
     return 0
 
 

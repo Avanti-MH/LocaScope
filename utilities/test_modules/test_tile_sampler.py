@@ -63,7 +63,6 @@ import numpy as np                                               # noqa: E402
 from DsLadder import RungPlan                                    # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
                          allocate_targets, bucket_names, spill_order,
-                         caps_for_tissue_ratio,
                          RichnessConfig, Sample, SampleMeta,
                          SamplerConfig, TileSampler, assign_buckets,
                          resolution_plan)

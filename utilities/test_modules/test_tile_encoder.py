@@ -185,7 +185,7 @@ class FakeEncoder(TileEncoder):
 class TokenConfig(FakeConfig):
     """A token model that HAS decided which token, the way a real one must.
 
-    One table entry is the whole of it: '' -> 'cls'. There is no _vector_from
+    One table entry is the whole of it: '' -> 'cls'. There is no vector_from
     override here and none in GigaPathFunc or Uni2Func either -- the base
     reduces by cfg.pooling, so an override would be a second copy of that
     decision and, worse, one that ignores cfg.pooling. This fake kept such an
@@ -227,7 +227,7 @@ class HeadEncoder(FakeEncoder):
     this fake is here to say so before CONCH exists.
     """
 
-    def _apply_head(self, raw):
+    def apply_head(self, raw):
         return raw[:, 0, :HEAD_DIM]     # stands in for an attentional pooler
 
 
@@ -456,7 +456,7 @@ def t_unknown_pooling_dies_at_config_time():
 
 
 def t_feature_spec_describes_what_features_returned():
-    """One slot whatever the pooling, because _vector_from flattened them.
+    """One slot whatever the pooling, because vector_from flattened them.
 
     The file holds one vector per tile and `pooling` is the only record of what
     went into it; pool_slots(pooling, model_spec) recovers the rest.
