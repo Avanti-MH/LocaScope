@@ -2,7 +2,7 @@
 
 Wraps the three stage primitives into one WSI-scoped object:
 
-    Stage 1 — mpp estimation    via GigaPathKnnEstiMpp
+    Stage 1 — mpp estimation    via KnnEstMpp
     Stage 2 — retrieval         via GigaPathSlidingWinSimRot (cached per level)
     Stage 3 — SIFT+RANSAC       via SiftRansacLocalizer
 
@@ -14,22 +14,39 @@ Design:
   whole MRXS level otherwise — at mask_ds=16 one slide's level image is
   ~313 MP, and a single ResNet layer1 activation on that is 18.6 GiB.
   Pass mask_seg_chunk_px=None to opt out and segment the level in one call.
-* A retriever is built lazily on first use for each pyramid level; est_mpp
-  from stage 1 is fuzzy-snapped to a level via
-  `wsi.get_best_level_for_downsample`. WsiTissuesContainer requires an exact
-  match to a level downsample, so the retriever is constructed at that
-  level's NATIVE mpp — not at the raw est_mpp.
+* A retriever is built lazily on first use for each pyramid level; the
+  routed level is `KnnEstMpp.estimate`'s own `chosen_level` --
+  `wsi.coarser_level_for_downsample`, the repo's own measured, coarse-biased
+  routing rule (`SafeSlide.py`'s own docstring: 91.1% recovered by stage 3 at
+  one level coarse against 15.7% at one level fine, 1398 shots). This file
+  used to snap with `wsi.get_best_level_for_downsample` instead -- the
+  FINE-biased general-purpose openslide rule, not the one measured for this
+  exact job -- inline, a second implementation of the same snap. Fixed by
+  reading `chosen_level` off the Result rather than recomputing it; see
+  `StageInterface.py`'s docstring for why that recompute is not a shared
+  function either, now that there is nothing left here to share it with.
 * If a level's retriever build fails (e.g. filter_patchable emptied the mask
   because tiles are too big at that level), the shot is marked
   `unusable_level` and its stage 2 / 3 metrics are None.
 * Errors in any stage produce a LocaScopeQueryResult with `.error` set;
   earlier stages' results are preserved.
 
+`encoder` IS A REGISTRY NAME (`TileEncoderFunc`'s, e.g. `'gigapath'`), not a
+built object -- `KnnEstMpp` builds its own from it (`KnnEstMppConfig`'s own
+design: an estimator does not need to be handed an already-built encoder to
+be usable standing alone). This pipeline still wants ONE encoder shared
+across mask-building, stage 1 and stage 2 rather than three separate copies
+in GPU memory, so it does not build a second one itself: `build()` reads the
+one `self.estimator` already built off `self.estimator.encoder` and reuses
+THAT for everything downstream. The sharing was always incidental to what
+`KnnEstMpp` needs for itself, never a requirement of it -- this is the
+pipeline arranging for it, not the estimator promising it.
+
 Usage:
 
     from utilities.LocaScopePipeline import LocaScopePipeline
 
-    pl = LocaScopePipeline(wsi, encoder).build()
+    pl = LocaScopePipeline(wsi, encoder='gigapath').build()
     result = pl.run(shot_img)
     # result.est_mpp, result.routed_level, result.retrieval, result.refine
 """
@@ -40,10 +57,11 @@ import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Union
+from typing import Dict, Optional, Union
 
 import numpy as np
 import openslide
+import torch
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
@@ -55,7 +73,9 @@ for _d in ('utilities', '1_estimate_query_mpp', '2_retrieval', '3_localization')
 from PatchingLib             import QueryPatchContainer                                # noqa: E402
 from SafeSlide               import SafeSlide                                          # noqa: E402
 from TissuesRegionsMask      import TissuesRegionsMask                                 # noqa: E402
-from GigaPathKnnEstiMpp      import GigaPathKnnEstiMpp                                 # noqa: E402
+from TileSampler             import OverlapConfig, SamplerConfig                       # noqa: E402
+from KnnEstMpp                import (KnnEstMpp, KnnEstMppConfig,                       # noqa: E402
+                                      REFERENCE_BANK_RICHNESS)
 from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot, SlideWinSimRotResult     # noqa: E402
 from SIFT_RANSAC             import SiftRansacLocalizer, SiftRansacResult              # noqa: E402
 
@@ -87,15 +107,15 @@ class LocaScopePipeline:
     def __init__(
         self,
         wsi:                 Union[openslide.OpenSlide, str],
-        encoder:             Callable,
+        encoder:             str,
+        device:              Union[str, torch.device] = 'cuda' if torch.cuda.is_available() else 'cpu',
         tile_size:           int   = 256,
         mask_cfg:            'TissueMaskConfig' = None,
         feature_store_root:  Optional[str] = None,
         feature_store_mode:  str = 'rw',
         knn_samples:         int   = 40,
         knn_k:               int   = 5,
-        knn_seed:            Optional[int] = 42,
-        knn_tissue_ratio:    float = 0.5,
+        knn_seed:            int   = 42,
         retriever_overlap:   bool  = True,
         refiner_min_inliers: int   = 10,
         refiner_padding:     int   = 2,
@@ -109,7 +129,13 @@ class LocaScopePipeline:
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi                 = wsi
-        self.encoder             = encoder
+        # A REGISTRY NAME, not a built object -- see this module's own
+        # docstring. Resolved to the real thing in build(), and read off
+        # `self.estimator.encoder` from there on so mask-building and stage 2
+        # share the exact object `KnnEstMpp` built for itself.
+        self.encoder_name        = encoder
+        self.device              = torch.device(device)
+        self.encoder = None
         self.tile_size           = tile_size
         # One value instead of five parameters and two remembered method calls.
         # The mask a pipeline builds can now say how it was built, which is what
@@ -121,7 +147,6 @@ class LocaScopePipeline:
         self.knn_samples         = knn_samples
         self.knn_k               = knn_k
         self.knn_seed            = knn_seed
-        self.knn_tissue_ratio    = knn_tissue_ratio
         self.retriever_overlap   = retriever_overlap
         self.refiner_min_inliers = refiner_min_inliers
         self.refiner_padding     = refiner_padding
@@ -132,14 +157,31 @@ class LocaScopePipeline:
         self.base_mpp = wsi.base_mpp   # raises if the slide carries no mpp
 
         self.mask:      Optional[TissuesRegionsMask] = None
-        self.estimator: Optional[GigaPathKnnEstiMpp] = None
+        self.estimator: Optional[KnnEstMpp] = None
         # None value == "tried, unusable"; missing key == "not tried yet"
         self._retrievers: Dict[int, Optional[GigaPathSlidingWinSimRot]] = {}
         self._retriever_reason: Dict[int, str] = {}   # why a level is unusable
 
     # ── One-time setup ────────────────────────────────────────────────────────
     def build(self) -> 'LocaScopePipeline':
-        """Build mask + mpp KNN reference bank (per-WSI one-time)."""
+        """Build the encoder + mask + mpp KNN reference bank (per-WSI one-time)."""
+        # KnnEstMpp builds its own encoder from cfg.encoder -- constructing
+        # it here, before the mask, is what lets mask-building below reuse
+        # THAT object instead of building a second encoder of its own.
+        # `mask_cfg=self.mask_cfg` even though `build(wsi, mask=...)` below
+        # hands the estimator an already-built mask directly: identity should
+        # still name the recipe that mask actually came from, not whatever
+        # KnnEstMppConfig's own default happens to be.
+        cfg = KnnEstMppConfig(
+            encoder=self.encoder_name, mask_cfg=self.mask_cfg,
+            sampler_cfg=SamplerConfig(
+                tile=self.tile_size, n_per_rung=self.knn_samples,
+                seed=self.knn_seed, richness=REFERENCE_BANK_RICHNESS,
+                overlap=OverlapConfig()),
+            k=self.knn_k)
+        self.estimator = KnnEstMpp(cfg, device=self.device)
+        self.encoder = self.estimator.encoder
+
         # Segment, filter and merge in one place and in one order. merge is
         # incomplete without filter having run first -- it skips nested boxes on
         # the assumption they are already gone -- and that dependency used to be
@@ -147,14 +189,10 @@ class LocaScopePipeline:
         self.mask = self.mask_cfg.build(
             self.wsi, getattr(self.encoder, 'device', None))
 
-        self.estimator = GigaPathKnnEstiMpp(
-            self.wsi, encoder=self.encoder, mask=self.mask,
-            tile_size=self.tile_size,
-            samples_per_level=self.knn_samples, k=self.knn_k,
-            seed=self.knn_seed, tissue_ratio=self.knn_tissue_ratio,
-        )
-        self.estimator.build_samples()
-        self.estimator.build_ref_features()
+        # Reuses `self.mask` rather than letting KnnEstMpp segment its own --
+        # same mask, so stage 1's reference bank and stage 2's retriever agree
+        # on which regions are tissue.
+        self.estimator.build(self.wsi, mask=self.mask)
         return self
 
     # ── Lazy per-level retriever cache ────────────────────────────────────────
@@ -237,23 +275,20 @@ class LocaScopePipeline:
         if self.estimator is None:
             raise RuntimeError('LocaScopePipeline not built; call .build() first.')
 
-        # Stage 1 — estimate mpp
+        # Stage 1 — estimate mpp AND route to a pyramid level.
+        # `chosen_level` is `KnnEstMpp.estimate`'s own snap
+        # (`wsi.coarser_level_for_downsample`) -- there is no separate
+        # routing step left to fail on its own, so a routing failure now
+        # surfaces as `stage1 failed` rather than its own category. See this
+        # module's own docstring for why that snap moved off this file.
         try:
             r1 = self.estimator.estimate(img_np, overlap=True)
             est_mpp = float(r1.estimated_mpp)
+            level = r1.chosen_level
         except Exception as e:
             return LocaScopeQueryResult(
                 None, None, False, None, None,
                 f'stage1 failed: {type(e).__name__}: {e}')
-
-        # Route est_mpp to the closest pyramid level (fuzzy snap)
-        try:
-            ds_target = est_mpp / self.base_mpp
-            level = self.wsi.get_best_level_for_downsample(ds_target)
-        except Exception as e:
-            return LocaScopeQueryResult(
-                est_mpp, None, False, None, None,
-                f'level routing failed: {type(e).__name__}: {e}')
 
         # Stage 2 — retrieve (cached retriever per level)
         retriever = self._get_retriever(level)

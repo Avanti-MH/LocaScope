@@ -20,7 +20,7 @@ query image (np.ndarray / PIL)
     │
     ├─ QueryPatchContainer.extract_all(tile_size, overlap)
     │
-    ├─ [mpp=None] GigaPathKnnEstiMpp.estimate(qpc)  →  mpp_est
+    ├─ [mpp=None] KnnEstMpp.estimate(qpc)  →  mpp_est
     │  [mpp=float] skip, use directly
     │
     ├─ TissuesRegionsMask.from_wsi(wsi, ds=seg_ds)
@@ -109,7 +109,7 @@ class LocaScope:
 ### `locate(query, mpp, ...)`
 
 1. `QueryPatchContainer.extract_all(tile_size, overlap)`
-2. `mpp=None` → `GigaPathKnnEstiMpp.estimate(qpc)` → `mpp_est`
+2. `mpp=None` → `KnnEstMpp.estimate(qpc)` → `mpp_est`
 3. `mask.filter_patchable(tile_size, ds_est)`（每次 locate 用當次 mpp 算）
 4. `GigaPathSlidingWinSim.build_query_features(qpc)`
 5. `.compute_sim_maps()` → `.find_best()` → `retrieval`
@@ -122,5 +122,5 @@ class LocaScope:
 
 - `filter_patchable` 每次 locate 重跑 → 可能改變 `mask.tissue_regions`，多 query 時有副作用，考慮 copy 或在 locate 內用 temp list
 - `wsi` 由呼叫者管理 lifetime（LocaScope 不 close），需在 docstring 說明
-- MPP 估算失敗時的 fallback 策略（目前 GigaPathKnnEstiMpp 一定給結果）
+- MPP 估算失敗時的 fallback 策略（目前 KnnEstMpp 一定給結果）
 - 是否暴露 `wsi_container`、`localizer` 供外部 debug 用

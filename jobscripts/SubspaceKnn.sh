@@ -105,7 +105,12 @@ if [ -n "${ONLY_WSI}" ]; then
   SLIDES=("${ONLY_WSI}")
 fi
 
-python utilities/bench_modules/bench_subspace_knn.py "${SLIDES[@]}" \
+# bench_subspace_knn.py was merged into bench_mpp_feature_decomposition.py's
+# `subspace_knn` part (2026-09-14) -- same functions, same output filenames,
+# --parts is the only thing that changed. The standalone script became a
+# dead duplicate sitting next to the merged one and was deleted 2026-09-17.
+python utilities/bench_modules/bench_mpp_feature_decomposition.py "${SLIDES[@]}" \
+  --parts subspace_knn \
   --stores "$RESULT_ROOT"/cache/reference_features/"${ENCODER:-gigapath}" \
   --pooling cls \
   --per-level "${PER_LEVEL:-1000}" \

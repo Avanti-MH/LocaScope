@@ -435,7 +435,7 @@ def allocate_targets(floors: Sequence[float],
     to go.
 
     NOBODY ASKED is a real configuration and not a degenerate one to reject.
-    `GigaPathKnnEstiMpp`'s reference bank wants "any admissible tile, no
+    `KnnEstMpp`'s reference bank wants "any admissible tile, no
     preference between buckets" -- all floors zero, caps 1 on the buckets it
     admits. Splitting the remainder evenly there would turn "no preference"
     into "equal thirds", which is a different bank. So with no askers the
@@ -453,33 +453,6 @@ def allocate_targets(floors: Sequence[float],
         for i in askers:
             out[i] = min(caps[i], out[i] + share)
     return tuple(out)
-
-
-def caps_for_tissue_ratio(tissue_ratio: float,
-                          edges: Optional[Sequence[float]] = None
-                          ) -> Tuple[float, ...]:
-    """The retired `tissue_ratio` gate, expressed as a cap per bucket.
-
-    `tissue >= r` is `background <= 1 - r`, so every bucket whose interval lies
-    wholly at or below `1 - r` is admitted at cap 1 and the rest at 0. Two
-    callers wanted exactly their old behaviour back and neither should own the
-    translation: `GigaPathKnnEstiMpp`'s reference bank and
-    `bench_gigapath_accuracy`, both at 0.5.
-
-    A ratio that does not land on a bucket edge is REFUSED rather than rounded.
-    Rounding would silently widen or narrow the corpus, and `edges` is a config
-    field the caller can move -- so the refusal is what keeps a moved edge from
-    quietly changing a bank that was meant to be unchanged.
-    """
-    edges = tuple(RichnessConfig().edges if edges is None else edges)
-    limit = 1.0 - float(tissue_ratio)
-    if not any(abs(float(e) - limit) < 1e-9 for e in edges):
-        raise ValueError(
-            f'tissue_ratio {tissue_ratio} means background <= {limit:g}, which '
-            f'is not one of the richness edges {edges}. Pick a ratio that '
-            f'lands on an edge, or pass an explicit RichnessConfig')
-    return tuple(1.0 if float(e) <= limit + 1e-9 else 0.0
-                 for e in edges) + (0.0,)
 
 
 def spill_order(caps: Sequence[float], target: Sequence[float]) -> Tuple[int, ...]:
