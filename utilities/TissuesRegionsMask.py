@@ -161,6 +161,53 @@ class TissuesRegionsMask:
         return (mx, my,
                 int(r.w / self.mask_ds_x), int(r.h / self.mask_ds_y))
 
+    def get_local_mask(self, coord_0: tuple[float, float], tile_size: int,
+                       *, transfer2ds: float) -> np.ndarray:
+        """One tile's own footprint of `main_mask`, resampled to exactly
+        `(tile_size, tile_size)` -- the crop `white_fractions` reduces to a
+        single number without ever handing back the array itself.
+
+            local = trm.get_local_mask((x0, y0), 256, transfer2ds=4.0)  # [256,256] bool
+
+        `coord_0`: the tile's own top-left in ABSOLUTE level-0 pixels (same
+        convention as `TissueRegion.x/y` and every other public coordinate
+        on this class). `transfer2ds`: the ds the tile was itself read at
+        (`DsLadder`'s rung value, e.g. 4.0) -- together with `tile_size` this
+        gives the tile's level-0 footprint (`tile_size * transfer2ds`), which
+        is what actually gets converted to mask columns/rows via
+        `to_mask_xy`; `transfer2ds` is a plain ds, not a WSI level index, so
+        no `wsi_level_downsamples` lookup is involved the way
+        `_levelLength_converter` needs one.
+
+        NEAREST, not bilinear, for the resample -- the same reasoning
+        `Uni2PcaSegmenter.__call__` gives for its own upsample: this decodes
+        a coarser cell's binary decision back onto finer pixels, and
+        bilinear would invent fractional tissue along every cell boundary
+        the source mask never claimed. A caller that goes on to downsample
+        THIS result again (e.g. `ComplementaryLoss._prepare_tissue_mask`,
+        collapsing it to a decoder's much smaller `grid_size`) is doing the
+        opposite kind of resample -- many pixels into few, where a soft
+        coverage fraction per cell is the more informative answer -- which
+        is exactly why that second step stays bilinear instead.
+        """
+        x0, y0 = coord_0
+        footprint = float(tile_size) * float(transfer2ds)
+        col0, row0 = self.to_mask_xy(x0, y0)
+        col1, row1 = self.to_mask_xy(x0 + footprint, y0 + footprint)
+        height, width = self.main_mask.shape
+        col0, col1 = sorted((max(0, min(col0, width)), max(0, min(col1, width))))
+        row0, row1 = sorted((max(0, min(row0, height)), max(0, min(row1, height))))
+        if col1 <= col0 or row1 <= row0:
+            raise ValueError(
+                f'tile at level-0 {tuple(coord_0)} sized {footprint:g} px '
+                f'falls entirely outside main_mask (shape {self.main_mask.shape}, '
+                f'origin ({self.origin_x}, {self.origin_y})) -- this tile '
+                f'should not have passed whatever selected it for training')
+        crop = self.main_mask[row0:row1, col0:col1].astype(np.uint8)
+        resized = cv2.resize(crop, (int(tile_size), int(tile_size)),
+                             interpolation=cv2.INTER_NEAREST)
+        return resized.astype(bool)
+
     def read_matching_rgb(self, wsi) -> np.ndarray:
         """The slide image covering exactly what main_mask covers, same shape.
 
