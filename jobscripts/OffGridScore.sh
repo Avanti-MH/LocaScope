@@ -68,9 +68,12 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # differ by less than the exposure noise between them. The aggregate over 10
 # points is what would show it.
 #
-# Rotation is fixed at 0 on purpose. This measures displacement alone; rotation
-# has its own test (test_gigapath_slide_win_sim.py step 5), and mixing them
-# would leave one number answering two questions.
+# Rotation is fixed at 0 on purpose. This measures displacement alone, and
+# mixing rotation into it would leave one number answering two questions.
+# (The rotation-recovery checks that used to cover GigaPathSlidingWinSimRot's
+# rotation path -- test_gigapath_slide_win_sim.py step 5 -- were dropped when
+# that file was merged into test_locascope_stages.py, 2026-09-17; nothing
+# currently covers rotation on its own.)
 #
 # Two axes ride along at almost no cost:
 #
