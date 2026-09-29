@@ -232,7 +232,7 @@ def write_csvs(out_dir: Path, tag: str, out_rows: List[Dict],
     '''Two files, because they answer two questions.
 
     `test_scores_<tag>.csv` is one row per (checkpoint, dataset) -- the summary
-    that goes next to `bench_mpp_feature_decomposition.py`'s numbers.
+    that goes next to `bench_stage1_mpp.py`'s numbers.
 
     `test_predictions_<tag>.csv` is one row per TILE: where it came from
     (`wsi_name`, `x`, `y`), what it is (`rung`, `bucket`, `native`) and what

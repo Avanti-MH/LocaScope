@@ -38,8 +38,9 @@ def weight_filename(encoder_name: str, frozen: bool, head_name: str,
     untagged keeps every already-trained bal checkpoint's filename exactly
     as it is -- only `ord_a`/`ord_b` runs (which used to need a hand-picked
     `--out` subdirectory to avoid overwriting a bal checkpoint of the same
-    encoder+head, see `jobscripts/Benchmarks/MppFeatureDecomposition.sh`'s
-    own history) now get a real, distinct filename in the SAME shared
+    encoder+head, see `jobscripts/Benchmarks/Stage1MppBench.sh`'s
+    history, formerly MppFeatureDecomposition.sh) now get a real, distinct
+    filename in the SAME shared
     weights/ directory. `loss` is a training-time hyperparameter, not an
     architectural choice `build_from_checkpoint` needs to rebuild the
     model correctly (unlike `training/PrototypicalRoutingHead`'s `collapse`/

@@ -595,7 +595,7 @@ def _merge_val_scores(path: Path, out_rows):
     same directory), so training a second arm (a different `--collapse`,
     say) without `--merge` would silently truncate the first arm's rows
     away instead of accumulating next to them -- exactly the shape that
-    lets `bench_mpp_feature_decomposition.py`-style tooling compare every
+    lets `bench_stage1_mpp.py`-style tooling compare every
     arm the same way it already compares `MppRoutingHead`'s several heads.
 
     `.get(k, '')`, not `r[k]` (2026-09-22, fixing a real crash): a row

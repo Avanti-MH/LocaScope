@@ -128,7 +128,7 @@ routing head（Cosine/τ / 交叉注意力度量路由）。這次只搭骨架�
 `PrototypicalRoutingHead`（跟 `...Baseline`）的每次執行都用同一個 job
 name,結果一定寫進同一個目錄——這是刻意的,為的是讓不同 arm（不同
 `--generator`/`--routing-head`/`--pooling`/`--classifier`）的結果能疊在
-一起比,像 `bench_mpp_feature_decomposition.py` 現在比較 `MppRoutingHead`
+一起比,像 `bench_stage1_mpp.py` 現在比較 `MppRoutingHead`
 好幾個 head 一樣。但原本 `val_scores.csv`/`val_scores_per_rung.csv` 每次都是
 整份覆寫,換一個 arm 重跑就會把前一個 arm 的歷史洗掉。現在照抄
 `MppRoutingHead/cli/train.py` 自己的 `--merge`/`_merge_val_scores` 慣例：
@@ -289,7 +289,7 @@ test 再放大規模。
 ## 3. Metric-based 主線分數
 
 上 `stage1_compare` 那個計分板（`utilities/bench_modules/
-bench_mpp_feature_decomposition.py`），跟 `KnnEstMpp`、`MppRoutingHead` 現有
+bench_stage1_mpp.py`），跟 `KnnEstMpp`、`MppRoutingHead` 現有
 checkpoint 站在同一批 slide 上比——需要一個新的 `PrototypicalEstMpp`
 （`1_estimate_query_mpp/`，`StageInterface.MppEstimator` 形狀),但這是
 之後的事,先不寫。

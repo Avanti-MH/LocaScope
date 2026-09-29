@@ -3,8 +3,8 @@
 parameters (exact, no run needed) plus one real forward pass's PEAK GPU
 memory (measured, not guessed -- see the module docstring on why a formula
 cannot answer this one). Takes the exact same `--knn-encoder`/
-`--classifier-weights` method specs `bench_mpp_feature_decomposition.py
---parts stage1_compare` does, because the question only matters for
+`--classifier-weights` method specs `bench_stage1_mpp.py`
+does, because the question only matters for
 whichever methods a real run actually names.
 
 Two numbers, and they answer different questions:

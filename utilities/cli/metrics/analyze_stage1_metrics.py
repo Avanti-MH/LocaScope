@@ -3,8 +3,7 @@
 actually wins.
 
 No GPU, no WSI, no torch -- it only reads the csv, so it runs on a login node
-and takes under a second. `bench_mpp_feature_decomposition.py`'s
-`stage1_compare` part is the writer; THIS FILE decides the schema that writer
+and takes under a second. `bench_stage1_mpp.py` is the writer; THIS FILE decides the schema that writer
 has to produce (below), and everything the writer collects exists because a
 question here needs it -- not the other way round.
 
@@ -69,10 +68,10 @@ first.
 
 Usage:
     python utilities/cli/metrics/analyze_stage1_metrics.py \\
-        result/MppFeatureDecomposition/<sampler_id>_<seg_id>.csv
+        result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv
 
     python utilities/cli/metrics/analyze_stage1_metrics.py \\
-        result/MppFeatureDecomposition/<sampler_id>_<seg_id>.csv --native-only
+        result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv --native-only
 """
 from __future__ import annotations
 
@@ -100,7 +99,7 @@ BAR = '=' * 78
 #: 2026-09-22: rebuilt against `training/MppRoutingHead/Runtime.
 #: HEAD_CHOICES`'s actual registered names -- the previous version's keys
 #: (`'LinearHead+fixed'`, `'ArcFaceHead+fixed'`, ...) were the CLASS names
-#: `classifier` used to hold before `bench_mpp_feature_decomposition.py`'s
+#: `classifier` used to hold before `bench_stage1_mpp.py`'s
 #: own `_method_specs` switched it to `head_name` (that switch's own
 #: comment explains why: 'classifier' collapsed all five mlp variants into
 #: one label). Nothing here was ever updated to match, so every lookup has
@@ -194,7 +193,7 @@ def method_of(row: dict) -> str:
     `loss` (2026-09-22) is appended ONLY when it is present AND not 'bal':
     every checkpoint trained before `--loss` existed, and every 'bal' run
     since, keeps the exact label it already had (no '+bal' suffix appearing
-    everywhere) -- same reasoning `bench_mpp_feature_decomposition.py`'s own
+    everywhere) -- same reasoning `bench_stage1_mpp.py`'s own
     `_prototype_weight_filename`-style filenames only tag a NON-default
     loss. Without this, a bal- and an ord_a-trained checkpoint of the same
     encoder+head+reduction would collapse into one label and get averaged

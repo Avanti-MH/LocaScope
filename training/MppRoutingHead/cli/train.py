@@ -14,7 +14,7 @@
                  moves the trunk a different way.
 
     baseline 1   the KNN (`KnnEstMpp`). Not here: it trains nothing.
-                 `bench_mpp_feature_decomposition.py` scores it.
+                 `bench_stage1_mpp.py` scores it.
 
 THREE SPLITS, SPLIT BY WSI
 ---------------------------

@@ -9,7 +9,7 @@ scanner) needs a fresh set of prototypes, not a fresh training run.
 
 `MppRoutingHead` is the classifier-head baseline this has to beat, not a step
 towards it. Both sit on the same `stage1_compare` scorecard as `KnnEstMpp`
-(`utilities/bench_modules/bench_mpp_feature_decomposition.py`) — see that
+(`utilities/bench_modules/bench_stage1_mpp.py`) — see that
 file's own module docstring for the comparison shape every stage-1 candidate
 is measured on.
 
