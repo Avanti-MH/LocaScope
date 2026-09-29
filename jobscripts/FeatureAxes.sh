@@ -71,12 +71,12 @@ SLIDES=(
   "S1137178,G7E,110926" "S1151088,G7E,111220"
 )
 
-# The reference stores PoolingBench.sh dumps. DRAW is the `reference draw`
+# The reference stores TileRetrievalBench.sh dumps. DRAW is the `reference draw`
 # line that dump prints (<sampler_id>_<plan>); there is no default, because a
 # guessed one would read a draw nobody chose.
-: "${DRAW:?set DRAW to the reference draw PoolingBench.sh printed}"
+: "${DRAW:?set DRAW to the reference draw TileRetrievalBench.sh printed}"
 python utilities/bench_modules/bench_feature_axes.py "${SLIDES[@]}" \
-  --stores "$RESULT_ROOT"/cache/PoolingBench_features/"${ENCODER:-gigapath}" \
+  --stores "$RESULT_ROOT"/cache/TileRetrievalBench_features/"${ENCODER:-gigapath}" \
   --seg hest --draw "$DRAW" \
   --pooling cls
 

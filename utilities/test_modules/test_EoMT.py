@@ -308,7 +308,7 @@ def encode_batch(enc, x_u8: torch.Tensor, dev, fp16: bool = True):
     is 154 MB against 616 MB per batch of pure transfer.
 
     fp16 autocast because the same model reaches 650 tiles/s in
-    bench_slidewin_pooling under it and this file was doing about a fortieth of
+    bench_window_retrieval under it and this file was doing about a fortieth of
     that in fp32 at batch 1. It moves the features by ~1e-3, which principal
     directions are insensitive to -- insensitive, not identical, so --no-fp16
     is there for a run that has to match exactly.
@@ -897,7 +897,7 @@ def main():
                          'the boundary -- a section edge, fat, a fold -- are '
                          'the ones in between.')
     ap.add_argument('--batch-tiles', type=int, default=1024,
-                    help='tiles per forward. bench_slidewin_pooling reaches '
+                    help='tiles per forward. bench_window_retrieval reaches '
                          '650 tiles/s on this model at 2048; at 1 it was doing '
                          'about a fortieth of that.')
     ap.add_argument('--workers', type=int, default=8,

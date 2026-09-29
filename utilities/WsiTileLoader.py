@@ -15,7 +15,7 @@ WHY NOT JUST LOOP AND read_region
 ----------------------------------
 Because the cost is the read, not the model. A whole slide at level 1 is tens of
 thousands of tiles and tens of GB off disk, and a MIRAX decodes each rect on the
-way out. `bench_slidewin_pooling` reaches 650 tiles/s through UNI2; a serial
+way out. `bench_window_retrieval` reaches 650 tiles/s through UNI2; a serial
 reader in the parent process does not come close to feeding that.
 
 THE ONE THING THAT MUST NOT BE SIMPLIFIED

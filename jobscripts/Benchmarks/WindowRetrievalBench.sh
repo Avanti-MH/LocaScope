@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=SlidewinPooling        # -> log/<name>, result/<name>/
+#SBATCH --job-name=WindowRetrievalBench # -> log/<name>, result/<name>/
 #SBATCH --partition=normal                # Partition
 #SBATCH --time=24:00:00                   # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560               # Account
@@ -16,8 +16,8 @@
 # SLURM parses these before the script runs -- so the name comes from the
 # command line, next to the encoder it belongs to:
 #
-#   ENCODER=conch_vit HEAD=trunk sbatch --job-name=ConchSlidewinPooling \
-#       jobscripts/SlidewinPooling.sh
+#   ENCODER=conch_vit HEAD=trunk sbatch --job-name=ConchWindowRetrievalBench \
+#       jobscripts/Benchmarks/WindowRetrievalBench.sh
 
 # ---------------- Load modules ----------------
 ml purge
@@ -106,24 +106,24 @@ if [ "$MODE" = "smoke" ]; then
   )
   ARGS="--slides ${SLIDES[*]} --levels 1 2 --n-fov ${N_FOV:-25}"
   ARGS="$ARGS --encoder $ENCODER${HEAD:+ --head $HEAD}"
-  OUT="$RESULT_ROOT/SlidewinPooling/smoke"
+  OUT="$RESULT_ROOT/WindowRetrievalBench/smoke"
 else
   ARGS="--levels ${LEVELS:-0 1 2} --n-fov ${N_FOV:-100} --batch-size ${BATCH_SIZE:-2048}"
   ARGS="$ARGS --encoder $ENCODER${HEAD:+ --head $HEAD}"
-  OUT="$RESULT_ROOT/SlidewinPooling"
+  OUT="$RESULT_ROOT/WindowRetrievalBench"
 fi
 
 echo "======== mode=$MODE  encoder=$TAG ========"
-echo "out : $OUT/$TAG/slidewin_pooling.csv"
+echo "out : $OUT/$TAG/window_retrieval.csv"
 echo ""
 
-python utilities/bench_modules/bench_slidewin_pooling.py \
+python utilities/bench_modules/bench_window_retrieval.py \
   $ARGS \
   --out "$OUT"
 
 echo ""
 echo "======== done ========"
-echo "  $OUT/$TAG/slidewin_pooling.csv"
+echo "  $OUT/$TAG/window_retrieval.csv"
 echo ""
 echo "  Read the gates FIRST -- a failure there means no number below is worth"
 echo "  reading. Then truth_pctile per (slide, level): 0.5 = broken mapping."
@@ -137,8 +137,8 @@ echo ""
 echo "  Every metric is derived from two stored integers per (query, arm), so"
 echo "  re-tabulating costs no GPU:"
 echo ""
-echo "    python utilities/bench_modules/bench_slidewin_pooling.py --report-only \\"
-echo "        $OUT/$TAG/slidewin_pooling.csv"
+echo "    python utilities/bench_modules/bench_window_retrieval.py --report-only \\"
+echo "        $OUT/$TAG/window_retrieval.csv"
 echo ""
 echo "  One encoder per report. Feeding two CSVs at once is refused: every"
 echo "  table averages over rows, so the merge would print one comparison"

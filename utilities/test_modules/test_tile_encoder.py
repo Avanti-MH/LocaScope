@@ -701,7 +701,7 @@ def t_rings_follow_the_tokens_to_the_gpu():
     """A CPU ring mask cannot index CUDA tokens, and rings3 is the only mode
     that indexes at all -- the others are reshape and slice, which never notice.
 
-    So pooling moved onto the GPU (bench_slidewin_pooling's `reduce`) breaks
+    So pooling moved onto the GPU (bench_window_retrieval's `reduce`) breaks
     exactly one of the five and leaves four working. It raises rather than
     corrupting, but it raises deep inside a run that has already read a whole
     tissue region, which is minutes and tens of GB from here.

@@ -310,7 +310,7 @@ different code paths: `capture`/`capture_with_gt` gain an optional `rng`
 parameter (`capture(self, x, y, rotation=None, rng=None)`), used INSTEAD of
 `self._py_rng` for that one call when given, falling back to the existing
 behaviour when it is not — every one of `Camera`'s nine existing callers
-(`bench_offgrid_score.py`, `bench_gigapath_pooling.py`, `query_sim/
+(`bench_offgrid_score.py`, `bench_tile_retrieval.py`, `query_sim/
 generator.py`, ... — see the session log's usage survey) is unaffected.
 `RoutingHeadDataset` then reuses ONE `Camera` per WSI (cheap: the WSI handle
 opens once) for both splits, and only EVAL passes a `rng` derived from the

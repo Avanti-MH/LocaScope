@@ -101,7 +101,7 @@ ENCODERS = {
         local=None),
 }
 
-#: The arms bench_slidewin_pooling asks for. Named here so the admissibility
+#: The arms bench_window_retrieval asks for. Named here so the admissibility
 #: check is asked about the set the sweeps actually use, rather than about a
 #: list invented for a test.
 WANTED = ('cls', 'cls_avg', 'cls_std', 'rings3',

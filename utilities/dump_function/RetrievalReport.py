@@ -1,7 +1,7 @@
 """One definition of every retrieval metric, and the tables that print them.
 
-Two benches ask the same question at two scales -- bench_slidewin_pooling scores
-a whole FoV window through stage 2, bench_gigapath_pooling scores a single tile
+Two benches ask the same question at two scales -- bench_window_retrieval scores
+a whole FoV window through stage 2, bench_tile_retrieval scores a single tile
 against a store -- and both want the same answer shape: does this arm beat the
 baseline, and how often is the truth inside a candidate budget.
 

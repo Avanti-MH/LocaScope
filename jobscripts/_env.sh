@@ -10,7 +10,7 @@
 #
 # Each encoder module therefore does os.environ.setdefault('HF_HOME', ...) above
 # its `import timm`, which is correct for the process that imports the encoder
-# first -- and that process is the exception. bench_slidewin_pooling imports
+# first -- and that process is the exception. bench_window_retrieval imports
 # TissueSegFunc, which imports HestSegFunc, which imports transformers, which
 # imports huggingface_hub, all before the encoder module is named. The constants
 # were frozen to ~/.cache/huggingface, and 2.6 GB of UNI2 was re-downloaded on

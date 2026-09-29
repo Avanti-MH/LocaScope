@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Say what a feature store contains, and whether its answers point anywhere.
 
-    python utilities/cli/inspect_cache_store/inspect_feature_store.py result/cache/PoolingBench_features/gigapath
+    python utilities/cli/inspect_cache_store/inspect_feature_store.py result/cache/TileRetrievalBench_features/gigapath
     python utilities/cli/inspect_cache_store/inspect_feature_store.py <root> --pairs
 
 A directory is walked for every `ds*.safetensors` under it (the Store.py

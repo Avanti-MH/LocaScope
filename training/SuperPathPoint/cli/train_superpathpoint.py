@@ -70,7 +70,7 @@ from SuperPoint.Trainer import TrainerConfig                       # noqa: E402
 DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 
 #: spec.md 6.5. `BRACS_1228` is deliberately in TRAIN: it is the slide
-#: `SlideWinTest`, `BenchMarkV2` and `SlidewinPooling` all ran on, so the
+#: `SlideWinTest`, `BenchMarkV2` and `WindowRetrievalBench` all ran on, so the
 #: existing SIFT and retrieval numbers are about it -- which makes it a sanity
 #: check that can be asked at any time without touching the held-out pair.
 #: Five per stain, chosen so that each addition answers something the set

@@ -533,12 +533,12 @@ def _rank_stats(sim: torch.Tensor, ans: np.ndarray):
 
 def slidewin_rows(query_meta, ref_tensors, pooled_q, pooled_r, poolings,
                   query_tensors, dmain, dovlp) -> list:
-    """The same rows bench_slidewin_pooling stores, for the same tables.
+    """The same rows bench_window_retrieval stores, for the same tables.
 
     That bench asks its question of a whole FoV window through stage 2; this one
     asks it of a single tile against a store. Different systems, one metric
     vocabulary -- W/L/T against the baseline, top@f%, truth@k, gap@k -- so the
-    numbers here can be read beside the ones in log/SlidewinPooling rather than
+    numbers here can be read beside the ones in log/WindowRetrievalBench rather than
     only against each other.
 
     Only the same-level pool (level_delta == 0). truth and fine are defined by
@@ -1000,7 +1000,7 @@ def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
 
     lines += _summary(recs, poolings, whitens)
 
-    # The same tables bench_slidewin_pooling prints, from the same code in
+    # The same tables bench_window_retrieval prints, from the same code in
     # utilities/dump_function/RetrievalReport.py. Last because they are the widest reading:
     # everything above is one (slide, level) at a time, and these aggregate.
     # per_slide is on because this bench spans two pyramid steps (4x on SVS, 2x
@@ -1008,7 +1008,7 @@ def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
     rows = [r for rec in recs for r in rec['rows']]
     if rows:
         lines.append(f'\n\n{"#" * 90}')
-        lines.append('# paired tables -- same metrics as log/SlidewinPooling')
+        lines.append('# paired tables -- same metrics as log/WindowRetrievalBench')
         lines.append('# baseline is `cls`, which is what production keeps.')
         lines.append(f'{"#" * 90}')
         RR.report(RR.attach_baseline(rows, 'cls'), list(poolings), 'cls',
@@ -1093,7 +1093,7 @@ def main() -> int:
     tag = encoder_tag(args.encoder, args.head)
     store_root = (Path(args.out) if args.out else
                   Cache.cache_root(args.features_cache_job or
-                                   Cache.job_name('PoolingBench'), 'features') / tag)
+                                   Cache.job_name('TileRetrievalBench'), 'features') / tag)
 
     if args.phase == 'eval':
         # No GPU, no WSI, no model -- everything needed is in the stores.

@@ -49,7 +49,7 @@ def _sim_tensors(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
     tile appears in up to R_q*C_q windows, and every copy still carries all D
     channels. On BRACS_1228 L0 region 0, 145x147 windows against a 4x5 query
     kernel, that is 2.62 GB for an output of 1.71 MB -- 1536x, and 7680x for
-    the concatenated multi-slot descriptors bench_slidewin_pooling builds.
+    the concatenated multi-slot descriptors bench_window_retrieval builds.
 
     Contracting D first gives every (WSI tile, query tile) dot product once,
     which is R_w*C_w*R_q*C_q numbers -- 1.79 MB for the same case. The windows

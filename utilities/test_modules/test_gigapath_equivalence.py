@@ -302,7 +302,7 @@ def t_encoder_matches_the_old_path(n_tiles=8):
         f'.features() differs from gigapath_encode by {d_feat:.3e}, not clear '
         f'of the rolled decoy at {decoy:.3e}')
 
-    # .pooled() is the third encoding path and the one bench_slidewin_pooling
+    # .pooled() is the third encoding path and the one bench_window_retrieval
     # will move onto. It reduces INSIDE the batch loop, so its result is
     # assembled from per-batch pieces while the reference pools one whole token
     # tensor at the end -- concatenation order and slot bookkeeping are what can

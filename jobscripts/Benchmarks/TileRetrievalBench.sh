@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=PoolingBench          # Job name -> log/<name> and result/<name>/
+#SBATCH --job-name=TileRetrievalBench    # Job name -> log/<name> and result/<name>/
 #SBATCH --partition=normal2              # Partition
 #SBATCH --time=08:00:00                  # ~50 min expected; slack for MRXS masks
 #SBATCH --account=MST114560              # Account
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                # openslide reads + the CPU transform
 #SBATCH --mem=128G                       # per-tile reads, not whole regions
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH -o /work/u26130998/log/PoolingBench            # STDOUT
-#SBATCH -e /work/u26130998/log/PoolingBench            # STDERR
+#SBATCH -o /work/u26130998/log/TileRetrievalBench      # STDOUT
+#SBATCH -e /work/u26130998/log/TileRetrievalBench      # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -25,6 +25,12 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- Does a different pooling find what CLS misses? -------------
+#
+# TILE-LEVEL retrieval bench: a query tile against every reference tile.
+# WindowRetrievalBench.sh asks the same question one level up (a whole FoV
+# window through stage 2). Formerly PoolingBench.sh / bench_gigapath_pooling.py;
+# renamed 2026-09-29 because the bench takes any --encoder and the old name said
+# neither the level nor that.
 #
 # GigaPath computes 197 tokens per tile and keeps one: timm pools with
 # global_pool='token', which is x[:, 0]. Retrieval's largest failure bucket is
@@ -49,9 +55,9 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # The stores are a cache under the one rule: result/cache/<job>_features/<tag>/.
 # Dump writes it, the pairing check and eval read it, and all three name the
 # same job so none of them reads a directory the dump never wrote to.
-FEATURES_CACHE_JOB="${FEATURES_CACHE_JOB:-PoolingBench}"
+FEATURES_CACHE_JOB="${FEATURES_CACHE_JOB:-TileRetrievalBench}"
 
-# Spelled the same way as SlidewinPooling.sh, and spelled ONCE: the bench
+# Spelled the same way as WindowRetrievalBench.sh, and spelled ONCE: the bench
 # appends this tag to the cache root itself. Every call below passes --encoder
 # for that reason.
 ENCODER="${ENCODER:-gigapath}"
@@ -100,7 +106,7 @@ ONLY_LEVELS=""
 # The pool SIZE is unchanged -- the bench keeps its own k / ds**2 rule and feeds
 # it to the sampler as the target. Only the composition moves.
 
-echo "======== pooling dump  k=$K  queries=$QUERIES per (slide, level) ========"
+echo "======== tile retrieval dump  k=$K  queries=$QUERIES per (slide, level) ========"
 echo "out=$OUT"
 echo
 
@@ -109,7 +115,7 @@ WSI_FLAG=""
 LEVEL_FLAG=""
 [ -n "$ONLY_LEVELS" ] && LEVEL_FLAG="--levels $ONLY_LEVELS"
 
-python utilities/bench_modules/bench_gigapath_pooling.py \
+python utilities/bench_modules/bench_tile_retrieval.py \
   --phase dump \
   --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
   --features-cache-job "$FEATURES_CACHE_JOB" \
@@ -143,7 +149,7 @@ fi
 
 echo ""
 echo "======== eval (no GPU; rerun on a login node any time) ========"
-python utilities/bench_modules/bench_gigapath_pooling.py \
+python utilities/bench_modules/bench_tile_retrieval.py \
   --phase eval --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
   --features-cache-job "$FEATURES_CACHE_JOB" --report "$REPORT"
 
@@ -152,7 +158,7 @@ echo "======== done ========"
 echo "  stores  $OUT/$TAG/"
 echo "  report  $REPORT"
 echo ""
-echo "  The report ends with the same paired tables as log/SlidewinPooling --"
+echo "  The report ends with the same paired tables as log/WindowRetrievalBench --"
 echo "  W/L/T against the cls baseline, top@f%, truth@k and gap@k -- printed by"
 echo "  the same code (utilities/dump_function/RetrievalReport.py), so the two"
 echo "  benches' columns mean the same thing and can be read side by side."
@@ -166,7 +172,7 @@ echo "  not the next has told you nothing -- that is how classify_region died"
 echo "  (see the M4.2 entry in log/TODO.log)."
 echo ""
 echo "  Re-eval without re-dumping:"
-echo "    python utilities/bench_modules/bench_gigapath_pooling.py --phase eval \\"
+echo "    python utilities/bench_modules/bench_tile_retrieval.py --phase eval \\"
 echo "        --encoder $ENCODER${HEAD:+ --head $HEAD}"
 echo "  Delta histograms:"
 echo "    python utilities/cli/inspect_cache_store/inspect_feature_store.py --pairs --hist"

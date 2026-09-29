@@ -2,9 +2,9 @@
 """Does a different token pooling, or a different window score, retrieve the
 right window better than production does?
 
-    python utilities/bench_modules/bench_slidewin_pooling.py --n-fov 100
-    python utilities/bench_modules/bench_slidewin_pooling.py --report-only \
-        /work/u26130998/result/SlidewinPooling/slidewin_pooling.csv
+    python utilities/bench_modules/bench_window_retrieval.py --n-fov 100
+    python utilities/bench_modules/bench_window_retrieval.py --report-only \
+        /work/u26130998/result/WindowRetrievalBench/window_retrieval.csv
 
 Stage 2 as it actually runs -- mask, regions, sliding window -- with two axes
 laid over it. GigaPath emits 197 tokens per tile and production keeps one, the
@@ -757,7 +757,7 @@ def run_slide_level(slide, stem, level, mask, args, encoder,
 # ══════════════════════════════════════════════════════════════════════════════
 #  Derived metrics -- everything reads only the stored integers
 #
-#  They live in utilities/dump_function/RetrievalReport.py because bench_gigapath_pooling asks
+#  They live in utilities/dump_function/RetrievalReport.py because bench_tile_retrieval asks
 #  the same question one scale down and prints the same tables. Two copies of
 #  "@1%" would never have raised: both would print a plausible number under the
 #  same header, and a comparison between the two benches would be quietly
@@ -856,7 +856,7 @@ def main() -> int:
     parser.add_argument(
         '--out', default=None,
         help='output directory, used verbatim. Default: '
-             'result/<SLURM_JOB_NAME or SlidewinPooling>/<encoder>/ -- the '
+             'result/<SLURM_JOB_NAME or WindowRetrievalBench>/<encoder>/ -- the '
              'encoder level is added only to that derived path, so name it '
              'yourself when you pass one.')
     args = parser.parse_args()
@@ -867,13 +867,13 @@ def main() -> int:
     # anything else a run drops beside the CSV.
     #
     # Added only to the derived path. An explicit --out is used verbatim --
-    # SlidewinPooling.sh:117 already spells $OUT/$TAG in what it echoes.
+    # WindowRetrievalBench.sh:117 already spells $OUT/$TAG in what it echoes.
     tag = encoder_tag(args.encoder, args.head)
-    out_dir = Path(args.out or job_result_dir('SlidewinPooling', encoder=tag))
+    out_dir = Path(args.out or job_result_dir('WindowRetrievalBench', encoder=tag))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     arms = [f'{p}+{s}' for p in POOLINGS for s in SCORES]
-    print(f'bench_slidewin_pooling   {len(args.slides)} slides x levels '
+    print(f'bench_window_retrieval   {len(args.slides)} slides x levels '
           f'{args.levels}   {args.n_fov} FoV each')
     print(f'poolings  {"  ".join(POOLINGS)}')
     print(f'scores    {"  ".join(SCORES)}'
@@ -959,7 +959,7 @@ def main() -> int:
     # second encoder's run from overwriting the first one's numbers, the column
     # stops the two from being averaged together afterwards. Neither does the
     # other's job.
-    write_csv(all_rows, out_dir / 'slidewin_pooling.csv')
+    write_csv(all_rows, out_dir / 'window_retrieval.csv')
     if all_rows:
         report(attach_baseline(all_rows, BASELINE), arms, BASELINE,
                per_slide=args.per_slide)
