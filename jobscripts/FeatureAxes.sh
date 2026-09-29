@@ -44,8 +44,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #                   position inside a tissue region is 72% background and 46%
 #                   are pure background, so "this component is mpp" and "this
 #                   component is emptiness" are easy to confuse and only one is
-#                   worth following. Needs a store from the quota sampler; older
-#                   stores have no white_frac and the run says so.
+#                   worth following.
 #
 #   r2(r)           how much of log mpp the first r components explain, against
 #                   r RANDOM directions as the decoy. If random does as well,
@@ -72,8 +71,13 @@ SLIDES=(
   "S1137178,G7E,110926" "S1151088,G7E,111220"
 )
 
+# The reference stores PoolingBench.sh dumps. DRAW is the `reference draw`
+# line that dump prints (<sampler_id>_<plan>); there is no default, because a
+# guessed one would read a draw nobody chose.
+: "${DRAW:?set DRAW to the reference draw PoolingBench.sh printed}"
 python utilities/bench_modules/bench_feature_axes.py "${SLIDES[@]}" \
-  --stores "$RESULT_ROOT"/cache/reference_features/"${ENCODER:-gigapath}" \
+  --stores "$RESULT_ROOT"/cache/PoolingBench_features/"${ENCODER:-gigapath}" \
+  --seg hest --draw "$DRAW" \
   --pooling cls
 
 echo ""

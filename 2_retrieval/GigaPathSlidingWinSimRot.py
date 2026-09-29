@@ -40,7 +40,7 @@ import openslide                                                            # no
 from PatchingLib          import (QueryPatchContainer, WsiTissuesContainer,   # noqa: E402
                                   FeaturesMap, WsiFeaturesMap)
 from SafeSlide            import SafeSlide                                                # noqa: E402
-from TissuesRegionsMask   import TissueRegion, TissuesRegionsMask            # noqa: E402
+from TissueMask   import TissueRegion, TissueMask            # noqa: E402
 from GigaPathSlidingWinSim  import SlidingWindowSimilarity                   # noqa: E402
 
 
@@ -143,7 +143,7 @@ class GigaPathSlidingWinSimRot:
         self,
         wsi:       Union[openslide.OpenSlide, str],
         encoder:   Callable,
-        mask:      Optional[TissuesRegionsMask] = None,
+        mask:      TissueMask,
         mpp:       Optional[float]              = None,
         tile_size: int                          = 256,
         overlap:   bool                         = True,
@@ -209,8 +209,8 @@ class GigaPathSlidingWinSimRot:
                            time reuses the features too.
 
         `self.mask` is the caller's mask and is never replaced. `from_ds` takes
-        a `regions_view()` of it and filters THAT, so every build starts from
-        the whole segmentation. It has to: filtering is monotone in ds, so a
+        a `patchable` view of it, so every build starts from the whole
+        segmentation. It has to: filtering is monotone in ds, so a
         build at 1.0 that narrowed the original in place would leave a later
         build at 0.25 unable to see the regions the coarse pass dropped.
         0.25 -> 1.0 -> 0.25 must return the same regions as a fresh 0.25.
@@ -229,19 +229,6 @@ class GigaPathSlidingWinSimRot:
             self.wsi, mpp=mpp, ds=ds)
         self.mpp = self.wsi.base_mpp * self.ds   # mpp/ds/level now say one thing
 
-        if self.mask is None:
-            # '' and not a threshold: this scores a window by the mean cosine
-            # over the query's tiles, so a window on blank glass loses on its
-            # own merits and the mask is an optimisation here, not a
-            # correctness requirement. '' skips the read AND the array.
-            from TissueSegFunc import TissueSegConfig
-            self.mask = TissuesRegionsMask.from_wsi(
-                self.wsi, method=TissueSegConfig('').build())
-            print(f'  [Rot] no mask given; one region over the whole scanned '
-                  f'rectangle, which is NOT what LocaScopePipeline uses '
-                  f'(HEST, mask_ds=4, filter_regions, merge_overlapping). '
-                  f'{len(self.mask.tissue_regions)} regions, '
-                  f'tissue {self.mask.tissue_fraction() * 100:.1f}%', flush=True)
 
         # Three ways to end up with features, cheapest first.
         if self.ds in self._by_ds:

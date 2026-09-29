@@ -33,14 +33,14 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # STOP_AFTER controls depth (not forced to run everything):
 #   STOP_AFTER=metadata   just the sanity check, seconds
 #   STOP_AFTER=holes      + the exhaustive block scan below, the slow tier
-#   STOP_AFTER=mask       + tissue-mask validity (GPU with HEST=1)
+#   STOP_AFTER=mask       + tissue-mask validity (GPU for a model SEG)
 #   STOP_AFTER=yield      (default) + tile-yield, needs a mask STORE already
 #                         built by utilities/cli/build_cache/build_mask_store.py
 #   SKIP_SCALE=1          drop the parallel base_mpp/native-rung check
 #
 # GPU line above is only there because the partition wants one -- metadata,
-# holes and scale are CPU/IO bound; only mask (with HEST=1) and a from-scratch
-# yield run touch the GPU.
+# holes and scale are CPU/IO bound; only mask (with a model SEG) touches the
+# GPU.
 # =============================================================================
 
 # ---------------- Parameters ----------------
@@ -58,8 +58,8 @@ VAL_ONLY="${VAL_ONLY:-0}"
 
 STOP_AFTER="${STOP_AFTER:-yield}"
 SKIP_SCALE="${SKIP_SCALE:-0}"
-HEST="${HEST:-0}"
-MASK_ROOT="${MASK_ROOT:-$RESULT_ROOT/cache/masks}"
+SEG="${SEG:-hest}"                              # mask recipe: the mask tier segments with it, the yield tier reads its cache
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-BuildMaskStore}"  # result/cache/<this>_mask/
 
 LEVELS="${LEVELS:-0 1 2 3 4}"   # one column per level in the holes grid figure
 # 1024, not the 128 this script used while it pointed at Ki67_with_photo's 19
@@ -83,13 +83,12 @@ FIGURE_SLIDES="${FIGURE_SLIDES:-holed}"
 OUT="${OUT:-$RESULT_ROOT/WsiHealthCheck}"
 mkdir -p "$OUT"
 
-ARGS=(--dataset $DATASET --stop-after "$STOP_AFTER" --mask-root "$MASK_ROOT"
+ARGS=(--dataset $DATASET --stop-after "$STOP_AFTER" --seg "$SEG" --mask-cache-job "$MASK_CACHE_JOB"
       --levels $LEVELS --block "$BLOCK" --sweep "$SWEEP"
       --figure-slides "$FIGURE_SLIDES" --out "$OUT")
 [ -n "$WSI" ] && ARGS+=(--wsi $WSI)
 [ "$VAL_ONLY" = "1" ] && ARGS+=(--val-only)
 [ "$SKIP_SCALE" = "1" ] && ARGS+=(--skip-scale)
-[ "$HEST" = "1" ] && ARGS+=(--hest)
 
 # ---------------- Step 1: how expensive is one read? (holes tier only) ------
 # Turns the walltime table above into wall-clock time for THIS filesystem and

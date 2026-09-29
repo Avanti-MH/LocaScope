@@ -5,13 +5,12 @@ For each input WSI, opens it once, iterates pyramid levels, builds a Camera
 with query_mpp = level's native mpp, and generates `--per-camera` shots into
 a single unified out_dir + gt.csv.
 
-The tissue mask is built ONCE per WSI, not once per level: from_wsi plus
-filter_regions plus merge_overlapping depend only on the slide, and only
-filter_patchable depends on the level. The one mask object is then shared
-across the levels, so each level must leave it exactly as it found it.
+The tissue mask is built ONCE per WSI, not once per level: the segmentation
+and the recipe's region prep depend only on the slide, and only `patchable`
+depends on the level. Each level takes a `patchable` view of the one base mask.
 
 Cameras whose mask ends up with zero usable regions after all filters
-(filter_regions -> merge_overlapping -> filter_patchable) are skipped with a
+(the recipe's filtered -> merged, then patchable) are skipped with a
 clear reason line. Use query_sim/cli/diag_camera_skip.py to visualise WHY a
 specific (wsi, level) got skipped.
 
@@ -19,8 +18,8 @@ Usage:
     python query_sim/cli/multi_batch.py <wsi1> [<wsi2> ...] \\
         [--per-camera 30] [--jitter 0.05] \\
         [--wh-ratio 4:3] [--MPixels 12] \\
-        [--tissue-ratio 0.3] [--region-protrusion 0.5] [--mask-ds 1.0] \\
-        [--hest] [--seg-chunk-px 4000000] \\
+        [--tissue-ratio 0.3] [--region-protrusion 0.5] \\
+        [--seg hest] [--mask-ds 1.0] [--seg-chunk-px 4000000] \\
         [--seed 0] [--out DIR]
 
 Outputs (in result/<SLURM_JOB_NAME or MultiBatch>/):
@@ -57,14 +56,17 @@ for _d in ('utilities', 'aiNNModel'):
         sys.path.insert(0, _p)
 
 from SafeSlide          import SafeSlide                # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask       # noqa: E402
+from TissueMask import TissueMask       # noqa: E402
 from _memprobe          import mem_line                 # noqa: E402
 from cli       import job_result_dir                    # noqa: E402
 from config    import DomainGapConfig                   # noqa: E402
 from record    import FOVRecord                         # noqa: E402
 from camera    import Camera                            # noqa: E402
-from generator import _build_base_mask, _record_from_shot   # noqa: E402
+from generator import base_mask as build_base_mask, camera_mask, _record_from_shot  # noqa: E402
 from cli.diag_camera_skip import diagnose_skip          # noqa: E402
+
+import Cache                                                         # noqa: E402
+from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 
 
 def _slide_tag(wsi_path: str, max_len: int = 20) -> str:
@@ -105,7 +107,7 @@ def _run_camera(
     cfg:            DomainGapConfig,
     tissue_ratio:   float,
     region_prot:    float,
-    base_mask:      TissuesRegionsMask,
+    base_mask:      TissueMask,
     seed:           int,
     img_dir:        str,
     diag_dir:       str,
@@ -113,9 +115,8 @@ def _run_camera(
     """Build one Camera at this (wsi, level). Return (records, skip_reason).
 
     `base_mask` is built once per WSI by the caller and SHARED across every
-    level, so this function must hand it back exactly as it found it: it
-    pushes one snapshot (filter_patchable, the only level-dependent filter)
-    and the finally-block pops exactly that one.
+    level. The camera gets a `patchable` view of it, so nothing done here can
+    reach the next level's mask.
     """
     cam = Camera(slide, cfg=cfg, seed=seed,
                  tissue_ratio=tissue_ratio,
@@ -126,21 +127,16 @@ def _run_camera(
           f'required_region_side_l0={cam.required_region_side_l0}',
           flush=True)
 
-    cam.mask = base_mask
-    cam.mask.filter_patchable(tile_size=cam.required_region_side_l0, ds=1.0)
+    cam.mask = camera_mask(cam, base_mask)
     n_regions = len(cam.mask.tissue_regions)
     print(f'  mask: tissue_frac={cam.mask.tissue_fraction()*100:.1f}%  '
           f'usable_regions={n_regions}', flush=True)
 
     if n_regions == 0:
-        reason = (f'filter_patchable emptied the mask: no tissue region can host '
+        reason = (f'patchable emptied the mask: no tissue region can host '
                   f'required_region_side_l0={cam.required_region_side_l0} '
                   f'(mask ds={base_mask.mask_ds_x:.1f}, tile too large for this level)')
         print(f'  SKIP: {reason}', flush=True)
-        # diagnose_skip works on its own copy and leaves base_mask untouched,
-        # so undo filter_patchable here -- this early return skips the
-        # try/finally below that would otherwise have done it.
-        cam.mask.regions_undo()
         # Bracketed by probes on purpose: _draw hands the whole main_mask to
         # imshow, and at ds=1 that is a 6.6 Gpx bool per panel which matplotlib
         # promotes to float to colour-map. It is the prime suspect for the
@@ -151,36 +147,29 @@ def _run_camera(
             level   = level,
             out_dir = diag_dir,
             wsi_tag = wsi_tag,
-            verdict = 'SKIP: filter_patchable emptied the mask',
+            verdict = 'SKIP: patchable emptied the mask',
         )
         print(f'  {mem_line("after diag")}', flush=True)
         return [], reason
 
     records: List[FOVRecord] = []
-    try:
-        for shot in cam:
-            if len(records) >= per_camera:
-                break
-            idx = len(records)
-            fname = f'{wsi_tag}_L{level}_syn{idx:05d}.png'
-            Image.fromarray(shot.image).save(os.path.join(img_dir, fname))
-            records.append(_record_from_shot(
-                shot, fname, wsi_path, cfg,
-                cam.output_w, cam.output_h, level=level,
-            ))
-            if len(records) % max(1, per_camera // 5) == 0 or len(records) == per_camera:
-                print(f'  [saved] {len(records)}/{per_camera}  {fname}', flush=True)
-    finally:
-        # Exactly one: the shared base_mask arrived with filter_regions and
-        # merge_overlapping already applied and must leave with them intact.
-        cam.mask.regions_undo()                          # filter_patchable
+    for shot in cam:
+        if len(records) >= per_camera:
+            break
+        idx = len(records)
+        fname = f'{wsi_tag}_L{level}_syn{idx:05d}.png'
+        Image.fromarray(shot.image).save(os.path.join(img_dir, fname))
+        records.append(_record_from_shot(
+            shot, fname, wsi_path, cfg,
+            cam.output_w, cam.output_h, level=level,
+        ))
+        if len(records) % max(1, per_camera // 5) == 0 or len(records) == per_camera:
+            print(f'  [saved] {len(records)}/{per_camera}  {fname}', flush=True)
 
     if not records:
         reason = (f'Camera iterator yielded nothing (all sampled positions '
                   f'failed has_tissue check or bounding-square read went out-of-WSI)')
         print(f'  SKIP: {reason}', flush=True)
-        # diagnose_skip copies cam.mask before rewinding it, so base_mask keeps
-        # its two filters and the next level starts from the same state.
         print(f'  {mem_line("before diag")}', flush=True)
         diagnose_skip(
             cam     = cam,
@@ -210,21 +199,14 @@ def main():
     ap.add_argument('--MPixels',          type=float, default=12.0)
     ap.add_argument('--tissue-ratio',     type=float, default=0.3)
     ap.add_argument('--region-protrusion',type=float, default=0.5)
-    ap.add_argument('--mask-ds',          type=float, default=1.0)
-    ap.add_argument('--hest',             action='store_true',
-                    help='segment tissue with the HEST DeepLabV3 model instead '
-                         'of the default HSV threshold')
-    ap.add_argument('--seg-chunk-px',       type=int,   default=4_000_000,
-                    help='tile budget for the segmentation forward pass; only '
-                         'used with --hest, where the whole level image would '
-                         'otherwise go through the model in one go')
-    ap.add_argument('--read-chunk-px',  type=int,   default=268_435_456,
-                    help='tile budget for READING the level (host RAM, as '
-                         'opposed to --seg-chunk-px which is VRAM). Above this '
-                         'the level is read and segmented tile by tile and is '
-                         'never in memory whole. 0 restores the single read, '
-                         'which at --mask-ds 1.0 costs 16 bytes per level-0 '
-                         'pixel and OOMs on any large slide.')
+    # --seg and its overrides. The recipe's read is chunked by default, which
+    # is what keeps --mask-ds 1.0 from costing 16 bytes per level-0 pixel.
+    add_mask_args(ap)
+    ap.add_argument('--mask-cache-job', default=None,
+                    help='whose mask cache: result/cache/<this>_mask/. '
+                         'Default: this job')
+    ap.add_argument('--device', default=None,
+                    help='segmenter device; default cuda when available')
     ap.add_argument('--seed',             type=int,   default=0)
     ap.add_argument('--out',              default=None)
     ap.add_argument('--append',           action='store_true',
@@ -260,18 +242,15 @@ def main():
     print(f'per-camera={args.per_camera}  jitter={args.jitter}  '
           f'wh={args.wh_ratio}  MP={args.MPixels}', flush=True)
 
-    # Segmentation method, chosen once for the whole job: loading DeepLabV3 is
-    # seconds of startup and the weights are the same for every WSI.
-    mask_method = None
-    if args.hest:
-        import torch
-        from TissueSegFunc import HestSegConfig
-        _dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f'mask seg  -> HEST DeepLabV3 on {_dev}  '
-              f'(seg_chunk_px={args.seg_chunk_px})', flush=True)
-        mask_method = HestSegConfig().build(_dev)
-    else:
-        print('mask seg  -> HSV threshold (default)', flush=True)
+    # One MaskMaker for the whole job: a segmentation model is seconds of
+    # startup and the weights are the same for every WSI. It is built on the
+    # first cache miss, and a slide already masked is never segmented again.
+    import torch                                                     # noqa: PLC0415
+    device = torch.device(args.device or
+                          ('cuda' if torch.cuda.is_available() else 'cpu'))
+    masks = MaskMaker(mask_cfg_from_args(args), Cache.cache_root(
+        args.mask_cache_job or Cache.job_name('MultiBatch'), 'mask'), device)
+    print(f'mask seg  -> {masks.cfg.seg_id()} on {device}', flush=True)
 
     # Counts, not lists: the rows go to disk as they are produced, so keeping
     # them here as well would only be a second copy waiting to be lost.
@@ -286,10 +265,9 @@ def main():
             # scanner never wrote raises OpenSlideError, and that error latches
             # on the handle -- every later call fails, metadata included. There
             # is no except around _run_camera, so one hole used to take the
-            # whole job down. It matters most at a small --mask-ds: from_wsi
-            # reads the level in ONE read_region, and openslide fails the whole
-            # rect when any tile inside it is missing, so at ds=1 a single hole
-            # covers the entire slide. SafeSlide halves the rect on failure and
+            # whole job down. It matters most at a small --mask-ds: a read of a
+            # large rect fails whole when any tile inside it is missing, so at
+            # ds=1 a single hole covers a whole read. SafeSlide halves the rect on failure and
             # only the genuinely missing leaves come back blank.
             slide = SafeSlide(wsi_path)
         except Exception as e:
@@ -305,14 +283,13 @@ def main():
         print(f'\n===== {wsi_tag}  levels={slide.level_count}  base_mpp={base_mpp:.4f} =====',
               flush=True)
 
-        # Once per WSI, not once per level. from_wsi + filter_regions +
-        # merge_overlapping do not depend on the level; only filter_patchable
-        # does, and _run_camera applies that itself on the mask handed to it.
-        # This is also the one heavy step that can now fail on its own (a full
-        # level read, and with --hest a model forward pass), so it gets its own
-        # except and takes down just this WSI.
+        # Once per WSI, not once per level. The segmentation and the recipe's
+        # region prep do not depend on the level; only `patchable` does, and
+        # _run_camera takes that view itself. This is also the one heavy step
+        # that can fail on its own (a level read, and with a model a forward
+        # pass), so it gets its own except and takes down just this WSI.
         try:
-            print(f'  building base mask (ds={args.mask_ds}) ...', flush=True)
+            print(f'  building base mask ({masks.cfg.seg_id()}) ...', flush=True)
             # Drop the previous slide's mask BEFORE allocating this one. The
             # assignment below evaluates its right-hand side in full before it
             # rebinds the name, so without this the old main_mask (1 byte/px,
@@ -320,13 +297,9 @@ def main():
             # new slide's read.
             base_mask = None
             _t0 = time.perf_counter()
-            base_mask = _build_base_mask(
-                slide, args.mask_ds, mask_method, 0.01,
-                seg_chunk_px=args.seg_chunk_px if mask_method is not None else None,
-                read_chunk_px=args.read_chunk_px or None,
-            )
-            # Timed because this is now the one per-WSI fixed cost, and at
-            # ds=1 with --hest it is the number that decides whether ds=1 is
+            base_mask = build_base_mask(slide, masks)
+            # Timed because this is the one per-WSI fixed cost, and at ds=1
+            # with a model it is the number that decides whether ds=1 is
             # affordable at all. One line per WSI, comparable across slides.
             print(f'  base mask: {base_mask.main_mask.shape}  '
                   f'tissue_frac={base_mask.tissue_fraction()*100:.1f}%  '
@@ -398,6 +371,7 @@ def main():
         print(f'To visualise a skip: python query_sim/cli/diag_camera_skip.py '
               f'<wsi_path> --level <lvl>', flush=True)
 
+    masks.close()
     print(f'\n{mem_line("job end")}', flush=True)
 
 

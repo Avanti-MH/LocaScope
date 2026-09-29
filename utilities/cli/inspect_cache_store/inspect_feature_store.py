@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Say what a feature store contains, and whether its answers point anywhere.
 
-    python utilities/cli/inspect_cache_store/inspect_feature_store.py result/cache/features/*.safetensors
-    python utilities/cli/inspect_cache_store/inspect_feature_store.py result/cache/features --pairs
+    python utilities/cli/inspect_cache_store/inspect_feature_store.py result/cache/PoolingBench_features/gigapath
+    python utilities/cli/inspect_cache_store/inspect_feature_store.py <root> --pairs
 
-Reading the metadata is header-only, so listing a directory of 30 GB stores is
-instant. `--pairs` is the part that costs anything: it loads the index tensors of
-each query store and checks them against the reference store they name.
+A directory is walked for every `ds*.safetensors` under it (the Store.py
+layout: <seg_id>/<slide>/<region_id>/<key>/). Reading the metadata is
+header-only, so listing tens of GB is instant. `--pairs` is the part that costs
+anything: it loads the index tensors of each query store and checks them
+against the reference store beside it -- same key directory, same ds.
 
 Why the pairing check exists
 ----------------------------
@@ -61,7 +63,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent.parent))          # utilities/
 
 import numpy as np                                          # noqa: E402
-import FeatureStore as FS                                   # noqa: E402
+from Store import FeatureStore as FS                        # noqa: E402
 
 #: Covering radius of ONE grid: a square lattice of spacing 256 has its farthest
 #: point at the cell centre, 256/sqrt(2) away. This holds only INSIDE the grid's
@@ -90,22 +92,11 @@ def expand(paths) -> list:
     for p in paths:
         p = Path(p)
         if p.is_dir():
-            hits = sorted(p.glob('*.safetensors'))
+            # Point at one encoder's root: two encoders in one table would put
+            # two feature spaces side by side.
+            hits = sorted(p.rglob('ds*.safetensors'))
             if not hits:
-                # One level down, because stores now live under an encoder tag:
-                # result/cache/features/gigapath/. Only when the directory
-                # itself holds none, so pointing at one encoder still inspects
-                # exactly that encoder, and the descent is announced -- an
-                # inspection silently covering two encoders would put two
-                # feature spaces in one table.
-                subs = sorted(d for d in p.iterdir()
-                              if d.is_dir() and any(d.glob('*.safetensors')))
-                for d in subs:
-                    print(f'[dir] {p.name}/{d.name}')
-                    hits.extend(sorted(d.glob('*.safetensors')))
-            if not hits:
-                missing.append(f'{p} is a directory with no .safetensors in it, '
-                               f'and no subdirectory of it has any either')
+                missing.append(f'{p} holds no ds*.safetensors at any depth')
             out.extend(hits)
         elif p.exists():
             out.append(p)
@@ -118,20 +109,20 @@ def expand(paths) -> list:
     return out
 
 
-def show(path: Path) -> FS.StoreMeta:
+def show(path: Path) -> FS.Meta:
     m = FS.load_meta(path)
     size = path.stat().st_size / 1e9
     grid = f'{m.feat_hw[0]}x{m.feat_hw[1]}' if m.feat_hw else '-'
     is_query = 'query' in m.pooling
-    print(f'{path.name}')
+    print(f'{"/".join(path.parts[-5:])}')
     print(f'  slide     {m.wsi_stem}  L{m.level}   ds={m.ds:g}  '
           f'mpp={m.mpp:.4f}  base_mpp={m.base_mpp:.4f}')
     print(f'  features  pooling={m.pooling}  slots={len(m.slots)}  '
           f'layout={m.slot_layout}  dim={m.dim}  '
           f'feat_hw={grid}  num_prefix={m.num_prefix}')
-    print(f'  made by   encoder={m.encoder_id}   mask={m.mask_id}   '
+    print(f'  made by   encoder={m.encoder_id}   mask={m.seg_id}/{m.region_id}   '
           f'tile={m.tile_size}   overlap={m.overlap}')
-    print(f'  identity  cfg_hash={m.cfg_hash()}   {size:.2f} GB   {m.created_at}')
+    print(f'  key       {m.key}   {size:.2f} GB   {m.created_at}')
     if is_query:
         # "fraction of the grid covered" is a reference-store idea. A query store
         # is not drawn from the grid at all -- its n_available is a placeholder
@@ -146,8 +137,7 @@ def show(path: Path) -> FS.StoreMeta:
         # of positions and had some synthesised. `origin` in the extras gives
         # the exact count.
         pct = (m.n_tiles / m.n_available * 100) if m.n_available else float('nan')
-        note = ('   <- NOT a complete cache; require coverage="all" to refuse it'
-                if m.coverage == 'sample' else '')
+        note = ('   <- a draw, not the slide' if m.coverage == 'sample' else '')
         print(f'  content   {m.n_tiles:,} over {m.n_available:,} grid positions '
               f'({pct:.1f}%)   coverage={m.coverage}   seed={m.sample_seed}{note}')
     return m
@@ -197,17 +187,20 @@ def on_outer_ring(ans: np.ndarray, reg: np.ndarray, rc: np.ndarray,
     return out
 
 
-def check_pair(qpath: Path, root: Path, show_hist: bool = False) -> bool:
-    """Verify one query store against the reference store it belongs to."""
+def check_pair(qpath: Path, show_hist: bool = False) -> bool:
+    """Verify one query store against the reference store beside it: the same
+    key directory (same slide, mask and draw) at the same ds."""
     qm = FS.load_meta(qpath)
-    refs = FS.find(root, wsi_stem=qm.wsi_stem, level=qm.level, pooling='tokens')
-    refs = [r for r in refs if FS.load_meta(r).cfg_hash() == qm.cfg_hash()]
-    if not refs:
-        print(f'  PAIR  no reference store for {qm.wsi_stem} L{qm.level} '
-              f'cfg={qm.cfg_hash()}')
+    rpath = qpath.with_name(qpath.name.replace('_query_tokens', '_tokens'))
+    if not rpath.exists():
+        print(f'  PAIR  no reference store beside it ({rpath.name})')
         return False
-    rpath = refs[0]
     rm = FS.load_meta(rpath)
+    if (rm.level, rm.sampler_id, rm.plan) != (qm.level, qm.sampler_id, qm.plan):
+        print(f'  PAIR  {rpath.name} disagrees with the query store about the '
+              f'level or the draw: ref L{rm.level} {rm.sampler_id}_{rm.plan}, '
+              f'query L{qm.level} {qm.sampler_id}_{qm.plan}')
+        return False
 
     q, _ = FS.load(qpath, keys=('x', 'y', 'ans_main', 'ans_ovlp',
                                 'delta_main', 'delta_ovlp'))
@@ -317,37 +310,13 @@ def check_pair(qpath: Path, root: Path, show_hist: bool = False) -> bool:
     return ok
 
 
-# ── which sampler wrote this? ─────────────────────────────────────────────────
+# ── what the draw holds ──────────────────────────────────────────────────────
 #
-# A store's file date says when it was written, and the source file's mtime says
-# when someone last touched the code -- neither says which sampling rule ran.
-# The store itself does, in three places written by different lines, which is
-# what makes them worth reading together:
-#
-#   sampler_id   the SamplerConfig hash. Empty means the writer had no sampling
-#                rule to record. Necessary, not sufficient: it also comes out
-#                empty for a store written before the field existed.
-#
-#   origin       0 grid / 1 displaced / 2 inherited. Any 1 or 2 is decisive --
-#                only the quota sampler can produce a tile that is not on the
-#                grid. All-zero is NOT decisive the other way: a level whose
-#                buckets all filled from the grid legitimately has no
-#                displacements.
-#
-#   white_frac   the distribution is what says whether quotas BOUND. Uniform
-#                sampling inside tissue regions measured p50 = 0.72 with 46% at
-#                ~1.0 on BRACS_1228 L0; a quota run caps the `full` bucket, so a
-#                store still showing ~46% pure background was not drawn under
-#                one whatever its other fields say.
-#
-# Reads the header plus a few [N] vectors. The features tensor is never touched,
-# so this stays seconds over 44 stores totalling tens of GB.
-
-#: Bucket names, duplicated from ReferenceSampler rather than imported: this
-#: file must stay readable against stores written by older code, and importing
-#: the current names would silently relabel a store whose bucket ids meant
-#: something else. Length mismatch is reported instead.
-BUCKET_NAMES = ('lt15', 'mid', 'gt70', 'gt80', 'full')
+# The header names the rule that drew the tiles (`sampler_id`, `plan`); the
+# [N] extras say what it produced: `origin` (grid / jitter / inherit), `bucket`
+# (indexing the header's `buckets`), and `white_frac`, whose distribution says
+# whether the zero caps on the background buckets actually bound. Reads the
+# header plus a few [N] vectors; the features tensor is never touched.
 
 ORIGIN_NAMES = ('grid', 'jitter', 'inherit')
 
@@ -359,16 +328,14 @@ def sampling_row(path: Path) -> dict:
     meta = FS.load_meta(path)
     with safe_open(str(path), framework='pt') as f:
         present = set(f.keys())
-        wanted = {'white_frac', 'origin', 'bucket', 'valid_frac',
-                  'parent_x', 'parent_y'}
+        wanted = {'white_frac', 'origin', 'bucket', 'valid_frac'}
         got = {k: f.get_tensor(k).numpy() for k in sorted(wanted & present)}
 
-    row = dict(name=path.name, wsi=meta.wsi_stem, level=meta.level,
+    row = dict(name='/'.join(path.parts[-4:]), wsi=meta.wsi_stem, level=meta.level,
                is_query='query' in meta.pooling, n=meta.n_tiles,
-               sampler_id=meta.sampler_id, created=meta.created_at,
-               keys=sorted(present - {'features', 'x', 'y', 'region',
-                                      'grid_rc'}))
-
+               draw=f'{meta.sampler_id}_{meta.plan}' if meta.sampler_id else meta.key,
+               created=meta.created_at,
+               keys=sorted(present - {'features', 'x', 'y', 'region', 'grid_rc'}))
     white = got.get('white_frac')
     if white is not None and len(white):
         white = white.astype(np.float64)
@@ -376,13 +343,11 @@ def sampling_row(path: Path) -> dict:
         row['white_full_frac'] = float((white >= 0.99).mean())
     origin = got.get('origin')
     if origin is not None and len(origin):
-        row['origin'] = {ORIGIN_NAMES[i] if i < len(ORIGIN_NAMES) else f'?{i}':
-                         int((origin == i).sum())
+        row['origin'] = {ORIGIN_NAMES[i]: int((origin == i).sum())
                          for i in sorted(set(origin.tolist()))}
     bucket = got.get('bucket')
     if bucket is not None and len(bucket):
-        row['bucket'] = {BUCKET_NAMES[i] if i < len(BUCKET_NAMES) else f'?{i}':
-                         int((bucket == i).sum())
+        row['bucket'] = {meta.buckets[i]: int((bucket == i).sum())
                          for i in sorted(set(bucket.tolist()))}
     return row
 
@@ -395,7 +360,7 @@ def report_sampling(paths) -> None:
         except Exception as e:                              # noqa: BLE001
             unreadable.append((p, e))
 
-    print(f'{"store":52s} {"n":>6s}  {"sampler_id":12s} '
+    print(f'{"store":52s} {"n":>6s}  {"draw":24s} '
           f'{"white p50":>9s} {"pure bg":>8s}  origin')
     print('-' * 118)
     for r in sorted(rows, key=lambda r: (r['wsi'], r['level'], r['is_query'])):
@@ -406,45 +371,19 @@ def report_sampling(paths) -> None:
         origin = ('  '.join(f'{k}={v}' for k, v in r['origin'].items())
                   if 'origin' in r else '-')
         print(f'{r["name"][:52]:52s} {r["n"]:6d}  '
-              f'{(r["sampler_id"] or "(empty)"):12s} {white_p50} {pure}  '
+              f'{r["draw"][:24]:24s} {white_p50} {pure}  '
               f'{origin}')
-        # Which extras are present dates the store against the code more
-        # precisely than any file time can: valid_frac appears only once hole
-        # filtering existed, parent_x/parent_y only after the parent was stored
-        # as a coordinate. A store missing them was written before those lines,
-        # whatever the source file's mtime says today.
         print(f'{"":52s} {"":6s}  extras: {", ".join(r["keys"]) or "(none)"}')
 
     print()
-    with_id = [r for r in rows if r['sampler_id']]
-    displaced = [r for r in rows
-                 if any(k != 'grid' for k in r.get('origin', {}))]
-    print(f'{len(rows)} store(s):  {len(with_id)} carry a sampler_id, '
-          f'{len(displaced)} contain a tile that is not on the grid')
-
-    # The verdict is stated as what the evidence supports, not as a guess about
-    # which code was current. All-grid with no sampler_id is consistent with
-    # both a uniform draw and a quota run that never needed a displacement --
-    # the white_frac column is what separates them, so it is named here rather
-    # than left for the reader to remember.
-    if not with_id and not displaced:
-        print('  -> no store records a sampling rule and none holds an '
-              'off-grid tile.')
-        print('     Read the "pure bg" column: ~46% at L0 is the uniform '
-              'draw; a quota run holds it near its lt15/mid/gt70 shares.')
-    elif displaced:
-        print('  -> at least one store was written by the quota sampler: '
-              'a displaced or inherited tile cannot come from a uniform draw.')
-
     for p, e in unreadable:
         print(f'[unreadable] {p.name}: {type(e).__name__}: {e}')
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument('paths', nargs='*', default=['result/cache/features'],
-                    help='stores or directories of them '
-                         '(default result/cache/features)')
+    ap.add_argument('paths', nargs='+',
+                    help='store files, or roots to walk (one encoder each)')
     ap.add_argument('--pairs', action='store_true',
                     help='also verify each query store against its reference')
     ap.add_argument('--sampling', action='store_true',
@@ -478,7 +417,7 @@ def main() -> int:
             if 'query' not in m.pooling:
                 continue
             print(f'{p.name}')
-            if not check_pair(p, p.parent, show_hist=args.hist):
+            if not check_pair(p, show_hist=args.hist):
                 failed.append(p)
             print()
 

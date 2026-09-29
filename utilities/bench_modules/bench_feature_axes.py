@@ -73,9 +73,9 @@ import matplotlib                                                   # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                     # noqa: E402
 
-import FeatureStore as FeatureStoreModule                           # noqa: E402
+from Store import FeatureStore                                      # noqa: E402
+from TissueMaskConfig import add_mask_args, mask_cfg_from_args      # noqa: E402
 from GigaPathFunc import pooling_kinds                                # noqa: E402
-import _paths                                                       # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 
 
@@ -83,67 +83,34 @@ from _paths import job_result_dir                                   # noqa: E402
 #  Loading
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_level(store_root, wsi_stem, level, pooling, sampler_id=None):
+def load_level(path, pooling):
     """One level's tiles: features, coordinates, and background fraction.
 
     Returns (features, coords, white_fraction, meta):
         features        [n_tiles, dim] float32, L2-normalized
         coords          [n_tiles, 2] int64, level-0 top-left
-        white_fraction  [n_tiles] float32, or all-NaN when the store predates it
-
-    find_one rather than find: a root can hold two stores for the same slide and
-    level that differ only in how their tiles were chosen, and picking whichever
-    sorted first would describe a feature space nobody built.
+        white_fraction  [n_tiles] float32
     """
-    selector = {} if sampler_id is None else {'sampler_id': sampler_id}
-    path = FeatureStoreModule.find_one(
-        store_root, what=f'reference store for {wsi_stem} L{level}',
-        wsi_stem=wsi_stem, level=level, pooling='tokens', **selector)
-
-    wanted = ['features', 'x', 'y']
-    meta = FeatureStoreModule.load_meta(path)
-    tensors, _ = FeatureStoreModule.load(path, keys=wanted)
-
-    # white_frac only exists in stores written by the quota sampler. Asking for a
-    # key that is not there raises inside safetensors, so it is fetched
-    # separately and its absence reported rather than guessed at.
-    try:
-        extra, _ = FeatureStoreModule.load(path, keys=['white_frac'])
-        white_fraction = extra['white_frac'].numpy().astype(np.float32)
-    except Exception:                                     # noqa: BLE001
-        white_fraction = np.full(tensors['features'].shape[0], np.nan,
-                                 dtype=np.float32)
-
+    tensors, meta = FeatureStore.load(path, keys=['features', 'x', 'y', 'white_frac'])
     slots = pooling_kinds(tensors['features'].float(), pooling, meta)
     features = torch.nn.functional.normalize(
         slots.reshape(slots.shape[0], -1), dim=-1)
-
     coords = np.stack([tensors['x'].numpy(), tensors['y'].numpy()],
                       axis=1).astype(np.int64)
-    return features, coords, white_fraction, meta
+    return features, coords, tensors['white_frac'].numpy().astype(np.float32), meta
 
 
-def load_slide_balanced(store_root, wsi_stem, pooling, per_level,
-                        sampler_id=None, seed=42):
-    """Every level of one slide, cut to the same number of tiles each.
+def load_slide_balanced(key_dir, pooling, per_level, seed=42):
+    """Every level of one slide's draw, cut to the same number of tiles each.
 
     Balancing is not tidiness. PCA finds the directions of greatest variance,
     and a level contributing three times as many tiles contributes three times
     as much variance -- so on an unbalanced set the leading component can be
     "which level has the most tiles" wearing the costume of a finding.
     """
-    levels = sorted({meta.level for meta in
-                     (FeatureStoreModule.load_meta(p)
-                      for p in FeatureStoreModule.find(store_root,
-                                                       wsi_stem=wsi_stem,
-                                                       pooling='tokens'))})
-    if not levels:
-        raise FileNotFoundError(f'no reference store for {wsi_stem}')
-
-    loaded = {}
-    for level in levels:
-        loaded[level] = load_level(store_root, wsi_stem, level, pooling,
-                                   sampler_id)
+    paths = FeatureStore.levels(key_dir, 'tokens')
+    levels = sorted(paths)
+    loaded = {level: load_level(paths[level], pooling) for level in levels}
 
     take = min(per_level, min(f.shape[0] for f, _, _, _ in loaded.values()))
     rng = np.random.default_rng(seed)
@@ -451,7 +418,7 @@ def plot_scatter(projection_rows, path) -> None:
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-def analyse_slide(store_root, wsi_stem, args, out_dir,
+def analyse_slide(key_dir, wsi_stem, args, out_dir,
                   summary_rows, component_rows, decoy_rows,
                   projection_rows, extreme_rows) -> None:
     """One slide, appending to the shared row lists.
@@ -462,8 +429,7 @@ def analyse_slide(store_root, wsi_stem, args, out_dir,
     is a different question and answering it by accident would be worse than not
     answering it.
     """
-    slide = load_slide_balanced(store_root, wsi_stem, args.pooling,
-                                args.per_level, args.sampler_id, args.seed)
+    slide = load_slide_balanced(key_dir, args.pooling, args.per_level, args.seed)
     slide['wsi_stem'] = wsi_stem
     slide['pooling'] = args.pooling
     features = slide['features']
@@ -698,8 +664,13 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('wsi_stem', nargs='+',
                         help='one or more slides, e.g. BRACS_1228')
-    parser.add_argument('--stores',
-                        default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'))
+    parser.add_argument('--stores', required=True,
+                        help="one encoder's feature root: result/cache/"
+                             '<job>_features/<encoder>/')
+    parser.add_argument('--draw', required=True,
+                        help='the draw to read, <sampler_id>_<plan> -- printed '
+                             'by the dump that wrote it')
+    add_mask_args(parser)
     parser.add_argument(
         '--out', default='',
         help='output directory, used verbatim. Default: '
@@ -707,9 +678,6 @@ def main() -> int:
              'encoder is the last component of --stores. That level is added '
              'only to the derived path, so name it yourself when you pass one.')
     parser.add_argument('--pooling', default='cls')
-    parser.add_argument('--sampler-id', default=None,
-                        help="which sampling rule's stores to read when a root "
-                             "holds more than one; '' selects the pre-quota draws")
     parser.add_argument('--per-level', type=int, default=1000)
     parser.add_argument('--null-repeats', type=int, default=5,
                         help='shuffles for the parallel-analysis null')
@@ -720,8 +688,8 @@ def main() -> int:
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
-    store_root = (args.stores if os.path.isabs(args.stores)
-                  else str(_ROOT / args.stores))
+    store_root = args.stores
+    mask_cfg = mask_cfg_from_args(args)
 
     # This bench has no encoder of its own -- it reads features somebody else
     # wrote -- so the tag comes from the input. The store root's last component
@@ -741,7 +709,10 @@ def main() -> int:
     projection_rows, extreme_rows, failures = [], [], []
     for wsi_stem in args.wsi_stem:
         try:
-            analyse_slide(store_root, wsi_stem, args, out_dir, summary_rows,
+            key_dir = FeatureStore.key_dir(
+                store_root, seg_id=mask_cfg.seg_id(), slide=wsi_stem,
+                region_id=mask_cfg.region_id(), key=args.draw)
+            analyse_slide(key_dir, wsi_stem, args, out_dir, summary_rows,
                           component_rows, decoy_rows, projection_rows,
                           extreme_rows)
         except Exception as error:                          # noqa: BLE001

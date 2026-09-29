@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How many tiles does each (slide, tile_size, ds) yield, and in which buckets?
 
-    python utilities/cli/diagnostics/probe_tile_yield.py [--mask-root ...] [--n 500]
+    python utilities/cli/diagnostics/probe_tile_yield.py [--seg uni2_pca] [--mask-cache-job BuildMaskStore] [--n 500]
 
 Outputs (in result/<SLURM_JOB_NAME or ProbeTileYield>/):
     tile_yield.png
@@ -59,8 +59,8 @@ mostly near an edge is a rung whose labels will be quietly worse.
 
 WHICH WSIs
 ----------
-Default (no --dataset, no --wsi): every WSI already in `--mask-root`'s
-mask store (`utilities/cli/build_cache/build_mask_store.py` writes it) -- this
+Default (no --dataset, no --wsi): every WSI already in the `--seg` recipe's
+mask cache (`utilities/cli/build_cache/build_mask_store.py` writes it) -- this
 tool cannot probe a slide with no mask to read, so "everything the store
 already has" is this tool's own natural default, the same way
 `diag_wsi_scale.py` defaults to every registered dataset. `--dataset`/
@@ -87,20 +87,22 @@ import matplotlib                                               # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
-from _paths import RESULT_DIR, job_result_dir, setup_import_paths  # noqa: E402
+from _paths import job_result_dir, setup_import_paths          # noqa: E402
 
 setup_import_paths()
 
-import MaskStore                                                # noqa: E402
+from Cache import cache_root, find, read_meta, wsi_stem_of      # noqa: E402
+from TissueMaskConfig import MASK_RECIPES                        # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
-from TileSampler import OverlapConfig, SamplerConfig, TileSampler                              # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask                # noqa: E402
+from TileSampler import (PRE_TILE_FACTOR, OverlapConfig,      # noqa: E402
+                         SamplerConfig, TileSampler)
+from TissueMask import SlideMask                # noqa: E402
 from DsLadder import DEFAULT_RUNGS, DsLadder              # noqa: E402
-from PreTileStore import PRE_TILE_FACTOR                   # noqa: E402
 from WsiSelection import resolve_wsi_paths                       # noqa: E402
 
 
-DEFAULT_MASK_ROOT = os.path.join(RESULT_DIR, 'cache', 'masks')
+#: Where build_mask_store.py pre-warms masks by default.
+DEFAULT_MASK_CACHE_JOB = 'BuildMaskStore'
 
 
 #: Every string a reader will see. Rewritten on every run so the definitions
@@ -140,12 +142,15 @@ class TileYieldProbe:
     given at all.
     """
 
-    def __init__(self, mask_root: str = DEFAULT_MASK_ROOT,
+    def __init__(self, seg: str = 'uni2_pca',
+                mask_cache_job: str = DEFAULT_MASK_CACHE_JOB,
                 tile_sizes=(256, 512, 1024), ds_values=DEFAULT_RUNGS,
                 n: int = 500, candidates: str = 'lattice', grid_step: int = 0,
                 max_overlap: float = 0.0, overlapping_share: float = 0.0,
                 max_tries: int = 2500, seed: int = 0, out_dir=None):
-        self.mask_root = mask_root
+        self.mask_cfg = MASK_RECIPES[seg]
+        self.mask_root = cache_root(mask_cache_job, 'mask')
+        self.seg_dir = self.mask_root / self.mask_cfg.seg_id()
         self.tile_sizes = list(tile_sizes)
         self.ds_values = list(ds_values)
         self.n = n
@@ -161,10 +166,9 @@ class TileYieldProbe:
     def default_entries(self) -> list:
         """Every WSI the mask store already holds -- this tool's own
         default when the caller names no `--dataset`/`--wsi`."""
-        found = MaskStore.find(self.mask_root)
-        return [dict(dataset=None, wsi_name=MaskStore.wsi_stem_of(
-            MaskStore.load_meta(p).wsi_path), path=MaskStore.load_meta(p).wsi_path)
-            for p in found]
+        found = [read_meta(p) for p in find(self.seg_dir, '*/mask_meta.json')]
+        return [dict(dataset=None, wsi_name=wsi_stem_of(m['wsi_path']),
+                     path=m['wsi_path']) for m in found]
 
     def _probe_cell(self, wsi, trm, tile_size, rung) -> dict:
         """One (tile_size, ds) cell. Returns a row dict.
@@ -177,9 +181,8 @@ class TileYieldProbe:
 
         Goes through `TileSampler` rather than calling `has_tissue`
         directly, because the yield is not only about the tissue fraction:
-        `_sample_level` first runs filter_regions -> merge_overlapping ->
-        filter_patchable, and it is `filter_patchable` that empties a cell
-        outright when no region can hold the window. A probe that skipped
+        the sampler takes a `patchable` view per rung, and that is what
+        empties a cell outright when no region can hold the window. A probe that skipped
         that would over-report exactly the cells spec.md 6.5 says are empty.
         """
         plan = DsLadder(rungs=(float(rung),)).plan(wsi.level_downsamples, tile_size)[0]
@@ -234,7 +237,7 @@ class TileYieldProbe:
         alt.sample([plan])
         alt_rep = alt.reports[plan.rung_ds]
 
-        return {'wsi_stem': MaskStore.wsi_stem_of(wsi),
+        return {'wsi_stem': wsi_stem_of(wsi),
                 'sampler_id': cfg.sampler_id(),
                 'floor_frame': rich.floor_frame,
                 'n_goal': rep_.n_goal,
@@ -256,20 +259,23 @@ class TileYieldProbe:
     def run_one(self, entry: dict) -> list:
         """One WSI -> its rows across every (tile_size, ds) cell, or `[]`
         with a printed message if the mask store has nothing for it."""
-        stem = MaskStore.wsi_stem_of(entry['path'])
-        try:
-            mask_path = MaskStore.find_one(self.mask_root, wsi_stem=stem)
-        except Exception as e:                                   # noqa: BLE001
-            print(f'    no mask: {e}', flush=True)
+        stem = wsi_stem_of(entry['path'])
+        folder = self.seg_dir / stem
+        if not (folder / 'mask_meta.json').exists():
+            print(f'    no mask under {folder}', flush=True)
             return []
-        slide_mask, meta = MaskStore.load(mask_path)
-        print(f'    mask {meta.rows}x{meta.cols} at ds {meta.mask_ds:.0f}, '
-              f'tissue {meta.fraction:.1%}   ({meta.method})', flush=True)
+        meta = read_meta(folder / 'mask_meta.json')
+        slide_mask = SlideMask.load(folder / 'mask.safetensors')
+        print(f'    mask {meta["rows"]}x{meta["cols"]} at ds {meta["mask_ds"]:.0f}, '
+              f'tissue {meta["fraction"]:.1%}   ({self.mask_cfg.seg_id()})',
+              flush=True)
 
         rows = []
         with SafeSlide(entry['path']) as wsi:
-            trm = TissuesRegionsMask.from_mask(wsi, slide_mask.mask,
-                                               slide_mask.origin, slide_mask.span)
+            # The recipe's regions -- exactly what a sampler is handed; the
+            # per-rung `patchable` step is the sampler's own and part of what
+            # is being probed.
+            trm = self.mask_cfg.regions(wsi, slide_mask)
             print(f'    {len(trm.tissue_regions)} tissue regions', flush=True)
             for tile_size in self.tile_sizes:
                 line = []
@@ -398,7 +404,7 @@ class TileYieldProbe:
 def _scanned(trm):
     """(origin, span) in LEVEL-0, off the mask rather than off the slide.
 
-    The mask knows where it starts -- `from_mask` recorded it -- and asking
+    The mask knows where it starts -- its SlideMask recorded it -- and asking
     the slide again would re-derive `openslide.bounds-*` in a second place.
     On a MIRAX those differ from (0, 0) by tens of thousands of pixels, so
     the two have to be the same number and the cheapest way to guarantee
@@ -413,14 +419,17 @@ def _scanned(trm):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--mask-root', default=DEFAULT_MASK_ROOT,
-                    help='where utilities/cli/build_cache/build_mask_store.py wrote the masks')
+    ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default='uni2_pca',
+                    help='mask recipe whose cached masks to probe')
+    ap.add_argument('--mask-cache-job', default=DEFAULT_MASK_CACHE_JOB,
+                    help='the job that made the mask cache: result/cache/'
+                         '<this>_mask/ (build_mask_store.py writes there)')
     ap.add_argument('--dataset', nargs='+', default=None,
                     help='narrow to these datasets (via AccessDatasets) -- '
-                         'still needs a mask in --mask-root per slide')
+                         'still needs a cached mask per slide')
     ap.add_argument('--wsi', nargs='+', default=None,
                     help='explicit WSI path(s). Default (with no --dataset '
-                         'either): every mask already in --mask-root')
+                         'either): every mask already in the cache')
     ap.add_argument('--val-only', action='store_true')
     # NO --tissue-ratio: the gate it swept is gone, and the axis with it.
     # What replaced the question is `supply_<bucket>` against `floor_<bucket>`.
@@ -469,7 +478,8 @@ def main():
         entries = None   # TileYieldProbe.run() falls back to the mask store
 
     prober = TileYieldProbe(
-        mask_root=args.mask_root, tile_sizes=args.tile_sizes,
+        seg=args.seg, mask_cache_job=args.mask_cache_job,
+        tile_sizes=args.tile_sizes,
         ds_values=args.ds_values, n=args.n, candidates=args.candidates,
         grid_step=args.grid_step, max_overlap=args.max_overlap,
         overlapping_share=args.overlapping_share, max_tries=args.max_tries,
@@ -478,7 +488,7 @@ def main():
     if entries is None:
         entries = prober.default_entries()
         if not entries:
-            print(f'no masks under {args.mask_root}. Run '
+            print(f'no masks under {prober.seg_dir}. Run '
                   f'utilities/cli/build_cache/build_mask_store.py first.')
             return 1
         print(f'{len(entries)} slides from the mask store', flush=True)

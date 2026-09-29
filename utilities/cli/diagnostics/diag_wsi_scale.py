@@ -164,9 +164,9 @@ def main() -> int:
                     help='explicit WSI path(s), for a slide not in the '
                          'registry -- combined with --dataset if both given')
     ap.add_argument('--val-only', action='store_true',
-                    help="only the recorded val split (needs cli/train.py "
-                         "to have already written wsi_split.csv for that "
-                         "dataset) -- the original diagnose_native_split.py's "
+                    help="only the recorded val split (needs "
+                         "utilities/cli/build_cache/make_split.py to have "
+                         "written it) -- the original diagnose_native_split.py's "
                          "own scope. Default: every WSI in the dataset")
     ap.add_argument('--quiet', action='store_true',
                     help='skip the per-slide/per-rung dump, print only the '

@@ -1,45 +1,44 @@
 #!/usr/bin/env python3
-"""Fill the mask store: one tissue mask per slide, written once and reused.
+"""Pre-warm the mask cache: segment every named slide once, so a later job that
+samples from it never waits on the GPU for a mask.
 
-    python utilities/cli/build_cache/build_mask_store.py <wsi-path>... [--fit-tiles 1000]
-    python utilities/cli/build_cache/build_mask_store.py --wsi-names Ki67_pure_0001 ...
+    python utilities/cli/build_cache/build_mask_store.py --seg uni2_pca <wsi-path>...
+    python utilities/cli/build_cache/build_mask_store.py --seg hest --wsi-names Ki67_pure_0001 ...
 
-Outputs (in result/cache/masks/ by default):
-    <wsi_stem>__<method>__<cfg8>.safetensors
+Outputs:
+    result/cache/<cache-job>_mask/<seg_id>/<slide>/mask.safetensors + mask_meta.json
     build_mask_store.csv          in result/<SLURM_JOB_NAME or BuildMaskStore>/
 
-argparse, a loop, and printed progress. Everything that decides anything is in
-`utilities/MaskStore.py` -- `build_one` runs the segmenter, `MaskMeta.of`
-assembles the identity, `save` validates and writes atomically. The split is
-`FeatureStore` and `cli/build_cache/build_reference_store.py`'s, and CLAUDE.md's reason: a
-library layer that prints cannot be called by a bench.
+argparse, a loop, and printed progress. Everything that decides anything is
+`TissueMaskConfig.MaskMaker.slide_mask`: the recipe names the directory, a hit
+is read back, a miss is segmented and written atomically. This is the same call
+a sampler makes on a miss, so a mask written here IS the mask a job pointed at
+`--mask-cache-job <cache-job>` reads -- there is no second format to keep in
+step with the first.
 
-WHY THIS RUNS ONCE AND NOT THREE TIMES
----------------------------------------
-The mask costs 3.5 to 6 minutes of GPU per slide (measured, `Uni2PcaSegFunc.
-LEVEL`), and three later steps read it: the sampling probe of spec.md 12 step
-3b, the pre-tile extraction of 3c, and any bench that wants the same regions the
-training tiles came from. Recomputing is not the problem; three recomputations
-that could quietly differ is.
-
-The store is keyed on the segmenter's `identity_id()`, so re-running with a
-changed config writes a SECOND file rather than overwriting the first, and a
-reader that asks for one gets an error rather than the other.
+WHY PRE-WARM AT ALL
+-------------------
+UNI2-PCA costs 3.5 to 6 minutes of GPU per slide (measured, `Uni2PcaSegFunc.
+LEVEL`) and HEST is seconds to minutes. A training job that misses on its first
+epoch spends that inside its own walltime, on the card it reserved for the
+encoder. Running this first moves the cost to a job that does nothing else.
 
 WHAT THE CSV IS FOR
 -------------------
-One row per slide: the tissue fraction, the explained variance, and the
-foreground fraction the fit saw. None of it is asserted -- there is no tissue
-ground truth here -- but the fractions are readable against what this project
-has already measured, and a slide that comes out at 0.5 on a Ki67 is the signal
-that PC1 found position or scanner banding rather than tissue.
+One row per slide: the tissue fraction and, for UNI2-PCA, the explained variance
+and the foreground fraction the fit saw. None of it is asserted -- there is no
+tissue ground truth here -- but the fractions are readable against what this
+project has already measured, and a slide that comes out at 0.5 on a Ki67 is the
+signal that PC1 found position or scanner banding rather than tissue.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import os
+import shutil
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,23 +47,16 @@ for _p in (os.path.join(_HERE, '..', '..'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from _paths import RESULT_DIR, job_result_dir, setup_import_paths  # noqa: E402
+from _paths import job_result_dir, setup_import_paths            # noqa: E402
 
 setup_import_paths()
 
 import torch                                                    # noqa: E402
 
-import MaskStore                                                # noqa: E402
 from AccessDatasets import locate                                 # noqa: E402
-from MaskStore import MaskMeta                                   # noqa: E402
+from Cache import cache_root, job_name, wsi_stem_of                # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
-from Uni2PcaSegFunc import Uni2PcaSegConfig                      # noqa: E402
-
-
-#: result/cache/ rather than result/<job>/, because several jobs read it and it
-#: is not the byproduct of any one of them. `make clean-job JOB=cache` is then
-#: the one obvious way to purge it (ClaudeRules section 6).
-DEFAULT_ROOT = os.path.join(RESULT_DIR, 'cache', 'masks')
+from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 
 #: The measured tissue fractions on this project's own slides, for reading the
 #: printed number against. BRACS from test_EoMT's stratified_positions docstring
@@ -82,17 +74,19 @@ def main():
                         '(e.g. Ki67_pure_0001), resolved to paths -- an '
                         'alternative to the positional paths, not a '
                         'replacement; the two lists are concatenated')
-    ap.add_argument('--root', default=DEFAULT_ROOT,
-                    help='where the store lives (default: result/cache/masks/)')
-    ap.add_argument('--fit-tiles', type=int, default=1000,
-                    help="tiles the PCA is fitted on. The config's own default; "
-                         'a smaller value is a different identity and so a '
-                         'different file, which is correct')
-    ap.add_argument('--workers', type=int, default=8,
-                    help='DataLoader workers for reading tiles. The read is the '
-                         'cost here, not the model')
-    ap.add_argument('--components', type=int, default=16)
-    ap.add_argument('--background-threshold', type=float, default=0.5)
+    ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default='uni2_pca',
+                    help='mask recipe (TissueMaskConfig.MASK_RECIPES)')
+    ap.add_argument('--cache-job', default=None,
+                    help='the <made_by> of result/cache/<made_by>_mask/. '
+                         'Default: this job (SLURM_JOB_NAME or BuildMaskStore)')
+    ap.add_argument('--fit-tiles', type=int, default=None,
+                    help='uni2_pca only: tiles the PCA is fitted on. Default: '
+                         "the recipe's own. A different value is a different "
+                         'seg_id and so a different directory, which is correct')
+    ap.add_argument('--workers', type=int, default=None,
+                    help='uni2_pca only: DataLoader workers for reading tiles')
+    ap.add_argument('--components', type=int, default=None)
+    ap.add_argument('--background-threshold', type=float, default=None)
     ap.add_argument('--larger-pca-as-fg', action=argparse.BooleanOptionalAction,
                     default=None,
                     help='which side of PC1 is tissue. Decided by '
@@ -102,7 +96,11 @@ def main():
                          'a CLI default that restates a config default is a '
                          'second place for the answer to live, and the two drift')
     ap.add_argument('--overwrite', action='store_true',
-                    help='rebuild even when a mask with this identity exists')
+                    help="delete the slide's cached mask first. Draws already "
+                         'made from the old mask live under each job\'s '
+                         '<job>_sampler/<seg_id>/<slide>/ and are NOT touched: '
+                         'delete those too, or they outlive the mask they came '
+                         'from')
     ap.add_argument('--out', default=None,
                     help='directory for the summary CSV. Empty means '
                          'result/<SLURM_JOB_NAME or BuildMaskStore>/')
@@ -112,60 +110,62 @@ def main():
     if not paths:
         ap.error('give at least one slide, as a path or via --wsi-names')
 
+    mask_cfg = MASK_RECIPES[args.seg]
+    overrides = {k: v for k, v in (
+        ('fit_tiles', args.fit_tiles), ('workers', args.workers),
+        ('components', args.components),
+        ('background_threshold', args.background_threshold),
+        ('larger_pca_as_fg', args.larger_pca_as_fg)) if v is not None}
+    if overrides:
+        if args.seg != 'uni2_pca':
+            ap.error(f'{sorted(overrides)} only apply to --seg uni2_pca')
+        mask_cfg = dataclasses.replace(
+            mask_cfg, seg=dataclasses.replace(mask_cfg.seg, **overrides))
+
+    root = cache_root(args.cache_job or job_name('BuildMaskStore'), 'mask')
     out_dir = args.out or job_result_dir('BuildMaskStore')
     os.makedirs(out_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    overrides = {} if args.larger_pca_as_fg is None else {
-        'larger_pca_as_fg': args.larger_pca_as_fg}
-    cfg = Uni2PcaSegConfig(fit_tiles=args.fit_tiles,
-                           components=args.components,
-                           background_threshold=args.background_threshold,
-                           workers=args.workers, **overrides)
-    # Built ONCE and reused across slides. The encoder's weights are the
-    # expensive part of construction and they do not depend on the slide; the
-    # PCA basis does, and `mask_wsi` refits it per slide.
-    segmenter = cfg.build(device)
-    print(f'segmenter {segmenter.identity_id()}   method {cfg.method}   '
-          f'device {device}', flush=True)
-    print(f'store     {args.root}', flush=True)
+    print(f'recipe    {args.seg}   seg_id {mask_cfg.seg_id()}   device {device}',
+          flush=True)
+    print(f'cache     {root}', flush=True)
 
+    masks = MaskMaker(mask_cfg, root, device)
     rows, failures = [], []
     for index, wsi_path in enumerate(paths, 1):
-        stem = MaskStore.wsi_stem_of(wsi_path)
+        stem = wsi_stem_of(wsi_path)
         print(f'\n[{index}/{len(paths)}] {stem}', flush=True)
-
-        existing = MaskStore.find(args.root, wsi_stem=stem,
-                                  segmenter_id=segmenter.identity_id())
-        if existing and not args.overwrite:
-            print(f'    have it: {existing[0].name}   (--overwrite to rebuild)',
-                  flush=True)
-            slide_mask, meta = MaskStore.load(existing[0])
-            rows.append(_row(stem, existing[0], meta, reused=True))
-            continue
-
+        if args.overwrite:
+            shutil.rmtree(masks.slide_dir(stem), ignore_errors=True)
         try:
             with SafeSlide(wsi_path) as wsi:
-                slide_mask = MaskStore.build_one(wsi, segmenter)
-                meta = MaskMeta.of(slide_mask, wsi, segmenter)
-                path = MaskStore.save(args.root, slide_mask, meta)
+                slide_mask, hit = masks.slide_mask(wsi)
         except Exception as e:                                   # noqa: BLE001
             # One unreadable slide must not lose the ones already done. The
-            # store is written per slide, so what is on disk stays valid.
+            # cache is written per slide, so what is on disk stays valid.
             print(f'    FAILED  {type(e).__name__}: {e}', flush=True)
             failures.append((stem, f'{type(e).__name__}: {e}'))
             continue
 
-        report = slide_mask.report or {}
-        print(f'    {meta.rows} x {meta.cols} cells at ds {meta.mask_ds:.0f}   '
-              f'tissue {meta.fraction:.1%}   ({_REFERENCE})', flush=True)
+        geo, report = slide_mask.geometry(), slide_mask.report or {}
+        print(f'    {"have it" if hit else "segmented"}   {geo["rows"]} x '
+              f'{geo["cols"]} cells at ds {geo["mask_ds"]:.0f}   tissue '
+              f'{geo["fraction"]:.1%}   ({_REFERENCE})', flush=True)
         if report:
             print(f'    fit: {report.get("cells", "?")} cells, explained '
                   f'{report.get("explained_variance_top3", 0):.1%}, foreground '
                   f'in sample {report.get("foreground_fraction_in_sample", 0):.1%}',
                   flush=True)
-        print(f'    wrote {path.name}', flush=True)
-        rows.append(_row(stem, path, meta, reused=False))
+        rows.append({'wsi_stem': stem, 'seg': args.seg,
+                     'seg_id': mask_cfg.seg_id(),
+                     'dir': str(masks.slide_dir(stem)),
+                     **geo,
+                     'fit_cells': report.get('cells', ''),
+                     'explained_top3': report.get('explained_variance_top3', ''),
+                     'fit_foreground': report.get('foreground_fraction_in_sample', ''),
+                     'reused': int(hit)})
+    masks.close()
 
     summary = os.path.join(out_dir, 'build_mask_store.csv')
     if rows:
@@ -180,21 +180,6 @@ def main():
         for stem, why in failures:
             print(f'  {stem}: {why}')
     return 1 if failures else 0
-
-
-def _row(stem, path, meta, *, reused):
-    report = meta.report
-    return {'wsi_stem': stem, 'file': os.path.basename(str(path)),
-            'method': meta.method, 'segmenter_id': meta.segmenter_id,
-            'mask_ds': meta.mask_ds, 'rows': meta.rows, 'cols': meta.cols,
-            'origin_x': meta.origin_x, 'origin_y': meta.origin_y,
-            'span_w': meta.span_w, 'span_h': meta.span_h,
-            'tissue_fraction': meta.fraction,
-            'n_components': meta.n_components,
-            'fit_cells': report.get('cells', ''),
-            'explained_top3': report.get('explained_variance_top3', ''),
-            'fit_foreground': report.get('foreground_fraction_in_sample', ''),
-            'reused': int(reused)}
 
 
 if __name__ == '__main__':

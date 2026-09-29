@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Run one or more tissue segmenters on one or more TILE images and save one
-combined quick-look figure PER TILE -- no MaskStore write, and no whole-slide
+combined quick-look figure PER TILE -- no mask-cache write, and no whole-slide
 read except for `--method uni2`, which needs one to FIT its PCA basis first
 (see below).
 
 Neither existing tool answers "what would these methods say about this one
 tile": `utilities/cli/build_cache/build_mask_store.py` always fits + segments
-a WHOLE slide and always writes the result to `MaskStore`; `utilities/cli/
+a WHOLE slide and always writes the result to the mask cache; `utilities/cli/
 diagnostics/inspect_pca_seg.py` is uni2-pca-seg only, and whole-slide too.
 This is the direct, no-cache, any-combination-of-the-four-methods way to look
 at one or more tiles.
@@ -90,7 +90,7 @@ setup_import_paths()
 
 from AccessDatasets import locate                                 # noqa: E402
 from SafeSlide import SafeSlide                                   # noqa: E402
-from TissueSegFunc import TissueSegConfig                         # noqa: E402
+from TissueSegFunc import PlaneSegConfig                          # noqa: E402
 from HestSegFunc import HestSegConfig                             # noqa: E402
 from Uni2PcaSegFunc import Uni2PcaSegConfig                       # noqa: E402
 
@@ -122,7 +122,10 @@ def _build_no_fit_segmenters(methods, device) -> dict:
         segs['hest'] = HestSegConfig().build(device)
     for m in ('hsv', 'otsu'):
         if m in methods:
-            segs[m] = TissueSegConfig(method=m).build()
+            # One tile at a time, so the slide-read chunking never applies --
+            # and otsu refuses a config that says it might.
+            segs[m] = PlaneSegConfig(method=m, seg_chunk_px=None,
+                                     read_chunk_px=None).build()
     return segs
 
 

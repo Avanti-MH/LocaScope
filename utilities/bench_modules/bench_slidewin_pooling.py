@@ -220,8 +220,7 @@ import torch.nn.functional as F                                 # noqa: E402
 from PatchingLib import (FeaturesMap, QueryPatchContainer,      # noqa: E402
                          WsiTissuesContainer)
 from SafeSlide import SafeSlide                                  # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask                # noqa: E402
-from TissueSegFunc import HestSegConfig                          # noqa: E402
+from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import (admissible_poolings, encoder_config,  # noqa: E402
                              encoder_names, pooling_kinds)
 from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
@@ -816,9 +815,7 @@ def main() -> int:
                              'standard error at 5 pp; 25 would quantise the '
                              'rates to 4%% steps.')
     parser.add_argument('--white-max', type=float, default=0.15)
-    parser.add_argument('--mask-ds', type=float, default=4.0)
-    parser.add_argument('--seg-chunk-px', type=float, default=4_000_000)
-    parser.add_argument('--min-region-ratio', type=float, default=0.01)
+    add_mask_args(parser)
     parser.add_argument(
         '--encoder', default='gigapath', choices=encoder_names(),
         help='which tile encoder. Only the module for THIS one is imported: '
@@ -931,7 +928,7 @@ def main() -> int:
               'producing numbers that could not mean anything')
         return 1
 
-    hest_method = HestSegConfig().build(device)
+    masks = MaskMaker(mask_cfg_from_args(args), device=device)
     rng = np.random.default_rng(args.seed)
 
     all_rows, failed = [], []
@@ -940,12 +937,7 @@ def main() -> int:
         print(f'\n{"=" * 78}\n{stem}\n{"=" * 78}', flush=True)
         slide = SafeSlide(str(path))
         try:
-            mask = TissuesRegionsMask.from_wsi(
-                slide, ds=args.mask_ds, method=hest_method,
-                seg_chunk_px=int(args.seg_chunk_px), stitch_overlap=128,
-                level_rule='nearest')
-            mask.filter_regions(min_ratio=args.min_region_ratio)
-            mask.merge_overlapping()
+            mask, _ = masks.mask(slide)
             print(f'  mask  tissue {mask.tissue_fraction() * 100:.1f}%  '
                   f'{len(mask.tissue_regions)} regions', flush=True)
             if not mask.tissue_regions:

@@ -17,7 +17,6 @@ Output: <out>/<wsi_tag>_L<lvl>_diag.png
 from __future__ import annotations
 
 import argparse
-import copy
 import os
 import sys
 from typing import Optional
@@ -37,7 +36,8 @@ if _UTILITIES not in sys.path:
 # the same function.
 from cli import job_result_dir                                      # noqa: E402
 
-from TissuesRegionsMask import TissuesRegionsMask     # noqa: E402
+from SafeSlide import SafeSlide                        # noqa: E402
+from TissueMaskConfig import add_mask_args, mask_cfg_from_args  # noqa: E402
 from config             import DomainGapConfig         # noqa: E402
 from camera             import Camera                  # noqa: E402
 
@@ -87,17 +87,11 @@ def diagnose_skip(
 ) -> str:
     """Save a 4-panel figure showing cam.mask at each filter stage.
 
-    `cam` must have `cam.mask` set, in any filter state. This function does
-    NOT touch it: it works on a shallow copy with its own region list and undo
-    stack, rewinds that copy to raw, and replays raw → filter_regions →
-    merge_overlapping → filter_patchable(tile=cam.required_region_side_l0)
-    to snapshot each stage. `cam.mask` is left exactly as it was found.
-
-    The copy is not cosmetic. multi_batch builds one mask per WSI and shares it
-    across every pyramid level, so rewinding it here would silently strip
-    filter_regions and merge_overlapping from every later level. The copy is
-    shallow on purpose -- main_mask is large and read-only for our purposes,
-    only the two mutable lists need their own identity.
+    `cam` must have `cam.mask` set, in any filter state. Each stage is a view
+    derived from `cam.mask.raw()` -- raw → filtered → merged →
+    patchable(cam.required_region_side_l0) -- so `cam.mask` itself is never
+    touched, and the base mask multi_batch shares across levels cannot lose
+    its region prep here.
 
     `level` is used only for the filename + title (Camera doesn't carry a
     level attr — the level lives in cfg.query_mpp indirectly).
@@ -109,28 +103,17 @@ def diagnose_skip(
     if wsi_tag is None:
         wsi_tag = 'wsi'
 
-    mask = copy.copy(cam.mask)
-    mask.tissue_regions   = list(cam.mask.tissue_regions)
-    mask._regions_history = [list(h) for h in cam.mask._regions_history]
-
+    mask = cam.mask.raw()
     tile_l0   = cam.required_region_side_l0
     level_mpp = cam.cfg.query_mpp
     base_mpp  = float(cam.wsi.properties.get(openslide.PROPERTY_NAME_MPP_X, level_mpp))
 
-    # Rewind the COPY to raw, no matter what filter chain the caller applied.
-    while mask.regions_undo():
-        pass
-
-    # Snapshot chain
-    stages = [('raw', list(mask.tissue_regions))]
-    mask.filter_regions(min_ratio=min_region_ratio)
-    stages.append((f'filter_regions(min_ratio={min_region_ratio})',
-                   list(mask.tissue_regions)))
-    mask.merge_overlapping()
-    stages.append(('merge_overlapping', list(mask.tissue_regions)))
-    mask.filter_patchable(tile_size=tile_l0, ds=1.0)
-    stages.append((f'filter_patchable(tile={tile_l0})',
-                   list(mask.tissue_regions)))
+    filtered = mask.filtered(min_region_ratio)
+    merged = filtered.merged()
+    stages = [('raw', mask.tissue_regions),
+              (f'filtered(min_ratio={min_region_ratio})', filtered.tissue_regions),
+              ('merged', merged.tissue_regions),
+              (f'patchable({tile_l0})', merged.patchable(tile_l0).tissue_regions)]
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 5))
     try:
@@ -139,7 +122,7 @@ def diagnose_skip(
 
         if verdict is None:
             n_final = len(stages[-1][1])
-            verdict = 'PASS' if n_final > 0 else 'SKIP (0 regions after filter_patchable)'
+            verdict = 'PASS' if n_final > 0 else 'SKIP (0 regions after patchable)'
         fig.suptitle(
             f'{wsi_tag}  L{level}  '
             f'(mpp={level_mpp:.3f}, req_tile={tile_l0}px = {tile_l0*base_mpp/1000:.1f}mm)  '
@@ -156,8 +139,6 @@ def diagnose_skip(
               + f'   saved {out_path}', flush=True)
     finally:
         plt.close(fig)
-        # No regions_undo here: everything above happened on our own copy, so
-        # there is nothing of the caller's to restore.
 
     return out_path
 
@@ -168,9 +149,10 @@ def main():
     ap.add_argument('--level',             type=int, required=True)
     ap.add_argument('--wh-ratio',          default='4:3')
     ap.add_argument('--MPixels',           type=float, default=12.0)
-    ap.add_argument('--mask-ds',           type=float, default=32.0)
     ap.add_argument('--region-protrusion', type=float, default=0.5)
-    ap.add_argument('--min-region-ratio',  type=float, default=0.01)
+    add_mask_args(ap)
+    ap.add_argument('--device', default=None,
+                    help='segmenter device; default cuda when available')
     ap.add_argument('--out',               default='',
                     help='output directory. Empty means result/<SLURM_JOB_NAME or DiagCameraSkip>/, via _paths.job_result_dir -- results live outside the checkout')
     args = ap.parse_args()
@@ -180,7 +162,11 @@ def main():
     # the directory itself.
     args.out = args.out or job_result_dir('DiagCameraSkip')
 
-    slide = openslide.OpenSlide(args.wsi_path)
+    mask_cfg = mask_cfg_from_args(args)
+    import torch                                                     # noqa: PLC0415
+    device = torch.device(args.device or
+                          ('cuda' if torch.cuda.is_available() else 'cpu'))
+    slide = SafeSlide(args.wsi_path)
     try:
         base_mpp = float(slide.properties.get(openslide.PROPERTY_NAME_MPP_X, 0.25))
         level_mpp = base_mpp * slide.level_downsamples[args.level]
@@ -189,12 +175,12 @@ def main():
         )
         cam = Camera(slide, cfg=cfg,
                      region_protrusion_ratio=args.region_protrusion)
-        cam.mask = TissuesRegionsMask.from_wsi(slide, ds=args.mask_ds)
+        cam.mask = mask_cfg.build(slide, device)
 
         wsi_tag = os.path.splitext(os.path.basename(args.wsi_path))[0]
         diagnose_skip(
             cam=cam, level=args.level, out_dir=args.out, wsi_tag=wsi_tag,
-            min_region_ratio=args.min_region_ratio,
+            min_region_ratio=mask_cfg.min_region_ratio,
         )
     finally:
         slide.close()

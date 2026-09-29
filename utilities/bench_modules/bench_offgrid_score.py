@@ -117,8 +117,8 @@ from mpl_toolkits.mplot3d import Axes3D                             # noqa: E402
 from PatchingLib import (PatchGrid, QueryPatchContainer,            # noqa: E402
                          TissuePatchContainer)
 from SafeSlide import SafeSlide                                     # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask, TissueRegion     # noqa: E402
-from TissueSegFunc import HestSegConfig                             # noqa: E402
+from TissueMask import TissueRegion                                  # noqa: E402
+from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
 from GigaPathSlidingWinSim import SlidingWindowSimilarity           # noqa: E402
 from camera import Camera                                           # noqa: E402
@@ -493,25 +493,15 @@ def aggregate_gates(rows, combiner: str = 'mean') -> list:
 #  One slide
 # ══════════════════════════════════════════════════════════════════════════════
 
-def analyse_slide(wsi_path, args, encoders, hest_method, rng) -> list:
+def analyse_slide(wsi_path, args, encoders, masks, rng) -> list:
     stem = Path(wsi_path).stem
     print(f'\n{"=" * 78}\n{stem}\n{"=" * 78}', flush=True)
     slide = SafeSlide(str(wsi_path))
     score_rows = []
     try:
-        # level_rule='nearest', not openslide's default. BRACS_1228's level 1
-        # reports downsample 4.00003, so a strict comparison against a request
-        # for 4.0 falls back to level 0 and the mask is segmented over 6.58 Gpx
-        # instead of 411 Mpx. The first run of this bench did exactly that --
-        # `tiled seg ... input 61197x107568` in log/OffGridScore is level 0 --
-        # and paid several hundred seconds per slide for a mask that is only
-        # used to pick grid points and count background.
-        mask = TissuesRegionsMask.from_wsi(
-            slide, ds=args.mask_ds, method=hest_method,
-            seg_chunk_px=int(args.seg_chunk_px), stitch_overlap=128,
-            level_rule='nearest')
-        mask.filter_regions(min_ratio=args.min_region_ratio)
-        mask.merge_overlapping()
+        # --seg's recipe. The mask is only used to pick grid points and count
+        # background.
+        mask, _ = masks.mask(slide)
         print(f'  mask: tissue={mask.tissue_fraction() * 100:.1f}%  '
               f'{len(mask.tissue_regions)} regions', flush=True)
         if not mask.tissue_regions:
@@ -865,9 +855,7 @@ def main() -> int:
     parser.add_argument('--domain-gap', action=argparse.BooleanOptionalAction,
                         default=True,
                         help='apply colour/vignette/lens/noise/JPEG to the FoV')
-    parser.add_argument('--mask-ds', type=float, default=4.0)
-    parser.add_argument('--seg-chunk-px', type=float, default=4_000_000)
-    parser.add_argument('--min-region-ratio', type=float, default=0.01)
+    add_mask_args(parser)
     parser.add_argument(
         '--encoder', default='gigapath', choices=encoder_names(),
         help='which tile encoder. Only the module for THIS one is imported: '
@@ -943,14 +931,14 @@ def main() -> int:
     encoders = {
         name: base.variant(transform=_dc.replace(cfg.transform, preprocess=name))
         for name in PREPROCESS}
-    hest_method = HestSegConfig().build(device)
+    masks = MaskMaker(mask_cfg_from_args(args), device=device)
     rng = np.random.default_rng(args.seed)
 
     all_rows, failed = [], []
     for path in args.slides:
         try:
             all_rows.extend(
-                analyse_slide(path, args, encoders, hest_method, rng))
+                analyse_slide(path, args, encoders, masks, rng))
         except Exception as exc:                        # noqa: BLE001
             print(f'\n{Path(path).stem}: {type(exc).__name__}: {exc}')
             traceback.print_exc()

@@ -1,4 +1,4 @@
-.PHONY: clean clean-results clean-logs clean-cache clean-job list-jobs
+.PHONY: clean clean-results clean-logs clean-cache clean-job list-jobs lint
 
 # Runs write OUTSIDE the checkout. OUTPUT_ROOT is the repo's parent, matching
 # utilities/_paths.py -- the one definition on the python side, which
@@ -62,3 +62,9 @@ clean-logs:
 
 clean-cache:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
+
+# ruff.toml holds the rule set (reverse-engineered from the noqa comments
+# already in the tree, see that file's own header). Read-only -- use
+# `ruff check --fix .` by hand if a fix pass is actually wanted.
+lint:
+	ruff check .

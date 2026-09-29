@@ -28,13 +28,13 @@ from typing import Iterator, Optional, Tuple, Union
 import numpy as np
 import openslide
 
-# utilities/ so TissuesRegionsMask is importable when Camera is used alone
+# utilities/ so TissueMask is importable when Camera is used alone
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _UTILITIES = os.path.abspath(os.path.join(_HERE, '..', 'utilities'))
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 
-from TissuesRegionsMask import TissuesRegionsMask   # noqa: E402
+from TissueMask import TissueMask   # noqa: E402
 
 from config           import DomainGapConfig      # noqa: E402
 from pipeline         import simulate_with_gt, SENSOR_MARGIN   # noqa: E402
@@ -54,7 +54,7 @@ class Camera:
         self,
         wsi_or_path:  Union[str, openslide.OpenSlide],
         cfg:          Optional[DomainGapConfig]   = None,
-        mask:         Optional[TissuesRegionsMask] = None,
+        mask:         Optional[TissueMask] = None,
         seed:         Optional[int]                = None,
         tissue_ratio: float                        = 0.3,
         region_protrusion_ratio: float             = 0.5,
@@ -148,8 +148,8 @@ class Camera:
         """Minimum side length a tissue region must have to be a valid host.
 
         = rect_side + 2 * required_padding, i.e. FoV + as much padding as we
-        insist must stay inside the region. Used by
-        `generator._prep_mask_for_camera` to drive `filter_patchable`.
+        insist must stay inside the region. Used by `generator.camera_mask`
+        as the side a region must reach (`TissueMask.patchable`).
         """
         req_w = self.qfw.rect_w_l0 + 2 * self._req_pad_x_l0
         req_h = self.qfw.rect_h_l0 + 2 * self._req_pad_y_l0
@@ -342,8 +342,8 @@ class Camera:
         """
         if self.mask is None:
             raise RuntimeError(
-                'Camera.__iter__ needs a mask. Pass mask=TissuesRegionsMask.from_wsi(cam.wsi, ...) '
-                'and prep with filter_regions / merge_overlapping / filter_patchable before iterating.'
+                'Camera.__iter__ needs a mask. Set cam.mask = generator.camera_mask('
+                'cam, generator.base_mask(cam.wsi, masks)) before iterating.'
             )
         if not self.mask.tissue_regions:
             raise RuntimeError(

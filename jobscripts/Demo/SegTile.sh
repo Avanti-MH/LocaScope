@@ -19,7 +19,7 @@ source jobscripts/_env.sh
 
 # =============================================================================
 #  utilities/cli/demo/seg_tile.py -- one (or more) tile in, ONE COMBINED
-#  quick-look figure per tile out (one panel per METHOD). No MaskStore write,
+#  quick-look figure per tile out (one panel per METHOD). No mask-cache write,
 #  no whole-slide read except for a uni2 fit -- see seg_tile.py's own module
 #  docstring for why that method alone needs a slide, and how it recovers
 #  which slide a tile came from automatically from the tile's own folder

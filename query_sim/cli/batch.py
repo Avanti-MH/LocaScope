@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Batch synthesise N FOVs from a WSI, with per-FOV ground truth CSV.
 
-Position sampling uses TissuesRegionsMask (region-first, same pattern as
+Position sampling uses TissueMask (region-first, same pattern as
 TileSampler); crop shape is QueryFromWSI (wh_ratio + MPixels + query_mpp).
 
 Usage:
     python query_sim/cli/batch.py <wsi_path> \\
         [--n 300] [--wh-ratio 4:3] [--MPixels 12] [--mpp 0.25] [--seed 0]
-        [--tissue-ratio 0.3] [--mask-ds 32]
+        [--tissue-ratio 0.3] [--seg hest] [--mask-cache-job <job>]
         [--scale-min 0.9 --scale-max 1.15] [--no-distortion]
         [--no-geometric] [--no-photometric]
 
@@ -30,6 +30,9 @@ from cli       import job_result_dir        # noqa: E402
 from config    import DomainGapConfig       # noqa: E402
 from generator import generate              # noqa: E402
 
+import Cache                                                         # noqa: E402
+from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
+
 
 def main():
     ap = argparse.ArgumentParser(description='Generate synthetic microscope FOVs with GT.')
@@ -48,8 +51,12 @@ def main():
                     help='Fraction of bounding-square padding allowed to spill '
                          'past a tissue region edge (0=strict, 1=only FoV rect '
                          'must fit). Default 0.5.')
-    ap.add_argument('--mask-ds',      type=float, default=32.0,
-                    help='TissuesRegionsMask thumb downsample (default 32)')
+    add_mask_args(ap)
+    ap.add_argument('--mask-cache-job', default=None,
+                    help='whose mask cache: result/cache/<this>_mask/. '
+                         'Default: this job')
+    ap.add_argument('--device', default=None,
+                    help='segmenter device; default cuda when available')
 
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--out',  default=None,
@@ -88,16 +95,22 @@ def main():
 
     out_dir = args.out or job_result_dir('QuerySimBatch')
 
-    generate(
-        wsi_path     = args.wsi_path,
-        out_dir      = out_dir,
-        n            = args.n,
-        cfg          = cfg,
-        seed         = args.seed,
-        tissue_ratio = args.tissue_ratio,
-        region_protrusion_ratio = args.region_protrusion,
-        mask_ds      = args.mask_ds,
-    )
+    import torch                                                     # noqa: PLC0415
+    device = torch.device(args.device or
+                          ('cuda' if torch.cuda.is_available() else 'cpu'))
+    masks = MaskMaker(mask_cfg_from_args(args), Cache.cache_root(
+        args.mask_cache_job or Cache.job_name('QuerySimBatch'), 'mask'), device)
+    with masks:
+        generate(
+            wsi_path     = args.wsi_path,
+            out_dir      = out_dir,
+            n            = args.n,
+            cfg          = cfg,
+            seed         = args.seed,
+            tissue_ratio = args.tissue_ratio,
+            region_protrusion_ratio = args.region_protrusion,
+            masks        = masks,
+        )
 
 
 if __name__ == '__main__':

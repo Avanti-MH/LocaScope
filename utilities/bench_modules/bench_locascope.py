@@ -55,13 +55,14 @@ sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 sys.path.insert(0, str(_ROOT / '3_localization'))
 
 from _paths            import encoder_tag, job_result_dir               # noqa: E402
+import Cache                                                           # noqa: E402
 from dump_function._sift_plot import (draw_localization_row,            # noqa: E402
                                       draw_recall_row, read_anchored_crop,
                                       read_zoom_crop)
 from dump_function._locascope_plots import (append_metrics_row,         # noqa: E402
                                             load_metrics_csv, render_all)
 from LocaScopePipeline import LocaScopePipeline, LocaScopeQueryResult    # noqa: E402
-from TissueSegFunc import TissueSegConfig                               # noqa: E402
+from TissueMaskConfig import add_mask_args, mask_cfg_from_args           # noqa: E402
 from SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names             # noqa: E402
 
@@ -604,26 +605,16 @@ def main():
              "embeddings rather than a prerequisite. Its attentional pooler is "
              "512-d and its trunk 768-d, the shape GigaPath and UNI2 have. The "
              "head is part of identity_id and of the output directory.")
-    mask_grp = ap.add_mutually_exclusive_group()
-    mask_grp.add_argument('--mask-all',   action='store_true',
-                    help='stage 2 gets ONE region covering the whole scanned '
-                         'rectangle instead of a segmented tissue mask. A '
-                         'window on blank glass loses on its own mean-cosine, '
-                         'so the mask is an optimisation there -- and its cost '
-                         'is the size bias: find_best takes a global maximum, '
-                         'so a region with more placements wins on sample '
-                         'count alone. One region removes the comparison. '
-                         'CAUTION: WsiTissuesContainer reads a region in one '
-                         'read_region call, so at a routed level of 0 the '
-                         'single region is the whole plane and the read is '
-                         'tens to hundreds of GB. Usable today only where the '
-                         'routed level is coarse enough; see log/TODO.log.')
-    mask_grp.add_argument('--mask-hest',  action='store_true',
-                    help='segment tissue with the HEST DeepLabV3 model instead '
-                         'of the default HSV threshold. Costs a full mask build '
-                         'per WSI before any shot runs, and shares the GPUs '
-                         'with the tile encoder, so watch VRAM alongside '
-                         '--batch-size.')
+    # --seg: `none` gives stage 2 ONE region covering the whole scanned
+    # rectangle. A window on blank glass loses on its own mean-cosine, so the
+    # mask is an optimisation there -- and its cost is the size bias: find_best
+    # takes a global maximum, so a region with more placements wins on sample
+    # count alone. CAUTION: WsiTissuesContainer reads a region in one
+    # read_region call, so at a routed level of 0 the single region is the
+    # whole plane and the read is tens to hundreds of GB; see log/TODO.log. A
+    # model recipe costs a mask build per WSI before any shot runs and shares
+    # the GPUs with the tile encoder, so watch VRAM alongside --batch-size.
+    add_mask_args(ap)
     ap.add_argument('--resume',     action='store_true',
                     help='carry on from an existing metrics.csv instead of '
                          'replacing it: every shot already recorded there is '
@@ -631,9 +622,10 @@ def main():
                          'hit the walltime -- 2500 shots at about a minute each '
                          'does not fit 24 hours. The retrievers still have to be '
                          'rebuilt, so resume at a WSI boundary loses least.')
-    ap.add_argument('--feature-store', default=None, metavar='DIR',
-                    help='cache each (slide, level) WSI feature map here, keyed '
-                         'on the encoder and the mask recipe. A hit skips the '
+    ap.add_argument('--features-cache-job', default=None, metavar='JOB',
+                    help='cache each (slide, level) WSI feature map under '
+                         'result/cache/<JOB>_features/<encoder>/, keyed on the '
+                         'mask recipe and the grid. Off when absent. A hit skips the '
                          'ENCODE, not the read -- stage 3 reads pixels back out '
                          'of the container, so it is built either way '
                          '(278s read + 285s encode on BRACS_1228 L0). Every '
@@ -645,15 +637,6 @@ def main():
                          'to populate it the first time: otherwise the first run '
                          'has to trust the write and the read at once, and a '
                          'failure cannot say which.')
-    ap.add_argument('--mask-ds',    type=float, default=4.0, metavar='DS',
-                    help='resolution the tissue mask is built at, as level-0 '
-                         'pixels per mask pixel. from_wsi passes it to '
-                         'get_best_level_for_downsample, which picks a level '
-                         'whose own downsample is at most DS -- and an SVS '
-                         'level rarely lands on exactly 4.0, so 4.0 can fall '
-                         'back to level 0 and quietly cost 16x the work. Pass '
-                         '4.1 or 8.0 if the log shows a mask the size of the '
-                         'whole slide. Default 4.0 (unchanged).')
     ap.add_argument('--multi-gpu',  action='store_true',
                     help='wrap the tile encoder in DataParallel when the '
                          'allocation has more than one GPU. Raise --batch-size '
@@ -706,23 +689,9 @@ def main():
         print(f'  DataParallel over {_t.cuda.device_count()} GPU(s)', flush=True)
     print(f'  encoder    : {encoder.identity_id()}', flush=True)
 
-    # Chosen once for the whole bench: loading DeepLabV3 is seconds of startup
-    # and the weights are the same for every WSI.
-    from TissueMaskConfig import TissueMaskConfig
-    if args.mask_all:
-        # '' and not a method returning ones: same mask, without the
-        # full-level read and the full-size array. See TissueSegFunc.
-        seg = TissueSegConfig('')
-        print('Mask       : one region over the whole scanned rectangle', flush=True)
-    elif args.mask_hest:
-        from TissueSegFunc import HestSegConfig
-        seg = HestSegConfig()
-        print('Mask       : HEST DeepLabV3', flush=True)
-    else:
-        seg = TissueSegConfig('hsv')
-        print('Mask       : HSV threshold (default)', flush=True)
-    mask_cfg = TissueMaskConfig(seg=seg, ds=args.mask_ds)
-    print(f'Mask ds    : {args.mask_ds}   mask_id {mask_cfg.mask_id()}', flush=True)
+    mask_cfg = mask_cfg_from_args(args)
+    print(f'Mask       : {args.seg}   seg_id {mask_cfg.seg_id()}   region_id '
+          f'{mask_cfg.region_id()}', flush=True)
 
     all_metrics: List[dict] = []
     metrics_path = os.path.join(out_dir, 'metrics.csv')
@@ -782,7 +751,9 @@ def main():
         try:
             pl = LocaScopePipeline(
                 wsi_path, encoder, mask_cfg=mask_cfg,
-                feature_store_root=args.feature_store,
+                feature_store_root=(
+                    None if not args.features_cache_job else
+                    Cache.cache_root(args.features_cache_job, 'features') / enc_tag),
                 feature_store_mode=args.feature_store_mode).build()
         except Exception as e:
             print(f'  [pipeline build failed] {type(e).__name__}: {e}', flush=True)

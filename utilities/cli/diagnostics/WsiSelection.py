@@ -63,21 +63,10 @@ def resolve_wsi_paths(dataset=None, wsi=None, val_only: bool = False) -> list:
     return entries
 
 
-def val_split_names(dataset_id: str) -> list:
+def val_split_names(dataset_id: str, split_job: str = None) -> list:
     """The recorded val half of `dataset_id`'s split -- read, never
     re-derived: a split recomputed here could disagree with the one a
-    checkpoint was actually selected against. Needs `cli/train.py` to have
-    already run for this dataset (it is what writes `wsi_split.csv`).
-    Moved here from `diag_wsi_scale.py` -- every `--val-only` caller in this
-    directory wants the identical read, not a per-tool copy.
-    """
-    import csv
-    import _paths
-    path = (Path(_paths.RESULT_DIR) / 'cache' / 'mpp_routing_head'
-            / dataset_id.replace('/', '_') / 'wsi_split.csv')
-    if not path.exists():
-        raise FileNotFoundError(
-            f'{path} does not exist -- run cli/train.py first for this '
-            f'dataset, or drop --val-only to scan every WSI instead')
-    with open(path, newline='') as fh:
-        return [r['wsi_name'] for r in csv.DictReader(fh) if r['split'] == 'val']
+    checkpoint was actually selected against. `WsiSplit.read_split` refuses,
+    naming `make_split.py`, when the split has not been written."""
+    from WsiSplit import SPLIT_JOB, read_split, split_path
+    return read_split(split_path(split_job or SPLIT_JOB, dataset_id))[0]

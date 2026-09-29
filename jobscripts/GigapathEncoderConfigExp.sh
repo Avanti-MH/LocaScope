@@ -46,7 +46,7 @@ case "$EXP" in
       --svs             "$SVS" \
       --mrxs            "$MRXS" \
       --total-patches   "$TOTAL_PATCHES" \
-      --hest-ds         "$HEST_DS" \
+      --seg hest --mask-ds "$HEST_DS" \
       --tile-size       "$TILE_SIZE" \
       --seed            "$SEED" \
       --batch-size      "$BATCH_SIZE"

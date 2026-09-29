@@ -64,8 +64,8 @@ from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: 
 from PatchingLib import QueryPatchContainer, FeaturesMap                 # noqa: E402
 from SafeSlide import SafeSlide                                         # noqa: E402
 from TileEncoderFunc import encoder_config                              # noqa: E402
-from TissueMaskConfig import TissueMaskConfig                            # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask                        # noqa: E402
+from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
+from TissueMask import TissueMask                        # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
                          TileSampler, native_plans)
 
@@ -113,7 +113,9 @@ class KnnEstMppConfig(IdentifiedConfig):
     `mask_cfg` is `TissueMaskConfig` -- the same recipe object
     `LocaScopePipeline` already builds its own mask from, so a caller that
     wants THIS estimator's tissue definition to match the pipeline's just
-    passes the same `TissueMaskConfig` to both.
+    passes the same `TissueMaskConfig` to both. Defaults to
+    `MASK_RECIPES['hest']`, named rather than the bare dataclass: `seg` has
+    no default any more, because the old one was hsv without saying so.
 
     `sampler_cfg` is `TileSampler.SamplerConfig` -- tile size, n per rung,
     seed, richness caps/floors, overlap: everything that decides which tiles
@@ -128,7 +130,7 @@ class KnnEstMppConfig(IdentifiedConfig):
     which tiles the vote sees -- so `NOT_IDENTITY` stays empty.
     '''
     encoder: str
-    mask_cfg: TissueMaskConfig = field(default_factory=TissueMaskConfig)
+    mask_cfg: TissueMaskConfig = field(default_factory=lambda: MASK_RECIPES['hest'])
     sampler_cfg: SamplerConfig = field(default_factory=_default_sampler_cfg)
     k: int = 5
 
@@ -211,7 +213,7 @@ class KnnEstMpp(IdentifiedBuild):
         self.model = self.encoder.model   # for IdentifiedBuild.weights_id
 
         self.wsi = None
-        self.mask: Optional[TissuesRegionsMask] = None
+        self.mask: Optional[TissueMask] = None
         self.sampler: Optional[TileSampler] = None
         self.ref_feats: Optional[torch.Tensor] = None    # [N, D]
         self.ref_mpps: Optional[List[float]] = None
@@ -223,7 +225,7 @@ class KnnEstMpp(IdentifiedBuild):
     # ── build: reference bank, sampled from the target WSI itself ───────────
 
     def build(self, wsi: Union[openslide.OpenSlide, str],
-             mask: Optional[TissuesRegionsMask] = None) -> 'KnnEstMpp':
+             mask: Optional[TissueMask] = None) -> 'KnnEstMpp':
         '''Bind `wsi` and build its reference bank. Expensive -- see this
         module's docstring for why, in contrast to `ClassifierEstMpp.build`.'''
         if isinstance(wsi, str):

@@ -16,7 +16,7 @@ utilities/test_modules into sys.path to import the other -- which is what
 `keep the two in step` means once nothing enforces it.
 
 _paths lives in utilities/ now, the library layer this package already depends
-on for TissuesRegionsMask and config, so the import points DOWN rather than
+on for TissueMask and config, so the import points DOWN rather than
 sideways at a sibling. What this package legitimately owns is its default job
 names -- QuerySimBatch, QuerySimDemo, MultiBatch -- which are arguments to the
 function, not a second copy of it.

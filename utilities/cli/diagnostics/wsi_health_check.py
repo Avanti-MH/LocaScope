@@ -12,7 +12,7 @@ question about the same slides:
     --------    -----------------   --------------------------------   --------
     metadata    WsiInfoCheck        vendor/levels/size/mpp -- sane?     seconds
     holes       WsiHolesScan        exhaustive: which blocks fail?      minutes-hours
-    mask        MaskValidityCheck   does the tissue mask match reality? minutes, GPU with --hest
+    mask        MaskValidityCheck   does the tissue mask match reality? minutes, GPU for a model --seg
     yield       TileYieldProbe      does extraction get enough tiles?   minutes, needs a mask STORE
     scale       WsiScaleCheck       base_mpp spread, native rungs       seconds (parallel to the above)
 
@@ -52,7 +52,7 @@ controlled separately (--skip-scale) because it never was IN the funnel.
 Tuning any one tier beyond its essentials here (probe grid density, the
 sampler's overlap policy, ...) is what that tool's own CLI is for -- run it
 directly. This script exposes only what a first-pass health check needs:
---hest for mask (HSV vs. the real GPU model), and --block/--levels/--sweep
+--seg for the mask recipe both mask tiers use, and --block/--levels/--sweep
 for holes, because BLOCK decides whether an exhaustive scan fits the SLURM
 walltime at all -- see jobscripts/WsiHealthCheck.sh's own calibration step
 for how to pick it.
@@ -72,7 +72,8 @@ from WsiSelection import resolve_wsi_paths                            # noqa: E4
 from wsi_info import WsiInfoCheck                                     # noqa: E402
 from scan_wsi_holes import WsiHolesScan                               # noqa: E402
 from diag_mask_validity import MaskValidityCheck                      # noqa: E402
-from probe_tile_yield import TileYieldProbe, DEFAULT_MASK_ROOT          # noqa: E402
+from probe_tile_yield import TileYieldProbe, DEFAULT_MASK_CACHE_JOB     # noqa: E402
+from TissueMaskConfig import MASK_RECIPES                             # noqa: E402
 from diag_wsi_scale import (                                          # noqa: E402
     WsiScaleCheck, print_mpp_summary, print_native_summary, write_csv as write_scale_csv)
 
@@ -131,19 +132,25 @@ def run_holes(entries: list, out_dir: str, levels, block: int, sweep: int,
     return rows
 
 
-def run_mask(entries: list, out_dir: str, hest: bool) -> list:
-    _heading(f'mask  (MaskValidityCheck, hest={hest})')
-    return MaskValidityCheck(hest=hest, out_dir=out_dir).run(entries)
+def run_mask(entries: list, out_dir: str, seg: str) -> list:
+    _heading(f'mask  (MaskValidityCheck, seg={seg})')
+    check = MaskValidityCheck(MASK_RECIPES[seg], out_dir=out_dir)
+    try:
+        return check.run(entries)
+    finally:
+        check.masks.close()
 
 
-def run_yield(entries: list, out_dir: str, mask_root: str) -> list:
-    _heading('yield  (TileYieldProbe -- needs a prebuilt mask STORE)')
-    if not os.path.isdir(mask_root):
-        print(f'  [SKIP] no mask store at {mask_root} -- run '
+def run_yield(entries: list, out_dir: str, seg: str, mask_cache_job: str) -> list:
+    _heading('yield  (TileYieldProbe -- needs a prebuilt mask cache)')
+    probe = TileYieldProbe(seg=seg, mask_cache_job=mask_cache_job, out_dir=out_dir)
+    if not os.path.isdir(probe.seg_dir):
+        print(f'  [SKIP] no mask cache at {probe.seg_dir} -- run '
               f'utilities/cli/build_cache/build_mask_store.py first, or pass '
-              f'--mask-root. yield answers nothing without it.', flush=True)
+              f'--seg/--mask-cache-job. yield answers nothing without it.',
+              flush=True)
         return []
-    return TileYieldProbe(mask_root=mask_root, out_dir=out_dir).run(entries)
+    return probe.run(entries)
 
 
 def run_scale(entries: list, out_dir: str) -> list:
@@ -169,11 +176,13 @@ def main() -> int:
                     help='scale runs by default alongside the funnel -- it is '
                          'cheap and independent. Skip it if only the funnel '
                          'tiers are wanted')
-    ap.add_argument('--mask-root', default=DEFAULT_MASK_ROOT,
-                    help='prebuilt mask store the yield tier reads')
-    ap.add_argument('--hest', action='store_true',
-                    help='mask tier: segment with the real HEST model '
-                         '(GPU) instead of the default HSV threshold')
+    ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default='hest',
+                    help='mask recipe (MASK_RECIPES): the mask tier segments '
+                         'with it, the yield tier reads its cached masks -- '
+                         'one recipe, so both tiers look at the same mask')
+    ap.add_argument('--mask-cache-job', default=DEFAULT_MASK_CACHE_JOB,
+                    help='the job that made the mask cache the yield tier '
+                         'reads: result/cache/<this>_mask/')
     ap.add_argument('--levels', type=int, nargs='+', default=[0, 1, 2, 3],
                     help='holes tier: which pyramid levels to scan')
     ap.add_argument('--block', type=int, default=4096,
@@ -215,9 +224,10 @@ def main() -> int:
                                  args.levels, args.block, args.sweep,
                                  args.figure_slides)
     if stop_at >= TIERS.index('mask'):
-        ran['mask'] = run_mask(entries, os.path.join(out_dir, 'mask'), args.hest)
+        ran['mask'] = run_mask(entries, os.path.join(out_dir, 'mask'), args.seg)
     if stop_at >= TIERS.index('yield'):
-        ran['yield'] = run_yield(entries, os.path.join(out_dir, 'yield'), args.mask_root)
+        ran['yield'] = run_yield(entries, os.path.join(out_dir, 'yield'), args.seg,
+                                  args.mask_cache_job)
 
     if not args.skip_scale:
         ran['scale'] = run_scale(entries, os.path.join(out_dir, 'scale'))

@@ -87,8 +87,7 @@ setup_import_paths()
 
 from SafeSlide import SafeSlide                                     # noqa: E402
 from PatchingLib import WsiTissuesContainer                          # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask                    # noqa: E402
-from TissueSegFunc import HestSegConfig, TissueSegConfig              # noqa: E402
+from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileSampler import OverlapConfig, SamplerConfig, TileSampler, native_plans  # noqa: E402
 from GigaPathFunc import GigaPathEncoderConfig                        # noqa: E402
 from TileEncoderFunc import TransformConfig                          # noqa: E402
@@ -136,18 +135,18 @@ def _load_encoder(device, use_flash: bool, use_compile: bool, batch_size=None,
     return encoder
 
 
-def _tissue_mask(wsi, method: str = 'hsv'):
-    '''hsv: needs real tissue tiles, so blank glass has to be excluded.'''
-    return TissuesRegionsMask.from_wsi(wsi, method=TissueSegConfig(method).build())
+def _tissue_mask(wsi, mask_cfg, device):
+    '''Speed mode needs real tissue tiles, so blank glass has to be excluded;
+    `--seg` names the recipe (`--seg hsv` for a model-free one).'''
+    return mask_cfg.build(wsi, device)
 
 
 # ═════════════════════════════════════════════════════════════════════════
 #  MODE accuracy
 # ═════════════════════════════════════════════════════════════════════════
 
-def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
-              hest_overlap, tile_size, seed):
-    '''Open one WSI, build a HEST tissue mask, sample per-level tiles.'''
+def sample_wsi(wsi_path, per_wsi, masks, tile_size, seed):
+    '''Open one WSI, build its tissue mask, sample per-level tiles.'''
     print(f'\n-- {wsi_path.name} --', flush=True)
     wsi = SafeSlide(str(wsi_path))
     n_lv = wsi.level_count
@@ -155,11 +154,8 @@ def sample_wsi(wsi_path, per_wsi, hest_method, hest_ds, seg_chunk_px,
     print(f'  levels={n_lv}  wsi_budget={per_wsi}  per_level={per_level}',
          flush=True)
 
-    print(f'  building HEST tissue mask (ds={hest_ds}, '
-         f'seg_chunk_px={seg_chunk_px/1e6:.1f}M) ...', flush=True)
-    mask = TissuesRegionsMask.from_wsi(
-        wsi, ds=hest_ds, method=hest_method,
-        seg_chunk_px=seg_chunk_px, stitch_overlap=hest_overlap)
+    print(f'  building tissue mask ({masks.cfg.seg_id()}) ...', flush=True)
+    mask, _ = masks.mask(wsi)
     print(f'  tissue_fraction={mask.tissue_fraction() * 100:.1f}%  '
          f'regions={len(mask)}', flush=True)
 
@@ -304,18 +300,11 @@ def run_accuracy(args, out_dir: Path) -> int:
     print(f'\nSampling target: {args.total_patches} patches across '
          f'{len(wsi_paths)} WSIs ({per_wsi} per WSI)')
 
-    print('\nLoading HEST tissue seg model ...')
-    hest_method = HestSegConfig().build(device)
-
     images = []
-    for wp in wsi_paths:
-        images += sample_wsi(wp, per_wsi, hest_method, hest_ds=args.hest_ds,
-                             seg_chunk_px=args.seg_chunk_px,
-                             hest_overlap=args.hest_overlap,
-                             tile_size=args.tile_size, seed=args.seed)
-    del hest_method
-    if device.type == 'cuda':
-        torch.cuda.empty_cache()
+    with MaskMaker(mask_cfg_from_args(args), device=device) as masks:
+        for wp in wsi_paths:
+            images += sample_wsi(wp, per_wsi, masks,
+                                 tile_size=args.tile_size, seed=args.seed)
 
     n = len(images)
     if n == 0:
@@ -535,14 +524,15 @@ def bench_compare(device, n_patches, batch_sizes, warmup, repeats=3):
     _print_compare_matrix(all_results, baseline_pps, batch_sizes)
 
 
-def bench_wsi_compare(device, wsi_path, batch_sizes, level, overlap, warmup):
+def bench_wsi_compare(device, wsi_path, batch_sizes, level, overlap, warmup,
+                      mask_cfg):
     print('\n' + '=' * 72)
     print(f'  Part 2 -- WSI Comparison  level={level}  overlap={overlap}'
          f'  {os.path.basename(wsi_path)}')
     print('=' * 72)
     wsi = SafeSlide(wsi_path)
     ds = wsi.level_downsamples[level]
-    mask = _tissue_mask(wsi)
+    mask = _tissue_mask(wsi, mask_cfg, device)
     wtc = WsiTissuesContainer(wsi, ds=ds, level=level, tile_size=256,
                               overlap=overlap, mask=mask)
     n_patches = sum(len(tp) for tp in wtc)
@@ -608,7 +598,8 @@ def bench_synthetic(base, device, batch_sizes, dtypes, n_patches, warmup, repeat
     return results
 
 
-def bench_wsi(base, device, wsi_path, levels, overlaps, batch_sizes, dtypes, warmup):
+def bench_wsi(base, device, wsi_path, levels, overlaps, batch_sizes, dtypes, warmup,
+              mask_cfg):
     print('\n' + '=' * 72)
     print(f'  Part 2 -- WSI Pipeline  {os.path.basename(wsi_path)}')
     print('=' * 72)
@@ -620,8 +611,8 @@ def bench_wsi(base, device, wsi_path, levels, overlaps, batch_sizes, dtypes, war
     if base_mpp:
         print(f'  MPP/level={[f"{base_mpp * d:.3f}" for d in ds_list]}')
 
-    mask = _tissue_mask(wsi)
-    n_all = len(mask.tissue_regions)
+    base_mask = _tissue_mask(wsi, mask_cfg, device)
+    n_all = len(base_mask.tissue_regions)
     print(f'  Tissue regions: {n_all}')
 
     all_wsi_results = []
@@ -630,10 +621,9 @@ def bench_wsi(base, device, wsi_path, levels, overlaps, batch_sizes, dtypes, war
             print(f'\n  [SKIP] level {level} exceeds WSI max level {n_levels - 1}')
             continue
         ds = ds_list[level]
-        mask.regions_resume()
-        mask.filter_patchable(tile_size=256, ds=ds)
+        mask = base_mask.patchable(256 * ds)
         if len(mask.tissue_regions) < n_all:
-            print(f'  filter_patchable: {n_all} -> {len(mask.tissue_regions)} regions at ds={ds:.2f}')
+            print(f'  patchable: {n_all} -> {len(mask.tissue_regions)} regions at ds={ds:.2f}')
 
         for overlap in overlaps:
             print(f'\n  -- level={level}  ds={ds:.2f}'
@@ -755,7 +745,8 @@ def run_speed(args) -> int:
             if wsi_exists:
                 bench_wsi_compare(device, args.wsi, batch_sizes=args.wsi_compare_bs,
                                   level=args.wsi_compare_level,
-                                  overlap=args.wsi_compare_overlap, warmup=args.warmup)
+                                  overlap=args.wsi_compare_overlap, warmup=args.warmup,
+                                  mask_cfg=mask_cfg_from_args(args))
             else:
                 print(f'\n[SKIP Part 2] WSI not found: {args.wsi}')
         print('Done.')
@@ -778,7 +769,8 @@ def run_speed(args) -> int:
     if not args.no_wsi:
         if wsi_exists:
             wsi_results = bench_wsi(base, device, args.wsi, args.levels, args.overlaps,
-                                    args.batch_sizes, dtypes, args.warmup)
+                                    args.batch_sizes, dtypes, args.warmup,
+                                    mask_cfg_from_args(args))
         else:
             print(f'\n[SKIP Part 2] WSI not found: {args.wsi}')
 
@@ -809,9 +801,6 @@ def main() -> int:
         '/work/u26130998/datasets/Ki67_with_photo/S1104043_G7E_110207_mrxs/'
         'S1104043,G7E,110207.mrxs'))
     ap.add_argument('--total-patches', type=int, default=200)
-    ap.add_argument('--hest-ds', type=float, default=32.0)
-    ap.add_argument('--seg-chunk-px', type=int, default=4_000_000)
-    ap.add_argument('--hest-overlap', type=int, default=128)
     ap.add_argument('--tile-size', type=int, default=256)
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--batch-size', type=int, default=128)
@@ -841,6 +830,8 @@ def main() -> int:
     ap.add_argument('--no-flash-attn', action='store_true')
     ap.add_argument('--compile', action='store_true')
     ap.add_argument('--no-wsi', action='store_true')
+    # the tissue mask both modes sample inside (--seg, default hest)
+    add_mask_args(ap)
     args = ap.parse_args()
 
     if args.mode == 'accuracy':

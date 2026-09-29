@@ -10,7 +10,7 @@ off its properties."
 
 Lives IN `cli/diagnostics/`, not up in `utilities/`, because every caller so
 far is a diagnostic in this directory -- the production pipeline
-(`SafeSlide`, `TissuesRegionsMask`, ...) has its own, DELIBERATELY DIFFERENT
+(`SafeSlide`, `TissueMask`, ...) has its own, DELIBERATELY DIFFERENT
 way of reading a slide's scale (`SafeSlide.base_mpp` averages mpp-x/mpp-y
 with an aperio fallback and is built to survive a bad read). `scan_wsi_holes`
 and `diag_mask_validity` read `openslide.mpp-x` RAW, on purpose -- they hunt

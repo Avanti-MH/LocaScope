@@ -98,7 +98,7 @@ sys.path.insert(0, str(_HERE.parent.parent / 'utilities'))
 import _paths                                                       # noqa: E402
 _paths.setup_import_paths()
 
-import FeatureStore as FeatureStoreModule                           # noqa: E402
+from Store import FeatureStore                                      # noqa: E402
 from GigaPathFunc import pooling_kinds                                # noqa: E402
 from KnnEstMpp import (KnnClassifier, KnnEstMpp, KnnEstMppConfig,   # noqa: E402
                        REFERENCE_BANK_RICHNESS)
@@ -106,14 +106,14 @@ from ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E
 from StageInterface import EstMppResult                             # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 from AccessDatasets import locate                                    # noqa: E402
-from Datasets import wsi_split                                       # noqa: E402
+from training.MppRoutingHead.Datasets import (                      # noqa: E402
+    add_cache_args, open_caches)
+from WsiSplit import SPLIT_JOB, read_split, split_path              # noqa: E402
 from PatchingLib import QueryPatchContainer                          # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from TissueMaskConfig import TissueMaskConfig                        # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask                    # noqa: E402
-from Uni2PcaSegFunc import Uni2PcaSegConfig                          # noqa: E402
-from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
-                         TileSampler, native_plans)
+from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
+from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
+                         SamplerConfig, TileSampler)
 from DsLadder import DEFAULT_RUNGS, DsLadder                        # noqa: E402
 from QueryFromWSI import QueryFromWSI                                # noqa: E402
 from simulate_microscope_photo import simulate_microscope_photo       # noqa: E402
@@ -136,64 +136,34 @@ def write_csv(rows, path) -> None:
 #  stores this way.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_level(store_root, wsi_stem, level, pooling, sampler_id=None):
+def load_level(path, pooling):
     """One level's tiles: features, coordinates, and background fraction.
 
     Returns (features, coords, white_fraction, meta):
         features        [n_tiles, dim] float32, L2-normalized
         coords          [n_tiles, 2] int64, level-0 top-left
-        white_fraction  [n_tiles] float32, or all-NaN when the store predates it
-
-    find_one rather than find: a root can hold two stores for the same slide
-    and level that differ only in how their tiles were chosen, and picking
-    whichever sorted first would describe a feature space nobody built.
+        white_fraction  [n_tiles] float32
     """
-    selector = {} if sampler_id is None else {'sampler_id': sampler_id}
-    path = FeatureStoreModule.find_one(
-        store_root, what=f'reference store for {wsi_stem} L{level}',
-        wsi_stem=wsi_stem, level=level, pooling='tokens', **selector)
-
-    wanted = ['features', 'x', 'y']
-    meta = FeatureStoreModule.load_meta(path)
-    tensors, _ = FeatureStoreModule.load(path, keys=wanted)
-
-    try:
-        extra, _ = FeatureStoreModule.load(path, keys=['white_frac'])
-        white_fraction = extra['white_frac'].numpy().astype(np.float32)
-    except Exception:                                     # noqa: BLE001
-        white_fraction = np.full(tensors['features'].shape[0], np.nan,
-                                 dtype=np.float32)
-
+    tensors, meta = FeatureStore.load(path, keys=['features', 'x', 'y', 'white_frac'])
     slots = pooling_kinds(tensors['features'].float(), pooling, meta)
     features = torch.nn.functional.normalize(
         slots.reshape(slots.shape[0], -1), dim=-1)
-
     coords = np.stack([tensors['x'].numpy(), tensors['y'].numpy()],
                       axis=1).astype(np.int64)
-    return features, coords, white_fraction, meta
+    return features, coords, tensors['white_frac'].numpy().astype(np.float32), meta
 
 
-def load_slide_balanced(store_root, wsi_stem, pooling, per_level,
-                        sampler_id=None, seed=42):
-    """Every level of one slide, cut to the same number of tiles each.
+def load_slide_balanced(key_dir, pooling, per_level, seed=42):
+    """Every level of one slide's draw, cut to the same number of tiles each.
 
     Balancing is not tidiness. PCA finds the directions of greatest variance,
     and a level contributing three times as many tiles contributes three
     times as much variance -- so on an unbalanced set the leading component
     can be "which level has the most tiles" wearing the costume of a finding.
     """
-    levels = sorted({meta.level for meta in
-                     (FeatureStoreModule.load_meta(p)
-                      for p in FeatureStoreModule.find(store_root,
-                                                       wsi_stem=wsi_stem,
-                                                       pooling='tokens'))})
-    if not levels:
-        raise FileNotFoundError(f'no reference store for {wsi_stem}')
-
-    loaded = {}
-    for level in levels:
-        loaded[level] = load_level(store_root, wsi_stem, level, pooling,
-                                   sampler_id)
+    paths = FeatureStore.levels(key_dir, 'tokens')
+    levels = sorted(paths)
+    loaded = {level: load_level(paths[level], pooling) for level in levels}
 
     take = min(per_level, min(f.shape[0] for f, _, _, _ in loaded.values()))
     rng = np.random.default_rng(seed)
@@ -349,13 +319,12 @@ def extreme_tiles(slide, projections, n_components, n_each) -> list:
     return rows
 
 
-def analyse_slide_axes(store_root, wsi_stem, args, summary_rows, component_rows,
+def analyse_slide_axes(key_dir, wsi_stem, args, summary_rows, component_rows,
                        decoy_rows, projection_rows, extreme_rows) -> None:
     """One slide, appending to the shared row lists -- see `extreme_tiles`
     etc. Nothing here averages across slides; whether the axes agree BETWEEN
     slides is `--parts axes`'s own separate figure, not this function."""
-    slide = load_slide_balanced(store_root, wsi_stem, args.pooling,
-                                args.per_level, args.sampler_id, args.seed)
+    slide = load_slide_balanced(key_dir, args.pooling, args.per_level, args.seed)
     slide['wsi_stem'] = wsi_stem
     slide['pooling'] = args.pooling
     features = slide['features']
@@ -563,14 +532,24 @@ def plot_axes_scatter(projection_rows, path) -> None:
     print(f'  {Path(path).name} -> {path}')
 
 
+def _draw_dir(args, wsi_stem):
+    """One slide's key directory in `--stores`, under `--seg`'s recipe and the
+    `--draw` the dump printed."""
+    if not (args.stores and args.draw):
+        raise SystemExit('axes / subspace_knn read a stored draw: pass --stores '
+                         'and --draw (the dump prints the draw)')
+    mask_cfg = MASK_RECIPES[args.seg]
+    return FeatureStore.key_dir(args.stores, seg_id=mask_cfg.seg_id(),
+                                slide=wsi_stem, region_id=mask_cfg.region_id(),
+                                key=args.draw)
+
+
 def run_axes(args, out_dir: Path) -> int:
-    store_root = (args.stores if Path(args.stores).is_absolute()
-                  else str(_ROOT / args.stores))
     summary_rows, component_rows, decoy_rows = [], [], []
     projection_rows, extreme_rows, failures = [], [], []
     for wsi_stem in args.wsi_stem:
         try:
-            analyse_slide_axes(store_root, wsi_stem, args, summary_rows,
+            analyse_slide_axes(_draw_dir(args, wsi_stem), wsi_stem, args, summary_rows,
                               component_rows, decoy_rows, projection_rows,
                               extreme_rows)
         except Exception as error:                          # noqa: BLE001
@@ -920,13 +899,10 @@ def evaluate_settings(fit_features, fit_mpp, test_features, test_mpp,
     return score_rows, group_rows
 
 
-def load_query_level(store_root, wsi_stem, level, pooling):
+def load_query_level(key_dir, level, pooling):
     """One level's synthesised FoV tiles: features and the FoV each came from."""
-    path = FeatureStoreModule.find_one(
-        store_root, what=f'query store for {wsi_stem} L{level}',
-        wsi_stem=wsi_stem, level=level, pooling='query_tokens')
-    meta = FeatureStoreModule.load_meta(path)
-    tensors, _ = FeatureStoreModule.load(path, keys=['features', 'fov_id'])
+    path = FeatureStore.levels(key_dir, 'query_tokens')[level]
+    tensors, meta = FeatureStore.load(path, keys=['features', 'fov_id'])
 
     slots = pooling_kinds(tensors['features'].float(), pooling, meta)
     features = torch.nn.functional.normalize(
@@ -1020,7 +996,7 @@ def run_arm_a(features, mpp_labels, level_index, coords, white_fraction,
     return score_rows, selected_rows, gate_rows
 
 
-def run_arm_b(store_root, wsi_stem, args, data, features, mpp_labels,
+def run_arm_b(key_dir, wsi_stem, args, data, features, mpp_labels,
              level_mpp_values, subset_name) -> tuple:
     """Reference is the (possibly filtered) bank; queries are the FoV
     renders. The background filter reaches this only through `features` --
@@ -1029,7 +1005,7 @@ def run_arm_b(store_root, wsi_stem, args, data, features, mpp_labels,
     group_offset = 0
     for level in data['levels']:
         block_features, fov_id, level_mpp = load_query_level(
-            store_root, wsi_stem, level, args.pooling)
+            key_dir, level, args.pooling)
         query_blocks.append(block_features)
         group_blocks.append(fov_id + group_offset)
         group_offset += int(fov_id.max()) + 1
@@ -1053,12 +1029,11 @@ def run_arm_b(store_root, wsi_stem, args, data, features, mpp_labels,
     return rows, group_rows
 
 
-def analyse_slide_subspace(store_root, wsi_stem, args) -> tuple:
+def analyse_slide_subspace(key_dir, wsi_stem, args) -> tuple:
     print(f'\n{"=" * 78}\n{wsi_stem}   pooling {args.pooling}\n{"=" * 78}',
           flush=True)
 
-    data = load_slide_balanced(store_root, wsi_stem, args.pooling,
-                              args.per_level, seed=args.seed)
+    data = load_slide_balanced(key_dir, args.pooling, args.per_level, seed=args.seed)
     features = data['features']
     level_index = data['level_index']
     level_mpp_values = np.array([data['level_mpp'][i]
@@ -1094,7 +1069,7 @@ def analyse_slide_subspace(store_root, wsi_stem, args) -> tuple:
 
         if not args.skip_arm_b:
             try:
-                arm_b = run_arm_b(store_root, wsi_stem, args, data,
+                arm_b = run_arm_b(key_dir, wsi_stem, args, data,
                                  features[rows], mpp_labels[rows],
                                  level_mpp_values, subset_name)
                 score_rows.extend(arm_b[0])
@@ -1300,7 +1275,6 @@ def plot_subspace_versus_baseline(score_rows, wsi_stem, path) -> None:
 
 
 def run_subspace_knn(args, out_dir: Path) -> int:
-    store_root = Path(args.stores)
     if args.white_max is not None and args.white_max < 0:
         args.white_max = None
 
@@ -1308,7 +1282,7 @@ def run_subspace_knn(args, out_dir: Path) -> int:
     for slide in args.wsi_stem:
         try:
             scores, groups, selected, gates = analyse_slide_subspace(
-                store_root, slide, args)
+                _draw_dir(args, slide), slide, args)
             all_scores.extend(scores)
             all_groups.extend(groups)
             all_selected.extend(selected)
@@ -1360,17 +1334,17 @@ SAMPLER_ROUTING_CANDIDATES = tuple(
 def sample_reference_and_query_positions(wsi, mask, tile_size, rungs,
                                          n_ref_per_rung, n_query_per_rung,
                                          seed):
-    """SuperPoint stageA's own recipe (`extract_pretiles.py`'s own
-    `_RECIPES['stageA']`): `DsLadder` rungs, disjoint lattice, PLAIN DEFAULT
-    `RichnessConfig()` (bg85_95/bg95_100 capped at 0 -- a background-heavy
-    tile carries no scale information and only adds a wrong neighbour), no
-    chains. Here because `sampler_routing` needs the same SHAPE without
-    writing to `result/cache/tiles/`.
+    """The SHAPE of SuperPoint's stageA recipe
+    (`training/SuperPathPoint/common/Corpora.RECIPES['stageA']`): `DsLadder`
+    rungs, disjoint lattice, PLAIN DEFAULT `RichnessConfig()` (bg85_95/bg95_100
+    capped at 0 -- a background-heavy tile carries no scale information and
+    only adds a wrong neighbour), no chains. Not its n, and not its corpus:
+    `sampler_routing` draws its own and writes no pre-tiles.
 
     One draw of `n_ref_per_rung + n_query_per_rung` positions per rung; the
     caller splits it per rung, which is what guarantees reference and query
-    never share a position (the twin-tile contamination `ReferenceSampler`'s
-    own docstring warns about). Reference tiles are read straight off this
+    never share a position -- a query whose twin is in the reference bank is
+    found by identity, not by scale. Reference tiles are read straight off this
     sampler (real grid pixels); query POSITIONS only are read off it, then
     rendered through `QueryFromWSI` + `simulate_microscope_photo` instead --
     see `run_sampler_routing` -- so reference and query differ by more than
@@ -1444,12 +1418,13 @@ def _print_method_report(method: str, setting: str, table: dict, votes: dict,
 
 
 def run_sampler_routing(args, out_dir: Path) -> int:
-    from TissueSegFunc import TissueSegConfig                      # noqa: PLC0415
     from GigaPathFunc import GigaPathEncoderConfig                   # noqa: PLC0415
 
     entry = locate(args.wsi_name)
     wsi = SafeSlide(entry.path)
-    mask = TissuesRegionsMask.from_wsi(wsi, method=TissueSegConfig('hsv').build())
+    # --seg's recipe, as in stage1_compare. This used to be hsv at the old
+    # default ds 32, built here and recorded nowhere.
+    mask = MASK_RECIPES[args.seg].build(wsi, args.device)
     encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
         .with_model(dtype='fp32').build(args.device)
 
@@ -1587,17 +1562,6 @@ def run_sampler_routing(args, out_dir: Path) -> int:
 # not here: this part's only job is to produce rows in the shape that file
 # expects.
 
-#: ONE object, read by both `run_stage1_compare`'s own pre-pass and
-#: `_sampling_recipe_id` below, so the mask recipe actually used and the
-#: mask recipe the output filename claims cannot drift apart -- which is
-#: exactly the silent collision `_sampling_recipe_id`'s own docstring says
-#: `seg_id` exists to prevent. `.build()` is never called on this directly
-#: (Uni2PcaSegConfig is a SLIDE segmenter, not TissueMaskConfig.build()'s
-#: per-tile shape -- see run_stage1_compare's own comment); only its
-#: `.seg`/`.min_region_ratio`/`.merge`/`.mask_id()` are used.
-STAGE1_MASK_CFG = TissueMaskConfig(seg=Uni2PcaSegConfig())
-
-
 def _sampling_recipe_id(args) -> str:
     """`<sampler_id>_<seg_id>` -- the filename analyze_stage1_metrics.py's
     own docstring names. Two hashes because they answer two different
@@ -1613,26 +1577,8 @@ def _sampling_recipe_id(args) -> str:
         f'mpixels={args.mpixels}', f'ratio={args.ratio}',
         f'datasets={",".join(sorted(args.datasets))}', f'n_wsi={args.n_wsi}'])
     sampler_id = hashlib.sha256(parts.encode()).hexdigest()[:8]
-    seg_id = STAGE1_MASK_CFG.mask_id()
-    return f'{sampler_id}_{seg_id}'
-
-
-def _rung_plans(wsi, tile_size: int, native_only: bool):
-    """(plans, native_by_rung) for THIS wsi.
-
-    `native_only`: this WSI's own pyramid levels only (`native_plans` --
-    `shrink` is 1.0 by construction, nothing is ever resampled).
-    Otherwise `DsLadder`'s fixed rungs (`DEFAULT_RUNGS`) -- native where this
-    WSI's own pyramid has one, resampled where it does not.
-    `RungPlan.shrink` says which DIRECTLY (1.0 == native), so this reads it
-    off the plan the sample was drawn from rather than re-deriving it the
-    way `QueryFromWSI.reads_natively` does for a query built independently
-    of one.
-    """
-    plans = (native_plans(wsi, tile_size) if native_only
-            else DsLadder(rungs=DEFAULT_RUNGS).plan_for(wsi, tile_size))
-    native_by_rung = {float(p.rung_ds): float(p.shrink) == 1.0 for p in plans}
-    return plans, native_by_rung
+    mask_cfg = MASK_RECIPES[args.seg]
+    return f'{sampler_id}_{mask_cfg.seg_id()}_{mask_cfg.region_id()}'
 
 
 def _overlap_cfg(enabled: bool) -> OverlapConfig:
@@ -1651,24 +1597,6 @@ def _overlap_cfg(enabled: bool) -> OverlapConfig:
         return OverlapConfig()
     return OverlapConfig(max_overlap_ratio=0.5, overlapping_share=1.0,
                          jitter_cap=1.0)
-
-
-def _sample_positions(wsi, mask, tile_size, native_only, n_per_rung, seed,
-                      overlap: bool):
-    """`[{'x', 'y', 'rung', 'native'}, ...]` -- positions only, no pixels.
-    The query is rendered separately (`QueryFromWSI` +
-    `simulate_microscope_photo`), the same split `run_sampler_routing` above
-    already uses and for the same reason: a plain grid tile is not what a
-    real photo looks like, and stage 1's actual job is to answer for photos.
-    """
-    plans, native_by_rung = _rung_plans(wsi, tile_size, native_only)
-    cfg = SamplerConfig(tile=tile_size, n_per_rung=n_per_rung, seed=seed,
-                        richness=RichnessConfig(), overlap=_overlap_cfg(overlap))
-    sampler = TileSampler(wsi, mask, cfg)
-    sampler.sample(plans)
-    return [dict(x=int(s.meta.x), y=int(s.meta.y), rung=float(s.meta.ds),
-                native=native_by_rung.get(float(s.meta.ds), False))
-           for s in sampler]
 
 
 def _method_specs(args) -> list:
@@ -1692,7 +1620,7 @@ def _method_specs(args) -> list:
     specs = []
     for name in args.knn_encoder:
         specs.append(dict(kind='knn', encoder=name, classifier='',
-                          reduction='', weights='', weights_path=None,
+                          reduction='', loss='', weights='', weights_path=None,
                           needs_mask=True))
     for weights in args.classifier_weights:
         try:
@@ -1700,9 +1628,34 @@ def _method_specs(args) -> list:
         except Exception as exc:                             # noqa: BLE001
             print(f'  [SKIP] {weights}: {type(exc).__name__}: {exc}')
             continue
+        # ckpt['head_name'], NOT ckpt['classifier']. 'classifier' is the
+        # CLASS's own registered name (Checkpoints.save_checkpoint's own
+        # `classifier_name(type(head.classify))`) -- 'mlp' for every one of
+        # mlp/mlp_deep/mlp_wide/mlp_deep_residual/mlp_deep_wide, since all
+        # five build the SAME MlpHead class at different mlp_depth/
+        # mlp_width_mult/mlp_residual. 'head_name' is the HEAD_CHOICES key
+        # cli/train.py trained it under (`for name, head in heads.items():
+        # save_tagged(..., name, ...)`), already stored in every checkpoint
+        # -- so this needs no Checkpoints.py change, only reading the field
+        # that was already there. Using 'classifier' here made
+        # analyze_stage1_metrics.py's method_of() collapse all five mlp
+        # variants into one 'uni2+mlp+fixed' label, averaging five actually-
+        # different trained models into one number.
+        #
+        # `loss` (2026-09-22): the SAME class of gap -- ckpt['args']['loss']
+        # (train.py's own `--loss`, default 'bal') is not part of `head_name`
+        # either, so a bal- and an ord_a-trained arcface head would collapse
+        # into one 'gigapath+arcface' method_of() label without this,
+        # averaging two differently-trained models the same way the mlp
+        # variants did before 'classifier' switched to head_name. `.get`,
+        # not `[...]`: a checkpoint trained before `--loss` existed has no
+        # `'loss'` key in `args` at all, and 'bal' was every run's behaviour
+        # before that flag was added, so it is the correct default, not a
+        # guess.
         specs.append(dict(
             kind='classifier', encoder=ckpt['encoder'],
-            classifier=ckpt['classifier'], reduction=ckpt['reduction'],
+            classifier=ckpt['head_name'], reduction=ckpt['reduction'],
+            loss=ckpt.get('args', {}).get('loss', 'bal'),
             weights=os.path.basename(weights), weights_path=weights,
             needs_mask=False))
     if not specs:
@@ -1780,62 +1733,56 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     # run against the SAME slides for the comparison to be paired.
     slides_by_dataset = {}
     for dataset_id in args.datasets:
-        split_path = (Path(_paths.RESULT_DIR) / 'cache' / 'mpp_routing_head'
-                      / dataset_id.replace('/', '_') / 'wsi_split.csv')
-        split_path.parent.mkdir(parents=True, exist_ok=True)
-        # EXISTING WINS: the same recorded split training/MppRoutingHead's
-        # own cli/train.py reads, so this bench never scores on a slide a
-        # checkpoint was selected on. Written fresh, once, only if nothing
-        # has recorded one for this dataset yet.
-        _val, test_names = wsi_split(dataset_id, 10, split_path, seed=args.seed)
+        # READ, never written: the split make_split.py recorded
+        # (--split-cache-job, default MakeSplit) -- the same file the
+        # checkpoints were selected on, so this bench never scores on a slide
+        # a checkpoint saw in val.
+        test_names = read_split(split_path(args.split_cache_job or SPLIT_JOB,
+                                           dataset_id))[1]
         slides_by_dataset[dataset_id] = test_names[:args.n_wsi]
         print(f'{dataset_id}: {len(slides_by_dataset[dataset_id])} slide(s) '
              f'from the recorded test split '
              f'({", ".join(slides_by_dataset[dataset_id])})')
 
     # Segmentation + position sampling, ONCE per slide, shared by every
-    # method below -- not once per (method, slide) the way this used to run
-    # `TissueMaskConfig().build(wsi, device)` inside the method loop. Two
-    # things changed that made the old shape wrong:
-    #
-    #   Uni2PcaSegFunc is a SLIDE segmenter, not an image one (see its own
-    #   module docstring) -- it fits a PCA across the whole scanned
-    #   rectangle before it can threshold any of it, so it cannot go through
-    #   TissueMaskConfig.build()'s per-tile `TissuesRegionsMask.from_wsi(...,
-    #   method=segmenter)` path the way hsv/hest do; `mask_wsi(wsi)` is its
-    #   own fit+project+clean entry point, and `from_mask` places the result.
-    #
-    #   mask_wsi's own docstring prices it at 3.5-6 minutes of GPU per slide
-    #   (a UNI2 forward pass per tile of the scanned rectangle to fit +
-    #   project the PCA). Redoing that once per method -- 17 methods x 18
-    #   slides here -- would be tens of GPU-hours for a result that cannot
-    #   change: `_sample_positions` draws off the SAME `seed` every time, so
-    #   nothing about either step actually varies across methods. Compute
-    #   once, reuse.
-    print('\n======== segmenting + sampling every slide once ========')
-    seg = STAGE1_MASK_CFG.seg.build(device)
+    # method below -- nothing about either varies across methods, so neither
+    # is redone 17 methods x 18 slides times. Both go through the sampler
+    # cache: `TileSampler.cached` for the positions (a slide already drawn
+    # under this recipe/config/plan is not even opened), and the mask cache
+    # for the mask the KNN methods need (a hit after the draw, since the draw
+    # had to make it). The segmenter is loaded once, on the first miss, and
+    # released before any method is built.
+    print(f'\n======== segmenting ({args.seg}) + sampling every slide once ========')
+    caches = open_caches(args, 'MppFeatureDecomposition', device)
+    sampler_cfg = SamplerConfig(tile=args.tile, n_per_rung=args.n_per_rung,
+                                seed=args.seed, richness=RichnessConfig(),
+                                overlap=_overlap_cfg(args.overlap))
+    plan = (PlanSpec('native') if args.native_only
+            else PlanSpec('ladder', tuple(DEFAULT_RUNGS)))
     slide_cache = {}
     for dataset_id, names in slides_by_dataset.items():
         for wsi_name in names:
             entry = locate(wsi_name, dataset=dataset_id)
+            sampler = TileSampler.cached(
+                entry.path, sampler_cfg, plan, caches.sampler_root,
+                masks=caches.masks,
+                report_dir=out_dir / 'sampler_reports' / dataset_id.replace('/', '_'))
             wsi = SafeSlide(entry.path)
-            seg_result = seg.mask_wsi(wsi)
-            mask = TissuesRegionsMask.from_mask(wsi, seg_result.mask,
-                                                seg_result.origin, seg_result.span)
-            mask.filter_regions(min_ratio=STAGE1_MASK_CFG.min_region_ratio)
-            if STAGE1_MASK_CFG.merge:
-                mask.merge_overlapping()
-            mask.cfg = STAGE1_MASK_CFG
-            positions = _sample_positions(wsi, mask, args.tile,
-                                          args.native_only,
-                                          args.n_per_rung, args.seed,
-                                          args.overlap)
-            print(f'  {wsi_name}: {len(positions)} positions')
+            mask, _ = caches.masks.mask(wsi)
+            # `RungPlan.shrink` says which rungs are native (1.0) -- read off
+            # this slide's own plans rather than re-derived.
+            native_by_rung = {float(p.rung_ds): float(p.shrink) == 1.0
+                              for p in plan.plans_for(wsi, args.tile)}
+            positions = [dict(x=int(s.meta.x), y=int(s.meta.y),
+                              rung=float(s.meta.ds),
+                              native=native_by_rung.get(float(s.meta.ds), False))
+                         for s in sampler]
+            print(f'  {wsi_name}: {len(positions)} positions   (mask '
+                 f'{"reused" if sampler.cache_info["mask_hit"] else "segmented"}, '
+                 f'draw {"reused" if sampler.cache_info["samples_hit"] else "drawn"})')
             slide_cache[(dataset_id, wsi_name)] = (mask, positions)
             wsi.close()
-    del seg
-    if device.type == 'cuda':
-        torch.cuda.empty_cache()
+    caches.masks.close()
     print(f'  [after segmentation] {_mem_snapshot(device)}')
 
     rows = []
@@ -1889,7 +1836,8 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                         rung=rung, native=pos['native'],
                         gt_mpp=gt_mpp, gt_ds=gt_ds,
                         encoder=spec['encoder'], classifier=spec['classifier'],
-                        reduction=spec['reduction'], weights=spec['weights'],
+                        reduction=spec['reduction'], loss=spec['loss'],
+                        weights=spec['weights'],
                         estimated_ds=result.estimated_ds,
                         estimated_mpp=result.estimated_mpp,
                         chosen_ds=result.chosen_ds, chosen_mpp=result.chosen_mpp,
@@ -1928,13 +1876,15 @@ def main() -> int:
                              'a cached store)')
 
     # ── shared / axes+subspace_knn (cached FeatureStore reads) ──────────────
-    parser.add_argument('--stores',
-                        default=str(Path(_paths.RESULT_DIR) / 'cache' / 'features'))
+    parser.add_argument('--stores', default=None,
+                        help="axes/subspace_knn: one encoder's feature root, "
+                             'result/cache/<job>_features/<encoder>/ (with '
+                             '--seg and --draw it names one key directory '
+                             'per slide)')
+    parser.add_argument('--draw', default=None,
+                        help='axes/subspace_knn: the draw to read, '
+                             '<sampler_id>_<plan> -- printed by the dump')
     parser.add_argument('--pooling', default='cls')
-    parser.add_argument('--sampler-id', default=None,
-                        help='axes only: which sampling rule\'s stores to '
-                             "read when a root holds more than one; '' "
-                             'selects the pre-quota draws')
     parser.add_argument('--per-level', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=42)
 
@@ -1997,7 +1947,7 @@ def main() -> int:
     parser.add_argument('--n-wsi', type=int, default=9,
                         help='stage1_compare: slides per dataset, taken from '
                              'the RECORDED test split '
-                             '(training/MppRoutingHead/Datasets.wsi_split) '
+                             '(utilities/cli/build_cache/make_split.py) '
                              'so this never scores on a slide a checkpoint '
                              'was selected on')
     parser.add_argument('--native-only', action='store_true',
@@ -2009,6 +1959,9 @@ def main() -> int:
     parser.add_argument('--n-per-rung', type=int, default=20,
                         help='stage1_compare: query positions per rung per '
                              'slide')
+    # --seg / --mask-cache-job / --sampler-cache-job / --split-cache-job:
+    # stage1_compare draws through them; sampler_routing reads only --seg.
+    add_cache_args(parser)
     parser.add_argument('--overlap', action='store_true',
                         help='stage1_compare: allow jitter top-up (both the '
                              'query positions and each KnnEstMpp\'s own '
@@ -2061,7 +2014,7 @@ def main() -> int:
     # side, in ONE run); filing its output under `--stores`' encoder would
     # misfile a genuinely cross-encoder CSV under whichever one `--stores`
     # happened to default to. It gets its OWN untagged dir instead.
-    encoder_tag = Path(args.stores).name if Path(args.stores).name else 'gigapath'
+    encoder_tag = Path(args.stores).name if args.stores else 'gigapath'
     out_dir = Path(args.out or job_result_dir('MppFeatureDecomposition',
                                               encoder=encoder_tag))
     out_dir.mkdir(parents=True, exist_ok=True)

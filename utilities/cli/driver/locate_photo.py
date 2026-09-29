@@ -81,7 +81,6 @@ from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
                                       checker_in_footprint)
 from LocaScopePipeline import LocaScopePipeline                      # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names                # noqa: E402
-from TissueSegFunc     import HestSegConfig                          # noqa: E402
 
 
 PHOTO_EXTS = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
@@ -500,8 +499,8 @@ def main():
     cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')
     encoder = cfg.build(device)
-    from TissueMaskConfig import TissueMaskConfig
-    mask_cfg = TissueMaskConfig(seg=HestSegConfig(), ds=4.0)
+    from TissueMaskConfig import MASK_RECIPES
+    mask_cfg = MASK_RECIPES['hest']
 
     # Built ONCE for the whole folder -- see the module docstring.
     print('Building pipeline (mask + mpp reference bank) ...', flush=True)

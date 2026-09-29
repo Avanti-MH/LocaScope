@@ -18,7 +18,7 @@ import openslide
 from PatchingLib import (QueryPatchContainer, WsiTissuesContainer,
                          FeaturesMap, WsiFeaturesMap)
 from SafeSlide import SafeSlide
-from TissuesRegionsMask import TissuesRegionsMask
+from TissueMask import TissueMask
 from GigaPathFunc import GigaPathEncoderConfig
 
 def _sim_tensors_unfold(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
@@ -141,7 +141,7 @@ def compute_gigapath_sliding_win_similarity(
     mpp: float,
     tile_size: int = 256,
     overlap: bool = True,
-    mask: Optional[TissuesRegionsMask] = None,
+    mask: Optional[TissueMask] = None,
     encoder: Optional[callable] = None,
     batch_size: int = 128,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
@@ -221,7 +221,7 @@ class GigaPathSlidingWinSim:
         self,
         wsi: Union[openslide.OpenSlide, str],
         encoder: Callable,
-        mask: Optional[TissuesRegionsMask] = None,
+        mask: TissueMask,
         mpp: Optional[float] = None,
         tile_size: int = 256,
         overlap: bool = True,
@@ -253,16 +253,6 @@ class GigaPathSlidingWinSim:
         mpp = mpp or self.mpp
         if mpp is None:
             raise ValueError('mpp must be provided in __init__ or build_wsi_features()')
-        if self.mask is None:
-            # '' and not a threshold: the retriever scores a window by the
-            # mean cosine over the query's tiles, so a window on blank glass
-            # loses on its own merits and the mask here is an optimisation, not
-            # a correctness requirement. '' skips the read AND the array -- see
-            # TissueSegFunc on why that is not the same as a method returning
-            # ones.
-            from TissueSegFunc import TissueSegConfig
-            self.mask = TissuesRegionsMask.from_wsi(
-                self.wsi, method=TissueSegConfig('').build())
         self.wsi_container = WsiTissuesContainer.from_mpp(
             self.wsi, mpp, tile_size=self.tile_size, overlap=self.overlap, mask=self.mask
         )

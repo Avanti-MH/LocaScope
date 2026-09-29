@@ -38,7 +38,7 @@ like a choice between two answers even when neither is one.
 
 HSV IS A REFERENCE, NOT GROUND TRUTH
 -------------------------------------
-`agree_hsv` below is agreement with `TissueSegConfig('hsv')`, which this project
+`agree_hsv` below is agreement with `PlaneSegConfig('hsv')`, which this project
 has shipped and whose numbers appear in its logs -- 20.8 percent tissue on
 BRACS_1228. It is a threshold on saturation and it is wrong at fat, at fold
 shadows and at pale sections. So a high agreement means "this polarity is the
@@ -92,7 +92,7 @@ import cv2                                                      # noqa: E402
 import torch                                                    # noqa: E402
 
 from SafeSlide import SafeSlide                                  # noqa: E402
-from TissueSegFunc import TissueSegConfig                        # noqa: E402
+from TissueSegFunc import PlaneSegConfig                         # noqa: E402
 
 from Uni2PcaSegFunc import Uni2PcaSegConfig                     # noqa: E402
 
@@ -121,7 +121,7 @@ DEFINITIONS = [
     ('fg=True', 'the mask with larger_pca_as_fg=True, i.e. tissue is PC1 > '
                 'background_threshold'),
     ('hsv reference',
-     "TissueSegConfig('hsv') on the per-cell mean colour, so it lands on the "
+     "PlaneSegConfig('hsv') on the per-cell mean colour, so it lands on the "
      'same grid. A saturation and value '
      'threshold, not ground truth -- it is wrong at fat, at fold shadows and '
      'at pale sections'),
@@ -197,9 +197,9 @@ def analyse(wsi_path, args, out_dir):
     #
     # hsv runs on the per-cell mean colour so the reference lands on the same
     # grid. `mask_hsv` is per-pixel, so running it on a downsampled image is
-    # sound in a way `mask_otsu` would not be -- `from_wsi`'s read_chunk_px
-    # docstring makes the same distinction for the same reason.
-    hsv_mask = TissueSegConfig('hsv').build()(thumb_cells).astype(bool)
+    # sound in a way `mask_otsu` would not be -- the reason PlaneSegConfig
+    # refuses to tile otsu.
+    hsv_mask = PlaneSegConfig('hsv').build()(thumb_cells).astype(bool)
 
     masks = {'fg=False': pc1 < cfg.background_threshold,
              'fg=True': pc1 > cfg.background_threshold}

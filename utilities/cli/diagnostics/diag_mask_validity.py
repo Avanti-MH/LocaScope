@@ -31,9 +31,9 @@ re-running per slide before trusting either source.
 Layout (2 rows x 5):
   row 1  slide / alpha / mask after [1]->[2] / level-0 probe map
          region colour = MEASURED readability: lime >=90%, orange >=50%, red <50%
-  row 2  baseline / [1] filter_regions / [2] merge_overlapping /
-         [3] filter_patchable / pipeline [1]->[2]
-         each from its own deepcopy of baseline, so a panel shows what THAT
+  row 2  baseline / [1] filtered / [2] merged / [3] patchable /
+         pipeline [1]->[2]
+         each its own view of the raw baseline, so a panel shows what THAT
          step does rather than the accumulated effect. Titles carry n0 -> n.
 
 Every panel shares the mask coordinate frame, including the probe map, which is
@@ -44,13 +44,12 @@ could not be read against the regions.
 Usage:
     python utilities/cli/diagnostics/diag_mask_validity.py \\
         --wsi "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
-        --hest --mask-ds 4 --grid 48 --out result/DiagMaskValidity
-    python utilities/cli/diagnostics/diag_mask_validity.py --dataset ki67_pure --grid 24
+        --seg hest --grid 48 --out result/DiagMaskValidity
+    python utilities/cli/diagnostics/diag_mask_validity.py --dataset ki67_pure --seg hsv --grid 24
 
-Without --hest the regions come from the default HSV threshold, which is enough
-to see the coverage map but will not reproduce the pipeline's regions. Match
---mask-ds and --min-region-ratio to LocaScopePipeline, and --patch-ds to the
-level it routes to, or the panels describe a mask the pipeline never builds.
+`--seg` names the recipe (default hest, LocaScopePipeline's own), so the
+panels are the regions the pipeline builds. Match --patch-ds to the level it
+routes to, or the patchable panel describes a scale the pipeline never uses.
 
 Output, per slide: <out>/<wsi_tag>_coverage.png  and  <wsi_tag>_regions.csv
 """
@@ -61,7 +60,6 @@ import argparse
 import csv
 import os
 import sys
-from copy import deepcopy
 
 import numpy as np
 import openslide
@@ -78,7 +76,9 @@ for _d in ('utilities', 'aiNNModel'):
         sys.path.insert(0, p)
 from _paths import job_result_dir                                   # noqa: E402
 
-from TissuesRegionsMask import TissuesRegionsMask     # noqa: E402
+from TissueMask import TissueMask                      # noqa: E402
+from TissueMaskConfig import add_mask_args, mask_cfg_from_args  # noqa: E402
+from TissueSegFunc import nearest_level                 # noqa: E402
 from SlideProbe import SlideProbe, bounds_rect         # noqa: E402
 from WsiSelection import resolve_wsi_paths             # noqa: E402
 
@@ -126,33 +126,26 @@ def region_readable_fraction(probe: SlideProbe, region, budget: int = 256) -> fl
 
 class MaskValidityCheck:
     """`run(entries)` is the shape every diagnostic in this directory shares
-    (see `WsiSelection.py`). `--hest`'s model is loaded ONCE in `__init__`,
-    not per slide -- it is a real GPU load, and a batch of slides shares it
-    the same way `LocaScopePipeline` would.
+    (see `WsiSelection.py`). The segmenter is built ONCE, on the first slide,
+    by the MaskMaker this holds -- a model is a real GPU load, and a batch of
+    slides shares it the same way `LocaScopePipeline` would.
     """
 
-    def __init__(self, mask_ds: float = 4.0, seg_chunk_px: int = 4_000_000,
-                hest: bool = False, grid: int = 48, region_probes: int = 256,
-                min_region_ratio: float = 0.01, patch_tile: int = 256,
+    def __init__(self, mask_cfg, device=None, grid: int = 48,
+                region_probes: int = 256, patch_tile: int = 256,
                 patch_ds: float = 1.0, dpi: int = 400, out_dir=None):
-        self.mask_ds = mask_ds
-        self.seg_chunk_px = seg_chunk_px
+        from TissueMaskConfig import MaskMaker                     # noqa: PLC0415
+        self.mask_cfg = mask_cfg
+        self.masks = MaskMaker(mask_cfg, device=device)
         self.grid = grid
         self.region_probes = region_probes
-        self.min_region_ratio = min_region_ratio
+        self.min_region_ratio = mask_cfg.min_region_ratio
         self.patch_tile = patch_tile
         self.patch_ds = patch_ds
         self.dpi = dpi
         self.out_dir = out_dir or job_result_dir('DiagMaskValidity')
         os.makedirs(self.out_dir, exist_ok=True)
 
-        self.method = None
-        if hest:
-            import torch                                            # noqa: PLC0415
-            from TissueSegFunc import HestSegConfig                  # noqa: PLC0415
-            dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            print(f'  loading HEST on {dev}', flush=True)
-            self.method = HestSegConfig().build(dev)
 
     def run_one(self, entry: dict) -> dict:
         wsi_path = entry['path']
@@ -173,43 +166,41 @@ class MaskValidityCheck:
               f'= {100.0 * bw * bh / (W0 * H0):.1f}% of canvas')
 
         # ── mask ─────────────────────────────────────────────────────────
-        base = TissuesRegionsMask.from_wsi(
-            wsi, ds=self.mask_ds, method=self.method,
-            seg_chunk_px=self.seg_chunk_px if self.method is not None else None,
-        )
+        # RAW regions: the panels below show what each step of the recipe's
+        # region prep does to them.
+        base = TissueMask(wsi, self.masks.slide_mask(wsi)[0])
         n_base = len(base.tissue_regions)
         print(f'  mask {base.main_mask.shape}  baseline regions = {n_base}')
 
-        # Each mutation on its own deep copy, so a panel shows what THAT step
-        # does rather than the accumulated effect of everything before it.
+        # Each step on its own view of the raw mask, so a panel shows what THAT
+        # step does rather than the accumulated effect of everything before it.
         mr, pt, pds = self.min_region_ratio, self.patch_tile, self.patch_ds
         ops = [(f'baseline  ({n_base})', base)]
 
-        t = deepcopy(base); t.filter_regions(min_ratio=mr)
-        ops.append((f'[1] filter_regions({mr})  {n_base}->{len(t)}', t))
+        t = base.filtered(mr)
+        ops.append((f'[1] filtered({mr})  {n_base}->{len(t)}', t))
 
-        t = deepcopy(base); t.merge_overlapping()
-        ops.append((f'[2] merge_overlapping  {n_base}->{len(t)}', t))
+        t = base.merged()
+        ops.append((f'[2] merged  {n_base}->{len(t)}', t))
 
-        t = deepcopy(base); t.filter_patchable(tile_size=pt, ds=pds)
-        ops.append((f'[3] filter_patchable({pt},ds={pds:g})  {n_base}->{len(t)}', t))
+        t = base.patchable(pt * pds)
+        ops.append((f'[3] patchable({pt},ds={pds:g})  {n_base}->{len(t)}', t))
 
-        # [1] -> [2] is what LocaScopePipeline.build() does. filter_patchable
-        # runs later and per level, in _level_mask, so it stays out of the
-        # state the coverage panels are drawn against.
-        trm = deepcopy(base)
-        trm.filter_regions(min_ratio=mr)
-        trm.merge_overlapping()
+        # [1] -> [2] is the recipe's region prep, what every caller is handed.
+        # `patchable` runs later and per scale, so it stays out of the state
+        # the coverage panels are drawn against.
+        trm = self.mask_cfg.regions(wsi, base.slide_mask)
         n_final = len(trm.tissue_regions)
         ops.append((f'pipeline [1]->[2]  {n_base}->{n_final}', trm))
 
         for label, t in ops:
             print(f'  {label}')
         print(f'  coverage panels use [1]->[2]: {n_final} regions '
-              f'(indices renumbered by merge_overlapping)')
+              f'(indices renumbered by merged)')
 
-        # The level from_wsi actually read, so alpha is sampled the same way.
-        lv = wsi.get_best_level_for_downsample(self.mask_ds)
+        # The level nearest the mask's resolution -- for a plane segmenter the
+        # level it read -- so alpha is sampled the same way.
+        lv = nearest_level(wsi, base.mask_ds_x)
         Wl, Hl = wsi.level_dimensions[lv]
         rgba = np.array(wsi.read_region((0, 0), lv, (Wl, Hl)))
         alpha = rgba[:, :, 3]
@@ -364,7 +355,7 @@ class MaskValidityCheck:
 
         axes[0, 2].imshow(trm.main_mask, cmap='gray', vmin=0, vmax=1)
         draw_bounds_box(axes[0, 2]); coverage_boxes(axes[0, 2])
-        frame(axes[0, 2], f'{"HEST" if self.method is not None else "HSV"} mask '
+        frame(axes[0, 2], f'{self.mask_cfg.seg_id()} mask '
                           f'after [1]->[2], {n_final} regions\n'
                           f'lime >=90% readable, orange >=50%, red <50%')
 
@@ -421,24 +412,16 @@ def main() -> int:
     ap.add_argument('--wsi-path', dest='wsi_paths', nargs='+', default=None,
                     help='explicit WSI path(s)')
     ap.add_argument('--val-only', action='store_true')
-    ap.add_argument('--mask-ds', type=float, default=4.0,
-                    help='ds for the mask, matching LocaScopePipeline.mask_ds')
-    ap.add_argument('--seg-chunk-px', type=int, default=4_000_000,
-                    help='tile-and-stitch budget, only used with --hest')
-    ap.add_argument('--hest', action='store_true',
-                    help='segment with HEST DeepLabV3 instead of HSV (needs '
-                         'GPU; loaded once, shared across every slide)')
+    add_mask_args(ap)
     ap.add_argument('--grid', type=int, default=48,
                     help='slide-wide probe budget is --grid squared, split by '
                          'bounds aspect so cells come out square')
     ap.add_argument('--region-probes', type=int, default=256,
                     help='probes per region, split by bbox aspect (total, not per side)')
-    ap.add_argument('--min-region-ratio', type=float, default=0.01,
-                    help='filter_regions threshold, as in LocaScopePipeline')
     ap.add_argument('--patch-tile', type=int, default=256,
-                    help='filter_patchable tile_size, for the ops panel')
+                    help='patchable tile size, for the ops panel')
     ap.add_argument('--patch-ds', type=float, default=1.0,
-                    help='filter_patchable target level ds (1.0 = level 0)')
+                    help='patchable target ds (1.0 = level 0)')
     ap.add_argument('--out', default='',
                     help='output directory. Empty means result/<SLURM_JOB_NAME or DiagMaskValidity>/, via _paths.job_result_dir -- results live outside the checkout')
     ap.add_argument('--dpi', type=int, default=400)
@@ -455,11 +438,13 @@ def main() -> int:
     print(f'{len(entries)} WSI(s)')
 
     check = MaskValidityCheck(
-        mask_ds=args.mask_ds, seg_chunk_px=args.seg_chunk_px, hest=args.hest,
-        grid=args.grid, region_probes=args.region_probes,
-        min_region_ratio=args.min_region_ratio, patch_tile=args.patch_tile,
+        mask_cfg_from_args(args), grid=args.grid,
+        region_probes=args.region_probes, patch_tile=args.patch_tile,
         patch_ds=args.patch_ds, dpi=args.dpi, out_dir=args.out or None)
-    check.run(entries)
+    try:
+        check.run(entries)
+    finally:
+        check.masks.close()
     return 0
 
 

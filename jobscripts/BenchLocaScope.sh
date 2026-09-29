@@ -104,20 +104,17 @@ echo
 # either way: 278s read + 285s encode on BRACS_1228 L0, so roughly half. The
 # other half needs lazy per-region reads; see log/TODO.log.
 #
-# Keyed on the encoder and the mask recipe, and neither is a name someone typed:
-# encoder_id is derived from the config plus a sha256 of the loaded weights, and
-# mask_id from the segmentation method, its ds, the region filter and whether
-# merging ran. On top of that the geometry is rechecked against the mask in hand
-# before anything is trusted -- a matching filename is not evidence.
+# Addressed by the mask recipe (seg_id / region_id) and the grid, under
+# result/cache/<job>_features/<encoder>/; the encoder's full identity (config +
+# a sha256 of the loaded weights) is checked on every read, and the geometry is
+# rechecked against the mask in hand before anything is trusted.
 #
 # MODE=w on the first run. Otherwise it has to trust the write and the read at
 # once, and a failure cannot say which. Every miss prints which field differed,
 # so a permanently cold cache does not read like a correctly invalidated one.
-FEATURE_STORE="${FEATURE_STORE:-/work/u26130998/result/cache/wsi_featuresmap_cache}"
+FEATURES_CACHE_JOB="${FEATURES_CACHE_JOB:-BenchLocaScope}"
 FEATURE_STORE_MODE="${FEATURE_STORE_MODE:-rw}"
-mkdir -p "$FEATURE_STORE"
-echo "feature cache: $FEATURE_STORE  (mode=$FEATURE_STORE_MODE)"
-echo "  du: $(du -sh "$FEATURE_STORE" 2>/dev/null | cut -f1)  files: $(ls -1 "$FEATURE_STORE" 2>/dev/null | wc -l)"
+echo "feature cache: result/cache/${FEATURES_CACHE_JOB}_features/  (mode=$FEATURE_STORE_MODE)"
 echo ""
 
 # --out is omitted on purpose: bench_locascope falls back to
@@ -130,8 +127,8 @@ python utilities/bench_modules/bench_locascope.py \
   --draw-figures $DRAW_FIGURES \
   --multi-gpu \
   --precision fp16 --batch-size 8192 \
-  --mask-all \
-  --feature-store "$FEATURE_STORE" \
+  --seg none \
+  --features-cache-job "$FEATURES_CACHE_JOB" \
   --feature-store-mode "$FEATURE_STORE_MODE" \
   $LIMIT_FLAG $RESUME_FLAG $FAIL_FLAG
 

@@ -46,17 +46,20 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # computes grid coordinates from PatchGrid.from_size, which touches no pixels,
 # and then reads 256x256 tiles individually.
 
-OUT="$RESULT_ROOT"/cache/reference_features
+# The stores are a cache under the one rule: result/cache/<job>_features/<tag>/.
+# Dump writes it, the pairing check and eval read it, and all three name the
+# same job so none of them reads a directory the dump never wrote to.
+FEATURES_CACHE_JOB="${FEATURES_CACHE_JOB:-PoolingBench}"
 
 # Spelled the same way as SlidewinPooling.sh, and spelled ONCE: the bench
-# appends this tag to --out itself, so dump, the pairing check and eval have to
-# agree about it or eval reads a directory dump never wrote to. Every one of
-# them below passes --encoder for that reason.
+# appends this tag to the cache root itself. Every call below passes --encoder
+# for that reason.
 ENCODER="${ENCODER:-gigapath}"
 HEAD="${HEAD:-}"          # conch_vit needs `HEAD=trunk`: this bench calls
                           # encoder.tokens(), and the attentional pooler has
                           # no token axis to pool.
 TAG="$ENCODER${HEAD:+_$HEAD}"
+OUT="$RESULT_ROOT/cache/${FEATURES_CACHE_JOB}_features"
 
 # Inside the tagged directory, not beside it: the report is written from those
 # stores and a second encoder would otherwise overwrite the first one's.
@@ -96,8 +99,6 @@ ONLY_LEVELS=""
 #
 # The pool SIZE is unchanged -- the bench keeps its own k / ds**2 rule and feeds
 # it to the sampler as the target. Only the composition moves.
-QUOTA_FLOOR_LT15=0.85
-QUOTA_JITTER_CAP=0.20
 
 echo "======== pooling dump  k=$K  queries=$QUERIES per (slide, level) ========"
 echo "out=$OUT"
@@ -111,11 +112,9 @@ LEVEL_FLAG=""
 python utilities/bench_modules/bench_gigapath_pooling.py \
   --phase dump \
   --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
-  --out "$OUT" \
+  --features-cache-job "$FEATURES_CACHE_JOB" \
   -k $K --k-floor $K_FLOOR --queries $QUERIES \
-  --mask-ds $MASK_DS --seed $SEED \
-  --quota-floor-lt15 $QUOTA_FLOOR_LT15 \
-  --quota-jitter-cap $QUOTA_JITTER_CAP \
+  --seg hest --mask-ds $MASK_DS --seed $SEED \
   $WSI_FLAG $LEVEL_FLAG
 DUMP_RC=$?
 
@@ -146,7 +145,7 @@ echo ""
 echo "======== eval (no GPU; rerun on a login node any time) ========"
 python utilities/bench_modules/bench_gigapath_pooling.py \
   --phase eval --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
-  --out "$OUT" --report "$REPORT"
+  --features-cache-job "$FEATURES_CACHE_JOB" --report "$REPORT"
 
 echo ""
 echo "======== done ========"

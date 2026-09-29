@@ -69,13 +69,15 @@ import torch                                                        # noqa: E402
 
 import _paths                                                       # noqa: E402
 from _paths import encoder_tag                                      # noqa: E402
-import FeatureStore as FS                                           # noqa: E402
+import Cache                                                        # noqa: E402
+from Store import FeatureStore as FS                                # noqa: E402
 from dump_function import RetrievalReport as RR                     # noqa: E402
+from KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
 from PatchingLib import PatchGrid                                   # noqa: E402
-import ReferenceSampler as RS                                       # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask                   # noqa: E402
-from TissueSegFunc import HestSegConfig                             # noqa: E402
+from TileSampler import (OverlapConfig, SamplerConfig, TileSampler,  # noqa: E402
+                         assign_buckets, native_plans)
+from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import (encoder_config, encoder_names,          # noqa: E402
                              pool_slots, pooling_kinds)
 from camera import Camera                                           # noqa: E402
@@ -148,11 +150,34 @@ def nearest_in(centres: np.ndarray, pts: np.ndarray, chunk: int = 4096):
 
 # ── one (slide, level) ────────────────────────────────────────────────────────
 
+#: Below this share of photographed pixels a distractor is dropped: SafeSlide
+#: fills a hole with a flat colour, and a flat tile encodes to the same vector
+#: at every level -- a pool slot that can never outrank anything.
+MIN_VALID = 0.95
+
+#: 0 grid, 1 jitter, 2 inherit -- TileSampler's `origin`, as a column.
+ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
+
+
+def reference_config(k: int, seed: int, tile: int = TILE) -> SamplerConfig:
+    """The draw every level's reference pool is cut by -- before the per-level
+    size. `n_per_rung` is `k`, the L0 size; each level takes
+    `min(grid, max(k / ds**2, k_floor))`, and that rule is part of the store's
+    address through `plan_label`."""
+    return SamplerConfig(tile=tile, n_per_rung=k, seed=seed,
+                         richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig())
+
+
+def plan_label(k_floor: int) -> str:
+    """The rung plan -- one native rung per pyramid level -- and the per-level
+    sizing floor, which changes which tiles a coarse level holds."""
+    return f'native-floor{k_floor}'
+
+
 def dump_one(wsi_path: str, level: int, out_root: Path, *,
-             mask, encoder, device, spec,
+             mask, masks, encoder, device, spec,
              k: int, k_floor: int, n_query: int, seed: int,
-             mask_id: str, encoder_id: str, batch_size: int,
-             sampler_cfg: RS.SamplerConfig,
+             encoder_id: str, batch_size: int,
              min_std: float = 8.0, rots=(0, 90)) -> dict:
     slide = SafeSlide(wsi_path)
     stem = Path(wsi_path).stem
@@ -261,139 +286,95 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
         print(f'  L{level}: dropped {n_drop} of {len(keep)} query tiles that fell '
               f'in the uncovered margin at a region edge  ({by_rot})', flush=True)
 
-    # reference: a QUOTA-CONTROLLED draw, plus every answer.
+    # reference: a COMPOSITION-CONTROLLED draw, plus every answer.
     #
     # The draw used to be uniform over the grid, which sounds neutral and is
-    # not: 46% of level-0 grid positions on BRACS_1228 are pure background
-    # (result/RefStore, white p50 = 0.72, p75 = 1.00). Those are distractors
-    # that can never outrank an answer, so a nominal pool of 3000 was an
-    # effective pool of roughly half that -- and the share differs per level, so
-    # the per-level numbers were comparing descriptor difficulty and pool
-    # composition at the same time. ReferenceSampler holds the composition
-    # fixed, which is what makes one pooling comparable with another.
+    # not: 46% of level-0 grid positions on BRACS_1228 are pure background.
+    # Those are distractors that can never outrank an answer, so a nominal pool
+    # of 3000 was an effective pool of roughly half that -- and the share
+    # differs per level, so the per-level numbers were comparing descriptor
+    # difficulty and pool composition at the same time. TileSampler under the
+    # reference-bank richness contract holds the composition fixed, which is
+    # what makes one pooling comparable with another. Its disjoint lattice IS
+    # the main grid (test_tile_sampler: "the main grid is exactly patchgrids"),
+    # so a drawn tile carries its region / grid position / kind.
     #
-    # The answers stay mandatory whatever the quota chose: an answer missing
+    # The answers stay mandatory whatever the draw chose: an answer missing
     # from the pool is an unanswerable question that scores as a miss.
-    white = mask.white_fractions(grid_xy, level, TILE)
-    level_cfg = dataclasses.replace(sampler_cfg,
-                                n_target=min(n_grid_positions,
-                                             max(int(round(k / (ds * ds))),
-                                                 k_floor)),
-                                seed=seed)
-    level_geom = RS.LevelGeoms(level=level, ds=ds, footprint_l0=int(TILE * ds),
-                         xy=grid_xy, region=grid_region.astype(np.int32),
-                         grid_rc=grid_rowcol.astype(np.int32),
-                         kind=grid_kind.astype(np.int8), white=white,
-                         bucket=RS.assign_buckets(white, level_cfg))
-    plan = RS.plan_level(level_geom, level_cfg)
-    sampler = RS.ReferenceSampler({level: level_geom}, level_cfg, mask=mask)
-    sample = sampler.plan(level, plan)
+    base_cfg = reference_config(k, seed)
+    level_cfg = dataclasses.replace(
+        base_cfg, n_per_rung=min(n_grid_positions,
+                                 max(int(round(k / (ds * ds))), k_floor)))
+    rung = next(p for p in native_plans(slide, TILE) if p.level == level)
+    drawn = [s.meta for s in TileSampler(slide, mask, level_cfg, slide=stem).sample([rung])]
+    names = list(level_cfg.richness.names)
 
+    grid_index = {(int(x), int(y)): i for i, (x, y) in enumerate(grid_xy)}
     ans_all = np.unique(np.concatenate([ans_main_g, ans_ovlp_g]))
-    already_chosen = set(zip(sample.x.tolist(), sample.y.tolist()))
-    answers_to_add = np.array([i for i in ans_all
-                    if (int(grid_xy[i, 0]), int(grid_xy[i, 1])) not in already_chosen],
-                   dtype=np.int64)
+    chosen = {(m.x, m.y) for m in drawn}
+    answers_to_add = [int(i) for i in ans_all
+                      if (int(grid_xy[i, 0]), int(grid_xy[i, 1])) not in chosen]
+    answer_white = mask.white_fractions(grid_xy[answers_to_add], level, TILE) \
+        if answers_to_add else np.zeros(0, np.float32)
+    answer_bucket = assign_buckets(answer_white, level_cfg.richness.edges)
 
-    ref_xy = np.concatenate([np.stack([sample.x, sample.y], 1), grid_xy[answers_to_add]])
-    ref_region = np.concatenate([sample.region, grid_region[answers_to_add].astype(np.int32)])
-    ref_rowcol = np.concatenate([sample.grid_rc, grid_rowcol[answers_to_add].astype(np.int32)])
-    ref_kind = np.concatenate([sample.kind, grid_kind[answers_to_add].astype(np.int8)])
-    ref_white = np.concatenate([sample.white_frac, white[answers_to_add]])
-    ref_bucket = np.concatenate([sample.bucket, level_geom.bucket[answers_to_add]])
-    ref_origin = np.concatenate([sample.origin, np.zeros(len(answers_to_add), np.int8)])
-    ref_parent_x = np.concatenate([sample.parent_x,
-                                   np.full(len(answers_to_add), -1, np.int64)])
-    ref_parent_y = np.concatenate([sample.parent_y,
-                                   np.full(len(answers_to_add), -1, np.int64)])
-
-    # Keyed by COORDINATE, not by grid index: a displaced tile has no grid
-    # index, and an answer is always a grid position, so the coordinate is the
-    # one key both sides share.
-    where = {(int(x), int(y)): i for i, (x, y) in enumerate(ref_xy)}
+    rows = []                                    # one dict per reference tile
+    for m in drawn:
+        g = grid_index.get((m.x, m.y))
+        rows.append(dict(x=m.x, y=m.y, bucket=names.index(m.bucket), score=m.score,
+                         origin=ORIGIN_CODE[m.origin], parent_x=m.parent_x,
+                         parent_y=m.parent_y, grid=g))
+    for i, white_i, bucket_i in zip(answers_to_add, answer_white, answer_bucket):
+        rows.append(dict(x=int(grid_xy[i, 0]), y=int(grid_xy[i, 1]),
+                         bucket=int(bucket_i), score=float(white_i),
+                         origin=ORIGIN_CODE['grid'], parent_x=-1, parent_y=-1, grid=i))
 
     print(f'  L{level}  mpp={level_mpp:.4f}  grid={n_grid_positions:,} '
           f'(main {len(main_idx):,} / ovlp {len(ovlp_idx):,})  '
-          f'ref={len(ref_xy):,} (quota {plan.got} + answers {len(answers_to_add)})  '
+          f'ref={len(rows):,} (drawn {len(drawn)} + answers {len(answers_to_add)})  '
           f'queries={len(query_imgs):,} from {n_fov_made} FoV', flush=True)
-    bucket_counts = '  '.join(f'{b}={int((ref_bucket == i).sum())}'
-                    for i, b in enumerate(RS.BUCKETS))
-    print(f'      sampler {level_cfg.sampler_id()}   {bucket_counts}   '
-          f'displaced={int((ref_origin == 1).sum())}', flush=True)
+    counts = np.bincount([r['bucket'] for r in rows], minlength=len(names))
+    print(f'      sampler {base_cfg.sampler_id()}   '
+          + '  '.join(f'{b}={int(c)}' for b, c in zip(names, counts)), flush=True)
 
-    # read the reference tiles, discarding the ones the scanner never
-    # photographed.
-    #
-    # SafeSlide fills a hole and any unscanned canvas with a flat colour, and a
-    # flat tile encodes to the same vector at every level -- up to 13% of one
-    # slide's deep bank turned out to be bit-identical twins that way. As a
-    # distractor such a tile is worse than useless: it is a pool slot that can
-    # never outrank anything.
-    #
-    # An ANSWER is kept whatever its validity. Dropping it would make that query
-    # unanswerable, which is the one thing this store's construction forbids --
-    # so its valid_frac is recorded instead and the eval can decide. A distractor
-    # is replaced from its OWN bucket, because holes come in contiguous patches
-    # and topping up from anywhere would move the composition the quota holds.
+    # Read the reference tiles, dropping the distractors the scanner never
+    # photographed. An ANSWER is kept whatever its validity -- dropping it
+    # would make that query unanswerable -- and its valid_frac is recorded so
+    # the eval can decide.
     answer_coords = {(int(grid_xy[i, 0]), int(grid_xy[i, 1])) for i in ans_all}
-    pending = [dict(x=int(x), y=int(y), row=i) for i, (x, y) in enumerate(ref_xy)]
-
     t0 = time.time()
-    ref_imgs, kept_rows, valid_fracs = [], [], []
-    n_rejected = n_replaced = n_bad_answers = 0
-    position = 0
-    while position < len(pending):
-        item = pending[position]
-        position += 1
-        image, valid = slide.read_region_valid((item['x'], item['y']), level,
-                                               (TILE, TILE))
-        valid_fraction = float(valid.mean())
-        is_answer = (item['x'], item['y']) in answer_coords
-        if valid_fraction < level_cfg.min_valid and not is_answer:
+    ref_imgs, kept = [], []
+    n_rejected = n_bad_answers = 0
+    for row in rows:
+        image, valid = slide.read_region_valid((row['x'], row['y']), level, (TILE, TILE))
+        row['valid'] = float(valid.mean())
+        is_answer = (row['x'], row['y']) in answer_coords
+        if row['valid'] < MIN_VALID and not is_answer:
             n_rejected += 1
-            more = sampler.replace(level, int(ref_bucket[item['row']]), n=1)
-            if more:
-                new_x, new_y, grid_index = more[0]
-                pending.append(dict(x=new_x, y=new_y, row=None,
-                                    grid_index=grid_index))
-                n_replaced += 1
             continue
-        if valid_fraction < level_cfg.min_valid:
-            n_bad_answers += 1
+        n_bad_answers += int(row['valid'] < MIN_VALID)
         ref_imgs.append(image)
-        kept_rows.append(item)
-        valid_fracs.append(valid_fraction)
+        kept.append(row)
     t_read = time.time() - t0
+    if n_rejected or n_bad_answers:
+        print(f'      holes: {n_rejected} distractors below valid {MIN_VALID:.2f} '
+              f'dropped, {n_bad_answers} answers kept anyway', flush=True)
 
-    def _column(source_array, grid_array, dtype):
-        return np.array(
-            [source_array[item['row']] if item['row'] is not None
-             else grid_array[item['grid_index']] for item in kept_rows],
-            dtype=dtype)
+    def column(name, dtype):
+        return np.array([r[name] for r in kept], dtype=dtype)
 
-    ref_xy = np.array([[item['x'], item['y']] for item in kept_rows],
-                      dtype=np.int64)
-    ref_region = _column(ref_region, grid_region, np.int32)
-    ref_rowcol = np.array(
-        [ref_rowcol[item['row']] if item['row'] is not None
-         else grid_rowcol[item['grid_index']] for item in kept_rows],
-        dtype=np.int32).reshape(len(kept_rows), 2)
-    ref_kind = _column(ref_kind, grid_kind, np.int8)
-    ref_white = _column(ref_white, white, np.float32)
-    ref_bucket = _column(ref_bucket, level_geom.bucket, np.int8)
-    ref_origin = np.array([ref_origin[item['row']] if item['row'] is not None
-                           else 0 for item in kept_rows], dtype=np.int8)
-    ref_parent_x = np.array([ref_parent_x[item['row']] if item['row'] is not None
-                             else -1 for item in kept_rows], dtype=np.int64)
-    ref_parent_y = np.array([ref_parent_y[item['row']] if item['row'] is not None
-                             else -1 for item in kept_rows], dtype=np.int64)
-    ref_valid = np.array(valid_fracs, dtype=np.float32)
+    def from_grid(array, missing, dtype):
+        return np.array([array[r['grid']] if r['grid'] is not None else missing
+                         for r in kept], dtype=dtype)
+
+    ref_xy = np.array([[r['x'], r['y']] for r in kept], dtype=np.int64)
+    ref_region = from_grid(grid_region, -1, np.int32)
+    ref_rowcol = np.array([grid_rowcol[r['grid']] if r['grid'] is not None
+                           else (-1, -1) for r in kept],
+                          dtype=np.int32).reshape(len(kept), 2)
+    ref_kind = from_grid(grid_kind, -1, np.int8)
     where = {(int(x), int(y)): i for i, (x, y) in enumerate(ref_xy)}
 
-    if n_rejected or n_bad_answers:
-        print(f'      holes: {n_rejected} distractors below valid '
-              f'{level_cfg.min_valid:.2f} ({n_replaced} replaced), '
-              f'{n_bad_answers} answers kept anyway', flush=True)
     ref_tokens = encoder.tokens(ref_imgs)
     query_tokens = encoder.tokens(query_imgs)
     print(f'      read {t_read:.0f}s   encode {time.time() - t0 - t_read:.0f}s',
@@ -403,8 +384,9 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
                   mpp=level_mpp, base_mpp=base_mpp, tile_size=TILE, overlap=True,
                   dim=spec['dim'], feat_hw=tuple(spec['feat_hw']),
                   num_prefix=spec['num_prefix'], encoder_id=encoder_id,
-                  mask_id=mask_id, coverage='sample', sample_seed=seed,
-                  sampler_id=level_cfg.sampler_id())
+                  seg_id=masks.cfg.seg_id(), region_id=masks.cfg.region_id(),
+                  coverage='sample', sample_seed=seed,
+                  sampler_id=base_cfg.sampler_id(), plan=plan_label(k_floor))
 
     written = {}
     for tag, tok in (('ref', ref_tokens), ('query', query_tokens)):
@@ -415,12 +397,12 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
             xy, reg, rc = ref_xy, ref_region, ref_rowcol
             extra = {
                 'kind': torch.from_numpy(ref_kind.astype(np.int16)),
-                'white_frac': torch.from_numpy(ref_white),
-                'bucket': torch.from_numpy(ref_bucket),
-                'origin': torch.from_numpy(ref_origin),
-                'parent_x': torch.from_numpy(ref_parent_x),
-                'parent_y': torch.from_numpy(ref_parent_y),
-                'valid_frac': torch.from_numpy(ref_valid),
+                'white_frac': torch.from_numpy(column('score', np.float32)),
+                'bucket': torch.from_numpy(column('bucket', np.int8)),
+                'origin': torch.from_numpy(column('origin', np.int8)),
+                'parent_x': torch.from_numpy(column('parent_x', np.int64)),
+                'parent_y': torch.from_numpy(column('parent_y', np.int64)),
+                'valid_frac': torch.from_numpy(column('valid', np.float32)),
             }
             pooling = 'tokens'
         else:
@@ -443,9 +425,9 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
             }
             pooling = 'query_tokens'
 
-        meta = FS.StoreMeta(pooling=pooling, slots=slots, slot_layout=layout,
-                            n_available=(n_grid_positions if tag == 'ref' else n),
-                            n_tiles=n, **common)
+        meta = FS.Meta(pooling=pooling, slots=slots, slot_layout=layout,
+                       n_available=(n_grid_positions if tag == 'ref' else n),
+                       n_tiles=n, buckets=tuple(names), **common)
         p = FS.save(out_root, meta=meta,
                     features=feats.to(torch.float16),
                     x=torch.from_numpy(xy[:, 0].astype(np.int32)),
@@ -454,7 +436,7 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
                     grid_rc=torch.from_numpy(rc.astype(np.int32)),
                     extra=extra)
         written[tag] = p
-        print(f'      {tag:5s} -> {p.name}  '
+        print(f'      {tag:5s} -> {p}  '
               f'{p.stat().st_size / 1e9:.2f} GB', flush=True)
 
     slide.close()
@@ -633,7 +615,7 @@ def eval_one(query_path: Path, query_meta, refs: dict, poolings, rec: dict = Non
         loaded[level_delta] = (ref_tensors, ref_meta)
         ans[level_delta], _ = nearest_in(_centres(ref_tensors, ref_meta.ds), query_centres)
 
-    sampler_name = getattr(query_meta, 'sampler_id', '') or 'uniform (pre-quota)'
+    sampler_name = f'{query_meta.sampler_id}_{query_meta.plan}'
     if rec is not None:
         rec['sampler'] = sampler_name
     lines = [f'\n{"=" * 74}',
@@ -833,13 +815,13 @@ def _summary(recs: list, poolings, whitens=WHITENS) -> list:
     """
     if not recs:
         return []
-    # Which sampling rules are in here. eval_all keys stores by cfg_hash, so a
-    # root holding a quota dump and an older uniform one is scored twice and
-    # BOTH land in recs -- and every number below is a median across them. A
+    # Which sampling rules are in here. eval_all scores every query store under
+    # its root, so a root holding two draws is scored twice and BOTH land in
+    # recs -- and every number below is a median across them. A
     # median over two different distractor compositions is not a comparison of
     # poolings, it is a blend, so the count is stated and more than one is
     # called out rather than left to be noticed.
-    _sids = sorted({r.get('sampler') or 'uniform (pre-quota)' for r in recs})
+    _sids = sorted({r['sampler'] for r in recs})
     lines = [f'\n{"=" * 74}',
              f'sampler {", ".join(_sids)}',
              f'SUMMARY over {len(recs)} (slide, level) combinations '
@@ -985,32 +967,34 @@ def _summary(recs: list, poolings, whitens=WHITENS) -> list:
 
 def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
              whitens=WHITENS) -> int:
-    stores = {}
-    for p in sorted(Path(root).glob('*.safetensors')):
-        try:
-            m = FS.load_meta(p)
-        except Exception:                                   # noqa: BLE001
-            continue
-        if wsi_filter and wsi_filter not in m.wsi_stem:
-            continue
-        stores[(m.wsi_stem, m.level, m.pooling, m.cfg_hash())] = (p, m)
+    """Every query store under `root`, against the reference stores BESIDE it.
 
-    todo = sorted(k for k in stores if 'query' in k[2])
-    if not todo:
-        sys.exit(f'no query stores under {root}')
-
+    A query store and its references share one key directory by construction
+    (same slide, same mask, same draw), so pairing is a directory listing, not
+    a hash comparison. The cross-level references are the same directory's
+    files one level either side.
+    """
     lines, recs = [], []
-    for key in todo:
-        stem, lv, _, cfg = key
-        query_path, query_meta = stores[key]
-        refs = {level_delta: stores[(stem, lv + level_delta, 'tokens', cfg)]
-                for level_delta in (-1, 0, 1) if (stem, lv + level_delta, 'tokens', cfg) in stores}
-        if 0 not in refs:
-            lines.append(f'{stem} L{lv}: no same-level reference -- skipped')
+    queries = sorted(Path(root).rglob('ds*_query_tokens.safetensors'))
+    if not queries:
+        sys.exit(f'no query stores under {root}')
+    for query_path in queries:
+        query_meta = FS.load_meta(query_path)
+        if wsi_filter and wsi_filter not in query_meta.wsi_stem:
             continue
-        rec = {'stem': stem, 'level': lv, 'p1': {}, 'p2': {}, 'delta': {},
-               'rot': {}, 'white': {}, 'step': None, 'pool': 0, 'n_fov': 0,
-               'sampler': '', 'rows': []}
+        by_level = {}
+        for ref_path in FS.files(query_path.parent, 'tokens'):
+            ref_meta = FS.load_meta(ref_path)
+            by_level[ref_meta.level] = (ref_path, ref_meta)
+        lv = query_meta.level
+        refs = {d: by_level[lv + d] for d in (-1, 0, 1) if lv + d in by_level}
+        if 0 not in refs:
+            lines.append(f'{query_meta.wsi_stem} L{lv}: no same-level reference '
+                         f'-- skipped')
+            continue
+        rec = {'stem': query_meta.wsi_stem, 'level': lv, 'p1': {}, 'p2': {},
+               'delta': {}, 'rot': {}, 'white': {}, 'step': None, 'pool': 0,
+               'n_fov': 0, 'sampler': '', 'rows': []}
         lines += eval_one(query_path, query_meta, refs, poolings, rec=rec, whitens=whitens)
         recs.append(rec)
 
@@ -1064,8 +1048,11 @@ def main() -> int:
     # the encoder level appended, and BOTH phases resolve it the same way or
     # eval reads a directory dump never wrote to.
     ap.add_argument('--out', default=None,
-                    help='store root, used verbatim. Default '
-                         'result/cache/features/<encoder>/')
+                    help='store root, used verbatim. Default result/cache/'
+                         '<--features-cache-job>_features/<encoder>/')
+    ap.add_argument('--features-cache-job', default=None,
+                    help='whose feature cache to write (dump) or read (eval): '
+                         'result/cache/<this>_features/. Default: this job')
     ap.add_argument('--wsi', default=None, help='substring filter, for a small run')
     ap.add_argument('--levels', type=int, nargs='+', default=None)
     ap.add_argument('-k', type=int, default=5000, help='reference tiles at L0')
@@ -1075,23 +1062,7 @@ def main() -> int:
                          'and as every table eval prints. It used to be per '
                          'slide and divided by the level count, which silently '
                          'gave a third of what was asked for on a 3-level slide.')
-    ap.add_argument('--mask-ds', type=float, default=4.0)
-    ap.add_argument('--seg-chunk-px', type=float, default=4e6)
-    ap.add_argument('--quota-tile', type=int, default=TILE,
-                    help='tile size the background quota is defined on')
-    ap.add_argument('--quota-jitter-cap', type=float, default=0.20,
-                    help='most of a bucket that may be filled by displacing an '
-                         'existing tile')
-    ap.add_argument('--quota-floor-lt15', type=float, default=0.85,
-                    help='least of the pool that must be tissue-dense. The '
-                         'distractors this bench slides over used to be 46%% '
-                         'pure background at level 0, which is a pool half the '
-                         'size it looked')
-    ap.add_argument('--min-region-ratio', type=float, default=0.01,
-                    help='filter_regions threshold, matching '
-                         'LocaScopePipeline. It gates on BBOX area, so a value '
-                         'like 0.10 lets one large legitimate region set a bar '
-                         'the rest cannot clear -- see log/TODO.log.')
+    add_mask_args(ap)
     ap.add_argument(
         '--encoder', default='gigapath', choices=encoder_names(),
         help='which tile encoder. Only the module for THIS one is imported: '
@@ -1118,12 +1089,11 @@ def main() -> int:
     args = ap.parse_args()
 
     # Resolved once, before the phase split, or eval would read a directory
-    # dump never wrote to. The default cache root carries the tag but no job
-    # name: it is shared across jobs on purpose, since a store's whole value is
-    # being reusable by the next run.
+    # dump never wrote to.
     tag = encoder_tag(args.encoder, args.head)
-    store_root = (Path(args.out) if args.out
-                  else Path(_paths.RESULT_DIR) / 'cache' / 'features' / tag)
+    store_root = (Path(args.out) if args.out else
+                  Cache.cache_root(args.features_cache_job or
+                                   Cache.job_name('PoolingBench'), 'features') / tag)
 
     if args.phase == 'eval':
         # No GPU, no WSI, no model -- everything needed is in the stores.
@@ -1166,47 +1136,21 @@ def main() -> int:
     encoder_id = encoder.identity_id()
     print(f'spec={spec}\n')
 
-    hest_method = HestSegConfig().build(device)
-    # The rule is part of the identity, not a footnote: 'best' and 'nearest' pick
-    # different levels and so give different region boundaries. Without it in
-    # mask_id the two would share a cfg_hash and could be silently mixed.
-    mask_id = f'hest@ds{args.mask_ds:g}/nearest'
-
-    # n_target and seed are set per level inside dump_one -- the bench keeps its
-    # own k / ds**2 sizing rule -- so this carries only the composition.
-    sampler_cfg = RS.SamplerConfig(tile=args.quota_tile,
-                                   jitter_cap=args.quota_jitter_cap,
-                                   floor_lt15=args.quota_floor_lt15,
-                                   inherit_frac=0.0, seed=args.seed)
+    masks = MaskMaker(mask_cfg_from_args(args), device=device)
+    print(f'reference draw {reference_config(args.k, args.seed).sampler_id()}_'
+          f'{plan_label(args.k_floor)}   mask {masks.cfg.seg_id()}/'
+          f'{masks.cfg.region_id()}', flush=True)
 
     for wsi_path, levels in sorted(combos.items()):
         print(f'== {Path(wsi_path).stem}   levels {sorted(levels)}', flush=True)
         slide = SafeSlide(wsi_path)
         t0 = time.time()
-        # level_rule='nearest': asking for ds=4 with openslide's rule lands on
-        # level 0 whenever the pyramid reports 4.00003, which segmented
-        # BRACS_1228 over 6.58 Gpx in 646 s instead of 411 Mpx in about 40.
-        # Recorded in mask_id below, because the two rules give different region
-        # boundaries and their stores must not be mixed.
-        mask = TissuesRegionsMask.from_wsi(
-            slide, ds=args.mask_ds, method=hest_method,
-            seg_chunk_px=int(args.seg_chunk_px), stitch_overlap=128,
-            level_rule='nearest')
-        n_raw = len(mask.tissue_regions)
-        # The same two stages LocaScopePipeline.build() runs, in the same order
-        # and with the same default (0.01, not the 0.10 that once let one large
-        # legitimate region set a threshold that deleted every other). They are
-        # level-independent, which is why they belong here and the per-level
-        # "can this region host a tile" test lives in grid_coords.
-        #
-        # Done BEFORE the Camera is constructed: the Camera keeps a reference to
-        # this mask, so filtering afterwards would change what it samples from
-        # under it.
-        mask.filter_regions(min_ratio=args.min_region_ratio)
-        mask.merge_overlapping()
+        # The recipe's segmentation and region prep, LocaScopePipeline's own.
+        # Level-independent, which is why it is here and the per-level "can
+        # this region host a tile" test lives in grid_coords.
+        mask, _ = masks.mask(slide)
         print(f'  mask: tissue={mask.tissue_fraction() * 100:.1f}%  '
-              f'regions {n_raw} -> {len(mask.tissue_regions)} after '
-              f'filter_regions({args.min_region_ratio}) + merge  '
+              f'{len(mask.tissue_regions)} regions  '
               f'({time.time() - t0:.0f}s)', flush=True)
         if not mask.tissue_regions:
             print('  no region survived the filters -- skipped', flush=True)
@@ -1215,20 +1159,20 @@ def main() -> int:
         n_per_level = args.queries
         for lv in sorted(levels):
             try:
-                dump_one(wsi_path, lv, out_root, mask=mask,
+                dump_one(wsi_path, lv, out_root, mask=mask, masks=masks,
                          encoder=encoder, device=device, spec=spec,
                          k=args.k, k_floor=args.k_floor, n_query=n_per_level,
-                         seed=args.seed, mask_id=mask_id, encoder_id=encoder_id,
-                         batch_size=args.batch_size, min_std=args.min_std,
-                         sampler_cfg=sampler_cfg)
+                         seed=args.seed, encoder_id=encoder_id,
+                         batch_size=args.batch_size, min_std=args.min_std)
             except Exception as e:                          # noqa: BLE001
                 import traceback
                 print(f'  L{lv} FAILED: {type(e).__name__}: {e}', flush=True)
                 traceback.print_exc()
         slide.close()
 
+    masks.close()
     print('\ndone. inspect with:')
-    print(f'  python utilities/cli/inspect_cache_store/inspect_feature_store.py {out_root}/*.safetensors')
+    print(f'  python utilities/cli/inspect_cache_store/inspect_feature_store.py {out_root} --pairs')
     return 0
 
 

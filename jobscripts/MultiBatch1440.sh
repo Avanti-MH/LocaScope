@@ -73,7 +73,7 @@ BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
 KI67=/work/u26130998/datasets/Ki67_with_photo
 
 # Tile budget for the segmentation forward pass, and for the read too since
-# from_wsi takes the smaller of the two budgets. It was dropped to 2M while the
+# The plane read takes the smaller of the two budgets. It was dropped to 2M while the
 # segfault was thought to be about tile width; that turned out to be wrong, so
 # nothing forces the smaller value now.
 #
@@ -93,14 +93,12 @@ SEG_CHUNK_PX=2000000
 
 # 45:32 with 1.47456 MP lands on 1440.000 x 1024.000 exactly, so nothing
 # depends on how int() rounds in QueryFromWSI (query_sim/source/wsi_query.py).
-# --read-chunk-px is not passed: its default of 256M already makes from_wsi
-# read tile by tile, and the grid is min(read_chunk_px, seg_chunk_px), so the
-# tiles are SEG_CHUNK_PX either way. It only earns a value of its own when there
-# is no model to bound the grid -- an HSV mask leaves seg_chunk_px None, and then
-# read_chunk_px is the only thing standing between ds=1 and the whole level
-# in memory.
+# --read-chunk-px is not passed: the hest recipe already reads tile by tile
+# (4M), and the grid is min(read_chunk_px, seg_chunk_px), so the tiles are
+# SEG_CHUNK_PX either way. The mask is cached under result/cache/MultiBatch1440_mask/,
+# so a rerun of a slide does not segment it again.
 ARGS="--wh-ratio 45:32 --MPixels 1.47456 --per-camera 50 --jitter 0.05"
-ARGS="$ARGS --mask-ds 1.0 --hest --seg-chunk-px $SEG_CHUNK_PX --seed 0 --append"
+ARGS="$ARGS --seg hest --mask-ds 1.0 --seg-chunk-px $SEG_CHUNK_PX --seed 0 --append"
 
 OUT="$RESULT_ROOT/$SLURM_JOB_NAME"
 mkdir -p "$OUT"

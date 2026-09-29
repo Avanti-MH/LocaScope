@@ -90,6 +90,9 @@ else:
 # was deleted -- default PARTS is sampler_routing only until that cache is
 # rebuilt. Pass PARTS="all" (or "axes subspace_knn") once it is.
 PARTS="${PARTS:-sampler_routing}"
+# axes / subspace_knn read PoolingBench.sh's reference stores; DRAW is the
+# `reference draw` line that dump prints (<sampler_id>_<plan>).
+DRAW="${DRAW:-}"
 
 # ── axes / subspace_knn (read result/cache/features/, need --wsi-stem) ────
 # All seven -- each analysed on its own; nothing averages across slides.
@@ -129,6 +132,11 @@ DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
 N_WSI="${N_WSI:-9}"
 STAGE1_N_PER_RUNG="${STAGE1_N_PER_RUNG:-20}"
 RATIO="${RATIO:-45:32}"
+# SEG: hsv (free, no model) / hest (DeepLabV3+ResNet-50) / uni2 (fits a PCA
+# across the whole scanned rectangle first, 3.5-6 GPU-min/slide -- see
+# Uni2PcaSegConfig's own docstring). Built once, shared across every slide
+# and every method regardless of which one this picks.
+SEG="${SEG:-hest}"
 KNN_SAMPLES="${KNN_SAMPLES:-40}"
 KNN_K="${KNN_K:-5}"
 # KNN_ENCODER: space-separated encoder names. Defaults to BOTH -- the same
@@ -143,6 +151,17 @@ KNN_ENCODER="${KNN_ENCODER:-gigapath uni2}"
 # training run needs no path typed in here to be included next time this
 # jobscript runs. Pass CLASSIFIER_WEIGHTS="" explicitly to skip
 # ClassifierEstMpp entirely.
+#
+# ONE shared directory (2026-09-22, back from a hardcoded .../ord_b/weights
+# that this "all" default pointed at while ord_a/ord_b lived in their own
+# subdirectories -- that meant "all" never actually meant all: bal's own
+# checkpoints, and any ord_a ones, were silently excluded). Now that every
+# checkpoint's filename carries its own --loss as a segment when it is not
+# 'bal' (see Checkpoints.weight_filename's own docstring), bal/ord_a/ord_b
+# checkpoints of the same encoder+head coexist in this one directory without
+# overwriting each other, so one glob genuinely finds all of them --
+# analyze_stage1_metrics.py's method_of() is what then tells them apart in
+# the report (loss appended to the label only when it is not 'bal').
 CLASSIFIER_WEIGHTS="${CLASSIFIER_WEIGHTS:-all}"
 if [ "$CLASSIFIER_WEIGHTS" = "all" ]; then
   WEIGHTS_DIR="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result/MppRoutingHead/weights"
@@ -152,7 +171,7 @@ if [ "$CLASSIFIER_WEIGHTS" = "all" ]; then
   fi
 fi
 
-STAGE1_ARGS=()
+STAGE1_ARGS=(--seg "$SEG")
 [ "${NATIVE_ONLY:-0}" = "1" ] && STAGE1_ARGS+=(--native-only)
 # avoids coarse rungs (huge footprint, little disjoint room) coming up short
 [ "${OVERLAP:-0}" = "1" ] && STAGE1_ARGS+=(--overlap)
@@ -180,7 +199,7 @@ echo "======== MppFeatureDecomposition ========"
 echo "  parts  $PARTS"
 echo "  slides (axes/subspace_knn)  ${SLIDES[@]}"
 echo "  wsi_name (sampler_routing)  $WSI_NAME"
-echo "  datasets (stage1_compare)  $DATASETS   n_wsi=$N_WSI   native_only=${NATIVE_ONLY:-0}"
+echo "  datasets (stage1_compare)  $DATASETS   n_wsi=$N_WSI   seg=$SEG   native_only=${NATIVE_ONLY:-0}"
 
 # Piped through `tee` (not run plain) only so `stage1_compare`'s own
 # printed CSV path can be recovered below without re-deriving
@@ -192,7 +211,8 @@ STAGE1_LOG_TEE="$(mktemp)"
 python utilities/bench_modules/bench_mpp_feature_decomposition.py \
   "${SLIDES[@]}" \
   --parts $PARTS \
-  --stores "${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result/cache/reference_features/${ENCODER:-gigapath}" \
+  --stores "${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result/cache/PoolingBench_features/${ENCODER:-gigapath}" \
+  ${DRAW:+--draw "$DRAW"} \
   --pooling cls \
   --per-level "$PER_LEVEL" \
   --white-max "$WHITE_MAX" \
