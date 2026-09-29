@@ -21,6 +21,11 @@ for a trunk.
                         stacked on an already-pooled vector -- a REDUCTION,
                         used as `common.Head.Head`'s `reduction='attn'` stage,
                         never a classifier by itself.
+    ResidualMlpBlock     `[D]->[D]`, `MlpHead`'s own transform half without
+                        its final `num_classes` projection -- never a
+                        classifier by itself either, shared by `training/
+                        PrototypicalRoutingHead`'s Stage 2/3 arms that need
+                        a per-member/per-query non-linear transform.
 
 `common/Head.py` composes these into a runnable (reduction, classifier) pair;
 this file has no opinion about that composition, only about what each
@@ -311,6 +316,53 @@ class AttentionPoolHead(nn.Module):
         query = self.query.unsqueeze(0).expand(n, -1, -1)   # [N, 1, D]
         pooled, _ = self.attn(query, grid, grid, need_weights=False)
         return pooled.squeeze(1)                              # [N, D]
+
+
+class ResidualMlpBlock(nn.Module):
+    '''`[.., in_dim] -> [.., in_dim]`, the WHOLE transform wrapped in an
+    outer residual (`x + transform(x)`) -- the pure set-MEMBER-transform
+    half of `MlpHead` (same `in_proj`/hidden/`out_act`/`out_drop`/
+    `out_proj` shape), WITHOUT that class's own final `num_classes`
+    projection. `MlpHead` is a CLASSIFIER (fixed output width); this is a
+    general-purpose `[D]->[D]` building block, never a classifier by
+    itself -- same role `AttentionPoolHead` above already plays for
+    pooling, not more capacity stacked onto an already-pooled vector.
+
+    Added 2026-09-22 specifically so `training/PrototypicalRoutingHead`'s
+    `PrototypeGenerators.SharedMlpPrototype` and `PrototypeRoutingHeads.
+    AttnScoreHead`'s own `MLPq`/`MLPk` share ONE definition instead of two
+    near-identical ones (caught the second copy before it shipped).
+
+    `width` (defaults to `in_dim`) is the INNER width -- `SharedMlpPrototype`'s
+    own `width_mult` axis stays expressible (pass `width=round(in_dim*
+    width_mult)`); a caller with no width axis of its own just leaves it
+    at the default.
+    '''
+
+    def __init__(self, in_dim: int, width: int = None, depth: int = 2,
+                dropout: float = 0.1):
+        super().__init__()
+        width = width or in_dim
+        depth = max(1, depth)
+        self.in_proj = nn.Linear(in_dim, width)
+        # depth-1 width-to-width hidden layers, each its OWN inner residual
+        # -- `in_proj`/`out_proj` are not wrapped the same way `MlpHead`'s
+        # own docstring explains: `in_proj` changes shape whenever `width
+        # != in_dim`, `out_proj`'s shape is fixed regardless, so neither is
+        # a width-to-width layer a residual could wrap without a mismatch.
+        self.hidden = nn.ModuleList([
+            nn.Sequential(nn.GELU(), nn.Dropout(dropout), nn.Linear(width, width))
+            for _ in range(depth - 1)
+        ])
+        self.out_act = nn.GELU()
+        self.out_drop = nn.Dropout(dropout)
+        self.out_proj = nn.Linear(width, in_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.in_proj(x)
+        for block in self.hidden:
+            h = h + block(h)
+        return x + self.out_proj(self.out_drop(self.out_act(h)))
 
 
 #: A REGISTERED NAME per classifier, same convention `TileEncoderFunc`'s
