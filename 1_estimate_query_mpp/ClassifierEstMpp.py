@@ -35,19 +35,11 @@ PROCEDURE (`estimate`)
 2. Run every patch through the loaded encoder + head (`torch.no_grad()`: this
    is inference, no backward pass is ever taken here) and take each patch's
    own SOFTMAX probability distribution over classes -- not just its argmax.
-3. SOFT-VOTE: sum every patch's probability vector into one
-   `total_weight[c] = sum over patches of that patch's P(class=c)`, then
-   `predicted_class = argmax(total_weight)`. A patch that is unsure spreads
-   its vote thinly across several classes instead of casting a full vote for
-   whichever it favours by the smallest margin -- which is what a hard vote
-   (argmax per patch, then majority/median) would do, and which lets one
-   confident-but-wrong patch cancel out several unsure-but-right ones on
-   equal footing. `confidence = total_weight[predicted_class] / M` -- the
-   average probability mass the winning class actually received -- says how
-   convincing the win was: patches unanimous and confident push it toward 1,
-   patches split across classes (as at a genuine rung boundary, or a query
-   with a busy and a blank half) leave it well under 1 even though a class
-   still won.
+3. AGGREGATE every patch's own softmax distribution into one FoV-level
+   class via `FoVVote.vote(cfg.vote, probs, ...)` (`cfg.vote` defaults to
+   `'mean_probability'`, this file's original and only method before
+   `FoVVote.py` existed -- see that module and `FoV_Vote.md`, this
+   directory, for the five other choices and the reasoning behind each).
 4. `estimated_ds = rungs[predicted_class]`, `estimated_mpp = wsi.base_mpp *
    estimated_ds` -- the RELATIVE-to-ABSOLUTE step `build(wsi)` exists for.
 5. Snap to a level this WSI actually has:
@@ -82,6 +74,7 @@ from Checkpoints import build_from_checkpoint                          # noqa: E
 from Features import encode_raw, trunk_raw                              # noqa: E402
 
 from StageInterface import EstMppResult                                 # noqa: E402
+from FoVVote import vote as fov_vote                                     # noqa: E402
 
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -122,15 +115,24 @@ class ClassifierEstMppConfig(IdentifiedConfig):
     reduction: str
     tile_size: int
     weights: str
+    #: `FoVVote.VOTE_CHOICES` key -- an INFERENCE-time choice, never
+    #: recorded on the checkpoint (training never sees a whole FoV, only
+    #: individual tiles, so there is nothing for the checkpoint to have
+    #: recorded). Part of `identity_id` like every field here except
+    #: `weights`: two runs differing only in `vote` are two different
+    #: experiments, not the same one re-labelled.
+    vote: str = 'mean_probability'
 
     NOT_IDENTITY = ('weights',)
 
     @classmethod
-    def from_checkpoint(cls, weights: str) -> 'ClassifierEstMppConfig':
+    def from_checkpoint(cls, weights: str,
+                        vote: str = 'mean_probability') -> 'ClassifierEstMppConfig':
         ckpt = torch.load(weights, map_location='cpu')
         return cls(encoder=ckpt['encoder'], classifier=ckpt['classifier'],
                    reduction=ckpt['reduction'],
-                   tile_size=int(ckpt['extra']['tile_size']), weights=weights)
+                   tile_size=int(ckpt['extra']['tile_size']), weights=weights,
+                   vote=vote)
 
 
 # ── result ───────────────────────────────────────────────────────────────────
@@ -159,12 +161,18 @@ class ClassifierEstMppResult(EstMppResult):
     Runtime.score` does -- gets it directly rather than re-deriving it with a
     tolerance it would have to pick itself.
 
-    `confidence` is genuinely new: the average probability mass the winning
-    class received across query patches (see `estimate`'s soft-vote step). It
-    is not recoverable from anything else on this Result.
+    `vote_extra` is whichever `FoVVote` function `cfg.vote` names filled
+    in -- shape depends on the method (`mean_probability` gives
+    `confidence`, `quality_weighted` also gives `effective_sample_size`,
+    ...), see `FoVVote.py`'s own docstring for why forcing one common
+    shape here across every vote choice would be the wrong move. NOT a
+    dataclass field of its own kind per vote method -- `Dict[str, float]`
+    keeps `ClassifierEstMppResult` ONE class regardless of `cfg.vote`,
+    rather than a subclass per vote choice a caller would have to
+    `isinstance` against.
     '''
     predicted_class: int
-    confidence: float
+    vote_extra: Dict[str, float]
 
 
 # ── estimator ────────────────────────────────────────────────────────────────
@@ -264,15 +272,8 @@ class ClassifierEstMpp(IdentifiedBuild):
             logits = self.head(raw, self._num_prefix)      # [M, num_classes]
             probs = torch.softmax(logits, dim=1)             # [M, num_classes]
 
-        # SOFT VOTE: each patch's ballot is its own probability vector, not a
-        # single argmax pick -- see this module's docstring for why. Summing
-        # (rather than averaging) makes `total_weight`'s scale meaningful on
-        # its own: it always sums to M across classes, so dividing the winner
-        # by M below is exactly "the average probability mass that class
-        # received", with no separate normalisation step to get wrong.
-        total_weight = probs.sum(dim=0)                       # [num_classes]
-        predicted_class = int(total_weight.argmax())
-        confidence = float(total_weight[predicted_class] / probs.shape[0])
+        predicted_class, vote_extra = fov_vote(
+            self.cfg.vote, probs, rungs=self.rungs)
 
         base_mpp = self.wsi.base_mpp
         estimated_ds = self.rungs[predicted_class]
@@ -286,4 +287,4 @@ class ClassifierEstMpp(IdentifiedBuild):
             estimated_ds=estimated_ds, estimated_mpp=estimated_mpp,
             chosen_ds=chosen_ds, chosen_mpp=chosen_mpp,
             chosen_level=chosen_level,
-            predicted_class=predicted_class, confidence=confidence)
+            predicted_class=predicted_class, vote_extra=vote_extra)
