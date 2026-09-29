@@ -20,9 +20,10 @@ WHAT THE --wsi TIER IS FOR
 One assertion carries this module: **after fit(wsi), segmenting a plane in one
 call and segmenting it in four quadrants must agree pixel for pixel.**
 
-That is the property `from_wsi` already documents as the dividing line between
-methods it may tile and methods it may not -- "_mask_otsu derives its threshold
-globally, and per tile it would threshold blank glass against its own noise" --
+That is the property `mask_otsu` documents as the dividing line between methods
+a tiled read may split and methods it may not -- its threshold comes from the
+histogram of whatever it is shown, so per tile it thresholds blank glass
+against its own noise --
 and it is the entire reason the PCA is fitted in `fit` rather than in
 `__call__`. If it holds, `seg_chunk_px` and `read_chunk_px` are sound here. If
 it does not, every mask produced with those set has seams that nothing reports.
@@ -63,8 +64,8 @@ setup_import_paths()
 from ConfigIdentity import config_from, registered              # noqa: E402
 from Uni2PcaSegFunc import (Uni2PcaSegConfig,                   # noqa: E402
                             Uni2PcaSegmenter, _UNI2_PCA_BASELINE,
-                            scanned_bounds, stratified_positions,
-                            tile_saturation)
+                            stratified_positions, tile_saturation)
+from TissueSegFunc import scanned_rect                          # noqa: E402
 
 _RESULTS = []
 
@@ -87,7 +88,7 @@ class _FakeSlide:
     """Enough of an OpenSlide for the helpers that only do arithmetic on it.
 
     Not a mock of the model -- there is no model in this tier. It exists so that
-    `scanned_bounds` and `tile_saturation` can be checked against an image whose
+    `scanned_rect` and `tile_saturation` can be checked against an image whose
     answer is known by construction, which no real slide provides.
     """
 
@@ -219,7 +220,7 @@ def t_every_identity_field_moves_the_hash():
 #  2. helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def t_scanned_bounds_honours_limit_bounds():
+def t_scanned_rect_honours_limit_bounds():
     """With bounds-* set, the rectangle is the scanned one; without, the canvas.
 
     Why it matters here rather than being a formality: on a MIRAX the canvas
@@ -229,11 +230,11 @@ def t_scanned_bounds_honours_limit_bounds():
     bands.
     """
     slide = _FakeSlide(np.zeros((400, 600, 3), np.uint8), bounds=(50, 30, 200, 100))
-    assert scanned_bounds(slide, True) == ((50, 30), (200, 100))
-    assert scanned_bounds(slide, False) == ((0, 0), (600, 400))
+    assert scanned_rect(slide, True) == ((50, 30), (200, 100))
+    assert scanned_rect(slide, False) == ((0, 0), (600, 400))
 
     bare = _FakeSlide(np.zeros((400, 600, 3), np.uint8))
-    assert scanned_bounds(bare, True) == ((0, 0), (600, 400)), \
+    assert scanned_rect(bare, True) == ((0, 0), (600, 400)), \
         'a slide with no bounds-* should fall back to the whole canvas'
     return 'bounds respected, absent bounds fall back to the canvas'
 
@@ -445,12 +446,11 @@ def t_fit_report_is_not_degenerate(seg):
 def t_tiling_is_invariant_and_refitting_is_not(seg, wsi, args):
     """One call over a plane == four calls over its quadrants. THE check.
 
-    This is the property that makes `from_wsi`'s `seg_chunk_px` and
-    `read_chunk_px` paths sound for this segmenter, and it holds only because
-    the PCA was fitted in `fit`. `from_wsi` documents the boundary itself:
-    "_mask_otsu derives its threshold globally, and per tile it would threshold
-    blank glass against its own noise ... _mask_hsv is per-pixel and HEST is
-    fully convolutional, so both are unaffected."
+    This is the property that makes a tiled read (`TissueSegFunc.tiled_apply`)
+    sound for this segmenter's `__call__`, and it holds only because the PCA
+    was fitted in `fit`. `mask_otsu` documents the boundary: a threshold taken
+    from each tile's own histogram thresholds blank glass against its own
+    noise, while a per-pixel or fully convolutional method is unaffected.
 
     THE DECOY is the design that was rejected -- refit the PCA on each
     quadrant's own features, which is what a lazily-fitting `__call__` would do.
@@ -466,7 +466,7 @@ def t_tiling_is_invariant_and_refitting_is_not(seg, wsi, args):
     cfg = seg.cfg
     level = seg.fit_report['level']
     side = cfg.tile * args.plane_tiles          # even split into quadrants
-    origin, span = scanned_bounds(wsi, cfg.limit_bounds)
+    origin, span = scanned_rect(wsi, cfg.limit_bounds)
     level_ds = seg.fit_report['level_ds']
 
     # A plane over the middle of the scanned rectangle, where there is content.
@@ -518,7 +518,7 @@ def t_tiling_is_invariant_and_refitting_is_not(seg, wsi, args):
     assert disagree == 0, (
         f'{disagree} of {total} pixels ({100 * disagree / total:.2f}%) differ '
         f'between one call and four. The PCA is not being shared across calls, '
-        f'so from_wsi with seg_chunk_px set would produce seams and report '
+        f'so a tiled read of this segmenter would produce seams and report '
         f'nothing')
     assert decoy_disagree > 0, (
         f'refitting the PCA per quadrant changed nothing either, so this check '
@@ -553,7 +553,7 @@ def t_fit_report_agrees_with_mask_ds(seg, wsi, args):
 def t_mask_is_binary_and_full_size(seg, wsi, args):
     """uint8, values in {0, 1}, and the input's spatial size.
 
-    `_tiled_apply:307-311` slices the returned mask with the INPUT tile's pixel
+    `TissueSegFunc.tiled_apply` slices the returned mask with the INPUT tile's pixel
     offsets and assigns into a full-size array, so anything smaller raises there
     on broadcast -- while the single-call path would have accepted a coarse mask
     and derived a coarser ds from its shape. A cell-resolution return would
@@ -562,7 +562,7 @@ def t_mask_is_binary_and_full_size(seg, wsi, args):
     """
     cfg = seg.cfg
     level = seg.fit_report['level']
-    origin, span = scanned_bounds(wsi, cfg.limit_bounds)
+    origin, span = scanned_rect(wsi, cfg.limit_bounds)
     # Deliberately NOT a multiple of the tile: the padding path has to be
     # exercised, and the crop back has to land on the requested size.
     height, width = cfg.tile * 2 + 37, cfg.tile * 3 - 11
@@ -583,7 +583,7 @@ _SECTIONS = {
     'config':  ['t_registered_under_its_name',
                 't_every_identity_field_is_in_the_baseline',
                 't_every_identity_field_moves_the_hash'],
-    'helpers': ['t_scanned_bounds_honours_limit_bounds',
+    'helpers': ['t_scanned_rect_honours_limit_bounds',
                 't_tile_saturation_finds_the_coloured_half',
                 't_stratified_covers_every_band_where_uniform_misses_some',
                 't_stratified_is_deterministic',

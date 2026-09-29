@@ -1,9 +1,10 @@
-"""HEST tissue segmentation (MahmoodLab/hest-tissue-seg) as a TissueSegmenter.
+"""HEST tissue segmentation (MahmoodLab/hest-tissue-seg) as a plane segmenter.
 
-    seg = HestSegConfig().build(device)
-    binary = seg(rgb)                    # [H, W] uint8, 1 = tissue
+    seg  = HestSegConfig().build(device)
+    mask = seg.segment_slide(wsi)        # SlideMask, via PlaneSegmenter's read
+    binary = seg(rgb)                    # one image: [H, W] uint8, 1 = tissue
 
-The contract and the model-free methods are TissueSegFunc's. What is here is
+The contract, the plane read and the model-free methods are TissueSegFunc's. What is here is
 what is HEST's: the frozen baseline its numbers form, the DeepLabV3 the
 checkpoint fits, the Lightning prefix that checkpoint was saved with, and the
 class index that means tissue.
@@ -29,8 +30,9 @@ import torch                                                # noqa: E402
 from PIL import Image                                       # noqa: E402
 from torchvision import transforms                          # noqa: E402
 
-from ConfigIdentity import ModelConfig, register            # noqa: E402
-from TissueSegFunc import TissueSegConfig, TissueSegmenter  # noqa: E402
+from ConfigIdentity import ModelConfig, file_fingerprint, register  # noqa: E402
+from TissueSegFunc import (PlaneSegConfig, PlaneSegmenter,  # noqa: E402
+                           _PLANE_BASELINE)
 
 
 _CKPT_DIR = _HERE / 'ckpt'
@@ -55,6 +57,7 @@ _TRANSFORM = transforms.Compose([
 #: The zero point. Editing this invalidates every mask id ever written, on
 #: purpose; editing a dataclass DEFAULT does not -- it splits new from old.
 _HEST_BASELINE = {
+    **_PLANE_BASELINE,
     'method': 'hest',
     'model': ModelConfig(source='torchvision', arch=HEST_ARCH, dtype='fp32'),
 }
@@ -69,7 +72,7 @@ def _download_ckpt() -> Path:
 
 @register('hest')
 @dataclass(frozen=True)
-class HestSegConfig(TissueSegConfig):
+class HestSegConfig(PlaneSegConfig):
     """DeepLabV3 + ResNet-50, two classes.
 
     `model.arch` names the ARCHITECTURE and not the checkpoint, so a finetune of
@@ -87,8 +90,18 @@ class HestSegConfig(TissueSegConfig):
     def build(self, device: Optional[torch.device] = None) -> 'HestSegmenter':
         return HestSegmenter(self, device or torch.device('cpu'))
 
+    def weights_key(self) -> str:
+        """The CONTENT of a local checkpoint, for a key that cannot build the
+        model to hash its parameters. `model.weights` is NOT_IDENTITY because
+        the built segmenter hashes what it loaded -- but a cache hit is exactly
+        the case where nothing is built, so without this a finetune overwritten
+        in place under the same path would keep hitting the old masks. The
+        published checkpoint is fixed by the repo and file name, so it adds
+        nothing."""
+        return file_fingerprint(self.model.weights) if self.model.weights else ''
 
-class HestSegmenter(TissueSegmenter):
+
+class HestSegmenter(PlaneSegmenter):
     BASELINE = _HEST_BASELINE
 
     def __init__(self, cfg: HestSegConfig, device: torch.device):
@@ -120,7 +133,7 @@ class HestSegmenter(TissueSegmenter):
     def __call__(self, image: Union[np.ndarray, Image.Image]) -> np.ndarray:
         """One RGB image -> [H, W] uint8, 1 = tissue.
 
-        Called once per tile by TissuesRegionsMask's tile-and-stitch pass. The
+        Called once per tile by TissueMask's tile-and-stitch pass. The
         model is fully convolutional, so the tile size is the caller's.
         """
         pil = Image.fromarray(image) if isinstance(image, np.ndarray) \

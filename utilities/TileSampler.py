@@ -71,8 +71,8 @@ Any other order breaks, silently:
                     lattice fills up long before the inherited centres are
                     placed.
 
-`ReferenceSampler` states the same constraint about its own inheritance set:
-"it must be fixed before the per-level quotas are filled, since it consumes
+`ReferenceSampler`, the sampler this replaced, stated the same constraint about
+its inheritance set: "it must be fixed before the per-level quotas are filled, since it consumes
 them."
 
 TWO CONFLICTS, RESOLVED RATHER THAN HIDDEN
@@ -113,7 +113,7 @@ rungs" cannot both hold. `bucket_frame` says which one is given up:
 
 THE DEFAULT IS 'per_rung', because the floors exist to control what each rung
 CONTAINS, and that is the thing every consumer of a single rung depends on. It
-is the same choice `ReferenceSampler` made.
+is the same choice the retired `ReferenceSampler` made.
 
 BUT STAGE B WANTS 'at_inherit'. A survival analysis stratified by bucket --
 "do keypoints in tissue-dense tiles survive the ladder better than ones at the
@@ -177,8 +177,8 @@ because the index is built anyway.
 
 A CHAIN IS COMPLETE OR IT SAYS SO
 ===================================
-`ReferenceSampler`: "a correspondence with holes in it is not a
-correspondence." `stacks()` returns complete chains only; `stacks(
+The retired `ReferenceSampler` put it as "a correspondence with holes in it is
+not a correspondence." `stacks()` returns complete chains only; `stacks(
 complete_only=False)` returns the rest with the missing rungs named. A
 four-rung chain returned as if it were six reads as "the keypoint died at
 ds 16" when it means "ds 16 never sampled it", and those two are the whole of
@@ -208,7 +208,7 @@ second thing to keep in step with them.
 PERSISTENCE
 ============
 `save(with_images=False)` writes the metadata table alone. `save(with_images=
-True)` writes `utilities/PreTileStore.py`'s format -- PNG per record,
+True)` writes `Store.PreTileStore`'s format -- PNG per record,
 `index.csv`, `meta.json` -- rather than inventing a second one. The axis
 columns join `index.csv`; `stack_kind` and the config belong to the batch and
 go in `meta.json`.
@@ -252,7 +252,9 @@ import numpy as np
 # `reserve_l0` (what must FIT, when a caller reads a pre-tile around the tile)
 # and `stack_kind`.
 
-from DsLadder import RungPlan                                    # noqa: E402
+from Cache import (atomic_dir, check_source, source_key,         # noqa: E402
+                   wsi_stem_of)
+from DsLadder import DsLadder, RungPlan                          # noqa: E402
 
 
 def native_plans(wsi, tile: int, factor: int = 1) -> List[RungPlan]:
@@ -275,6 +277,40 @@ def native_plans(wsi, tile: int, factor: int = 1) -> List[RungPlan]:
                             footprint_l0=fp, reserve_l0=fp * int(factor),
                             stack_kind='F'))
     return out
+
+
+@dataclass(frozen=True)
+class PlanSpec:
+    """Which rungs to cut, as a VALUE -- before any slide is open.
+
+    `RungPlan`s depend on the slide's pyramid, so they cannot exist until the
+    slide is opened; a cache hit exists to avoid opening it. This is the part
+    of the plan that is known up front: it names a cache directory (`key`) and
+    turns into the slide's own plans on a miss (`plans_for`).
+
+        PlanSpec('ladder', (1, 2, 4, 8, 16, 32))   DsLadder's fixed rungs
+        PlanSpec('native')                         the slide's own levels
+    """
+    kind: str = 'ladder'
+    rungs: Tuple[float, ...] = ()
+
+    def __post_init__(self):
+        if self.kind not in ('ladder', 'native'):
+            raise ValueError(f"kind must be 'ladder' or 'native', got {self.kind!r}")
+        if self.kind == 'ladder' and not self.rungs:
+            raise ValueError('a ladder PlanSpec needs rungs')
+        object.__setattr__(self, 'rungs',
+                           tuple(sorted(float(r) for r in self.rungs)))
+
+    def key(self) -> str:
+        if self.kind == 'native':
+            return 'native'
+        return 'ladder-' + '-'.join(f'{r:g}' for r in self.rungs)
+
+    def plans_for(self, wsi, tile: int) -> List[RungPlan]:
+        if self.kind == 'native':
+            return native_plans(wsi, tile)
+        return DsLadder(rungs=self.rungs).plan_for(wsi, tile)
 
 
 def _scanned_rect(mask) -> Tuple[int, int, int, int]:
@@ -319,6 +355,65 @@ def resolution_plan(ds: float, tile: int, factor: int = 1) -> RungPlan:
                     shrink=float(ds), tile_size=int(tile),
                     read_size=int(tile), footprint_l0=float(tile),
                     reserve_l0=float(tile) * int(factor), stack_kind='R')
+
+
+# ── the pre-tile: the reserve, read back ─────────────────────────────────────
+#
+# A pre-tile is what `Sample.materialise(extent='reserve')` reads: the tile and
+# the context reserved around it, centred on it, so a homography of the tile
+# samples real tissue instead of a black wedge (SuperPathPoint spec.md 6.6).
+# These are the reserve's own arithmetic -- how big, how far in, and the crop
+# that gives the tile back -- so they live beside the reserve that the lattice
+# honours, not in the store that happens to keep the pixels.
+
+#: spec.md 6.6. The derived bound is 2.49; 3 is that rounded up, and the slack
+#: pays for the one approximation in the derivation (a projective map is not
+#: exactly a scaling about the centre, so the 1/patch_ratio term is nominal).
+PRE_TILE_FACTOR = 3
+
+
+def pre_tile_px(tile: int, factor: int = PRE_TILE_FACTOR) -> int:
+    """The pre-tile side, in tile-resolution pixels.
+
+    Refuses an odd margin. `centre_crop` has to remove `(pre - tile) / 2` from
+    each side, and a half-pixel there would put the tile off centre by a
+    different amount on the two sides. An odd factor times an even tile is
+    always fine; the check is here for the day one of those stops being true.
+    """
+    pre = int(tile) * int(factor)
+    if (pre - int(tile)) % 2:
+        raise ValueError(
+            f'tile {tile} x factor {factor} = {pre} leaves an odd margin of '
+            f'{pre - tile} px, so the tile cannot sit exactly in the centre. '
+            f'Use an even tile size or an odd factor')
+    return pre
+
+
+def centre_margin(tile: int, factor: int = PRE_TILE_FACTOR) -> int:
+    """Pixels removed from each side to get the tile back out of the pre-tile."""
+    return (pre_tile_px(tile, factor) - int(tile)) // 2
+
+
+def centre_crop(image: np.ndarray, tile: int) -> np.ndarray:
+    """The central `tile x tile` of a pre-tile. The ONE definition of the crop.
+
+    Strict on purpose: square, at least `tile`, and an even margin -- a crop
+    that silently shifted by half a pixel would move the labels against the
+    pixels and look like a slightly worse model. (query_sim's `_centre_crop`
+    is lenient by design, for a rectangular FoV; it is a different contract,
+    not a second copy of this one.)
+    """
+    h, w = np.asarray(image).shape[:2]
+    if h != w:
+        raise ValueError(f'pre-tile must be square, got {h}x{w}')
+    if h < tile:
+        raise ValueError(f'pre-tile is {h} px, smaller than the {tile} px tile')
+    if (h - tile) % 2:
+        raise ValueError(
+            f'{h} px pre-tile and {tile} px tile leave an odd margin; see '
+            f'pre_tile_px()')
+    off = (h - tile) // 2
+    return image[off:off + tile, off:off + tile]
 
 
 # ── richness: what is in a tile ──────────────────────────────────────────────
@@ -379,8 +474,8 @@ def bucket_names(edges: Sequence[float]) -> Tuple[str, ...]:
     THE COST, STATED. The old tuple's comment promised that these were "the
     same five and the same order as `ReferenceSampler.BUCKETS`, so a corpus cut
     here and a reference bank cut there can be compared bucket for bucket".
-    Seven derived names break that. `ReferenceSampler` is already on the
-    retirement list (its own TODO), and a comparison against names that lie is
+    Seven derived names broke that. `ReferenceSampler` has since been retired
+    and its reference banks are drawn here, and a comparison against names that lie is
     not a comparison worth keeping -- but it is a real loss and not a free one.
     """
     cuts = [0.0] + [float(e) for e in edges] + [1.0]
@@ -653,10 +748,10 @@ class OverlapConfig:
     overlapping_share: float = 0.0
 
     #: Displacements offered when a bucket runs out of lattice, **as fractions
-    #: of the tile**. `ReferenceSampler` writes the same five as absolute
+    #: of the tile**. The retired `ReferenceSampler` wrote the same five as absolute
     #: pixels -- (64, 256), (256, 64), (192, 256), (256, 192), (320, 320) --
     #: which are those numbers for a 256 px tile and are FOUR TIMES the tile at
-    #: 64. Its own docstring argues that the units matter ("as level-0
+    #: 64. Its own docstring argued that the units matter ("as level-0
     #: constants they would be 87% overlap at ds=8") and then picks one that
     #: holds for a single tile size. Fractions hold for every one.
     #:
@@ -678,9 +773,9 @@ class OverlapConfig:
     #: IS the maximum set. A non-zero cap there promises a top-up that cannot
     #: happen, and the bucket stays short with nothing saying why.
     #:
-    #: It means something as soon as overlap is allowed, which is what
-    #: `ReferenceSampler` assumes: it has these offsets and no overlap bound at
-    #: all.
+    #: It means something as soon as overlap is allowed, which is what the
+    #: retired `ReferenceSampler` assumed: it had these offsets and no overlap
+    #: bound at all.
     jitter_cap: float = 0.0
 
     def step_for(self, tile: int) -> int:
@@ -828,20 +923,11 @@ class SamplerConfig:
     #: it changes which tiles come out of the random arm.
     max_tries_per_tile: int = 5
 
-    #: Region preparation, run per rung and undone afterwards. Was hard-coded
-    #: at 0.01 inside the sampling loop, which meant the figure that drew the
-    #: ops pipeline at 0.05 was not showing what the corpus went through.
-    min_region_ratio: float = 0.01
-    merge_regions: bool = True
+    # No region prep here. It belongs to the mask's recipe
+    # (`TissueMaskConfig.min_region_ratio` / `merge`, hashed into `region_id`),
+    # and a second copy of it here ran the same prep twice under two configs.
 
     def __post_init__(self):
-        if hasattr(self, 'tissue_ratio'):
-            raise TypeError(
-                'tissue_ratio is gone. It scored the same quantity as the '
-                'richness buckets -- background fraction -- and the two '
-                'disagreeing is the 475/500 corpus of 2026-08-26. A zero cap '
-                'on the top buckets IS the gate: richness.caps[-2:] == (0, 0) '
-                'is a gate at 85 per cent background, stated once.')
         if self.candidates not in ('lattice', 'random'):
             raise ValueError(
                 f"candidates must be 'lattice' or 'random', got "
@@ -928,7 +1014,7 @@ class SampleMeta:
         `(12289 - 4096) // 2 = 4096`, and `4096 + 2*4096` is 12288. One px.
         A region with room to spare absorbs it; a region whose far edge IS the
         mask's -- which at a coarse rung is the only kind left, because
-        `filter_patchable` has removed every smaller one -- has nothing to
+        `patchable` has removed every smaller one -- has nothing to
         absorb it with, and the read runs one px off the scanned rectangle.
         Deriving it here means the two can no longer be different numbers.
         """
@@ -1113,8 +1199,7 @@ class TileSampler:
     """Sampler and container. See the module docstring for the spec."""
 
     def __init__(self, wsi, mask, cfg: Optional[SamplerConfig] = None,
-                 slide: str = '', **old_kwargs):
-        _refuse_old_kwargs(old_kwargs)
+                 slide: str = ''):
         # SafeSlide only. Tiles read here are handed downstream -- to the
         # encoders, to query_sim, to the pre-tile store -- and a plain handle
         # returns unphotographed pixels as transparent, which every RGB
@@ -1136,40 +1221,31 @@ class TileSampler:
         #: chain id -> (bucket, score) as scored at `source_rung`. Filled by
         #: `_choose_centres` and read only under bucket_frame='at_inherit'.
         self._inherit_bucket: Dict[int, Tuple[str, float]] = {}
+        #: Filled by `cached`: where this draw lives and what was reused.
+        self.cache_info: Dict[str, object] = {}
 
     # ── candidates ──────────────────────────────────────────────────────────
 
-    def _prepare_regions(self, plan: RungPlan) -> None:
-        """filter_regions -> merge -> filter_patchable, for THIS rung.
+    def _regions(self, plan: RungPlan):
+        """The regions that can host THIS rung's tile: a `patchable` view of
+        the mask, taken fresh per rung and never written back.
 
-        Undone by `_restore_regions`. The pair has to bracket every rung or the
-        rung's candidates depend on which rungs ran before it -- silently, and
-        differently depending on the order the caller asked for.
+        The mask arrives with its recipe's region prep already applied
+        (`TissueMaskConfig.regions`), so all that is left is the one step that
+        depends on the rung. It used to run filter, merge and patchable here in
+        place and undo all three afterwards, with its own copy of the recipe's
+        `min_region_ratio` -- so the same prep ran twice under two configs,
+        and a rung's candidates depended on the undo count being right.
 
-        `filter_patchable` is given the TILE's footprint, not the reserve, and
-        that is the whole of the two-rectangle rule below: the TILE is the
-        training sample and has to be in tissue; the RESERVE is only context
-        for a warp and has to be READABLE. `extract_pretiles`' own docstring
-        says it -- "The pre-tile has to be READABLE, not tissue."
-
-        Requiring the reserve to fit a single region was the earlier rule and
-        it cost the coarse rungs almost everything: at ds 32 it demanded a
-        region 24576 px wide, and BRACS_1228 came back with 21 tiles of 500
-        while S1104233 came back with 0. It also threw away exactly the
-        positions a warp wants -- a tile at the edge of a region whose pre-tile
-        reaches into the glass beside it, which is real glass a microscope
-        would also see.
+        The TILE's footprint, not the reserve, and that is the whole of the
+        two-rectangle rule in `_lattice`: the TILE is the training sample and
+        has to be in tissue; the RESERVE is only context for a warp and has to
+        be READABLE. Requiring the reserve to fit a single region was the
+        earlier rule and it cost the coarse rungs almost everything: at ds 32
+        it demanded a region 24576 px wide, and BRACS_1228 came back with 21
+        tiles of 500 while S1104233 came back with 0.
         """
-        self.mask.filter_regions(min_ratio=self.cfg.min_region_ratio)
-        if self.cfg.merge_regions:
-            self.mask.merge_overlapping()
-        self.mask.filter_patchable(tile_size=int(plan.footprint_l0), ds=1.0)
-
-    def _restore_regions(self) -> None:
-        self.mask.regions_undo()                      # filter_patchable
-        if self.cfg.merge_regions:
-            self.mask.regions_undo()                  # merge_overlapping
-        self.mask.regions_undo()                      # filter_regions
+        return self.mask.patchable(int(plan.footprint_l0)).tissue_regions
 
     def _lattice(self, plan: RungPlan) -> np.ndarray:
         """Level-0 top-left corners on the lattice, inside the regions.
@@ -1177,8 +1253,8 @@ class TileSampler:
         The step is in LEVEL pixels and is converted here, which is the whole
         reason `grid_step` is not a level-0 constant: as a level-0 number it
         would be a disjoint lattice at ds 1 and an 87 per cent overlapping one
-        at ds 8. `ReferenceSampler.JITTER_OFFSETS` records the same trap for
-        its own offsets.
+        at ds 8. The retired `ReferenceSampler.JITTER_OFFSETS` recorded the same
+        trap for its own offsets.
         """
         # footprint_l0 / tile is level-0 px per OUTPUT px. It equals ds on an
         # 'F' rung and 1 on an 'R' one, where ds degrades rather than
@@ -1191,7 +1267,7 @@ class TileSampler:
         fp = int(plan.footprint_l0)
         sx0, sy0, sx1, sy1 = _scanned_rect(self.mask)
         out = []
-        for region in self.mask.tissue_regions:
+        for region in self._regions(plan):
             # TWO RECTANGLES, INTERSECTED, and they are two requirements on two
             # different things:
             #
@@ -1238,7 +1314,7 @@ class TileSampler:
         which made `max_tries` a budget on ACCEPTED tiles; separating them
         costs a few thousand wasted draws and makes the two arms comparable.
         """
-        regions = self.mask.tissue_regions
+        regions = self._regions(plan)
         if not regions:
             return np.zeros((0, 2), dtype=np.int64)
         n = int(self.cfg.n_per_rung * max(1, self.cfg.max_tries_per_tile))
@@ -1582,14 +1658,10 @@ class TileSampler:
         want = cfg.inherit.source_rung
         source = (min(plans, key=lambda q: q.rung_ds) if want is None else
                   min(plans, key=lambda q: abs(q.rung_ds - want)))
-        self._prepare_regions(source)
-        try:
-            xy = self._candidates(source)
-            if len(xy):
-                _, b = self._rate(xy, source)
-                xy = xy[self._admissible(b)]
-        finally:
-            self._restore_regions()
+        xy = self._candidates(source)
+        if len(xy):
+            _, b = self._rate(xy, source)
+            xy = xy[self._admissible(b)]
         if not len(xy):
             return np.zeros((0, 2), dtype=np.int64)
 
@@ -1679,23 +1751,15 @@ class TileSampler:
 
     # ── the loop ────────────────────────────────────────────────────────────
 
-    def sample(self, plans: Sequence[RungPlan] = (), **old_kwargs
-               ) -> 'TileSampler':
+    def sample(self, plans: Sequence[RungPlan]) -> 'TileSampler':
         """Fill the container. The three phases, in the order they must run.
 
         Takes RUNG PLANS, not a level and a count. A plan says which level to
         read, what the footprint is and what must fit -- which is what lets one
         sampler serve a 4x pyramid and a 2x one without knowing which it is on.
         """
-        if old_kwargs or not plans:
-            raise _migration_error(
-                'sample(n=..., level=..., tissue_ratio=..., max_tries=...)',
-                'sample() now takes a sequence of RungPlan. n_per_rung is a '
-                'SamplerConfig field; tissue_ratio is GONE (richness.caps of '
-                'zero is the gate now); max_tries is '
-                'max_tries_per_tile and only the random arm reads it. Build '
-                'the plans with RungPlan.fov(...) or RungPlan.resolution(...), '
-                'or from common/DsLadder.py.')
+        if not plans:
+            raise ValueError('sample() needs at least one RungPlan')
         cfg = self.cfg
         # FINE TO COARSE, and the truncation is why. A chain breaks at the
         # rung where its footprint first reaches into a zero-capped bucket,
@@ -1751,45 +1815,41 @@ class TileSampler:
             self._rng = np.random.default_rng(cfg.seed)
 
             report = RungReport(ds=plan.rung_ds, n_asked=cfg.n_per_rung)
-            self._prepare_regions(plan)
-            try:
-                inherited = self._place_inherited(centres, plan, report)
-                xy = self._candidates(plan)
-                report.n_candidates = len(xy)
-                score, bucket = self._rate(xy, plan)
-                names = cfg.richness.names
-                for i, name in enumerate(names):
-                    report.supply[name] = int((bucket == i).sum())
-                keep = self._admissible(bucket)
-                xy, score, bucket = xy[keep], score[keep], bucket[keep]
-                report.n_admissible = len(xy)
+            inherited = self._place_inherited(centres, plan, report)
+            xy = self._candidates(plan)
+            report.n_candidates = len(xy)
+            score, bucket = self._rate(xy, plan)
+            names = cfg.richness.names
+            for i, name in enumerate(names):
+                report.supply[name] = int((bucket == i).sum())
+            keep = self._admissible(bucket)
+            xy, score, bucket = xy[keep], score[keep], bucket[keep]
+            report.n_admissible = len(xy)
 
-                if cfg.richness.bucket_frame == 'at_inherit':
-                    # The bucket decided at `source_rung`, carried unchanged.
-                    # A chain then has ONE bucket -- what a per-bucket survival
-                    # analysis needs -- and the quotas act only on the
-                    # remainder, which is what that costs.
-                    for m in inherited:
-                        got = self._inherit_bucket.get(m.inherit_id)
-                        if got:
-                            m.bucket, m.score = got
-                else:
-                    # Recomputed at this rung. The footprint is this rung's, so
-                    # the bucket is too; a chain drifts between buckets as it
-                    # climbs, and that is the price of each rung's distribution
-                    # being what the quotas asked for.
-                    pass          # _place_inherited already rated them
+            if cfg.richness.bucket_frame == 'at_inherit':
+                # The bucket decided at `source_rung`, carried unchanged.
+                # A chain then has ONE bucket -- what a per-bucket survival
+                # analysis needs -- and the quotas act only on the
+                # remainder, which is what that costs.
+                for m in inherited:
+                    got = self._inherit_bucket.get(m.inherit_id)
+                    if got:
+                        m.bucket, m.score = got
+            else:
+                # Recomputed at this rung. The footprint is this rung's, so
+                # the bucket is too; a chain drifts between buckets as it
+                # climbs, and that is the price of each rung's distribution
+                # being what the quotas asked for.
+                pass          # _place_inherited already rated them
 
-                chosen = self._select(xy, bucket, score, plan, inherited,
-                                      report)
-                rung = inherited + chosen
-                report.n_taken = len(rung)
-                for name in names:
-                    report.per_bucket[name] = sum(
-                        1 for m in rung if m.bucket == name)
-                samples.extend(rung)
-            finally:
-                self._restore_regions()
+            chosen = self._select(xy, bucket, score, plan, inherited,
+                                  report)
+            rung = inherited + chosen
+            report.n_taken = len(rung)
+            for name in names:
+                report.per_bucket[name] = sum(
+                    1 for m in rung if m.bucket == name)
+            samples.extend(rung)
             self.reports[plan.rung_ds] = report
 
         self.samples = [Sample(m) for m in samples]
@@ -1806,18 +1866,14 @@ class TileSampler:
         out = []
         for plan in plans:
             report = RungReport(ds=plan.rung_ds, n_asked=self.cfg.n_per_rung)
-            self._prepare_regions(plan)
-            try:
-                xy = self._candidates(plan)
-                report.n_candidates = len(xy)
-                _, bucket = self._rate(xy, plan)
-                names = self.cfg.richness.names
-                for i, name in enumerate(names):
-                    report.supply[name] = int((bucket == i).sum())
-                    report.per_bucket[name] = report.supply[name]
-                report.n_admissible = int(self._admissible(bucket).sum())
-            finally:
-                self._restore_regions()
+            xy = self._candidates(plan)
+            report.n_candidates = len(xy)
+            _, bucket = self._rate(xy, plan)
+            names = self.cfg.richness.names
+            for i, name in enumerate(names):
+                report.supply[name] = int((bucket == i).sum())
+                report.per_bucket[name] = report.supply[name]
+            report.n_admissible = int(self._admissible(bucket).sum())
             out.append(report)
         return out
 
@@ -2000,8 +2056,8 @@ class TileSampler:
         Whether a tile was photographed is a property of (location, LEVEL) and
         cannot be answered from a mask or shared between rungs -- a corrupt
         stored tile at level 0 says nothing about level 3. So this runs per
-        tile, and a chain is re-checked at every rung: `ReferenceSampler` calls
-        that out for the same reason ("a correspondence with holes in it is not
+        tile, and a chain is re-checked at every rung: the retired
+        `ReferenceSampler` called that out for the same reason ("a correspondence with holes in it is not
         a correspondence").
 
         Returns how many went, per rung. Chains that lose a member become
@@ -2040,11 +2096,11 @@ class TileSampler:
                'overlap_max',
                'inherit_id', 'stack_kind', 'origin', 'parent_x', 'parent_y')
 
-    def save(self, folder: Union[str, Path], with_images: bool = False
-             ) -> Path:
+    def save(self, folder: Union[str, Path], with_images: bool = False,
+             extra_meta: Optional[Dict[str, object]] = None) -> Path:
         """`index.csv` + `meta.json`, and the PNGs when asked for.
 
-        The format is `utilities/PreTileStore.py`'s, not a second one: an
+        The format is `Store.PreTileStore`'s, not a second one: an
         `index.csv` beside a `meta.json` beside one PNG per record. What this
         adds is the axis columns.
 
@@ -2084,6 +2140,7 @@ class TileSampler:
             'provenance': self.cfg.provenance(),
             'rungs': {f'{d:g}': dataclasses.asdict(r)
                       for d, r in self.reports.items()},
+            **(extra_meta or {}),
         }
         with open(folder / 'meta.json', 'w') as handle:
             json.dump(meta, handle, indent=2)
@@ -2124,7 +2181,12 @@ class TileSampler:
         out.cfg = cfg or SamplerConfig()
         out.slide = meta.get('slide', '')
         out.samples = [Sample(m) for m in rows]
-        out.reports = {}
+        # The per-rung reports ride in meta.json (`save` writes them), and a
+        # reload that dropped them could not say what the draw looked like --
+        # which is the whole of `write_report`.
+        out.reports = {float(d): RungReport(**r)
+                       for d, r in meta.get('rungs', {}).items()}
+        out.cache_info = {}
         out._rng = np.random.default_rng(out.cfg.seed)
         out._inherit_bucket = {}
 
@@ -2136,6 +2198,140 @@ class TileSampler:
                 f'wrong config would report the wrong axes for every row -- '
                 f'pass the right config, or none, and read the stored one')
         return out
+
+    # ── the cache ───────────────────────────────────────────────────────────
+
+    @classmethod
+    def cached(cls, wsi_path: Union[str, Path], cfg: SamplerConfig,
+               plan: PlanSpec, sampler_root: Union[str, Path], *, masks,
+               report_dir: Optional[Union[str, Path]] = None) -> 'TileSampler':
+        """The draw for one slide, from the cache when it is there and made
+        -- segmentation included -- when it is not.
+
+            <sampler_root>/<seg_id>/<slide>/<region_id>_<sampler_id>_<plan>/
+                                            index.csv + meta.json
+
+        `masks` is the caller's `TissueMaskConfig.MaskMaker`: the recipe, the
+        device and the MASK cache, which is its own object under its own root
+        (`<made_by>_mask`). The draw's path repeats the mask's keys, upstream
+        above downstream, so dropping a recipe is one `rm -rf` of `<seg_id>/`
+        in each root.
+
+        A hit opens NOTHING: no slide, no segmenter. A miss opens the slide,
+        asks `masks` for the mask (itself a hit or a segmentation), samples,
+        and writes the draw atomically. Either way the sampler comes back in
+        one state -- `wsi=None, mask=None` -- so a caller cannot tell which
+        happened by what it holds, only by `cache_info`; a caller that wants
+        pixels passes its own reader to `materialise`.
+
+        `masks` is taken as an object and never imported: the mask recipes
+        import every segmenter, and this module stays without them.
+
+        `report_dir`, when given, receives `sampler_report_<slide>.md` and
+        `samples_<slide>.csv` -- on a hit exactly as on a miss, because the
+        report is written from what this sampler holds, not from how it got it.
+        """
+        mask_cfg = masks.cfg
+        slide = wsi_stem_of(wsi_path)
+        folder = (Path(sampler_root) / mask_cfg.seg_id() / slide
+                  / f'{mask_cfg.region_id()}_{cfg.sampler_id()}_{plan.key()}')
+        info = dict(folder=str(folder), seg_id=mask_cfg.seg_id(),
+                    region_id=mask_cfg.region_id(), sampler_id=cfg.sampler_id(),
+                    plan=plan.key(),
+                    mask_parts=list(mask_cfg.identity_parts()))
+        if (folder / 'meta.json').exists():
+            out = cls.load(folder, cfg=cfg)
+            with open(folder / 'meta.json') as handle:
+                check_source(json.load(handle), wsi_path, folder)
+            info.update(mask_hit=True, samples_hit=True)
+        else:
+            from SafeSlide import SafeSlide                     # noqa: PLC0415
+            with SafeSlide(str(wsi_path)) as wsi:
+                mask, mask_hit = masks.mask(wsi)
+                out = cls(wsi, mask, cfg, slide=slide)
+                out.sample(plan.plans_for(wsi, cfg.tile))
+                with atomic_dir(folder) as tmp:
+                    out.save(tmp, extra_meta=dict(
+                        source=source_key(wsi_path), wsi_path=str(wsi_path),
+                        seg_id=info['seg_id'], region_id=info['region_id'],
+                        plan=info['plan'], mask_parts=info['mask_parts']))
+            out.wsi, out.mask = None, None
+            info.update(mask_hit=bool(mask_hit), samples_hit=False)
+        out.slide = slide
+        out.cache_info = info
+        if report_dir is not None:
+            out.write_report(report_dir)
+        return out
+
+    def write_report(self, report_dir: Union[str, Path]) -> Path:
+        """`sampler_report_<slide>.md` and `samples_<slide>.csv` into
+        `report_dir` -- the result directory of whoever asked for this draw.
+
+        The report is the whole of what decided the draw and what came of it:
+        the sampler config and the mask recipe, the cache entry used and
+        whether the mask and the draw were reused or made, and per rung what
+        the candidate pool offered (`supply`) against what was taken
+        (`per_bucket`) -- a cap shows as the two disagreeing, a slide that did
+        not have a bucket as `below floor`. The CSV is every sample's identity,
+        `save`'s own columns.
+        """
+        report_dir = Path(report_dir)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        slide = self.slide or 'slide'
+        info = getattr(self, 'cache_info', {}) or {}
+
+        csv_path = report_dir / f'samples_{slide}.csv'
+        with open(csv_path, 'w', newline='') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(self.COLUMNS)
+            for i, s in enumerate(self.samples):
+                writer.writerow([i] + [getattr(s.meta, c) for c in self.COLUMNS[1:]])
+
+        names = list(self.cfg.richness.names)
+        lines = [f'# Sampler report -- {slide}', '']
+        if info:
+            state = lambda hit: 'reused' if hit else 'computed'   # noqa: E731
+            lines += ['## Cache', '',
+                      f'- entry: `{info.get("folder", "")}`',
+                      f'- mask: {state(info.get("mask_hit"))}, '
+                      f'draw: {state(info.get("samples_hit"))}',
+                      f'- seg_id `{info.get("seg_id")}`, region_id '
+                      f'`{info.get("region_id")}`, sampler_id '
+                      f'`{info.get("sampler_id")}`, plan `{info.get("plan")}`', '',
+                      '## Mask recipe (fields that differ from the baseline)', '']
+            lines += [f'- `{p}`' for p in info.get('mask_parts', [])] or ['- (baseline)']
+            lines.append('')
+        lines += ['## Sampler config', '']
+        lines += [f'- `{p}`' for p in _config_parts(self.cfg)]
+        for k, v in self.cfg.provenance().items():
+            lines.append(f'- `{k}={v!r}` (provenance, not identity)')
+        lines += ['', f'## Distribution ({len(self.samples)} samples)', '',
+                  '| rung | asked | taken | short | below floor | spilled | '
+                  + ' | '.join(names) + ' |',
+                  '|' + '---|' * (6 + len(names))]
+        totals = collections.Counter()
+        for ds in sorted(self.reports):
+            r = self.reports[ds]
+            totals.update(r.per_bucket)
+            lines.append(f'| {ds:g} | {r.n_asked} | {r.n_taken} | {r.short} | '
+                         f'{r.n_below_floor} | {r.n_spilled} | '
+                         + ' | '.join(str(r.per_bucket.get(n, 0)) for n in names)
+                         + ' |')
+        lines.append('| all | | ' + str(len(self.samples)) + ' | | | | '
+                     + ' | '.join(str(totals.get(n, 0)) for n in names) + ' |')
+        lines += ['', '## Candidate supply per bucket (what the pool offered)', '',
+                  '| rung | candidates | admissible | ' + ' | '.join(names) + ' |',
+                  '|' + '---|' * (3 + len(names))]
+        for ds in sorted(self.reports):
+            r = self.reports[ds]
+            lines.append(f'| {ds:g} | {r.n_candidates} | {r.n_admissible} | '
+                         + ' | '.join(str(r.supply.get(n, 0)) for n in names)
+                         + ' |')
+        lines += ['', f'Sample identities: `{csv_path.name}`', '']
+
+        md_path = report_dir / f'sampler_report_{slide}.md'
+        md_path.write_text('\n'.join(lines))
+        return md_path
 
     # ── summary ─────────────────────────────────────────────────────────────
 
@@ -2153,41 +2349,3 @@ class TileSampler:
 
 
 # ── what the previous sampler's callers hit ──────────────────────────────────
-
-class TileInfo:
-    """The old per-tile record. Refuses, and says what replaced it.
-
-    Not an alias for `SampleMeta`: the old record carried `mpp` and no axis at
-    all, so code that reads `info.mpp` off a `SampleMeta` would get an
-    AttributeError somewhere unrelated. An explicit refusal here puts the
-    message at the line that needs changing.
-    """
-
-    def __init__(self, *args, **kwargs):
-        raise TypeError(
-            'TileInfo is gone; TileSampler now yields Sample objects whose '
-            '.meta is a SampleMeta. The fields moved: level/x/y are the same, '
-            'tile_size is the OUTPUT side and read_size is what is read, and '
-            'mpp is no longer carried (ask the slide -- it was a copy of '
-            'wsi.base_mpp * level_downsample and could go stale). See the '
-            'module docstring.')
-
-
-def _migration_error(what: str, instead: str) -> TypeError:
-    return TypeError(
-        f'{what} is gone. {instead}\n'
-        f'  There is deliberately NO default sampling behaviour: the three '
-        f'axes -- richness, overlap, inheritance -- all change which tiles '
-        f'come out, all go into sampler_id, and a default would be a value '
-        f'that was set and that nobody noticed. Say what you want.\n'
-        f'  The old behaviour is SamplerConfig(candidates="random"), kept as '
-        f'the control arm rather than as a fallback.')
-
-
-def _refuse_old_kwargs(kwargs: Dict[str, object]) -> None:
-    old = {'tile_size', 'seed'} & set(kwargs)
-    if old:
-        raise _migration_error(
-            f'TileSampler(..., {", ".join(sorted(old))}=...)',
-            'Both moved into SamplerConfig: '
-            'TileSampler(wsi, mask, SamplerConfig(tile=256, seed=42)).')

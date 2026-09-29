@@ -1,8 +1,8 @@
 """Tissue segmentation from UNI2 patch features and one PCA per slide.
 
     seg  = Uni2PcaSegConfig().build(device)
-    mask = seg.mask_wsi(wsi)                       # fit + project, level 0, no args
-    trm  = TissuesRegionsMask.from_mask(wsi, mask.mask, mask.origin, mask.span)
+    mask = seg.segment_slide(wsi)                  # fit + project, level 0, no args
+    trm  = TissueMask(wsi, mask)
 
 THIS IS A SLIDE SEGMENTER, NOT AN IMAGE SEGMENTER
 --------------------------------------------------
@@ -16,10 +16,10 @@ together by a docstring, and a `level` that never reached `identity_id`. All of
 them were downstream of forcing a slide-shaped operation through `method=`.
 
 It cannot be an image segmenter because it fits a PCA ACROSS the slide before it
-can threshold any part of it. `TissuesRegionsMask.from_wsi` reads a plane and
-hands it to a callable; there is no plane it could hand this that would let it
-do its job. So the mask is made first and `from_mask` does the rest --
-`_search_tissue_regions`, the origin bookkeeping, `mask_ds` from the shape.
+can threshold any part of it. `PlaneSegmenter` reads a plane and hands it to
+`__call__`; there is no plane it could hand this that would let it do its job.
+So this overrides `segment_slide` itself, and `TissueMask` does the rest --
+the region search, the origin bookkeeping, `mask_ds` from the shape.
 
 `__call__` survives as the base-class contract and as an escape hatch for a
 caller holding a fitted basis and one level-0 plane. It is not the path.
@@ -147,8 +147,9 @@ import torch                                                # noqa: E402
 from PIL import Image                                       # noqa: E402
 
 from ConfigIdentity import register                         # noqa: E402
-from MaskStore import SlideMask                            # noqa: E402
-from TissueSegFunc import TissueSegConfig, TissueSegmenter  # noqa: E402
+from TissueMask import SlideMask                    # noqa: E402
+from TissueSegFunc import (TissueSegConfig, TissueSegmenter,  # noqa: E402
+                           scanned_rect)
 
 
 #: The pyramid level everything here reads at, and it is not a parameter.
@@ -160,9 +161,9 @@ from TissueSegFunc import TissueSegConfig, TissueSegmenter  # noqa: E402
 #: passes the literal 0 for the same reason.
 #:
 #: A level parameter WAS here, and it existed only because fit and apply had
-#: been split apart to serve `TissuesRegionsMask.from_wsi(method=...)` -- which
+#: been split apart to serve the old `from_wsi(method=...)` door -- which
 #: made "the two must share a magnification" an invariant that nothing could
-#: check. `mask_wsi` puts them back in one call and the parameter has nothing
+#: check. `segment_slide` puts them back in one call and the parameter has nothing
 #: left to do.
 #:
 #: The cost that seemed to justify a coarser level is measured and small. From
@@ -200,33 +201,13 @@ _UNI2_PCA_BASELINE = {
 
 # ── reading the slide ─────────────────────────────────────────────────────────
 
-def scanned_bounds(wsi, limit_bounds: bool = True) -> Tuple[Tuple[int, int],
-                                                            Tuple[int, int]]:
-    """(origin, span) in LEVEL-0 pixels: the rectangle the scanner covered.
-
-    A third copy of the same six lines -- `SlideWinSift.py:248-255` and
-    `test_EoMT.slide_bounds:412` are the others, and `TissuesRegionsMask.
-    _resolve_geometry` computes it again as part of a larger answer. Copied
-    rather than imported because the alternatives are worse: reaching into a
-    private staticmethod of `TissuesRegionsMask` from `aiNNModel/` would point
-    this layer sideways, and importing that module pulls openslide and the
-    connected-component machinery in for six lines of arithmetic.
-
-    Why it matters here specifically: on a MIRAX the canvas outside
-    `openslide.bounds-*` is stage travel range holding no image data. Tiles over
-    it read nothing, and a ViT handed a blank tile has only its POSITIONAL
-    EMBEDDING varying between patches -- so a PCA fitted on those finds
-    position, and the mask comes out in bands. That is not a hypothetical; it is
-    what banded the earlier figure in test_EoMT.
-    """
-    props = wsi.properties
-    width, height = wsi.level_dimensions[0]
-    if not limit_bounds:
-        return (0, 0), (width, height)
-    return ((int(props.get('openslide.bounds-x', 0)),
-             int(props.get('openslide.bounds-y', 0))),
-            (int(props.get('openslide.bounds-width', width)),
-             int(props.get('openslide.bounds-height', height))))
+# `scanned_rect` is TissueSegFunc's: one definition of the scanned rectangle
+# for every segmenter. It matters more here than for the plane segmenters. On a
+# MIRAX the canvas outside `openslide.bounds-*` is stage travel range holding no
+# image data; tiles over it read nothing, and a ViT handed a blank tile has only
+# its POSITIONAL EMBEDDING varying between patches -- so a PCA fitted on those
+# finds position, and the mask comes out in bands. That is what banded the
+# earlier figure in test_EoMT.
 
 
 def tile_saturation(wsi, origin, span, tile: int, ds: float = 32.0) -> np.ndarray:
@@ -275,7 +256,7 @@ def stratified_positions(saturation: np.ndarray, n: int, bins: int = 10,
     covers 38.2 / 24.4 / 23.1 percent of the three BRACS and 9.2 / 5.9 / 4.6 /
     3.5 percent of the four Ki67 -- so a uniform 1000 over the last one is about
     35 tiles of tissue against 965 of glass, and the largest variance in that
-    sample is the variance AMONG BLANK TILES. See `scanned_bounds` for what a
+    sample is the variance AMONG BLANK TILES. See `scanned_rect` for what a
     PCA of blank tiles finds.
 
     Quantile bins rather than a high half and a low half: the interesting cells
@@ -361,15 +342,14 @@ class Uni2PcaSegConfig(TissueSegConfig):
 
     #: NO plane_ds, AND THAT IS THE POINT. It used to hold "the downsample the
     #: masking pass will read at", which had to equal the `ds` the caller passed
-    #: to `from_wsi` -- and nothing could check it. `__call__` receives an
+    #: to the old `from_wsi` -- and nothing could check it. `__call__` receives an
     #: ndarray and cannot know its magnification, so a basis fitted at ds 8 and
     #: applied to a ds 32 plane produced a mask of the right shape, silently
     #: wrong. An invariant held together by a docstring is not an invariant.
     #:
-    #: The magnification now enters exactly once, as `fit(wsi, level)`, and the
-    #: caller passes the SAME level to `from_wsi(level=...)`. That is still two
-    #: places, but they are two arguments of the same kind at one call site
-    #: rather than a config field and a call argument in different files.
+    #: The magnification now enters nowhere: `segment_slide` fits and projects
+    #: at `LEVEL` in one call, so there is no second place for it to disagree
+    #: with.
 
     #: Side of the square handed to the encoder, in plane pixels. Fed as read --
     #: `cfg.transform`'s resize and centre crop are bypassed -- so this only has
@@ -400,7 +380,7 @@ class Uni2PcaSegConfig(TissueSegConfig):
     #: notebook's number. PC1's histogram is bimodal on Ki67 (valley near 0.2)
     #: and unimodal on BRACS, so no single value can be read off both, and a
     #: mask cannot answer a question about the field it was thresholded FROM.
-    #: That is why `mask_wsi` hands its components to `MaskStore`: with them on
+    #: That is why `segment_slide` hands its components to the mask cache: with them on
     #: disk a sweep over candidate thresholds costs seconds, and without them it
     #: costs another 3.5 to 6 minutes of GPU per slide per candidate.
     background_threshold: float = 0.5
@@ -413,7 +393,7 @@ class Uni2PcaSegConfig(TissueSegConfig):
     #: `larger_pca_as_fg=True` selected 12.8 percent of the slide as scattered
     #: specks INSIDE a section that covers about half of it. Handing that to
     #: `_search_tissue_regions` gives thousands of one-cell regions, and
-    #: `filter_regions` then deletes almost all of them.
+    #: `filtered` then deletes almost all of them.
     #:
     #: `TissueSegFunc.mask_hsv:80-84` does the same close-then-open with the same
     #: 7 for the same reason, which is why the number is 7 rather than a new
@@ -447,7 +427,7 @@ class Uni2PcaSegConfig(TissueSegConfig):
     fit_seed: int = 0
     fit_ds: float = 32.0
 
-    #: Restrict everything to `openslide.bounds-*`. See `scanned_bounds`.
+    #: Restrict everything to `openslide.bounds-*`. See `scanned_rect`.
     limit_bounds: bool = True
 
     #: Tiles per encoder forward. Cannot change a single tile's features (a ViT
@@ -501,8 +481,10 @@ class Uni2PcaSegmenter(TissueSegmenter):
     """UNI2 features, one PCA per slide, PC1 thresholded.
 
         seg = Uni2PcaSegConfig().build(device)
-        seg.fit(wsi)                       # REQUIRED; see TissueSegmenter.fit
-        mask = seg(rgb_plane)              # [H, W] uint8, 1 = tissue
+        mask = seg.segment_slide(wsi)      # the path: fit + project, SlideMask
+
+        seg.fit(wsi)                       # the escape hatch: fit once, then
+        mask = seg(rgb_plane)              # one plane -> [H, W] uint8
     """
 
     BASELINE = _UNI2_PCA_BASELINE
@@ -617,9 +599,9 @@ class Uni2PcaSegmenter(TissueSegmenter):
     def fit(self, wsi, level: int = LEVEL) -> 'Uni2PcaSegmenter':
         """One PCA basis for the whole slide, from a stratified sample.
 
-        Called by `mask_wsi`, which is the entry point. Public only because
-        `TissueSegmenter.fit` is, and because `__call__` needs a basis before it
-        can do anything -- see its docstring for when that is the path you want.
+        Called by `segment_slide`, which is the entry point. Public only because
+        `__call__` needs a basis before it can do anything -- see its docstring
+        for when that is the path you want.
 
         `level` DEFAULTS TO 0 AND SHOULD NOT BE PASSED. It is an argument at all
         so `__call__` on a non-level-0 plane is reachable by someone who knows
@@ -637,7 +619,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
         from sklearn.preprocessing import MinMaxScaler
 
         cfg = self.cfg
-        origin, span = scanned_bounds(wsi, cfg.limit_bounds)
+        origin, span = scanned_rect(wsi, cfg.limit_bounds)
         level = int(level)
         level_ds = float(wsi.level_downsamples[level])
 
@@ -699,7 +681,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
         input the way `mask_hsv` is and `mask_otsu` is not.
 
         The cell grid is upsampled back to the input's pixel size before
-        returning. `TissuesRegionsMask._tiled_apply:307-311` slices the returned
+        returning. `TissueSegFunc.tiled_apply` slices the returned
         mask with the INPUT tile's pixel offsets and assigns into a full-size
         array, so a cell-resolution mask raises there on broadcast -- while the
         single-call path would have accepted it and derived a coarser ds from
@@ -709,10 +691,10 @@ class Uni2PcaSegmenter(TissueSegmenter):
         """
         if not self.fitted:
             raise RuntimeError(
-                'the PCA has not been fitted. Call seg.fit(wsi) before handing '
-                'this to from_wsi. Fitting inside here instead would give every '
-                'tile its own basis, which is the failure from_wsi already '
-                'documents for _mask_otsu -- and worse, because MinMaxScaler '
+                'the PCA has not been fitted. Call seg.fit(wsi) first, or use '
+                'segment_slide. Fitting inside here instead would give every '
+                'tile its own basis -- the failure mask_otsu documents for its '
+                'histogram threshold, and worse, because MinMaxScaler '
                 "maps a tile's own extremes to 0 and 1, so an all-tissue tile "
                 'lands its threshold inside tissue')
 
@@ -722,16 +704,16 @@ class Uni2PcaSegmenter(TissueSegmenter):
                   if self.cfg.larger_pca_as_fg
                   else pc1 < self.cfg.background_threshold)
 
-        # NO _clean HERE, and the asymmetry with mask_wsi is deliberate.
+        # NO _clean HERE, and the asymmetry with segment_slide is deliberate.
         #
         # `morph_kernel` is a spatial operation: a close near the edge of this
         # plane sees no neighbours, so the result would depend on WHERE the
-        # caller cut the plane. That is exactly the property `from_wsi`'s tiled
-        # paths require this method not to have -- and the one
+        # caller cut the plane. That is exactly the property a tiled read
+        # (`tiled_apply`) requires this method not to have -- and the one
         # `test_uni2_pca_seg` pins by segmenting a plane whole and in quadrants
         # and demanding they agree pixel for pixel.
         #
-        # `mask_wsi` holds the whole mask, so there is no cut for morphology to
+        # `segment_slide` holds the whole mask, so there is no cut for morphology to
         # depend on, and it cleans there.
 
         rgb = np.asarray(image.convert('RGB')) if isinstance(image, Image.Image) \
@@ -842,13 +824,12 @@ class Uni2PcaSegmenter(TissueSegmenter):
                    index.numpy())
 
     @torch.no_grad()
-    def mask_wsi(self, wsi) -> 'SlideMask':
+    def segment_slide(self, wsi) -> 'SlideMask':
         """A whole slide in, a tissue mask out. The entry point; no parameters.
 
             seg  = Uni2PcaSegConfig().build(device)
-            mask = seg.mask_wsi(wsi)
-            trm  = TissuesRegionsMask.from_mask(wsi, mask.mask,
-                                                mask.origin, mask.span)
+            mask = seg.segment_slide(wsi)
+            trm  = TissueMask(wsi, mask)
 
         Fits and projects in ONE call, which is what makes the two impossible to
         disagree about -- and disagreeing about magnification was the failure
@@ -879,7 +860,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
                   else pc1 < self.cfg.background_threshold)
         tissue = self._clean(tissue)
 
-        origin, _ = scanned_bounds(wsi, self.cfg.limit_bounds)
+        origin, _ = scanned_rect(wsi, self.cfg.limit_bounds)
         covered = (tissue.shape[1] * self._cell_px, tissue.shape[0] * self._cell_px)
         return SlideMask(mask=tissue, origin=origin, span=covered,
                          mask_ds=float(self._cell_px), report=self.fit_report,
@@ -919,9 +900,8 @@ class Uni2PcaSegmenter(TissueSegmenter):
         `test_EoMT.slide_pca_mask` streams tiles and assembles only the cell
         grid.
 
-        `__call__` remains the `method=` contract for `TissuesRegionsMask`,
-        where the plane is the caller's to read and `read_chunk_px` is the
-        caller's way to stream it. This is the other direction: for a diagnostic
+        `__call__` remains the per-image escape hatch, for a caller holding
+        one plane it read itself. This is the other direction: for a diagnostic
         that wants the continuous field over a whole slide, and later for
         anything that wants the components rather than one bit per cell.
 
@@ -934,7 +914,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
             self.fit(wsi, level)
 
         cfg = self.cfg
-        origin, span = scanned_bounds(wsi, cfg.limit_bounds)
+        origin, span = scanned_rect(wsi, cfg.limit_bounds)
         level_ds = float(wsi.level_downsamples[level])
         positions, (n_rows, n_cols) = grid_positions(span, cfg.tile, level_ds)
         if not positions:
@@ -950,6 +930,12 @@ class Uni2PcaSegmenter(TissueSegmenter):
 
         cells = (side, side) if thumbnail else None
         done = 0
+        # Quarters, not every batch -- a slide's scanned rectangle is
+        # 10^5-10^6 tiles (see this method's own docstring), and printing
+        # every `batch_tiles`-sized step is 1500+ lines nobody reads. One
+        # line per ~25% still says the run is alive without flooding a log.
+        report_every = max(1, len(positions) // 4)
+        next_report = report_every
         for tiles, small, index in self._read_tiles(wsi, origin, positions,
                                                     level, cells):
             projected = self._project(self._cells(tiles))
@@ -963,9 +949,10 @@ class Uni2PcaSegmenter(TissueSegmenter):
                 if thumbnail:
                     thumb[ys, xs] = small[b]
             done += len(index)
-            print(f'\r        projecting {done}/{len(positions)} tiles',
-                  end='', flush=True)
-        print(flush=True)
+            if done >= next_report or done >= len(positions):
+                print(f'        projecting {done}/{len(positions)} tiles '
+                     f'({100 * done // len(positions)}%)', flush=True)
+                next_report += report_every
         return components, thumb
 
     # ── the one encoder call ────────────────────────────────────────────────

@@ -9,11 +9,11 @@ Wraps the three stage primitives into one WSI-scoped object:
 Design:
 
 * build() does the WSI-wide one-time work (mask + KNN reference bank).
-* The mask is always built through `from_wsi`'s tile-and-stitch path
-  (`mask_seg_chunk_px`). A heavy `mask_method` such as HEST DeepLabV3 OOMs on a
-  whole MRXS level otherwise — at mask_ds=16 one slide's level image is
-  ~313 MP, and a single ResNet layer1 activation on that is 18.6 GiB.
-  Pass mask_seg_chunk_px=None to opt out and segment the level in one call.
+* The mask comes from `mask_cfg` (a `MASK_RECIPES` entry, hest by default),
+  whose segmenter reads the level tile by tile -- a heavy method such as HEST
+  DeepLabV3 OOMs on a whole MRXS level otherwise: at mask_ds=16 one slide's
+  level image is ~313 MP, and a single ResNet layer1 activation on that is
+  18.6 GiB. The chunk budgets are fields of the recipe's segmenter config.
 * A retriever is built lazily on first use for each pyramid level; the
   routed level is `KnnEstMpp.estimate`'s own `chosen_level` --
   `wsi.coarser_level_for_downsample`, the repo's own measured, coarse-biased
@@ -25,7 +25,7 @@ Design:
   reading `chosen_level` off the Result rather than recomputing it; see
   `StageInterface.py`'s docstring for why that recompute is not a shared
   function either, now that there is nothing left here to share it with.
-* If a level's retriever build fails (e.g. filter_patchable emptied the mask
+* If a level's retriever build fails (e.g. `patchable` emptied the mask
   because tiles are too big at that level), the shot is marked
   `unusable_level` and its stage 2 / 3 metrics are None.
 * Errors in any stage produce a LocaScopeQueryResult with `.error` set;
@@ -72,7 +72,7 @@ for _d in ('utilities', '1_estimate_query_mpp', '2_retrieval', '3_localization')
 
 from PatchingLib             import QueryPatchContainer                                # noqa: E402
 from SafeSlide               import SafeSlide                                          # noqa: E402
-from TissuesRegionsMask      import TissuesRegionsMask                                 # noqa: E402
+from TissueMask      import TissueMask                                 # noqa: E402
 from TileSampler             import OverlapConfig, SamplerConfig                       # noqa: E402
 from KnnEstMpp                import (KnnEstMpp, KnnEstMppConfig,                       # noqa: E402
                                       REFERENCE_BANK_RICHNESS)
@@ -123,7 +123,7 @@ class LocaScopePipeline:
         # SafeSlide, not OpenSlide: a MIRAX read that lands on a cell the
         # scanner never wrote raises, and that raise latches on the handle, so
         # every later call fails -- metadata included. Since this one object is
-        # handed to TissuesRegionsMask, TileSampler and GigaPathSlidingWinSimRot,
+        # handed to TissueMask, TileSampler and GigaPathSlidingWinSimRot,
         # the recovery has to live inside it; healing swaps the native handle in
         # place and every holder keeps working.
         if isinstance(wsi, str):
@@ -140,8 +140,8 @@ class LocaScopePipeline:
         # One value instead of five parameters and two remembered method calls.
         # The mask a pipeline builds can now say how it was built, which is what
         # a cache has to ask before trusting a stored feature map.
-        from TissueMaskConfig import TissueMaskConfig
-        self.mask_cfg            = mask_cfg or TissueMaskConfig()
+        from TissueMaskConfig import MASK_RECIPES
+        self.mask_cfg            = mask_cfg or MASK_RECIPES['hest']
         self.feature_store_root  = feature_store_root
         self.feature_store_mode  = feature_store_mode
         self.knn_samples         = knn_samples
@@ -156,7 +156,7 @@ class LocaScopePipeline:
         # QueryFromWSI on every slide in use.
         self.base_mpp = wsi.base_mpp   # raises if the slide carries no mpp
 
-        self.mask:      Optional[TissuesRegionsMask] = None
+        self.mask:      Optional[TissueMask] = None
         self.estimator: Optional[KnnEstMpp] = None
         # None value == "tried, unusable"; missing key == "not tried yet"
         self._retrievers: Dict[int, Optional[GigaPathSlidingWinSimRot]] = {}
@@ -198,29 +198,28 @@ class LocaScopePipeline:
     # ── Lazy per-level retriever cache ────────────────────────────────────────
     #
     # `_level_mask` used to live here: a per-level copy of the mask keeping only
-    # regions that can host a tile. It was TissuesRegionsMask.filter_patchable
-    # written out a second time, because that method mutates in place and this
-    # needed a copy. Both halves moved into the library -- `regions_view()` for
-    # the copy, and `WsiTissuesContainer.from_ds` for the filter -- so the
+    # regions that can host a tile. It was the patchable filter written out a
+    # second time, because the mask's filter then mutated in place and this
+    # needed a copy. It moved into the library -- `WsiTissuesContainer.from_ds`
+    # takes a `mask.patchable(...)` view -- so the
     # retriever now narrows the mask itself, at the ds it is actually going to
     # build at. Which is the point: this class did not know that ds, it only
     # knew the one it was asking for.
 
     def _feature_store(self):
-        '''The cache for this slide, or None when no root was given.
+        '''The feature-map cache for this slide, or None when no root was given.
 
-        Built here and nowhere else because mask_id needs the whole recipe --
-        segmentation method, its ds, the region filter, whether merging ran --
-        and this is the only object that holds all of it.
+        `feature_store_root` is `Cache.cache_root(<job>, 'features') /
+        encoder_tag`. Built here because the file's address needs the whole
+        mask recipe -- the segmentation and the region prep -- and this is the
+        only object that holds it.
         '''
         if not self.feature_store_root:
             return None
-        from WsiFeaturesMapStore import WsiFeaturesMapStore
-        return WsiFeaturesMapStore(
-            self.feature_store_root,
-            getattr(self.wsi, '_filename', self.mask_cfg and ''),
-            self.encoder, self.mask_cfg.mask_id(),
-            mode=self.feature_store_mode)
+        from Store import FeatureMapCache
+        return FeatureMapCache(
+            self.feature_store_root, getattr(self.wsi, '_filename', ''),
+            self.encoder, self.mask_cfg, mode=self.feature_store_mode)
 
     def _get_retriever(self, level: int) -> Optional[GigaPathSlidingWinSimRot]:
         """Return cached rotation-aware retriever for this level, or None if unusable."""

@@ -226,7 +226,7 @@ def validate_shared(path, good, bad):
     """Healing replaces _osr INSIDE the shared object, so aliases recover.
 
     This is what a helper function returning a fresh OpenSlide could not do,
-    and it is what lets LocaScopePipeline pass one slide to TissuesRegionsMask,
+    and it is what lets LocaScopePipeline pass one slide to TissueMask,
     TileSampler and WsiTissuesContainer at once.
     """
     w = SafeSlide(path)

@@ -4,9 +4,9 @@
     python utilities/test_modules/test_tile_sampler.py
     python utilities/test_modules/test_tile_sampler.py --only overlap
 
-No slide, no model, no data. The mask is a real `TissuesRegionsMask` built by
-`from_mask` over a synthetic array, and the slide is the four attributes
-`from_mask` and `read_region_rgb` need. That is deliberate: the sampler's whole
+No slide, no model, no data. The mask is a real `TissueMask` built over a
+synthetic `SlideMask`, and the slide is the four attributes `TissueMask` and
+`read_region_rgb` need. That is deliberate: the sampler's whole
 job is arithmetic over a mask, so a fake mask tests the thing itself rather
 than a slide reader.
 
@@ -63,10 +63,11 @@ import numpy as np                                               # noqa: E402
 from DsLadder import RungPlan                                    # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
                          allocate_targets, bucket_names, spill_order,
-                         RichnessConfig, Sample, SampleMeta,
+                         PlanSpec, RichnessConfig, Sample, SampleMeta,
                          SamplerConfig, TileSampler, assign_buckets,
-                         resolution_plan)
-from TissuesRegionsMask import TissuesRegionsMask                # noqa: E402
+                         resolution_plan, PRE_TILE_FACTOR, centre_crop,
+                         centre_margin, pre_tile_px)
+from TissueMask import SlideMask, TissueMask                      # noqa: E402
 
 _RESULTS = []
 
@@ -89,7 +90,7 @@ def check(name, fn):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _Slide:
-    """What `from_mask` reads, plus a reader that returns something recognisable.
+    """What `TissueMask` reads, plus a reader that returns something recognisable.
 
     `read_region_rgb` and not `read_region`: the sampler refuses a handle
     without it, and that refusal is one of the checks below.
@@ -119,8 +120,8 @@ def _mask(tissue_blocks, rows=200, cols=200, ds=MASK_DS, slide=None):
     for r, c, h, w in tissue_blocks:
         arr[r:r + h, c:c + w] = True
     wsi = slide or _Slide(int(cols * ds), int(rows * ds))
-    return wsi, TissuesRegionsMask.from_mask(
-        wsi, arr, span=(int(cols * ds), int(rows * ds)))
+    span = (int(cols * ds), int(rows * ds))
+    return wsi, TissueMask(wsi, SlideMask(arr, (0, 0), span, float(ds)))
 
 
 def _one_big_block():
@@ -169,8 +170,8 @@ def _graded_mask(tile=TILE, ds=1.0):
     cannot show a floor being met, a cap biting, or a chain truncating.
 
     HOLES, NOT STRIPES. The tissue stays one connected region with one bbox, so
-    `filter_regions` -> `merge_overlapping` -> `filter_patchable` see the same
-    single region they see everywhere else; only what is INSIDE it varies. A
+    the per-rung `patchable` view sees the same single region it sees
+    everywhere else; only what is INSIDE it varies. A
     hole of side h in a tile of side t reads as h^2/t^2 background, and the
     side is chosen per tile COLUMN so the spread is a property of position and
     not of the rng.
@@ -190,8 +191,8 @@ def _graded_mask(tile=TILE, ds=1.0):
             c0 = 10 + j * cell + (cell - h) // 2
             arr[r0:r0 + h, c0:c0 + h] = False
     wsi = _Slide(int(200 * MASK_DS), int(200 * MASK_DS))
-    return wsi, TissuesRegionsMask.from_mask(
-        wsi, arr, span=(int(200 * MASK_DS), int(200 * MASK_DS)))
+    span = (int(200 * MASK_DS), int(200 * MASK_DS))
+    return wsi, TissueMask(wsi, SlideMask(arr, (0, 0), span, float(MASK_DS)))
 
 
 def _plans(dss=(1.0, 2.0), tile=TILE, factor=1):
@@ -366,7 +367,7 @@ def t_the_reserve_is_derived_from_the_margin_and_not_asked_for():
     `int(4096.4 * 3)` is 12289. The pad is `(12289 - 4096) // 2 = 4096` and
     `4096 + 2*4096` is 12288 -- the lattice reserves 12288 of room and the
     meta claimed 12289. One px, absorbed by any region with slack and by none
-    at a coarse rung, where `filter_patchable` has left only the regions whose
+    at a coarse rung, where `patchable` has left only the regions whose
     far edge IS the mask's.
 
     So `reserve` is derived from `margin` rather than read raw, and this pins
@@ -440,10 +441,11 @@ def t_the_overlapping_share_is_a_budget_and_binds():
 def t_every_jitter_offset_is_disjoint_and_off_lattice():
     """Both properties, per offset, AT EVERY TILE SIZE.
 
-    The offsets are fractions of the tile. `ReferenceSampler` writes the same
-    five as absolute pixels -- (64, 256) and so on -- which are those numbers
-    only at tile 256 and are four times the tile at 64. Its own docstring
-    argues that the units matter and then picks one that holds for one size.
+    The offsets are fractions of the tile. The retired `ReferenceSampler` wrote
+    the same five as absolute pixels -- (64, 256) and so on -- which are those
+    numbers only at tile 256 and are four times the tile at 64. Its own
+    docstring argued that the units matter and then picked one that holds for
+    one size.
     So the check runs at three tile sizes: a pixel constant passes at 256 and
     fails at the others.
     """
@@ -1040,22 +1042,6 @@ def t_a_plain_openslide_handle_is_refused():
     raise AssertionError('a handle with no read_region_rgb was accepted')
 
 
-def t_the_old_api_refuses_with_the_replacement():
-    wsi, mask = _one_big_block()
-    for call, needle in (
-        (lambda: TileSampler(wsi, mask, tile_size=256), 'SamplerConfig'),
-        (lambda: TileSampler(wsi, mask, _cfg()).sample(n=10), 'RungPlan'),
-    ):
-        try:
-            call()
-        except TypeError as e:
-            assert needle in str(e), str(e)
-            assert 'NO default' in str(e)
-        else:
-            raise AssertionError('the old API still works, silently')
-    return 'both entrances name their replacement'
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  8. equivalence -- against PatchGrid, which is the other implementation
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1074,11 +1060,7 @@ def _patchgrid_positions(region, tile, ds, overlap):
 
 
 def _lattice_positions(sampler, plan):
-    sampler._prepare_regions(plan)
-    try:
-        return {(int(x), int(y)) for x, y in sampler._lattice(plan)}
-    finally:
-        sampler._restore_regions()
+    return {(int(x), int(y)) for x, y in sampler._lattice(plan)}
 
 
 def t_the_main_grid_is_exactly_patchgrids():
@@ -1095,9 +1077,7 @@ def t_the_main_grid_is_exactly_patchgrids():
     s = TileSampler(wsi, mask, _cfg())
     for ds in (1.0, 2.0):
         plan = _plans((ds,))[0]
-        s._prepare_regions(plan)
-        regions = list(s.mask.tissue_regions)
-        s._restore_regions()
+        regions = list(s._regions(plan))
         want = set()
         for r in regions:
             want |= _patchgrid_positions(r, TILE, ds, overlap=False)
@@ -1131,9 +1111,7 @@ def t_the_half_step_lattice_is_a_different_definition_from_overlap_true():
                                      overlapping_share=1.0))
     s = TileSampler(wsi, mask, cfg)
     plan = _plans((1.0,))[0]
-    s._prepare_regions(plan)
-    regions = list(s.mask.tissue_regions)
-    s._restore_regions()
+    regions = list(s._regions(plan))
     want = set()
     for r in regions:
         want |= _patchgrid_positions(r, TILE, 1.0, overlap=True)
@@ -1163,9 +1141,7 @@ def t_neither_generator_places_a_partial_tile():
     wsi, mask = _one_big_block()
     s = TileSampler(wsi, mask, _cfg())
     plan = _plans((1.0,))[0]
-    s._prepare_regions(plan)
-    regions = list(s.mask.tissue_regions)
-    s._restore_regions()
+    regions = list(s._regions(plan))
     fp = int(plan.footprint_l0)
     for r in regions:
         for x, y in _patchgrid_positions(r, TILE, 1.0, overlap=False):
@@ -1177,7 +1153,228 @@ def t_neither_generator_places_a_partial_tile():
     return 'no flush-right tile in either'
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  cache -- TileSampler.cached, with the slide opener and the mask recipe faked
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _CountingSlideOpener:
+    """Stands in for `SafeSlide` inside `TileSampler.cached`, and counts opens:
+    the property a hit is for is that this number does not move."""
+    opens = 0
+
+    def __init__(self, path):
+        type(self).opens += 1
+        self.wsi, _ = _one_big_block()
+        self.wsi._filename = str(path)
+
+    def __enter__(self):
+        return self.wsi
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeRecipe:
+    """The three things `cached` asks of a mask recipe."""
+
+    def seg_id(self):
+        return 'fake-seg'
+
+    def region_id(self):
+        return 'r0000000'
+
+    def identity_parts(self):
+        return ['seg.method=fake']
+
+
+class _FakeMasks:
+    """Stands in for a `MaskMaker`: the recipe, and a counted `mask(wsi)`."""
+    calls = 0
+    cfg = _FakeRecipe()
+
+    def mask(self, wsi):
+        type(self).calls += 1
+        _, mask = _one_big_block()
+        return mask, False
+
+
+class _FakePlan:
+    def key(self):
+        return 'ladder-1-2'
+
+    def plans_for(self, wsi, tile):
+        return _plans((1.0, 2.0))
+
+
+def _with_fake_opener(fn):
+    import SafeSlide as safe_slide_module
+    original = safe_slide_module.SafeSlide
+    safe_slide_module.SafeSlide = _CountingSlideOpener
+    _CountingSlideOpener.opens = 0
+    _FakeMasks.calls = 0
+    try:
+        return fn()
+    finally:
+        safe_slide_module.SafeSlide = original
+
+
+def t_a_cache_hit_opens_nothing_and_returns_the_same_draw():
+    def run():
+        with tempfile.TemporaryDirectory() as root:
+            path = '/data/Group_A/SLIDE_1.svs'
+            a = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+                               masks=_FakeMasks())
+            b = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+                               masks=_FakeMasks())
+            assert _CountingSlideOpener.opens == 1, _CountingSlideOpener.opens
+            assert _FakeMasks.calls == 1, _FakeMasks.calls
+            assert not a.cache_info['samples_hit'] and b.cache_info['samples_hit']
+            assert [s.meta for s in a] == [s.meta for s in b], 'the hit drew differently'
+            assert a.wsi is None and b.wsi is None and a.mask is None
+            return f'{len(a)} samples, one open'
+    return _with_fake_opener(run)
+
+
+def t_two_configs_on_one_slide_are_sibling_entries():
+    def run():
+        with tempfile.TemporaryDirectory() as root:
+            path = '/data/Group_A/SLIDE_1.svs'
+            a = TileSampler.cached(path, _cfg(seed=0), _FakePlan(), root,
+                               masks=_FakeMasks())
+            b = TileSampler.cached(path, _cfg(seed=1), _FakePlan(), root,
+                               masks=_FakeMasks())
+            fa, fb = a.cache_info['folder'], b.cache_info['folder']
+            assert fa != fb and os.path.dirname(fa) == os.path.dirname(fb), (fa, fb)
+            return 'same slide directory, two draws'
+    return _with_fake_opener(run)
+
+
+def t_the_report_is_the_same_on_a_hit_as_on_a_miss():
+    def run():
+        with tempfile.TemporaryDirectory() as root:
+            path = '/data/Group_A/SLIDE_1.svs'
+            miss_dir, hit_dir = os.path.join(root, 'r1'), os.path.join(root, 'r2')
+            TileSampler.cached(path, _cfg(), _FakePlan(), root,
+                               masks=_FakeMasks(),
+                               report_dir=miss_dir)
+            TileSampler.cached(path, _cfg(), _FakePlan(), root,
+                               masks=_FakeMasks(),
+                               report_dir=hit_dir)
+            read = lambda d, n: open(os.path.join(d, n)).read()  # noqa: E731
+            assert read(miss_dir, 'samples_SLIDE_1.csv') == read(hit_dir, 'samples_SLIDE_1.csv')
+            md = [read(d, 'sampler_report_SLIDE_1.md').splitlines()
+                  for d in (miss_dir, hit_dir)]
+            differ = [(x, y) for x, y in zip(*md) if x != y]
+            assert len(differ) == 1 and 'draw:' in differ[0][0], differ
+            assert '| all |' in read(hit_dir, 'sampler_report_SLIDE_1.md')
+            return 'identical but for the reused/computed line'
+    return _with_fake_opener(run)
+
+
+def t_a_hit_for_a_different_slide_with_the_same_stem_is_refused():
+    def run():
+        from Cache import CacheMismatch
+        with tempfile.TemporaryDirectory() as root:
+            TileSampler.cached('/data/Group_A/SLIDE_1.svs', _cfg(), _FakePlan(), root,
+                               masks=_FakeMasks())
+            try:
+                TileSampler.cached('/data/Group_B/SLIDE_1.svs', _cfg(), _FakePlan(), root,
+                               masks=_FakeMasks())
+            except CacheMismatch:
+                return 'refused'
+        raise AssertionError('another slide got this slide\'s draw')
+    return _with_fake_opener(run)
+
+
+def t_load_restores_the_rung_reports():
+    wsi, mask = _one_big_block()
+    s = TileSampler(wsi, mask, _cfg()).sample(_plans((1.0, 2.0)))
+    with tempfile.TemporaryDirectory() as tmp:
+        s.save(tmp)
+        back = TileSampler.load(tmp)
+        assert set(back.reports) == set(s.reports), (back.reports, s.reports)
+        for ds in s.reports:
+            assert back.reports[ds] == s.reports[ds], ds
+    return f'{len(s.reports)} rung reports'
+
+
+def t_plan_spec_keys_and_refusals():
+    assert PlanSpec('ladder', (4, 1, 2)).key() == 'ladder-1-2-4'
+    assert PlanSpec('native').key() == 'native'
+    for bad in (dict(kind='ladder'), dict(kind='other', rungs=(1,))):
+        try:
+            PlanSpec(**bad)
+        except ValueError:
+            continue
+        raise AssertionError(f'{bad} was accepted')
+    return 'sorted key, empty ladder and unknown kind refused'
+
+
+# ── pre-tile geometry ─────────────────────────────────────────────────────
+
+def _planted_pre(marker: int = 200) -> np.ndarray:
+    """A pre-tile that is uniform except for a `TILE x TILE` block in the exact
+    centre. Any crop that is not the centre crop sees some of the surround."""
+    pre = pre_tile_px(TILE, PRE_TILE_FACTOR)
+    image = np.zeros((pre, pre, 3), np.uint8)
+    off = centre_margin(TILE, PRE_TILE_FACTOR)
+    image[off:off + TILE, off:off + TILE] = marker
+    return image
+
+
+def t_centre_crop_finds_the_planted_block():
+    """The crop returns exactly the block, and the block only."""
+    crop = centre_crop(_planted_pre(), TILE)
+    assert crop.shape == (TILE, TILE, 3), crop.shape
+    assert (crop == 200).all(), 'the crop is not the planted block'
+    return f'{pre_tile_px(TILE, PRE_TILE_FACTOR)} -> {TILE}'
+
+
+def t_an_off_by_one_crop_is_detectably_wrong():
+    """The DECOY. A crop that is right and one that is a pixel off both return
+    a `TILE x TILE` square of plausible tissue, so a shape assertion passes on
+    either; only a planted marker makes content separate them."""
+    image = _planted_pre()
+    off = centre_margin(TILE, PRE_TILE_FACTOR)
+    for shift in (-1, +1):
+        wrong = image[off + shift:off + shift + TILE,
+                      off + shift:off + shift + TILE]
+        assert not (wrong == 200).all(), (
+            f'a crop shifted by {shift} px looks identical to the centre crop, '
+            f'so this test cannot see an off-by-one at all')
+    return 'both +-1 shifts are visible'
+
+
+def t_the_margin_is_symmetric_and_whole():
+    """`pre - tile` is even for every tile size we plan to use -- a property of
+    the numbers, checked so that changing either is what fails, rather than the
+    crop silently sitting half a pixel off centre on one side."""
+    for tile in (256, 512, 1024, TILE):
+        pre = pre_tile_px(tile, PRE_TILE_FACTOR)
+        assert pre == tile * PRE_TILE_FACTOR, (tile, pre)
+        assert centre_margin(tile, PRE_TILE_FACTOR) * 2 + tile == pre, tile
+    return f'tiles 256/512/1024 at factor {PRE_TILE_FACTOR}'
+
+
+def t_an_odd_margin_and_a_non_square_pre_tile_are_refused():
+    """An odd tile at an even factor has no centre; better to refuse than to be
+    off by half a pixel on one side."""
+    for what, fn in (('tile 65 at factor 2', lambda: pre_tile_px(65, 2)),
+                     ('a non-square pre-tile',
+                      lambda: centre_crop(np.zeros((64, 96, 3), np.uint8), 32))):
+        try:
+            fn()
+        except Exception:                                        # noqa: BLE001
+            continue
+        raise AssertionError(f'{what} did not raise')
+    return 'both refused'
+
+
 _SECTIONS = {
+    'pretile':  ['t_centre_crop_finds_the_planted_block',
+                 't_an_off_by_one_crop_is_detectably_wrong',
+                 't_the_margin_is_symmetric_and_whole',
+                 't_an_odd_margin_and_a_non_square_pre_tile_are_refused'],
     'units':    ['t_the_lattice_step_is_output_pixels_and_not_ds',
                  't_every_placed_tile_keeps_its_reserve_inside_the_scanned_rectangle',
                  't_the_reserve_is_derived_from_the_margin_and_not_asked_for',
@@ -1215,8 +1412,13 @@ _SECTIONS = {
                  't_images_refuses_rather_than_reading_for_you',
                  't_save_and_load_round_trip_every_axis',
                  't_load_refuses_a_config_that_is_not_the_one_it_was_cut_with',
-                 't_a_plain_openslide_handle_is_refused',
-                 't_the_old_api_refuses_with_the_replacement'],
+                 't_a_plain_openslide_handle_is_refused'],
+    'cache':    ['t_a_cache_hit_opens_nothing_and_returns_the_same_draw',
+                 't_two_configs_on_one_slide_are_sibling_entries',
+                 't_the_report_is_the_same_on_a_hit_as_on_a_miss',
+                 't_a_hit_for_a_different_slide_with_the_same_stem_is_refused',
+                 't_load_restores_the_rung_reports',
+                 't_plan_spec_keys_and_refusals'],
 }
 
 

@@ -52,9 +52,15 @@ import dataclasses
 import hashlib
 import json
 import typing
-from typing import Any, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
-import torch
+# torch is imported where a model is BUILT, not here. Every config in the repo
+# goes through this module -- the mask recipe, the sampler's, query_sim's -- and
+# a module that only names and hashes configs has no reason to make all of them
+# unimportable without torch. weights_id needs no import: it calls methods on
+# the module it is handed.
+if TYPE_CHECKING:
+    import torch
 
 
 # ── encoding ──────────────────────────────────────────────────────────────────
@@ -181,6 +187,30 @@ def weights_id(module: Optional[torch.nn.Module]) -> str:
     return h.hexdigest()[:16]
 
 
+_FINGERPRINTS: Dict[tuple, str] = {}
+
+
+def file_fingerprint(path) -> str:
+    """sha256 of a file's bytes, first 16 hex -- for a key that has to see a
+    checkpoint's CONTENT without building the model that would hash its
+    parameters (`weights_id`).
+
+    Memoised on (path, size, mtime): a cache lookup asks once per slide, and a
+    few hundred MB read a hundred times is minutes spent on the same answer.
+    Replacing the file changes its mtime, which is what makes the memo safe.
+    """
+    import os                                                 # noqa: PLC0415
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    if key not in _FINGERPRINTS:
+        h = hashlib.sha256()
+        with open(path, 'rb') as handle:
+            for chunk in iter(lambda: handle.read(1 << 24), b''):
+                h.update(chunk)
+        _FINGERPRINTS[key] = h.hexdigest()[:16]
+    return _FINGERPRINTS[key]
+
+
 def cfg_json(parts: List[str], provenance: Dict[str, Any]) -> str:
     """The fields behind an id, so a mismatch can name one.
 
@@ -300,6 +330,7 @@ class ModelConfig(IdentifiedConfig):
     NOT_IDENTITY = ('weights',)
 
     def torch_dtype(self) -> torch.dtype:
+        import torch                                          # noqa: PLC0415
         try:
             return {'fp16': torch.float16, 'fp32': torch.float32}[self.dtype]
         except KeyError:
@@ -309,6 +340,7 @@ class ModelConfig(IdentifiedConfig):
     def build(self, **factory_kwargs) -> torch.nn.Module:
         """Construct on the CPU. Moving to a device is the caller's, because
         only the caller knows whether a checkpoint has to be loaded first."""
+        import torch                                          # noqa: PLC0415
         if self.source == 'timm':
             import timm
             model = timm.create_model(self.arch, pretrained=self.weights is None,

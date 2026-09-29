@@ -53,7 +53,7 @@ from PatchingLib import QueryPatchContainer                          # noqa: E40
 from QueryFromWSI import QueryFromWSI                                # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names             # noqa: E402
 from TileSampler import OverlapConfig, SamplerConfig                  # noqa: E402
-from TissueMaskConfig import TissueMaskConfig                          # noqa: E402
+from TissueMaskConfig import add_mask_args, mask_cfg_from_args        # noqa: E402
 from KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
 from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot          # noqa: E402
 from SIFT_RANSAC import SiftRansacLocalizer                            # noqa: E402
@@ -112,7 +112,7 @@ def run_stage1(wsi, mask, query_qc, args, device) -> Tuple[float, object]:
     rather than building a second copy; see `KnnEstMpp.py`'s own docstring
     for why that sharing is the caller's job, not a guarantee of the class)."""
     cfg = KnnEstMppConfig(
-        encoder=args.encoder, mask_cfg=TissueMaskConfig(),
+        encoder=args.encoder, mask_cfg=mask_cfg_from_args(args),
         sampler_cfg=SamplerConfig(tile=args.tile, n_per_rung=args.samples,
                                   seed=args.seed, richness=REFERENCE_BANK_RICHNESS,
                                   overlap=OverlapConfig()),
@@ -172,8 +172,9 @@ def main() -> int:
     ap.add_argument('--tile',    type=int,   default=256)
     ap.add_argument('--overlap', action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument('--filter', action=argparse.BooleanOptionalAction, default=True,
-                    help='apply filter_regions to drop small/contained tissue regions')
-    ap.add_argument('--min-region-ratio', type=float, default=0.10)
+                    help="the recipe's region prep (filtered + merged); "
+                         '--no-filter hands the stages the raw components')
+    add_mask_args(ap, default='hsv')
     ap.add_argument('--batch',   type=int,   default=1024)
     ap.add_argument('--encoder', default='gigapath', choices=encoder_names())
     ap.add_argument('--head',    default='')
@@ -210,13 +211,13 @@ def main() -> int:
     # to both rather than letting each stage segment its own.
     print('\n[mask] building tissue mask...')
     t0 = time.perf_counter()
-    mask = TissueMaskConfig().build(wsi, device)
-    before = len(mask.tissue_regions)
-    if args.filter:
-        mask.filter_regions(min_ratio=args.min_region_ratio)
+    mask = mask_cfg_from_args(args).build(wsi, device)
+    before = len(mask.raw())
+    if not args.filter:
+        mask = mask.raw()
     timings['mask'] = time.perf_counter() - t0
     print(f'  {before} regions'
-         + (f' -> {len(mask.tissue_regions)} after filtering'
+         + (f' -> {len(mask.tissue_regions)} after the recipe\'s region prep'
             if args.filter else ' (filter disabled)'))
 
     if 1 in args.stages:

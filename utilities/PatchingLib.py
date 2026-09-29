@@ -25,7 +25,7 @@ import numpy as np
 from PIL import Image
 import openslide
 
-from TissuesRegionsMask import TissueRegion
+from TissueMask import TissueRegion
 
 PatchIndex = Union[int, Tuple[int, int]]
 EncodeFn = Callable[List[Any], Any]
@@ -1133,7 +1133,7 @@ class WsiTissuesContainer():
     The third line is the one that moved. "Which regions are usable at this
     scale" used to be the caller's job, and three callers got it wrong in
     three different ways -- filtering at the estimated ds while building at the
-    ground-truth one, copying the filter's logic out of TissuesRegionsMask, or
+    ground-truth one, copying the filter's logic out of TissueMask, or
     forgetting it entirely and dying inside torch.cat on an empty batch. It is
     answered here now, by `from_ds`, because this is the only object that knows
     the ds for certain.
@@ -1168,10 +1168,10 @@ class WsiTissuesContainer():
         level = wsi.nearest_level_for_downsample(ds)
         return level, float(wsi.level_downsamples[level])
 
-    def __init__(self, wsi: openslide.OpenSlide, ds: float = 1.0, level: int = None, tile_size: int = 256, overlap: bool = True, mask: Optional[TissuesRegionsMask] = None):
+    def __init__(self, wsi: openslide.OpenSlide, ds: float = 1.0, level: int = None, tile_size: int = 256, overlap: bool = True, mask: Optional[TissueMask] = None):
         self.wsi: openslide.OpenSlide = wsi
         self.ds: float = ds
-        self.mask: Optional[TissuesRegionsMask] = mask
+        self.mask: Optional[TissueMask] = mask
         self.tile_size: int = tile_size
         #: Kept because it is part of the scale, not just an argument: the same
         #: regions at the same ds hold a different number of patches with the
@@ -1257,7 +1257,7 @@ class WsiTissuesContainer():
     @classmethod
     def from_ds(cls, wsi: openslide.OpenSlide, ds: float, tile_size: int = 256,
                 overlap: bool = True,
-                mask: Optional[TissuesRegionsMask] = None,
+                mask: Optional[TissueMask] = None,
                 verbose: bool = True):
         '''Build at the level nearest `ds`, keeping only regions usable there.
 
@@ -1270,14 +1270,14 @@ class WsiTissuesContainer():
           level 1 reports 4.00003 -- and `int(w / ds)` turns that into a whole
           missing tile for a region sized near a multiple of the tile.
 
-          the mask is narrowed to regions that can host a tile at that ds, on a
-          `regions_view()` so the caller's mask is untouched. Callers used to do
+          the mask is narrowed to regions that can host a tile at that ds --
+          `mask.patchable(...)`, a view, so the caller's mask is untouched. Callers used to do
           this themselves; when they filtered at a different ds the answer was a
           region with zero patches, and the encoder dies on an empty batch
           inside torch.cat naming neither the region nor the level.
 
-        `filter_regions` and `merge_overlapping` are NOT applied. They depend on
-        geometry alone, not on ds, so they belong to whoever built the mask --
+        `filtered` and `merged` are NOT applied. They depend on geometry alone,
+        not on ds, so they belong to the mask's recipe (TissueMaskConfig) --
         and merging must happen BEFORE this filter, since two fragments that are
         each too small can merge into one region that is not.
         '''
@@ -1285,15 +1285,12 @@ class WsiTissuesContainer():
         if verbose and ds_actual != ds:
             print(f'  [WsiTissues] ds {ds:.5f} -> level {level} '
                   f'(ds {ds_actual:.5f})', flush=True)
-        view = None
-        if mask is not None:
-            view = mask.regions_view()
-            view.filter_patchable(tile_size, ds_actual)
+        view = mask.patchable(tile_size * ds_actual) if mask is not None else None
         return cls(wsi, ds=ds_actual, level=level, tile_size=tile_size,
                    overlap=overlap, mask=view)
 
     @classmethod
-    def from_mpp(cls, wsi: openslide.OpenSlide, mpp: float, tile_size: int = 256, overlap: bool = True, mask: Optional[TissuesRegionsMask] = None):
+    def from_mpp(cls, wsi: openslide.OpenSlide, mpp: float, tile_size: int = 256, overlap: bool = True, mask: Optional[TissueMask] = None):
         '''`from_ds` with the scale given in micrometres per pixel.
 
         mpp and ds are the same statement in different units, so this converts

@@ -139,7 +139,7 @@ def check_same_seed_same_pixels(wsi, query_mpp, x, y, seed) -> list:
     it must not change the pixels.
 
     That interleaved order is not hypothetical -- it is exactly what
-    `training/MppRoutingHead/Datasets.py`'s `_CameraBank` does (one Camera per
+    `training/MppRoutingHead/Datasets.py`'s `CameraBank` does (one Camera per
     rung of a slide, all built before any of them shoots).
     """
     failures = []

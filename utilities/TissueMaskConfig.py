@@ -1,80 +1,60 @@
-"""The recipe that produces a TissuesRegionsMask, as one value.
+"""The recipe that produces a TissueMask, as one value -- and where masks come
+from, cached or not.
 
-    cfg  = TissueMaskConfig(seg=HestSegConfig(), ds=4.0)
-    mask = cfg.build(wsi, device)
-    mask.mask_id()          # what a store records
+    cfg = MASK_RECIPES['hest']
+    mask = cfg.build(wsi, device)                          # one slide, no cache
 
-Separate from TissuesRegionsMask, and the reason is the dependency direction
-rather than file size. This module imports the segmenter; the mask must not.
-A product does not import its producer, and the same split already holds one
-level over:
+    with MaskMaker(cfg, cache_root, device) as masks:      # a loop over slides
+        for wsi in slides:
+            mask, hit = masks.mask(wsi)                    # segmentation cached
 
-    EncoderConfig    -> GigaPathEncoder  -> WsiFeaturesMap
-    TissueMaskConfig -> TissueSegmenter  -> TissuesRegionsMask
+Three modules, three jobs, one direction:
 
-WsiFeaturesMap lives in PatchingLib and knows nothing about GigaPathFunc. Merging
-this into TissuesRegionsMask inverted that -- and made a module whose
-dependencies were cv2, numpy and openslide pull torch and torchvision, which was
-the visible symptom of the inversion rather than the problem itself.
+    TissueMaskConfig  ->  TissueSegFunc (producer)  ->  TissueMask (product)
+    recipe + cache        slide -> SlideMask            SlideMask + regions
+
+The product imports neither of the others, the way WsiFeaturesMap knows nothing
+about the encoder that filled it. Merging this module into TissueMask would
+invert that: the product would import every segmenter.
+
+TWO IDENTITIES, BECAUSE TWO STAGES, AND THE CONFIG'S SHAPE SAYS WHICH. `seg`
+is everything the segmentation depends on -- the method and how it reads the
+slide both live on the segmenter's own config -- and `seg_id` hashes exactly
+that; it names the directory a raw mask is cached under. The fields beside it
+are the region prep after it, and `region_id` hashes those. Segmentation is
+minutes of GPU per slide and the region prep is milliseconds, so changing
+`min_region_ratio` changes `region_id` and never resegments. The split used to
+be two hand-kept field lists and an assertion that they partitioned the class;
+now a field cannot be on the wrong side, because the side is the nesting.
 """
-
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Tuple
 
 _HERE = Path(__file__).resolve().parent
 for _d in (_HERE, _HERE.parent / 'aiNNModel'):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
-from ConfigIdentity import (IdentifiedConfig, register,      # noqa: E402
-                            parts_against, short_id)
-from TissueSegFunc import TissueSegConfig                    # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask            # noqa: E402
+from Cache import (check_source, read_meta, source_key,          # noqa: E402
+                   wsi_stem_of, write_meta)
+from ConfigIdentity import (IdentifiedConfig, parts_against,     # noqa: E402
+                            register, short_id)
+from HestSegFunc import HestSegConfig                            # noqa: E402
+from TissueMask import SlideMask, TissueMask                     # noqa: E402
+from TissueSegFunc import PlaneSegConfig, TissueSegConfig        # noqa: E402
+from Uni2PcaSegFunc import Uni2PcaSegConfig                      # noqa: E402
 
-
-# Three things used to be spread across every caller and recorded nowhere:
-#
-#     TissuesRegionsMask.from_wsi(wsi, ds=..., method=..., seg_chunk_px=...,
-#                                 stitch_overlap=..., level_rule=...)
-#     mask.filter_regions(min_ratio=...)
-#     mask.merge_overlapping()
-#
-# Fifteen call sites wrote some subset of those, in an order that matters, and
-# the mask that came out could not say which subset it was. That is the whole
-# problem: a feature store keyed on `mask_id` is only as good as that string,
-# and 'hest@ds4' is the same string whether min_region_ratio was 0.10 or 0.30.
-#
-# THE ORDER IS FIXED HERE because merge_overlapping is incomplete on its own by
-# design: it skips nested and identical boxes on the assumption that
-# filter_regions has already removed them (see its docstring). Run it first and
-# every nested region survives. The dependency is one way and has no assertion
-# behind it, so it belongs in one place that always does it the same way rather
-# than in two lines every caller writes.
-#
-# filter_patchable is NOT here. filter_regions and merge_overlapping are choices
-# about the segmentation, made once; filter_patchable is a consequence of the
-# SCALE -- which regions can host a tile at a given ds -- and
-# WsiTissuesContainer.from_ds already applies it, to a regions_view() so the mask
-# itself is never narrowed. Its result is visible in a store's geometry and ds is
-# already an identity field, so putting it here would record one fact twice and
-# let the two disagree.
-
-#: The zero point. LocaScopePipeline's defaults, so a pipeline-built mask hashes
-#: to "all baseline" and anything else says how it differs. Editing this
-#: invalidates every mask id ever written, on purpose; editing a dataclass
-#: DEFAULT does not -- it splits new from old instead.
+#: The zero point: the hest recipe, the one every job uses unless told
+#: otherwise, so its ids read "baseline" and anything else says how it differs.
+#: Editing this renames every mask on purpose; editing a dataclass DEFAULT does
+#: not -- it splits new from old instead.
 _MASK_BASELINE = {
-    'seg': TissueSegConfig('hsv'),
-    'ds': 4.0,
-    'level_rule': 'best',
-    'limit_bounds': True,
-    'seg_chunk_px': 4_000_000,
-    'stitch_overlap': 128,
-    'read_chunk_px': None,
+    'seg': HestSegConfig(),
     'min_region_ratio': 0.01,
     'merge': True,
 }
@@ -85,65 +65,207 @@ _MASK_BASELINE = {
 class TissueMaskConfig(IdentifiedConfig):
     """Everything that decides which regions a slide has.
 
-    Every field is identity. That is unusual here -- most configs have a
-    NOT_IDENTITY set -- and it is because there is no performance knob among
-    them: each one moves the region list, and the region list is what a stored
-    feature map is indexed by.
+    Every field is identity: each one moves the region list, and there is no
+    performance knob among them. The segmenter's own config carries the ones
+    that move the SEGMENTATION (see TissueSegFunc); the two here only move
+    the regions found in it.
 
-    read_chunk_px included on purpose despite looking like one. It is nominally
-    about memory, but the tiling is min(read_chunk_px, seg_chunk_px), so it can
-    change where the tile boundaries fall and therefore what a non-per-pixel
-    method produces at the seams.
+    `seg` HAS NO DEFAULT. It used to default to hsv, and six callers built
+    `TissueMaskConfig()` and got hsv without saying so. Name a recipe:
+    `MASK_RECIPES['hest']`.
+
+    The order of the region prep is fixed here -- `filtered`, then `merged` --
+    because `merged` is incomplete on its own by design: it skips nested and
+    identical boxes on the assumption that `filtered` already removed them.
+    `patchable` is NOT here. It is a consequence of the tile's footprint,
+    decided by whoever tiles, on a view.
     """
-    seg: TissueSegConfig = field(default_factory=lambda: TissueSegConfig('hsv'))
-
-    #: Segmentation resolution. Not the encoding scale -- that is the
-    #: container's ds and lives in the store's own identity.
-    ds: float = 4.0
-    level_rule: str = 'best'
-    limit_bounds: bool = True
-
-    seg_chunk_px: int = 4_000_000
-    stitch_overlap: int = 128
-    read_chunk_px: Optional[int] = None
-
+    seg: TissueSegConfig
     min_region_ratio: float = 0.01
     merge: bool = True
 
-    def identity_parts(self, baseline=None):
+    def identity_parts(self, baseline=None) -> List[str]:
         return parts_against(self, _MASK_BASELINE if baseline is None else baseline)
 
-    def mask_id(self) -> str:
-        """The short name a FeatureStore records under mask_id.
+    def seg_parts(self) -> List[str]:
+        """What the segmentation depends on: the `seg.` parts, and the content
+        of any weights the config names by path (`TissueSegConfig.weights_key`)
+        -- a key has to see a finetune overwritten in place, and a cache hit is
+        exactly when no model is built to hash its parameters."""
+        parts = [p for p in self.identity_parts() if p.startswith('seg.')]
+        weights = self.seg.weights_key()
+        return parts + ([f'seg.weights_sha={weights}'] if weights else [])
 
-        Its only job is to keep different masks in different files. Getting it
-        wrong does not produce a wrong answer -- WsiFeaturesMapStore recomputes
-        the region geometry and compares it against the stored coordinates -- it
-        produces two configurations overwriting each other's file in turn, a
-        cache that never hits. Visible, and cheap to fix; unlike the silent kind.
-        """
-        return short_id(self.identity_parts())
+    def seg_id(self) -> str:
+        """`<method>-<hash>`: the directory a raw mask is cached under."""
+        return f'{self.seg.method or "none"}-{short_id(self.seg_parts())}'
 
-    def build(self, wsi, device=None) -> TissuesRegionsMask:
-        """Segment, filter, merge -- in that order, once."""
-        segmenter = self.seg.build(device)
-        mask = TissuesRegionsMask.from_wsi(
-            wsi,
-            ds=self.ds,
-            method=segmenter,
-            seg_chunk_px=self.seg_chunk_px,
-            stitch_overlap=self.stitch_overlap,
-            read_chunk_px=self.read_chunk_px,
-            limit_bounds=self.limit_bounds,
-            level_rule=self.level_rule,
-        )
-        mask.filter_regions(min_ratio=self.min_region_ratio)
-        if self.merge:
-            mask.merge_overlapping()
+    def region_id(self) -> str:
+        """Hash of the region prep after the segmentation."""
+        return short_id([p for p in self.identity_parts()
+                         if not p.startswith('seg.')])
 
-        # The mask can now say how it was made. Nothing in TissuesRegionsMask
-        # reads this -- it is carried so that a caller holding only a mask can
-        # answer the question a mask could not answer before, which is the
-        # question a cache has to ask.
-        mask.cfg = self
-        return mask
+    def regions(self, wsi, slide_mask: SlideMask) -> TissueMask:
+        """Search, filter, merge -- in that order, once. The cheap half."""
+        mask = TissueMask(wsi, slide_mask).filtered(self.min_region_ratio)
+        return mask.merged() if self.merge else mask
+
+    def build(self, wsi, device=None) -> TissueMask:
+        """One slide, no cache, segmenter built and dropped with the call. A
+        loop over slides wants `MaskMaker`, which builds it once."""
+        with MaskMaker(self, device=device) as masks:
+            return masks.mask(wsi)[0]
+
+
+class MaskMaker:
+    """Where masks come from: one recipe, one device, optionally one cache.
+
+    Owns the segmenter's lifetime, which is what a module-level dict of built
+    segmenters used to do behind every caller's back -- a HEST or UNI2 model
+    held on the GPU until someone remembered to call `release_segmenters()`.
+    Here it is built on the first MISS, never on a hit, and dropped when the
+    `with` block ends.
+
+    `cache_root` is `Cache.cache_root(<made_by>, 'mask')`; None means every
+    call segments. A slide's raw mask lives at `<cache_root>/<seg_id>/<slide>/`
+    as `mask.safetensors` and `mask_meta.json`, the sidecar written LAST: a job
+    killed between the two leaves a mask with no sidecar, which reads as a miss
+    and is redone.
+    """
+
+    def __init__(self, cfg: TissueMaskConfig, cache_root=None, device=None):
+        self.cfg = cfg
+        self.cache_root = Path(cache_root) if cache_root is not None else None
+        self.device = device
+        self._segmenter = None
+
+    # ── lifetime ────────────────────────────────────────────────────────────
+
+    @property
+    def segmenter(self):
+        if self._segmenter is None:
+            self._segmenter = self.cfg.seg.build(self.device)
+        return self._segmenter
+
+    def close(self) -> None:
+        if self._segmenter is None:
+            return
+        self._segmenter = None
+        try:
+            import torch                                            # noqa: PLC0415
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
+    def __enter__(self) -> 'MaskMaker':
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    # ── masks ───────────────────────────────────────────────────────────────
+
+    def slide_dir(self, slide: str) -> Path:
+        if self.cache_root is None:
+            raise ValueError('this MaskMaker has no cache_root')
+        return self.cache_root / self.cfg.seg_id() / slide
+
+    def slide_mask(self, wsi, *, with_components: bool = False
+                   ) -> Tuple[SlideMask, bool]:
+        """The raw mask, cached when there is a cache. `(slide_mask, hit)`."""
+        if self.cache_root is None:
+            return self._segment(wsi, with_components), False
+
+        folder = self.slide_dir(wsi_stem_of(wsi))
+        data, meta_path = folder / 'mask.safetensors', folder / 'mask_meta.json'
+        if meta_path.exists():
+            meta = read_meta(meta_path, require={'seg_id': self.cfg.seg_id()})
+            check_source(meta, wsi, meta_path)
+            return SlideMask.load(data, with_components=with_components), True
+
+        slide_mask = self._segment(wsi, with_components)
+        slide_mask.save(data)
+        write_meta(meta_path, dict(
+            seg_id=self.cfg.seg_id(),
+            seg_parts=self.cfg.seg_parts(),
+            segmenter_id=self.segmenter.identity_id(),
+            source=source_key(wsi),
+            wsi_path=str(getattr(wsi, '_filename', '') or ''),
+            created_at=time.strftime('%Y-%m-%dT%H:%M:%S'),
+            **slide_mask.geometry()))
+        return slide_mask, False
+
+    def mask(self, wsi) -> Tuple[TissueMask, bool]:
+        """`slide_mask`, then the region prep -- which is never cached: it is
+        cheap, and it depends on `region_id`, which the raw mask does not.
+        `hit` means the segmentation was not run."""
+        slide_mask, hit = self.slide_mask(wsi)
+        return self.cfg.regions(wsi, slide_mask), hit
+
+    def _segment(self, wsi, with_components: bool) -> SlideMask:
+        slide_mask = self.segmenter.segment_slide(wsi)
+        if with_components and slide_mask.components is None:
+            raise ValueError(
+                f'{type(self.segmenter).__name__} produces no components')
+        return slide_mask
+
+
+# ── the recipes -- one name, one mask, wherever it is asked for ───────────────
+
+#: `--seg <name>` everywhere resolves here.
+#:
+#: none      one region per scanned rectangle; nothing is read. Stage 2's
+#:           whole-slide search, where blank glass loses on its own merits.
+#: hsv       colour thresholds at ds 4.
+#: hest      DeepLabV3 at ds 4. The baseline.
+#: uni2_pca  a slide segmenter; its resolution is UNI2's patch grid (ds 14).
+MASK_RECIPES: Dict[str, TissueMaskConfig] = {
+    'none': TissueMaskConfig(seg=PlaneSegConfig('')),
+    'hsv': TissueMaskConfig(seg=PlaneSegConfig('hsv')),
+    'hest': TissueMaskConfig(seg=HestSegConfig()),
+    'uni2_pca': TissueMaskConfig(seg=Uni2PcaSegConfig()),
+}
+
+
+def add_mask_args(ap, default: str = 'hest') -> None:
+    """`--seg` and the plane-read overrides, the same flags in every CLI that
+    builds a mask. A tool used to spell its own `--hest --mask-ds
+    --seg-chunk-px` and build the mask by hand; each spelling was a recipe no
+    other tool could name."""
+    ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default=default,
+                    help='tissue-mask recipe (TissueMaskConfig.MASK_RECIPES)')
+    ap.add_argument('--mask-ds', type=float, default=None,
+                    help="override the recipe's segmentation ds (plane "
+                         'segmenters only: none / hsv / hest)')
+    ap.add_argument('--seg-chunk-px', type=float, default=None,
+                    help="override the recipe's pixels per forward pass "
+                         '(plane segmenters only; 0 = unbounded)')
+    ap.add_argument('--read-chunk-px', type=float, default=None,
+                    help="override the recipe's pixels per slide read "
+                         '(plane segmenters only; 0 = read the level whole)')
+    ap.add_argument('--min-region-ratio', type=float, default=None,
+                    help="override the recipe's region filter")
+
+
+def mask_cfg_from_args(args) -> TissueMaskConfig:
+    """The recipe `--seg` names, with any override applied. The result is a
+    different config and therefore a different `seg_id` / `region_id`, so an
+    override can never be served a cached mask made without it."""
+    cfg = MASK_RECIPES[args.seg]
+    seg_over = {}
+    if args.mask_ds is not None:
+        seg_over['ds'] = float(args.mask_ds)
+    for name in ('seg_chunk_px', 'read_chunk_px'):
+        value = getattr(args, name)
+        if value is not None:
+            seg_over[name] = int(value) or None
+    if seg_over:
+        if not isinstance(cfg.seg, PlaneSegConfig):
+            raise ValueError(
+                f'--seg {args.seg} reads the slide itself; '
+                f'{", ".join(sorted(seg_over))} do not apply to it')
+        cfg = replace(cfg, seg=replace(cfg.seg, **seg_over))
+    if args.min_region_ratio is not None:
+        cfg = replace(cfg, min_region_ratio=float(args.min_region_ratio))
+    return cfg

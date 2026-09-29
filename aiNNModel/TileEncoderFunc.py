@@ -168,7 +168,7 @@ class EncoderOutputSpec:
     those entries permute under a 90-degree rotation. All three go into
     StoreMeta under the same names (FeatureStore:198-201), so writing a store is
     a copy and not an assembly -- assembly at the call site is what let
-    WsiFeaturesMapStore write pooling='cls' for a CNN.
+    FeatureMapCache write pooling='cls' for a CNN.
 
     What is measured and what is declared is not a style choice:
 
@@ -770,7 +770,7 @@ class TileEncoder(IdentifiedBuild):
 
         A store of features() output is labelled with this rather than with a
         literal, because the caller writing the label takes any encoder while
-        the label is only ever true of one. WsiFeaturesMapStore used to write
+        the label is only ever true of one. The feature-map cache used to write
         pooling='cls' for whatever it was handed -- correct for GigaPath, and a
         false claim about every CNN, whose features() is a global average.
 

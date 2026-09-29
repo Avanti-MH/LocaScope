@@ -14,7 +14,7 @@ Two properties of that failure make it worse than an ordinary exception.
    call raises the same error -- level_count and level_downsamples included,
    though they read no pixels. There is no API to clear it. Reopening is the
    only recovery, which is what makes this a class rather than a try/except at
-   each call site: the pipeline hands ONE slide object to TissuesRegionsMask,
+   each call site: the pipeline hands ONE slide object to TissueMask,
    TileSampler and WsiTissuesContainer, so healing has to happen inside the
    object they all share, not in a helper that would hand back a new one and
    leave every existing holder pointing at the corpse.
@@ -220,7 +220,7 @@ class SafeSlide(openslide.OpenSlide):
 
         Halving the longer side rather than tiling on a fixed grid keeps the
         two halves square-ish, so the descent narrows in on a hole from every
-        direction at once; it is also the shape TissuesRegionsMask._tiled_apply
+        direction at once; it is also the shape TissueMask._tiled_apply
         already uses for the same kind of problem.
 
         The odd pixel goes to the first half so the two always sum back to the

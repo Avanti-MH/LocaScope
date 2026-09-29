@@ -63,16 +63,82 @@ SUPERPATHPOINT_DIR = os.path.join(PROJECT_ROOT, 'training', 'SuperPathPoint')
 #: ...` resolve for `Runtime.py`/`cli/train.py`/`cli/evaluate.py`.
 MPPROUTINGHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'MppRoutingHead')
 
+#: Same rule again -- `training/PrototypicalRoutingHead/spec.md`'s own
+#: package, so its `Pooling.py`/`Runtime.py`/`Losses.py`/`cli/train.py`
+#: resolve each other the same way MPPROUTINGHEAD_DIR's siblings do.
+PROTOTYPICALROUTINGHEAD_DIR = os.path.join(
+    PROJECT_ROOT, 'training', 'PrototypicalRoutingHead')
+
 def setup_import_paths():
     """Make utilities/, query_sim/, 1_estimate_query_mpp/, 2_retrieval/,
-    3_localization/, aiNNModel/ (+ its models/ and models/common/),
-    training/SuperPathPoint/, training/MppRoutingHead/ and project root
-    importable."""
+    3_localization/, aiNNModel/ (+ its models/ and models/common/) and
+    project root importable.
+
+    Does NOT add any training package's own directory (2026-09-22 --
+    before this, it added all three: SUPERPATHPOINT_DIR/MPPROUTINGHEAD_DIR/
+    PROTOTYPICALROUTINGHEAD_DIR, unconditionally, every time ANY caller
+    anywhere called this function). `SuperPathPoint`/`MppRoutingHead`/
+    `PrototypicalRoutingHead` each have their OWN `Runtime.py` (the first
+    two) or `Datasets.py`/`Losses.py`/etc, and having all three on
+    `sys.path` at once makes a bare `from Runtime import ...` resolve to
+    whichever one `sys.path`'s own order happens to put first -- NOT
+    necessarily the one the calling file is actually a sibling of.
+
+    `MppRoutingHead`/`PrototypicalRoutingHead` (2026-09-22, same day,
+    later) no longer touch this mechanism at all: `training/`, `training/
+    MppRoutingHead/` and `training/PrototypicalRoutingHead/` are now real
+    Python packages (each with its own `__init__.py`), so their own
+    cross-file imports are fully-qualified (`from training.MppRoutingHead.
+    Runtime import ...`) and resolve unambiguously by import path, with no
+    `sys.path` ordering involved -- see `training/__init__.py`'s own
+    docstring. Only `SuperPathPoint` still calls `add_training_package`
+    (naming itself alone, right after this) -- it has no top-level bare
+    file that collides with anything in the other two, so a plain
+    `sys.path` entry was never actually ambiguous for it.
+    """
     for path in (UTILITIES_DIR, QUERY_SIM_DIR, ESTIMATE_MPP_DIR, RETRIEVAL_DIR,
                 LOCALIZATION_DIR, AINM_DIR, AINM_MODELS_DIR, AINM_MODELS_COMMON_DIR,
-                SUPERPATHPOINT_DIR, MPPROUTINGHEAD_DIR, PROJECT_ROOT):
+                PROJECT_ROOT):
         if path not in sys.path:
             sys.path.insert(0, path)
+
+
+#: `add_training_package`'s own name -> directory map. Keys are the SAME
+#: names `training/<name>/` uses on disk, not a separate vocabulary.
+TRAINING_PACKAGE_DIRS = {
+    'SuperPathPoint': SUPERPATHPOINT_DIR,
+    'MppRoutingHead': MPPROUTINGHEAD_DIR,
+    'PrototypicalRoutingHead': PROTOTYPICALROUTINGHEAD_DIR,
+}
+
+
+def add_training_package(*names: str) -> None:
+    """Put ONE OR MORE training packages' own directories on `sys.path`,
+    by name (`TRAINING_PACKAGE_DIRS`' own keys) -- never all three by
+    default the way `setup_import_paths` used to, see that function's own
+    docstring for the bare-`from Runtime import ...` collision this
+    avoids.
+
+    ORDER MATTERS when a caller names more than one: each `insert(0, ...)`
+    pushes the previous ones DOWN, so the LAST name given ends up FIRST in
+    `sys.path` and wins any bare-import collision. Put the caller's OWN
+    package last.
+
+    Only `SuperPathPoint` calls this today, naming itself alone -- nothing
+    to order with one name. `MppRoutingHead`/`PrototypicalRoutingHead`
+    used to call this in combination (`add_training_package('MppRoutingHead',
+    'PrototypicalRoutingHead')`, `MppRoutingHead` first/lower-priority,
+    `PrototypicalRoutingHead` last/winning `Runtime`, the one name both
+    directories had) until 2026-09-22, when both became real Python
+    packages with fully-qualified cross-file imports instead -- see
+    `training/__init__.py`'s own docstring. The ordering rule above still
+    applies to any FUTURE caller that names more than one.
+    """
+    for name in names:
+        path = TRAINING_PACKAGE_DIRS[name]
+        if path in sys.path:
+            sys.path.remove(path)
+        sys.path.insert(0, path)
 
 
 def encoder_tag(encoder: str, head: str = '') -> str:

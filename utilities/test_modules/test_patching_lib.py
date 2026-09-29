@@ -46,7 +46,7 @@ from _paths import job_result_dir, setup_import_paths
 setup_import_paths()
 
 from PatchingLib import PatchGrid, PatchInfo, QueryPatchContainer, TissuePatchContainer
-from TissuesRegionsMask import TissueRegion
+from TissueMask import TissueRegion
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -211,9 +211,7 @@ def validate_offset(W, H, tile, ox, oy, ds=1.0, level=2):
     # already failing at eee3412, so nothing downstream ever depended on it.
     # Not reinstated: a patch knows its ds and its level, and mpp is
     # ds * wsi.base_mpp, so storing it would be the same quantity written twice
-    # and free to disagree. TileInfo carries mpp legitimately -- it is a
-    # sampling record whose entire purpose is mpp estimation -- and that is a
-    # different dataclass.
+    # and free to disagree.
     grid = PatchGrid.from_size(W, H, tile, overlap=True,
                                x_offset=ox, y_offset=oy, ds=ds, level=level)
     for info in grid.iter_infos():
@@ -1316,27 +1314,24 @@ def run_patchinfo_section(size: int, out_dir: str) -> None:
 def _mask_with_regions(regions_wh, slide_w, slide_h):
     """A mask whose regions are placed by hand, with a token raster.
 
-    NOT test_tissues_regions_mask.make_trm: that derives regions from the
-    raster, which would need one mask pixel per level-0 pixel of the slide --
-    40 GB for a 200k x 200k canvas. Here only `tissue_regions` is read, so the
-    raster exists purely because `regions_view` shares rather than copies it.
-    The rebind semantics that makes that safe is tested where it belongs, in
-    test_tissues_regions_mask.validate_regions_view_isolation.
+    Regions from the raster would need one mask pixel per level-0 pixel of the
+    slide -- 40 GB for a 200k x 200k canvas. Here only `tissue_regions` is
+    read, so a 16x16 token raster carries them and `_with` places the regions
+    by hand. That views share the raster and cannot leak into their source is
+    tested where it belongs, in test_tissue_mask.t_mask_views_do_not_leak.
     """
-    from TissuesRegionsMask import TissuesRegionsMask
+    from types import SimpleNamespace
+    from TissueMask import SlideMask, TissueMask
     regions, x = [], 0
     for i, (w, h) in enumerate(regions_wh):
         regions.append(TissueRegion(x=x, y=0, w=w, h=h, index=i))
         x += w + 1000
-    return TissuesRegionsMask(
-        main_mask=np.ones((16, 16), dtype=bool),
-        # mask_mpp=0: nothing here converts through mpp, and a non-zero
-        # value would have to satisfy wsi_mpp * mask_ds, which for a
-        # 16-pixel raster over a whole slide is a meaningless number.
-        mask_ds_x=slide_w / 16, mask_ds_y=slide_h / 16, mask_mpp=0.0,
-        tissue_regions=regions, wsi_width=slide_w, wsi_height=slide_h,
-        wsi_mpp_x=0.25, wsi_mpp_y=0.25,
-        wsi_level_downsamples=[1.0, 4.0, 16.0])
+    wsi = SimpleNamespace(level_dimensions=[(slide_w, slide_h)],
+                          level_downsamples=[1.0, 4.0, 16.0],
+                          properties={'openslide.mpp-x': '0.25',
+                                      'openslide.mpp-y': '0.25'})
+    return TissueMask(wsi, SlideMask(np.ones((16, 16), dtype=bool), (0, 0),
+                                     (slide_w, slide_h), slide_w / 16))._with(regions)
 
 
 def validate_resolve_scale(wsi) -> None:
@@ -1355,7 +1350,7 @@ def validate_resolve_scale(wsi) -> None:
     downsamples = [float(d) for d in wsi.level_downsamples]
     for level, ds_true in enumerate(downsamples):
         # Ask for something 0.04% off -- the size of the gap that broke
-        # filter_patchable against from_mpp -- and demand the level's own value.
+        # the patchable filter against from_mpp -- and demand the level's own value.
         got_level, got_ds = WsiTissuesContainer.resolve_scale(
             wsi, ds=ds_true * 1.0004)
         assert got_level == level, (
@@ -1445,10 +1440,9 @@ def validate_container_contract_every_level(wsi, tile: int) -> None:
 
 
 def run_scale_section(args, out_dir: str) -> None:
-    # The mask-side half of this -- regions_view isolation and the
-    # fine/coarse/fine round trip -- lives in test_tissues_regions_mask.py,
-    # since it is filter_patchable's rebind semantics rather than anything
-    # about a container.
+    # The mask-side half of this -- view isolation and the fine/coarse/fine
+    # round trip -- lives in test_tissue_mask.py, since it is about
+    # `patchable` rather than anything about a container.
     print('\n=== Scale resolution ===')
     if not os.path.exists(args.wsi):
         print(f'  [SKIP] WSI not found, container checks skipped: {args.wsi}')
@@ -1642,9 +1636,13 @@ def main() -> int:
     ap.add_argument('--roi',
                     default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
                             'BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png')
+    # PatchingLibTest.sh's own slide and level. `test_real_wsi` reads the whole
+    # level in one call, so a default of a Ki67 MRXS at level 2 -- ds 4 on a 2x
+    # pyramid -- is a whole-canvas read that OOMs a 2-CPU job.
     ap.add_argument('--wsi',
-                    default='/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs')
-    ap.add_argument('--level', type=int, default=2)
+                    default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
+                            'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs')
+    ap.add_argument('--level', type=int, default=3)
     ap.add_argument('--openslide-level', type=int, default=9)
     ap.add_argument('--out-dir', default=None, help='figure output directory')
     args = ap.parse_args()
