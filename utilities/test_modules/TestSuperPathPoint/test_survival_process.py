@@ -22,9 +22,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
 sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                        # noqa: E402
+from _paths import setup_import_paths, add_training_package  # noqa: E402
 
 setup_import_paths()
+add_training_package('SuperPathPoint')
 
 import numpy as np                                            # noqa: E402
 
@@ -120,7 +121,7 @@ def t_anchors_of_unions_rungs_and_dedupes_across_them():
     (晚生型 depends on exactly this)."""
     per_rung = {1.0: np.array([[0.0, 0.0], [100.0, 100.0]]),
                2.0: np.array([[0.5, 0.5], [200.0, 200.0]])}
-    anchors = SP.anchors_of(per_rung, order=[1.0, 2.0], merge_radius_l0=2.0)
+    anchors, _ = SP.anchors_of(per_rung, order=[1.0, 2.0], merge_radius_l0=2.0)
     pts = {tuple(p) for p in np.round(anchors, 1)}
     expected = {(0.0, 0.0), (100.0, 100.0), (200.0, 200.0)}
     if pts != expected:
@@ -132,7 +133,7 @@ def t_anchors_of_unions_rungs_and_dedupes_across_them():
 
 def t_anchors_of_empty_rungs_produce_no_anchors():
     per_rung = {1.0: np.zeros((0, 2)), 2.0: np.zeros((0, 2))}
-    anchors = SP.anchors_of(per_rung, order=[1.0, 2.0], merge_radius_l0=2.0)
+    anchors, _ = SP.anchors_of(per_rung, order=[1.0, 2.0], merge_radius_l0=2.0)
     if len(anchors):
         raise AssertionError(f'expected 0 anchors, got {len(anchors)}')
     return 'empty in, empty out'
@@ -145,7 +146,7 @@ def t_anchors_of_same_rung_points_never_merge_even_within_radius():
     NMS already told them apart.
     """
     per_rung = {1.0: np.array([[0.0, 0.0], [0.1, 0.0]])}
-    anchors = SP.anchors_of(per_rung, order=[1.0], merge_radius_l0=5.0)
+    anchors, _ = SP.anchors_of(per_rung, order=[1.0], merge_radius_l0=5.0)
     if len(anchors) != 2:
         raise AssertionError(f'expected both same-rung points to survive, '
                              f'got {len(anchors)} anchors: {anchors.tolist()}')
@@ -161,9 +162,9 @@ def t_anchors_of_rung_scale_override_collapses_quantisation_term():
     override they must not (`max(1,1)//2=0`).
     """
     per_rung = {1.0: np.array([[0.0, 0.0]]), 16.0: np.array([[8.0, 0.0]])}
-    identity = SP.anchors_of(per_rung, order=[1.0, 16.0], merge_radius_l0=0.0)
-    overridden = SP.anchors_of(per_rung, order=[1.0, 16.0], merge_radius_l0=0.0,
-                               rung_scale=lambda ds: 1.0)
+    identity, _ = SP.anchors_of(per_rung, order=[1.0, 16.0], merge_radius_l0=0.0)
+    overridden, _ = SP.anchors_of(per_rung, order=[1.0, 16.0], merge_radius_l0=0.0,
+                                  rung_scale=lambda ds: 1.0)
     if len(identity) != 1:
         raise AssertionError(f'default (identity) rung_scale should merge '
                              f'(radius 0+16//2=8, distance=8.0) -- got '
@@ -176,6 +177,27 @@ def t_anchors_of_rung_scale_override_collapses_quantisation_term():
            f'override -> {len(overridden)} anchor(s)')
 
 
+def t_anchors_of_source_rung_names_which_rung_each_anchor_survived_in():
+    """The second return value (added 2026-09-13 for `offset_quantiles_of`'s
+    self-match exclusion): a fine-rung point that survives names its OWN
+    rung; a coarse-rung point that gets deduped away contributes nothing;
+    a coarse-rung point with nothing nearby (a late-born anchor) names
+    ITS OWN rung, not the fine one it failed to merge with."""
+    per_rung = {1.0: np.array([[0.0, 0.0]]),
+               2.0: np.array([[0.5, 0.5], [200.0, 200.0]])}
+    anchors, source_rung = SP.anchors_of(per_rung, order=[1.0, 2.0],
+                                         merge_radius_l0=2.0)
+    by_point = {tuple(np.round(a, 1)): float(s)
+               for a, s in zip(anchors, source_rung)}
+    expected = {(0.0, 0.0): 1.0, (200.0, 200.0): 2.0}
+    if by_point != expected:
+        raise AssertionError(f'source_rung {by_point} != expected {expected} '
+                             f'-- (0,0) survived from ds=1.0 (the (0.5,0.5) '
+                             f'ds=2.0 duplicate merged into it), (200,200) '
+                             f'is its own late-born ds=2.0 anchor')
+    return f'source_rung correctly names {by_point}'
+
+
 # ── 3. anchors_of_generations ────────────────────────────────────────────────
 
 def t_anchors_of_generations_keeps_overlap_points_not_near_main():
@@ -185,7 +207,7 @@ def t_anchors_of_generations_keeps_overlap_points_not_near_main():
     per_rung_tiles = {16.0: (
         [np.array([[0.0, 0.0]]), np.array([[100.0, 100.0]])],
         np.array([[0.5, 0.5], [50.0, 50.0]]))}
-    anchors = SP.anchors_of_generations(
+    anchors, _ = SP.anchors_of_generations(
         per_rung_tiles, order=[16.0], tile_merge_radius=2.0)
     pts = {tuple(p) for p in np.round(anchors, 1)}
     expected = {(0.0, 0.0), (100.0, 100.0), (50.0, 50.0)}
@@ -207,7 +229,7 @@ def t_anchors_of_generations_cross_rung_formula_catches_a_coarse_duplicate():
         1.0: ([np.array([[0.0, 0.0]])], np.zeros((0, 2))),
         16.0: ([np.array([[6.0, 0.0]])], np.zeros((0, 2))),
     }
-    anchors = SP.anchors_of_generations(
+    anchors, _ = SP.anchors_of_generations(
         per_rung_tiles, order=[1.0, 16.0], tile_merge_radius=4.0)
     if len(anchors) != 1:
         raise AssertionError(f'expected the ds=16 point to merge into the '
@@ -244,11 +266,11 @@ def t_nearest_detection_empty_points_is_NONE_not_a_crash():
 
 
 def t_nearest_detection_matches_brute_force_on_random_points():
-    """The grid-hash rewrite (`_nearest_index_grid`) has to give the exact
+    """`nearest_detection`'s `cKDTree`-based lookup has to give the exact
     same DISTANCE as a brute-force `O(N*M)` scan -- this is the test that
-    rewrite's own docstring promises exists. Ties are the one thing allowed
-    to differ (grid/ring visiting order vs `argmin`'s array order), so this
-    only asserts on `dist`/`score`, not on which index won.
+    function's own docstring promises exists. Ties are the one thing allowed
+    to differ (cKDTree's internal traversal order vs `argmin`'s array
+    order), so this only asserts on `dist`/`score`, not on which index won.
     """
     rng = np.random.default_rng(0)
     points = rng.uniform(-500.0, 500.0, size=(300, 2))
@@ -266,10 +288,10 @@ def t_nearest_detection_matches_brute_force_on_random_points():
         brute_score[qi] = score[j]
 
     if not np.allclose(dist, brute_dist, atol=1e-9):
-        raise AssertionError(f'grid-hash dist diverges from brute force: '
+        raise AssertionError(f'cKDTree dist diverges from brute force: '
                              f'max |diff| = {np.abs(dist - brute_dist).max()}')
     if not np.allclose(sc, brute_score, atol=1e-9):
-        raise AssertionError('grid-hash score diverges from brute force '
+        raise AssertionError('cKDTree score diverges from brute force '
                              '(same distance but different score -> picked '
                              'a different point at an exact tie, or a bug)')
     return f'300 points, 50 queries, max |diff| = ' \
@@ -277,12 +299,12 @@ def t_nearest_detection_matches_brute_force_on_random_points():
 
 
 def t_nearest_detection_far_outside_query_still_finds_true_nearest():
-    """`_nearest_index_grid`'s `max_ring` safety cutoff is sized per query
-    from that query's own distance to the point cloud (triangle inequality),
-    not from the cloud's own span -- this is exactly the decoy-shifted-
-    anchor case (a query can sit far outside `points`' bounding box). A cutoff
-    derived only from the cloud's span would truncate the ring search here
-    and miss the true nearest point (or return `best_j == -1`).
+    """A query can sit far outside `points`' own bounding box (the decoy-
+    shifted-anchor case, or a coarse C rung's small cloud probed by anchors
+    spanning the whole tree) -- `cKDTree` finds the true nearest point
+    regardless of that distance, unlike the retired grid-hash expanding-ring
+    search, whose per-query cost grew with (distance to the cloud) / (the
+    cloud's own density-derived cell size).
     """
     points = np.array([[0.0, 0.0], [1.0, 0.0], [-1.0, 1.0], [0.5, -0.5]])
     score = np.array([0.1, 0.2, 0.3, 0.4])
@@ -294,8 +316,7 @@ def t_nearest_detection_far_outside_query_still_finds_true_nearest():
     expected_dist = np.linalg.norm(points[expected_j] - query[0])
     if not np.isclose(dist[0], expected_dist):
         raise AssertionError(f'dist {dist[0]} != expected {expected_dist} -- '
-                             f'ring search truncated before reaching the '
-                             f'true nearest point')
+                             f'did not find the true nearest point')
     if sc[0] != score[expected_j]:
         raise AssertionError(f'score {sc[0]} != point {expected_j}\'s score '
                              f'{score[expected_j]}')
@@ -324,7 +345,8 @@ _SECTIONS = {
     'anchors':  ['t_anchors_of_unions_rungs_and_dedupes_across_them',
                 't_anchors_of_empty_rungs_produce_no_anchors',
                 't_anchors_of_same_rung_points_never_merge_even_within_radius',
-                't_anchors_of_rung_scale_override_collapses_quantisation_term'],
+                't_anchors_of_rung_scale_override_collapses_quantisation_term',
+                't_anchors_of_source_rung_names_which_rung_each_anchor_survived_in'],
     'generations': [
         't_anchors_of_generations_keeps_overlap_points_not_near_main',
         't_anchors_of_generations_cross_rung_formula_catches_a_coarse_duplicate'],

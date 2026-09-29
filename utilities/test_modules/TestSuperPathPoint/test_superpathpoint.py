@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import collections
 import itertools
+from pathlib import Path
 import os
 import sys
 import tempfile
@@ -77,23 +78,23 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
 sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
+from _paths import setup_import_paths, add_training_package  # noqa: E402
 
 setup_import_paths()
+add_training_package('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 import torch.nn as nn                                            # noqa: E402
 
 from common import KeypointLabelStore              # noqa: E402
-import PreTileStore
 from common.Homography import invert, points_input_to_output     # noqa: E402
 from common.Interfaces import ShapeMismatch, check_shapes        # noqa: E402
 from common.KeypointLabelStore import (LabelMeta,                # noqa: E402
                                        batch_from_lists)
-from PreTileStore import (PreTileMeta, PreTileRecord,     # noqa: E402
-                                 centre_crop, centre_margin,
-                                 pre_tile_px)
+from Store import (PreTileCorpus, PreTileMeta, PreTileRecord,  # noqa: E402
+                   PreTileStore)
+from TileSampler import centre_crop, centre_margin, pre_tile_px  # noqa: E402
 from common.KeypointLabelStore import points_from_prob        # noqa: E402
 from SuperPoint.Backbones import VggBackbone, VggBackboneConfig  # noqa: E402
 from SuperPoint.Datasets import PairDatasetConfig, splat         # noqa: E402
@@ -654,9 +655,9 @@ def t_the_pair_warps_points_and_not_the_map():
     across four pixels and mostly gone, and it would not agree with this.
     """
     with tempfile.TemporaryDirectory() as root:
-        tiles_root, labels_root, points = _make_stores(root)
+        corpus, labels_root, points = _make_stores(root)
         cfg = PairDatasetConfig(tile=TILE, in_channels=1, seed=0)
-        dataset = cfg.build(tiles_root, labels_root, wsi_stems=[_STEM_A])
+        dataset = cfg.build(corpus, labels_root, wsi_stems=[_STEM_A])
         assert len(dataset) == 2, len(dataset)
 
         item = dataset[0]
@@ -681,9 +682,9 @@ def t_the_warped_valid_mask_is_nearly_full_because_of_the_pre_tile():
     outside to sample, so the only False is the eroded rim -- and it must NOT be
     the two thirds a tile-sized source would give."""
     with tempfile.TemporaryDirectory() as root:
-        tiles_root, labels_root, _ = _make_stores(root)
+        corpus, labels_root, _ = _make_stores(root)
         dataset = PairDatasetConfig(tile=TILE, in_channels=1, seed=0).build(
-            tiles_root, labels_root, wsi_stems=[_STEM_A])
+            corpus, labels_root, wsi_stems=[_STEM_A])
         rim = 3
         fractions = []
         for i in range(len(dataset)):
@@ -699,11 +700,11 @@ def t_align_min_truncates_and_loss_weight_does_not():
     """The switch, both ways. `none` and `loss-weight` keep every tile;
     `align-min` cuts every rung to the smallest."""
     with tempfile.TemporaryDirectory() as root:
-        tiles_root, labels_root, _ = _make_stores(root, rungs=((1.0, 4), (4.0, 1)))
+        corpus, labels_root, _ = _make_stores(root, rungs=((1.0, 4), (4.0, 1)))
         sizes = {}
         for mode in ('none', 'align-min', 'loss-weight'):
             dataset = PairDatasetConfig(tile=TILE, balance=mode, seed=0).build(
-                tiles_root, labels_root, wsi_stems=[_STEM_A])
+                corpus, labels_root, wsi_stems=[_STEM_A])
             sizes[mode] = (len(dataset),
                            [round(float(w), 2) for w in dataset.rung_weight])
         assert sizes['none'][0] == 5, sizes
@@ -722,11 +723,11 @@ def t_every_item_says_which_slide_it_came_from():
     tiles -- otherwise a rung filter that empties one slide silently shifts
     every other slide's index and a per-slide row describes the wrong slide."""
     with tempfile.TemporaryDirectory() as root:
-        tiles_root, labels_root, _ = _make_stores(
+        corpus, labels_root, _ = _make_stores(
             root, rungs=((1.0, 2), (4.0, 3)), stems=(_STEM_A, _STEM_B))
         stems = [_STEM_B, _STEM_A]              # deliberately not sorted
         dataset = PairDatasetConfig(tile=TILE, balance='none').build(
-            tiles_root, labels_root, wsi_stems=stems)
+            corpus, labels_root, wsi_stems=stems)
         assert dataset.slides == stems, dataset.slides
         seen = collections.Counter()
         for i in range(len(dataset)):
@@ -739,7 +740,7 @@ def t_every_item_says_which_slide_it_came_from():
         # the decoy: drop one slide's rungs and the OTHER slide's index must
         # not move. A dict built from what was found would renumber here.
         one = PairDatasetConfig(tile=TILE, balance='none').build(
-            tiles_root, labels_root, wsi_stems=stems, rungs=[4.0])
+            corpus, labels_root, wsi_stems=stems, rungs=[4.0])
         assert one.slides == stems, one.slides
         return (f'{seen[_STEM_A]} + {seen[_STEM_B]}, indices stable; '
                 f'the second stem holds {_STEM_B.count(",")} commas')
@@ -754,10 +755,10 @@ def t_validation_splits_by_slide_and_the_parts_sum_to_the_whole():
     """
     torch.manual_seed(0)
     with tempfile.TemporaryDirectory() as root:
-        tiles_root, labels_root, _ = _make_stores(
+        corpus, labels_root, _ = _make_stores(
             root, rungs=((1.0, 3),), stems=(_STEM_A, _STEM_B))
         val = PairDatasetConfig(tile=TILE, balance='none', workers=0).build(
-            tiles_root, labels_root, wsi_stems=[_STEM_A, _STEM_B])
+            corpus, labels_root, wsi_stems=[_STEM_A, _STEM_B])
         net = _net()
         trainer = TrainerConfig(batch_size=2, workers=0, amp=False,
                                 wandb_mode='disabled').build(
@@ -815,10 +816,10 @@ def t_a_new_epoch_draws_a_new_warp_and_the_same_epoch_repeats():
     is for -- so the same epoch read twice must give the same warp.
     """
     with tempfile.TemporaryDirectory() as root:
-        tiles_root, labels_root, _ = _make_stores(root)
+        corpus, labels_root, _ = _make_stores(root)
         data = PairDatasetConfig(tile=TILE, in_channels=1, balance='none',
                                  seed=0, workers=0).build(
-                                     tiles_root, labels_root,
+                                     corpus, labels_root,
                                      wsi_stems=[_STEM_A])
 
         data.set_epoch(0)
@@ -914,15 +915,16 @@ _STEM_B = 'S1103627,G7E,110127'
 
 
 def _make_stores(root, rungs=((1.0, 2),), stems=(_STEM_A,)):
-    """A pre-tile store and a matching label store, in a temp directory.
+    """A pre-tile corpus and a matching label store, in a temp directory.
 
     Written through the real `PreTileStore` and `KeypointLabelStore` rather than
     by hand, so that a change to either format breaks this test instead of
     letting it test a shape nothing produces any more.
     """
-    tiles_root = os.path.join(root, 'tiles')
     labels_root = os.path.join(root, 'labels')
     factor = 3
+    corpus = PreTileCorpus(Path(root) / 'tiles', 'seg0', 'reg0', 'aaaa1111',
+                           'ladder-test', factor)
     pre_px = pre_tile_px(TILE, factor)
     margin = centre_margin(TILE, factor)
     rng = np.random.default_rng(0)
@@ -930,17 +932,19 @@ def _make_stores(root, rungs=((1.0, 2),), stems=(_STEM_A,)):
 
     for stem, (ds, count) in itertools.product(stems, rungs):
         meta = PreTileMeta(wsi_stem=stem, ds=float(ds), tile=TILE,
-                           sampler_id='aaaa1111', seed=0, segmenter_id='seg0000',
+                           seg_id=corpus.seg_id, region_id=corpus.region_id,
+                           sampler_id=corpus.sampler_id, plan=corpus.plan,
+                           seed=0, segmenter_id='seg0000',
                            pre_tile_factor=factor, level=0, level_ds=1.0,
                            shrink=1.0, read_size=pre_px)
-        folder = PreTileStore.create(tiles_root, meta)
+        folder = PreTileStore.create(corpus, meta)
         records = []
         for i in range(count):
             image = rng.integers(0, 256, (pre_px, pre_px, 3), dtype=np.uint8)
             record = PreTileRecord(index=i, x=1000 * i, y=2000 * i)
             PreTileStore.save_tile(folder, record, image, meta)
             records.append(record)
-        PreTileStore.write_index(folder, records, meta)
+        PreTileStore.write_index(folder, records)
 
         batch = batch_from_lists(
             [(r.x, r.y) for r in records], [points] * count,
@@ -948,8 +952,8 @@ def _make_stores(root, rungs=((1.0, 2),), stems=(_STEM_A,)):
             [np.full(len(points), 9, np.uint8)] * count, cap=16)
         KeypointLabelStore.save(labels_root, batch, LabelMeta(
             wsi_stem=stem, ds=float(ds), tile=TILE, ha_id='ha000000',
-            pretile_id=meta.cfg_hash(), n_tiles=len(batch), cap=batch.cap))
-    return tiles_root, labels_root, points
+            pretile_id=meta.corpus_key, n_tiles=len(batch), cap=batch.cap))
+    return corpus, labels_root, points
 
 
 # ══════════════════════════════════════════════════════════════════════════════

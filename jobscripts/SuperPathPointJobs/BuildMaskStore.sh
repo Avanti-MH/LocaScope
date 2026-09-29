@@ -123,9 +123,13 @@ echo "======== 3a  BuildMaskStore ========"
 echo "  slides: ${#SLIDES[@]}   level 0, mask ds 14, fit on $FIT_TILES tiles"
 echo ""
 
+# No --fit-tiles: the recipe (MASK_RECIPES['uni2_pca']) is the one place the
+# fit size lives. Overriding it here would give the masks a different seg_id,
+# and probe_tile_yield / extract_pretiles / prepare_chain_stack -- which read
+# the plain recipe -- would then find no mask at all.
 python utilities/cli/build_cache/build_mask_store.py \
   "${SLIDES[@]}" \
-  --fit-tiles $FIT_TILES \
+  --seg uni2_pca \
   --workers $WORKERS
 status=$?
 
@@ -152,7 +156,7 @@ probe=$?
 
 echo ""
 echo "======== done  (3a $status, 3b $probe) ========"
-echo "  masks   -> result/cache/masks/<slide>__uni2-pca-seg__<cfg8>.safetensors"
+echo "  masks   -> result/cache/\${SLURM_JOB_NAME}_mask/<seg_id>/<slide>/mask.safetensors"
 echo "  table   -> result/\${SLURM_JOB_NAME}/build_mask_store.csv"
 echo "  yield   -> result/\${SLURM_JOB_NAME}/tile_yield.csv + tile_yield.png"
 echo "  names   -> tile_yield_definitions.csv beside the figure"

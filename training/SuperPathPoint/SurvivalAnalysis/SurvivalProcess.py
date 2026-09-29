@@ -1,7 +1,7 @@
 """One stack -> real measurements only. spec.md 3.2.
 
     xy, score = detect(prob, cfg, score_threshold=0.001)
-    anchors = anchors_of({ds: xy_per_rung}, order, merge_radius_l0=0)
+    anchors, source_rung = anchors_of({ds: xy_per_rung}, order, merge_radius_l0=0)
     dist, score, rival, rival_dist = probe_real(anchors, per_rung_detections,
                                                 order, maps, origins, scales,
                                                 nms_radius=cfg.nms_radius)
@@ -29,6 +29,7 @@ import sys
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
@@ -87,106 +88,46 @@ def nearest_detection(points: np.ndarray, score: np.ndarray,
     -- `Attribution.NONE` means "this rung found nothing AT ALL", a
     different thing from "found something, far").
 
-    GRID-HASH EXPANDING-RING SEARCH, not the O(N*M) all-pairs matrix this
-    used to be (`delta = xy0[:, None, :] - points[None, :, :]`, an
-    `[N, M, 2]` array): fine at a few thousand points a side, an OOM crash
-    on a real C-tree's ds=1 rung, which routinely has tens of thousands of
-    both anchors and raw detections (2026-09-12: ~70,000 either side would
-    ask for ~78 GB). `points` is bucketed once into a grid sized for a
-    handful of points per cell; each query then searches OUTWARD ring by
-    ring (its own cell, the 8 around it, the 16 around those, ...) and
-    stops the moment the NEXT ring cannot possibly hold anything closer
-    than the best candidate already found -- a cell at Chebyshev ring `r`
-    is at least `(r-1)*cell` from the query, so once `best_d <= r*cell`
-    after finishing ring `r`, ring `r+1` and beyond are provably no closer.
-    This is EXACT, not an approximation: the DISTANCE always matches the
-    O(N*M) version (`test_survival_process.py`'s `t_nearest_detection_
+    `scipy.spatial.cKDTree`, not the O(N*M) all-pairs matrix this used to be
+    (`delta = xy0[:, None, :] - points[None, :, :]`, an `[N, M, 2]` array):
+    fine at a few thousand points a side, an OOM crash on a real C-tree's
+    ds=1 rung, which routinely has tens of thousands of both anchors and raw
+    detections (2026-09-12: ~70,000 either side would ask for ~78 GB).
+
+    A hand-rolled grid-hash expanding-ring search (bucket `points` into
+    cells, walk outward ring by ring from each query) was tried first and
+    DEPLOYED, then RETIRED the same day: it is exact and was fast on every
+    case checked at the time, but its per-query cost is `O(ring^2)` where
+    `ring` grows with (distance to the point cloud) / (the cloud's OWN
+    density-derived cell size) -- so a query far from a SMALL, DENSE cluster
+    of points forces a huge ring expansion, independent of how many points
+    there actually are. This is exactly the C axis's own shape: a coarse
+    rung's own detections can be few and tightly clustered (one small
+    mother tile) while the anchors being probed against it span the whole
+    tree, so some anchors sit far outside that rung's small cloud. Caught in
+    production 2026-09-11: two sweep tasks each burning 100%+ CPU for 20-40
+    minutes and climbing, stuck on one specific ChainStack, independent of
+    alive-method -- confirmed still making progress (not deadlocked, `/proc/
+    <pid>/stat`'s utime advancing at wall-clock rate) but with no visible
+    end. A KD-tree's query cost does not depend on where the query sits
+    relative to the tree's own points the way the grid-hash's does, so this
+    failure mode does not have an equivalent here.
+
+    EXACT, like the version before it: the DISTANCE always matches a
+    brute-force scan (`test_survival_process.py`'s `t_nearest_detection_
     matches_brute_force_on_random_points` checks it) -- the one thing that
-    can differ is WHICH point wins an exact tie (two points at the
-    identical distance), since this visits candidates in grid/ring order,
-    not array order the way `argmin` does. Real detector scores are
-    continuous floats; an exact tie has probability zero on real data, so
-    this is not a behaviour change worth engineering around.
+    can differ is WHICH point wins an exact tie (two points at the identical
+    distance), since `cKDTree` does not promise array order there either.
+    Real detector scores are continuous floats; an exact tie has probability
+    zero on real data, so this is not a behaviour change worth engineering
+    around.
     """
     n = len(xy0)
     if not len(points) or not n:
         return np.full(n, NONE, np.float64), np.zeros(n, np.float64)
-    nearest = _nearest_index_grid(points, xy0)
-    delta = xy0 - points[nearest]
-    distance = np.sqrt((delta ** 2).sum(axis=1))
-    return distance, np.asarray(score, np.float64)[nearest]
-
-
-def _nearest_index_grid(points: np.ndarray, queries: np.ndarray) -> np.ndarray:
-    """`[Q]` -- for each query, the INDEX into `points` of its nearest
-    neighbour (exact). `points` must be non-empty; `nearest_detection` is
-    the only caller and already guards that.
-
-    Cell size aims for roughly one point per cell on average
-    (`span / sqrt(len(points))`) -- small enough that a typical query
-    resolves within the first ring or two, large enough that a ring is not
-    almost-always empty (which would just mean more rings, not a wrong
-    answer, but a slower one).
-
-    THE RING SEARCH'S OWN STOPPING RULE (`best_d <= ring * cell`) IS WHAT
-    MAKES THIS EXACT, AND IT NEVER NEEDS A QUERY-INDEPENDENT CAP: a decoy
-    query can sit far outside `points`' own bounding box (`decoy_shift`
-    moves anchors by real, unbounded-in-principle amounts) and still needs
-    its TRUE nearest point, however many rings out that is -- a cap sized
-    only from `points`' own span would cut such a search off too early and
-    return a wrong (or missing) answer for exactly the queries furthest
-    from the cloud. `max_ring` below is sized per query instead, from that
-    query's own distance to the cloud's centre plus the cloud's own
-    radius (triangle inequality: no point in `points` can be farther from
-    the query than that), so it is generous enough to always contain the
-    true answer -- a defensive bound against a runaway loop, not a limit
-    that can ever change the result.
-    """
-    n_points = len(points)
-    span = float(max(points[:, 0].max() - points[:, 0].min(),
-                     points[:, 1].max() - points[:, 1].min(), 1.0))
-    cell = max(span / np.sqrt(n_points), 1.0)
-    cloud_cx = 0.5 * float(points[:, 0].min() + points[:, 0].max())
-    cloud_cy = 0.5 * float(points[:, 1].min() + points[:, 1].max())
-    cloud_radius = float(np.hypot(points[:, 0].max() - cloud_cx,
-                                 points[:, 1].max() - cloud_cy)) + cell
-
-    grid: Dict[Tuple[int, int], List[int]] = {}
-    cell_x = np.floor(points[:, 0] / cell).astype(np.int64)
-    cell_y = np.floor(points[:, 1] / cell).astype(np.int64)
-    for i in range(n_points):
-        grid.setdefault((int(cell_x[i]), int(cell_y[i])), []).append(i)
-
-    n_queries = len(queries)
-    nearest = np.empty(n_queries, dtype=np.int64)
-    for qi in range(n_queries):
-        qx, qy = queries[qi]
-        qcx = int(np.floor(qx / cell))
-        qcy = int(np.floor(qy / cell))
-        query_to_cloud = float(np.hypot(qx - cloud_cx, qy - cloud_cy))
-        max_ring = int(np.ceil((query_to_cloud + cloud_radius) / cell)) + 2
-        best_d = np.inf
-        best_j = -1
-        ring = 0
-        while True:
-            for dx in range(-ring, ring + 1):
-                for dy in range(-ring, ring + 1):
-                    if max(abs(dx), abs(dy)) != ring:
-                        continue    # only this ring's NEW cells -- inner
-                                    # ones were already searched last pass
-                    cand = grid.get((qcx + dx, qcy + dy))
-                    if not cand:
-                        continue
-                    for j in cand:
-                        d = float(np.hypot(points[j, 0] - qx, points[j, 1] - qy))
-                        if d < best_d:
-                            best_d = d
-                            best_j = j
-            if (best_j != -1 and best_d <= ring * cell) or ring >= max_ring:
-                break
-            ring += 1
-        nearest[qi] = best_j
-    return nearest
+    distance, nearest = cKDTree(points).query(xy0)
+    return (np.atleast_1d(distance).astype(np.float64),
+            np.asarray(score, np.float64)[np.atleast_1d(nearest)])
 
 
 def to_level0(xy: np.ndarray, *, origin: Tuple[float, float], ds: float
@@ -340,8 +281,18 @@ def _merge_within_radius(points: np.ndarray, radius: float,
 def anchors_of(per_rung: Dict[float, np.ndarray], order: Sequence[float],
               merge_radius_l0: float, *,
               rung_scale: Optional[Callable[[float], float]] = None
-              ) -> np.ndarray:
-    """The union of every rung's detections, deduplicated. `[N, 2]` level 0.
+              ) -> Tuple[np.ndarray, np.ndarray]:
+    """The union of every rung's detections, deduplicated.
+    `([N, 2] level 0, [N] source rung)`.
+
+    The second array is WHICH RUNG (an `order` value) each anchor's
+    coordinates were copied from unmodified -- finest-first merge order
+    means that is always the finest rung the point survived in, never an
+    average or a recomputation (AlphaSelectionNotes.md §9). Added
+    2026-09-13 so `offset_quantiles_of` can exclude an anchor from its OWN
+    source rung's offset distribution: that entry is a self-match,
+    guaranteed distance 0 by construction, not a real cross-rung
+    measurement -- see that function's own docstring.
 
     `order` finest first: a point kept from a finer rung's list is visited
     before the same physical point's coarser-rung duplicate, so its
@@ -390,15 +341,16 @@ def anchors_of(per_rung: Dict[float, np.ndarray], order: Sequence[float],
             if groups else np.zeros(0, np.float64))
     keep = _merge_within_radius(all_pts, merge_radius_l0,
                                 rung_id=rung_id, rung_scale=scale)
-    return all_pts[keep]
+    return all_pts[keep], rung_id[keep]
 
 
 def anchors_of_generations(
         per_rung_tiles: Dict[float, Tuple[List[np.ndarray], np.ndarray]],
         order: Sequence[float], tile_merge_radius: float,
-        cross_rung_base: float = 0.0) -> np.ndarray:
+        cross_rung_base: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
     """The 'C' axis equivalent of `anchors_of`: one rung is many tiles, not
-    one. `[N, 2]` level 0.
+    one. `([N, 2] level 0, [N] source rung)` -- see `anchors_of`'s own
+    docstring for what the second array is and why it exists.
 
     `per_rung_tiles[ds] = (main_tiles, overlap_tile)` -- every main
     descendant's own level-0 detections at that rung, and the overlap
@@ -452,7 +404,7 @@ def anchors_of_generations(
               if per_generation else np.zeros(0, np.float64))
     keep = _merge_within_radius(all_pts, cross_rung_base,
                                 rung_id=rung_ds, rung_scale=rung_ds)
-    return all_pts[keep]
+    return all_pts[keep], rung_ds[keep]
 
 
 def probe_real(anchors: np.ndarray,

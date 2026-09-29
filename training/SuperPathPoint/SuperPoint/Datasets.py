@@ -1,6 +1,6 @@
 """The training pair: one tile, one warped view of it, and both label maps.
 
-    ds = PairDatasetConfig().build(tiles_root, labels_root, wsi_stems, rungs)
+    ds = PairDatasetConfig().build(corpus, labels_root, wsi_stems, rungs)  # Store.PreTileCorpus
     batch = ds[0]
         image, warped_image        [C, tile, tile] float in [0, 1]
         keypoint_map, warped_...   [tile, tile] float 0/1
@@ -65,11 +65,11 @@ from torch.utils.data import Dataset
 from ConfigIdentity import IdentifiedConfig, register
 
 from common import KeypointLabelStore
-import PreTileStore
+from Store import PreTileStore
 from common.Homography import inside, points_input_to_output, sample_homography
 from common.HomographyConfig import HOMOGRAPHY_BASELINE, HomographyConfig
-from PreTileStore import (centre_crop, centre_margin,
-                                 pretile_valid_mask, warp_from_pretile)
+from TileSampler import centre_crop, centre_margin
+from common.Homography import pretile_valid_mask, warp_from_pretile
 
 BALANCE_MODES = ('none', 'align-min', 'loss-weight')
 
@@ -135,20 +135,19 @@ class PairDatasetConfig(IdentifiedConfig):
 
     NOT_IDENTITY = ('seed', 'workers')
 
-    def build(self, tiles_root, labels_root, *, wsi_stems: Sequence[str],
+    def build(self, corpus, labels_root, *, wsi_stems: Sequence[str],
               rungs: Optional[Sequence[float]] = None,
-              ha_id: Optional[str] = None,
-              sampler_id: Optional[str] = None) -> 'HomographyPairDataset':
-        return HomographyPairDataset(self, tiles_root, labels_root,
+              ha_id: Optional[str] = None) -> 'HomographyPairDataset':
+        return HomographyPairDataset(self, corpus, labels_root,
                                      wsi_stems=wsi_stems, rungs=rungs,
-                                     ha_id=ha_id, sampler_id=sampler_id)
+                                     ha_id=ha_id)
 
 
 @dataclass
 class PairItem:
     """One index entry. Deliberately small: this list is held per worker."""
     folder: Path
-    record: PreTileStore.PreTileRecord
+    record: PreTileStore.Record
     points: np.ndarray            # [n, 2] int16, tile coordinates
     rung: float
     rung_index: int
@@ -172,11 +171,10 @@ class HomographyPairDataset(Dataset):
     read cannot happen here (spec.md 6.5).
     """
 
-    def __init__(self, cfg: PairDatasetConfig, tiles_root, labels_root, *,
+    def __init__(self, cfg: PairDatasetConfig, corpus, labels_root, *,
                  wsi_stems: Sequence[str],
                  rungs: Optional[Sequence[float]] = None,
-                 ha_id: Optional[str] = None,
-                 sampler_id: Optional[str] = None):
+                 ha_id: Optional[str] = None):
         if cfg.balance not in BALANCE_MODES:
             raise ValueError(
                 f'balance must be one of {BALANCE_MODES}, got {cfg.balance!r}')
@@ -186,45 +184,27 @@ class HomographyPairDataset(Dataset):
         rung_values = sorted({float(r) for r in rungs}) if rungs else None
         found_rungs: List[float] = []
 
-        # ONE STORE PER (slide, rung, sampler_id), REFUSED RATHER THAN UNIONED.
-        # A root legitimately holds two corpora of the same slides -- stage A
-        # and stage B share `result/cache/tiles/` on purpose (2026-09-05) --
-        # and `sampler_id` (passed in by the caller, not stored on `cfg`: it
-        # selects a corpus, it is not a property of the training distribution)
-        # is what tells them apart. Left unset, this loop falls back to the
-        # old behaviour: any second folder for the same (slide, ds) raises,
-        # because reading both would call the union a corpus. It would not
-        # error on its own: it would report twice the tiles and a bucket
-        # distribution that is neither corpus's.
-        #
-        # `KeypointLabelStore.find_one` refuses the same shape for the same
-        # reason ("a labels root legitimately holds round-1 and round-2 labels
-        # of the same tiles"); this side had no guard until 2026-09-01.
-        seen: Dict[Tuple[str, float], Path] = {}
-        find_kwargs = dict(tile=int(cfg.tile))
-        if sampler_id is not None:
-            find_kwargs['sampler_id'] = sampler_id
-        for folder in sorted(PreTileStore.find(tiles_root, **find_kwargs)):
+        # ONE CORPUS, BY ADDRESS. A cache root legitimately holds two corpora
+        # of the same slides -- stage A and stage B, on purpose -- and reading
+        # both would call their union a corpus: twice the tiles and a bucket
+        # distribution that is neither's. `corpus` (a Store.PreTileCorpus) is
+        # one extraction's directory, so the union cannot be formed. It is
+        # passed by the caller, not stored on `cfg`: it selects the data, it
+        # is not a property of the training distribution.
+        for stem in wsi_stems:
+          for folder in corpus.rung_dirs(stem):
             meta = PreTileStore.load_meta(folder)
-            if meta.wsi_stem not in set(wsi_stems):
-                continue
+            if meta.tile != int(cfg.tile):
+                raise ValueError(
+                    f'{folder} holds {meta.tile} px tiles and this dataset '
+                    f'trains on {cfg.tile}: the corpus was cut for another '
+                    f'model')
             if rung_values is not None and not any(
                     abs(meta.ds - r) < 1e-6 for r in rung_values):
                 continue
-            key = (meta.wsi_stem, float(meta.ds))
-            if key in seen:
-                raise ValueError(
-                    f'two pre-tile stores for {meta.wsi_stem} at ds '
-                    f'{meta.ds:g} under {tiles_root}:\n'
-                    f'  {seen[key].name}\n  {folder.name}\n'
-                    f'They were cut at different sampler settings, so their '
-                    f'union is not a corpus -- it is two corpora with one '
-                    f'name. Pass sampler_id=... to build(), or point '
-                    f'--tiles-root at one of them')
-            seen[key] = folder
 
             query = dict(wsi_stem=meta.wsi_stem, ds=meta.ds,
-                         pretile_id=meta.cfg_hash())
+                         pretile_id=meta.corpus_key)
             if ha_id:
                 query['ha_id'] = ha_id
             # find_one and not find()[0]: a labels root legitimately holds

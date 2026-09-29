@@ -235,9 +235,8 @@ def load(path) -> Tuple[SurvivalBatch, SurvivalMeta]:
 def find(root, **eq) -> List[Path]:
     """Stores under `root` whose metadata matches every keyword.
 
-    By metadata and not by filename, `PreTileStore.find`'s reason: the name
-    carries fields a caller would otherwise have to re-derive, and an identity
-    rule recomputed elsewhere is one that drifts.
+    By metadata and not by filename: the name would carry fields a caller has
+    to re-derive, and an identity rule recomputed elsewhere is one that drifts.
     """
     hits = []
     for candidate in sorted(Path(root).glob('*.safetensors')):

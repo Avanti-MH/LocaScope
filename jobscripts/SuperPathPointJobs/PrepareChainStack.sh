@@ -25,7 +25,7 @@ source jobscripts/_env.sh
 # =============================================================================
 #
 # `prepare_chain_stack.py` decides, per axis, whether its own corpus already
-# exists for this slide, and if not, SAMPLES IT DIRECTLY (`MaskStore` +
+# exists for this slide, and if not, SAMPLES IT DIRECTLY (the mask cache +
 # `TileSampler` + `PreTileStore`, in process -- option B, 2026-09-06) --
 # `ExtractPreTiles.sh` is untouched by this and stays the separate, human-run
 # `stageA` training-corpus script.
@@ -58,12 +58,12 @@ C_RUNGS="${C_RUNGS:-1.0 2.0 4.0 8.0 16.0}"
 # Empty = build all three. Set e.g. AXES="F R" for a partial run.
 AXES="${AXES:-F R C}"
 
-# Only needed when a slide already has more than one store and
-# ensure_sampler_id() cannot tell them apart on its own (see
-# prepare_chain_stack.py's module docstring) -- empty otherwise.
-F_SAMPLER_ID="${F_SAMPLER_ID:-}"
-R_SAMPLER_ID="${R_SAMPLER_ID:-}"
-C_SAMPLER_ID="${C_SAMPLER_ID:-}"
+# Empty = each axis's corpus is COMPUTED from common/Corpora.RECIPES (the
+# normal case). Set one to a corpus key, as extract_pretiles prints it, to read
+# a corpus cut with other knobs instead -- e.g. a smoke run's.
+F_CORPUS="${F_CORPUS:-}"
+R_CORPUS="${R_CORPUS:-}"
+C_CORPUS="${C_CORPUS:-}"
 
 # R/C's own local ChainStack cache (descendants/derived rungs). Defaults off
 # -- RStack.from_own's docstring: degrade is cheap, not worth the disk IO at
@@ -71,17 +71,20 @@ C_SAMPLER_ID="${C_SAMPLER_ID:-}"
 # repeatedly is worth not recomputing at all.
 CACHE_ROOT="${CACHE_ROOT:-}"
 
-TILES_ROOT="${TILES_ROOT:-/work/u26130998/result/cache/tiles}"
+# result/cache/<PRETILE_CACHE_JOB>_pretiles/: where stageA already is, and
+# where F's and C's own corpora are written beside it.
+PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
 
-# Where build_mask_store.py wrote the masks -- needed only when F's/C's own
-# corpus actually has to be sampled (R never does).
-MASK_ROOT="${MASK_ROOT:-/work/u26130998/result/cache/masks}"
+# Which cached masks F's/C's own corpus is sampled from, when it has to be
+# (R never does): build_mask_store.py's recipe and job.
+SEG="${SEG:-uni2_pca}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-BuildMaskStore}"
 
 echo "======== PrepareChainStack ========"
 echo "  slide  ${WSI_NAME:-<all 12, no WSI_NAME given>}"
 echo "  axes   $AXES"
 echo "  tile   $TILE   rungs ${RUNGS}   c-rungs ${C_RUNGS}"
-echo "  tiles-root $TILES_ROOT"
+echo "  pre-tiles  result/cache/${PRETILE_CACHE_JOB}_pretiles/"
 echo ""
 
 python training/SuperPathPoint/cli/prepare_chain_stack.py \
@@ -89,12 +92,12 @@ python training/SuperPathPoint/cli/prepare_chain_stack.py \
   --tile "$TILE" \
   --rungs $RUNGS \
   --c-rungs $C_RUNGS \
-  --tiles-root "$TILES_ROOT" \
-  --mask-root "$MASK_ROOT" \
+  --pretile-cache-job "$PRETILE_CACHE_JOB" \
+  --seg "$SEG" --mask-cache-job "$MASK_CACHE_JOB" \
   --axes $AXES \
-  ${F_SAMPLER_ID:+--f-sampler-id "$F_SAMPLER_ID"} \
-  ${R_SAMPLER_ID:+--r-sampler-id "$R_SAMPLER_ID"} \
-  ${C_SAMPLER_ID:+--c-sampler-id "$C_SAMPLER_ID"} \
+  ${F_CORPUS:+--f-corpus "$F_CORPUS"} \
+  ${R_CORPUS:+--r-corpus "$R_CORPUS"} \
+  ${C_CORPUS:+--c-corpus "$C_CORPUS"} \
   ${CACHE_ROOT:+--cache-root "$CACHE_ROOT"}
 status=$?
 

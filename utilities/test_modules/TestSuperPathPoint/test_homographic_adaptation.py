@@ -63,15 +63,16 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
 sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
+from _paths import setup_import_paths, add_training_package  # noqa: E402
 
 setup_import_paths()
+add_training_package('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
 from common.Homography import invert, sample_homography, valid_mask  # noqa: E402
-from PreTileStore import centre_margin, pre_tile_px        # noqa: E402
+from TileSampler import centre_margin, pre_tile_px  # noqa: E402
 from SuperPoint.HomographicAdaptation import HaConfig             # noqa: E402
 
 _RESULTS = []

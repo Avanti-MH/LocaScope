@@ -70,16 +70,16 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                   # noqa: E402
 import numpy as np                                                # noqa: E402
 
-from _paths import RESULT_DIR, job_result_dir, setup_import_paths  # noqa: E402
+from cli import (RESULT_DIR, job_result_dir, pretile_root,        # noqa: E402
+                 setup_import_paths)
 
 setup_import_paths()
 
 from common import KeypointLabelStore                # noqa: E402
-import PreTileStore
+from Store import PreTileCorpus, PreTileStore                    # noqa: E402
 from common.KeypointLabelStore import points_from_prob             # noqa: E402
-from PreTileStore import centre_crop                        # noqa: E402
+from TileSampler import centre_crop  # noqa: E402
 
-DEFAULT_TILE_ROOT = os.path.join(RESULT_DIR, 'cache', 'tiles')
 DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 
 #: Every string a reader will see. Rewritten on every run so the definitions
@@ -110,7 +110,8 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--labels-root', default=DEFAULT_LABEL_ROOT)
-    ap.add_argument('--tiles-root', default=DEFAULT_TILE_ROOT)
+    ap.add_argument('--pretile-cache-job', default='ExtractPreTiles',
+                    help='the job that made the pre-tiles the labels name')
     ap.add_argument('--wsi-stem', nargs='*', default=None)
     ap.add_argument('--ds', type=float, nargs='*', default=None)
     ap.add_argument('--examples', type=int, default=3,
@@ -148,7 +149,7 @@ def main():
               f'min {batch.n_kp.min()}  max {batch.n_kp.max()}  '
               f'cap {batch.cap}  at-cap {batch.at_cap}', flush=True)
 
-        folder = _pretiles_for(args.tiles_root, meta)
+        folder = _pretiles_for(pretile_root(args), meta)
         agreement = (_agreement(folder, meta, args) if args.with_model and folder
                      else {})
         figure = _draw(batch, meta, folder, agreement, out_dir, args)
@@ -185,18 +186,19 @@ def main():
 
 
 def _pretiles_for(root, meta):
-    """The pre-tile store these labels were made from, or None.
+    """The pre-tile rung these labels were made from, or None.
 
-    Matched on `pretile_id`, not on (slide, rung): two extractions of the same
-    slide and rung differ in seed or sampler_id, and drawing the labels of one
-    over the images of the other would look almost right.
+    Addressed by `pretile_id`, the corpus key the labels recorded, not by
+    (slide, rung): two extractions of the same slide and rung differ in seed or
+    sampler, and drawing the labels of one over the images of the other would
+    look almost right.
     """
-    for folder in PreTileStore.find(root, wsi_stem=meta.wsi_stem,
-                                    tile=int(meta.tile)):
-        if PreTileStore.load_meta(folder).cfg_hash() == meta.pretile_id:
-            return folder
-    print(f'  no pre-tile store with id {meta.pretile_id}; drawing without '
-          f'images', flush=True)
+    folder = PreTileCorpus.from_key(root, meta.pretile_id).rung_dir(
+        meta.wsi_stem, meta.ds)
+    if (folder / 'index.csv').exists():
+        return folder
+    print(f'  no finished pre-tile rung at {folder}; drawing without images',
+          flush=True)
     return None
 
 

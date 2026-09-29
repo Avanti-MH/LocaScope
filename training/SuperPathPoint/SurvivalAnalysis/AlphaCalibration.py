@@ -146,6 +146,7 @@ def alpha_curve(dist: np.ndarray, score: np.ndarray, decoy_dist: np.ndarray,
 
 
 def offset_quantiles_of(dist: np.ndarray, *, rungs: Sequence[float],
+                        source_rung: Optional[np.ndarray] = None,
                         quantiles: Sequence[float] = (0.5, 0.9, 0.99)
                         ) -> np.ndarray:
     """`[L, len(quantiles)]` -- per-rung quantiles of the REAL offset
@@ -153,12 +154,28 @@ def offset_quantiles_of(dist: np.ndarray, *, rungs: Sequence[float],
     Independent of tau/alpha/threshold: a property of the data, checked
     against whichever alpha the gap curve picks (tau below the 90th
     percentile declares a tenth of real matches dead by construction).
+
+    `source_rung`, if given (`[N]`, `anchors_of`/`anchors_of_generations`'s
+    own second return value): excludes column `j` (rung `rungs[j]`) an
+    anchor's OWN source rung. An anchor's coordinates are copied unmodified
+    from whichever rung it was born in (finest-first merge), so probing
+    THAT rung's own detections always finds the anchor itself at distance
+    0 -- a self-match, not a real cross-rung offset measurement
+    (AlphaSelectionNotes.md §9: this is what made the ds=1 column read an
+    exact `q0.5 = 0.0` and silently diluted every rung's distribution with
+    however many anchors happened to be born there, before this was added).
+    `None` (default) keeps the OLD, contaminated behaviour -- every caller
+    updates to pass it in the same change that added it.
     """
     rungs_arr = np.asarray(list(rungs), np.float64)
     q = np.asarray(list(quantiles), np.float64)
     out = np.full((len(rungs_arr), len(q)), np.nan, np.float64)
     for j in range(len(rungs_arr)):
-        valid = dist[:, j][dist[:, j] >= 0.0]
+        column = dist[:, j]
+        mask = column >= 0.0
+        if source_rung is not None:
+            mask &= (source_rung != rungs_arr[j])
+        valid = column[mask]
         if len(valid):
             out[j] = np.quantile(valid, q)
     return out

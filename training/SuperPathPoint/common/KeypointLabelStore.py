@@ -63,7 +63,7 @@ from safetensors.numpy import save_file
 from safetensors import safe_open
 
 #: Bumped when a field changes MEANING. Adding one with a default does not need
-#: it. `MaskStore.SCHEMA_VERSION`'s rule, which is ConfigIdentity's first.
+#: it. ConfigIdentity's first rule.
 SCHEMA_VERSION = '1'
 
 #: What makes two label sets different. `ha_id` folds the whole adaptation --
@@ -261,7 +261,7 @@ class LabelMeta:
     ds:        float
     tile:      int
     ha_id:     str        # HomographicAdaptation.identity_id(): HA cfg + teacher
-    pretile_id: str       # PreTileMeta.cfg_hash(): which positions
+    pretile_id: str       # PreTileMeta.corpus_key: which positions
 
     #: The two knobs that decide what a point IS. Identity, because a store cut
     #: at one threshold cannot be re-cut at another.
@@ -294,7 +294,7 @@ class LabelMeta:
         """
         return cls(
             wsi_stem=wsi_stem, ds=float(ds), tile=int(tile),
-            ha_id=ha.identity_id(), pretile_id=pretile_meta.cfg_hash(),
+            ha_id=ha.identity_id(), pretile_id=pretile_meta.corpus_key,
             score_threshold=float(score_threshold),
             points_per_megapixel=float(points_per_megapixel),
             nms_radius=int(nms_radius), border=int(border),

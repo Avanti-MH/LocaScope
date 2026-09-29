@@ -32,7 +32,7 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
 if _HERE not in sys.path:            # prepare_chain_stack.py, reeval_density.py
     sys.path.insert(0, _HERE)
 
-from _paths import job_result_dir, setup_import_paths           # noqa: E402
+from cli import add_pretile_args, job_result_dir, setup_import_paths  # noqa: E402
 
 setup_import_paths()
 
@@ -51,6 +51,19 @@ from SurvivalAnalysis.AlphaCalibration import (                    # noqa: E402
     probability_map_curve, probability_map_pattern_curve, probe_decoy)
 from SurvivalAnalysis.Patterns import ASCII_NAMES, PATTERNS            # noqa: E402
 from SurvivalAnalysis import AliveCandidates                          # noqa: E402
+
+#: Fixed per-pattern colours, one hand-picked hue per `PATTERNS` entry rather
+#: than matplotlib's `C0`-`C5` cycle -- matches the "六態存活譜" reference
+#: figure (claude.ai/code/artifact/501f65f3-bd59-4a04-92ca-958602f85270) so a
+#: pattern reads as the same colour there and in every plot this file draws.
+PATTERN_COLORS = {
+    '一直存活': '#1D4E77',   # alive-everywhere
+    '細部存活': '#2B7A8C',   # fine-only
+    '晚生型':   '#4E9C6C',   # late-born
+    '只在一階': '#94BD3E',   # one-rung-only
+    '中間帶':   '#CE9A24',   # mid-band
+    '不連續':   '#C0453A',   # flicker
+}
 import prepare_chain_stack                                          # noqa: E402
 from reeval_density import load_arm                                  # noqa: E402
 
@@ -156,14 +169,14 @@ def _one_f_chain(chain, net, *, tile: int, rungs, score_threshold: float,
     # merge_radius_l0=0: F's `order` entries ARE the real level-0 scale, so
     # the default rung_scale (identity) is correct here -- see anchors_of's
     # own docstring and spec.md "同一個點的定義".
-    anchors = SurvivalProcess.anchors_of(detections, order, 0)
+    anchors, source_rung = SurvivalProcess.anchors_of(detections, order, 0)
     dist, score, rival, _ = SurvivalProcess.probe_real(
         anchors, per_rung, order, maps, origins=origins, scales=scales,
         nms_radius=net.cfg.nms_radius)
     decoy_shift = _decoy_shift_per_rung(decoy_kind, decoy_magnitude, order,
                                         'F', rng)
     decoy_dist, decoy_score = probe_decoy(anchors, per_rung, order, decoy_shift)
-    return order, anchors, dist, score, decoy_dist, decoy_score
+    return order, anchors, source_rung, dist, score, decoy_dist, decoy_score
 
 
 def _one_r_tile(folder, record, meta, net, *, tile: int, rungs,
@@ -194,15 +207,15 @@ def _one_r_tile(folder, record, meta, net, *, tile: int, rungs,
     # base stays the pre-redesign value; only rung_scale is overridden
     # (spec.md "同一個點的定義"). The labels still separate
     # R's own rungs from each other; only the added slop collapses to 0.
-    anchors = SurvivalProcess.anchors_of(detections, order, net.cfg.nms_radius,
-                                         rung_scale=lambda ds: 1.0)
+    anchors, source_rung = SurvivalProcess.anchors_of(
+        detections, order, net.cfg.nms_radius, rung_scale=lambda ds: 1.0)
     dist, score, rival, _ = SurvivalProcess.probe_real(
         anchors, per_rung, order, maps, origins=origins, scales=scales,
         nms_radius=net.cfg.nms_radius)
     decoy_shift = _decoy_shift_per_rung(decoy_kind, decoy_magnitude, order,
                                         'R', rng)
     decoy_dist, decoy_score = probe_decoy(anchors, per_rung, order, decoy_shift)
-    return order, anchors, dist, score, decoy_dist, decoy_score
+    return order, anchors, source_rung, dist, score, decoy_dist, decoy_score
 
 
 def _one_f_chain_probability_map(chain, net, *, tile: int, rungs,
@@ -228,7 +241,9 @@ def _one_f_chain_probability_map(chain, net, *, tile: int, rungs,
     detections, per_rung, maps = SurvivalProcess.detect_all_rungs(
         stack, net, rungs=order, origins=origins, scales=scales,
         score_threshold=score_threshold)
-    anchors = SurvivalProcess.anchors_of(detections, order, 0)
+    # source rung discarded -- this path has no offset_quantiles_of
+    # equivalent to feed it to (main()'s own comment on why).
+    anchors, _ = SurvivalProcess.anchors_of(detections, order, 0)
     combined_maps = {ds: maps[ds] for ds in order}
     decoy_shift = _decoy_shift_per_rung(decoy_kind, decoy_magnitude, order,
                                         'F', rng)
@@ -255,8 +270,10 @@ def _one_r_tile_probability_map(folder, record, meta, net, *, tile: int,
     detections, per_rung, maps = SurvivalProcess.detect_all_rungs(
         stack, net, rungs=order, origins=origins, scales=scales,
         score_threshold=score_threshold)
-    anchors = SurvivalProcess.anchors_of(detections, order, net.cfg.nms_radius,
-                                         rung_scale=lambda ds: 1.0)
+    # source rung discarded -- this path has no offset_quantiles_of
+    # equivalent to feed it to (main()'s own comment on why).
+    anchors, _ = SurvivalProcess.anchors_of(
+        detections, order, net.cfg.nms_radius, rung_scale=lambda ds: 1.0)
     combined_maps = {ds: maps[ds] for ds in order}
     decoy_shift = _decoy_shift_per_rung(decoy_kind, decoy_magnitude, order,
                                         'R', rng)
@@ -270,13 +287,13 @@ def _one_c_tree(mother, mother_image, groups_by_ds, images_by_ds, net, *,
     per_rung_tiles, per_rung = SurvivalProcess.detect_all_generations(
         mother, mother_image, groups_by_ds, images_by_ds, net,
         score_threshold=score_threshold)
-    anchors = SurvivalProcess.anchors_of_generations(
+    anchors, source_rung = SurvivalProcess.anchors_of_generations(
         per_rung_tiles, order, net.cfg.nms_radius)
     dist, score, rival, _ = SurvivalProcess.probe_real(anchors, per_rung, order)
     decoy_shift = _decoy_shift_per_rung(decoy_kind, decoy_magnitude, order,
                                         'C', rng)
     decoy_dist, decoy_score = probe_decoy(anchors, per_rung, order, decoy_shift)
-    return order, anchors, dist, score, decoy_dist, decoy_score
+    return order, anchors, source_rung, dist, score, decoy_dist, decoy_score
 
 
 def _one_c_tree_probability_map(mother, mother_image, groups_by_ds, images_by_ds,
@@ -308,7 +325,9 @@ def _one_c_tree_probability_map(mother, mother_image, groups_by_ds, images_by_ds
     per_rung_tiles, per_rung, per_rung_maps = SurvivalProcess.detect_all_generations(
         mother, mother_image, groups_by_ds, images_by_ds, net,
         score_threshold=score_threshold, keep_maps=True)
-    anchors = SurvivalProcess.anchors_of_generations(
+    # source rung discarded -- this path has no offset_quantiles_of
+    # equivalent to feed it to (main()'s own comment on why).
+    anchors, _ = SurvivalProcess.anchors_of_generations(
         per_rung_tiles, order, net.cfg.nms_radius)
     mother_origin = (float(mother.x), float(mother.y))
     combined_maps = {
@@ -325,17 +344,21 @@ def _one_c_tree_probability_map(mother, mother_image, groups_by_ds, images_by_ds
     return order, anchors, combined_maps, footprint_origin, rung_scale, decoy_shift
 
 
-def _apply_merge_radius_2nd(anchors, dist, score, decoy_dist, decoy_score,
-                            radius: float):
+def _apply_merge_radius_2nd(anchors, source_rung, dist, score, decoy_dist,
+                            decoy_score, radius: float):
     """Re-merge the anchor list at `radius` (module docstring: a
     sensitivity check, not a value to tune) and slice every per-anchor
-    column the same way -- `dist`/`score`/`decoy_dist`/`decoy_score` are all
-    `[N, L]`, one row per anchor, so one index array applies to all four.
+    column the same way -- `source_rung`/`dist`/`score`/`decoy_dist`/
+    `decoy_score` are all one row per anchor (`source_rung` is `[N]`, the
+    rest `[N, L]`), so one index array applies to all five. `source_rung`
+    has to be carried through this re-merge like the others: this can drop
+    anchors, and `offset_quantiles_of`'s self-match exclusion needs
+    `source_rung[i]` to still name the SAME anchor `dist[i]` does.
     `radius <= 0` is a no-op (`merge_anchors` itself returns every index).
     """
     keep = merge_anchors(anchors, radius, priority=score.max(axis=1)
                         if len(score) else None)
-    return (anchors[keep], dist[keep], score[keep],
+    return (anchors[keep], source_rung[keep], dist[keep], score[keep],
             decoy_dist[keep], decoy_score[keep])
 
 
@@ -447,15 +470,15 @@ def _stacked_pattern_bars(ax, alphas: np.ndarray, values: np.ndarray,
                           labels: Sequence[str]):
     """100%-stacked bar, one bar per alpha, six segments in `PATTERNS` order
     -- each segment's height IS the fraction, read directly off the y axis,
-    which a heatmap's colour never quite lets you do. Same `f'C{p}'` colour
-    a pattern gets in the excess line panels below, so a colour means the
-    same pattern in every panel of this figure.
+    which a heatmap's colour never quite lets you do. Same `PATTERN_COLORS`
+    colour a pattern gets in the excess line panels below, so a colour means
+    the same pattern in every panel of this figure.
     """
     width = 0.8 * float(np.min(np.diff(alphas))) if len(alphas) > 1 else 0.8
     bottom = np.zeros(len(alphas))
     for p, label in enumerate(labels):
         ax.bar(alphas, values[p], width=width, bottom=bottom,
-              color=f'C{p}', label=label)
+              color=PATTERN_COLORS[PATTERNS[p]], label=label)
         bottom += values[p]
     ax.set_ylim(0, 1)
     ax.set_xlabel('alpha')
@@ -499,10 +522,11 @@ def _plot_patterns(agg: Dict[str, np.ndarray], title: str, out_path: str):
     y_hi = max(np.nanmax(excess_real), np.nanmax(excess_decoy))
 
     for p, label in enumerate(labels):
+        color = PATTERN_COLORS[PATTERNS[p]]
         ax_exc_real.plot(alphas, excess_real[p], '-o', ms=3,
-                         color=f'C{p}', label=label)
+                         color=color, label=label)
         ax_exc_decoy.plot(alphas, excess_decoy[p], '-o', ms=3,
-                          color=f'C{p}', label=label)
+                          color=color, label=label)
     for ax, name in ((ax_exc_real, 'real'), (ax_exc_decoy, 'decoy')):
         ax.axhline(0.0, color='0.5', lw=0.8)
         ax.set_ylim(y_lo, y_hi)
@@ -803,8 +827,8 @@ def main():
                          "knob, not yet tuned' -- finer catches a sharper "
                          "peak more precisely at more compute per anchor "
                          "per rung")
-    ap.add_argument('--tiles-root', default=prepare_chain_stack.DEFAULT_TILES_ROOT)
-    ap.add_argument('--tile', type=int, default=256)
+    add_pretile_args(ap)
+    prepare_chain_stack.add_axis_corpus_args(ap)
     ap.add_argument('--rungs', type=float, nargs='+',
                     default=[1.0, 2.0, 4.0, 8.0, 16.0])
     ap.add_argument('--c-rungs', type=float, nargs='+',
@@ -889,12 +913,8 @@ def main():
                _make_alive_fn(args.alive_method,
                              combined_threshold=args.combined_threshold))
 
-    f_sid = prepare_chain_stack._sampler_config_for(
-        'stageB-fOwn', args.tile).sampler_id()
-    r_sid = prepare_chain_stack._sampler_config_for(
-        'stageA', args.tile).sampler_id()
-    c_sid = prepare_chain_stack._sampler_config_for(
-        'stageB-cOwn', args.tile).sampler_id()
+    corpus = {axis: prepare_chain_stack.axis_corpus(axis, args)
+              for axis in args.axes}
 
     slide_ctx = SafeSlide(args.wsi) if wsi_needed else contextlib.nullcontext(None)
     with slide_ctx as wsi:
@@ -906,9 +926,8 @@ def main():
             order = None
 
             if axis == 'F':
-                own = FStack.from_own(args.tiles_root, args.wsi_stem,
-                                      tile=args.tile, rungs=args.rungs,
-                                      sampler_id=f_sid)
+                own = FStack.from_own(corpus['F'], args.wsi_stem,
+                                      tile=args.tile, rungs=args.rungs)
                 chainstacks = [(own.chains[cid],) for cid in own]
                 if probability_map_method:
                     per_chainstack = lambda args_tuple: _one_f_chain_probability_map(  # noqa: E731
@@ -925,8 +944,8 @@ def main():
 
             elif axis == 'C':
                 forest = CStack.from_own(
-                    args.tiles_root, args.wsi_stem, args.c_rungs, wsi,
-                    tile=args.tile, sampler_id=c_sid,
+                    corpus['C'], args.wsi_stem, args.c_rungs, wsi,
+                    tile=args.tile,
                     cache_root=args.cache_root or ChainStack.DEFAULT_CACHE_ROOT)
                 chainstacks = [forest[i] for i in forest]
                 if probability_map_method:
@@ -944,9 +963,9 @@ def main():
                         decoy_magnitude=args.decoy_magnitude, rng=rng)
 
             else:  # 'R'
-                own = RStack.from_own(args.tiles_root, args.wsi_stem,
+                own = RStack.from_own(corpus['R'], args.wsi_stem,
                                       args.rungs, tile=args.tile,
-                                      sampler_id=r_sid, cache_root=None)
+                                      cache_root=None)
                 chainstacks = list(own.items)
                 if probability_map_method:
                     per_chainstack = lambda args_tuple: _one_r_tile_probability_map(  # noqa: E731
@@ -994,20 +1013,21 @@ def main():
                     # sense (AlphaCalibration.py's probability_map_curve
                     # module comment); offsets/heatmaps skipped below.
                     continue
-                order, anchors, dist, score, decoy_dist, decoy_score = \
-                    per_chainstack(one)
+                order, anchors, source_rung, dist, score, decoy_dist, \
+                    decoy_score = per_chainstack(one)
                 print(f'    -> {len(anchors)} anchors', flush=True)
                 if args.merge_radius_2nd > 0.0:
-                    anchors, dist, score, decoy_dist, decoy_score = \
-                        _apply_merge_radius_2nd(
-                            anchors, dist, score, decoy_dist, decoy_score,
-                            args.merge_radius_2nd)
+                    anchors, source_rung, dist, score, decoy_dist, \
+                        decoy_score = _apply_merge_radius_2nd(
+                            anchors, source_rung, dist, score, decoy_dist,
+                            decoy_score, args.merge_radius_2nd)
                 curves.append(alpha_curve(
                     dist, score, decoy_dist, decoy_score, rungs=order,
                     alphas=alphas, tau_floor=args.tau_floor,
                     threshold=args.score_threshold, alive_fn=alive_fn))
                 offsets.append(offset_quantiles_of(
-                    dist, rungs=order, quantiles=args.quantiles))
+                    dist, rungs=order, source_rung=source_rung,
+                    quantiles=args.quantiles))
                 pattern_curves.append(pattern_curve(
                     dist, score, decoy_dist, decoy_score, rungs=order,
                     alphas=alphas, tau_floor=args.tau_floor,

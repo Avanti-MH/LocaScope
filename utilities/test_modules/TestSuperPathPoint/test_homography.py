@@ -57,9 +57,10 @@ sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
 import numpy as np                                              # noqa: E402
 
-from _paths import setup_import_paths                           # noqa: E402
+from _paths import setup_import_paths, add_training_package  # noqa: E402
 
 setup_import_paths()
+add_training_package('SuperPathPoint')
 
 from common.Homography import (HOMOGRAPHY_DEFAULTS,             # noqa: E402
                                identity, inside, invert,

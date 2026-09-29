@@ -67,7 +67,7 @@ CHECKPOINT="${CHECKPOINT:?set CHECKPOINT=<path to a trained KeypointNet .pt>}"
 COMBINED_THRESHOLD="${COMBINED_THRESHOLD:?set COMBINED_THRESHOLD=<value for the exp_decay tasks -- not yet calibrated, pick one and record it>}"
 
 # Absolute, matching every other jobscript's OUT (MultiBatch1440.sh,
-# BenchMark.sh, WsiHoles.sh all build off this). A bare "result/..." resolves
+# WsiHealthCheck.sh all build off this). A bare "result/..." resolves
 # relative to sbatch's cwd, which is the repo checkout -- landing the sweep's
 # output INSIDE the repo instead of beside it, the exact split _paths.py and
 # CLAUDE.md's repo-layout section exist to prevent.

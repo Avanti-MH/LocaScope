@@ -123,7 +123,9 @@ DECOY_SEED="${DECOY_SEED:-0}"
 
 QUANTILES="${QUANTILES:-0.5 0.9 0.99}"
 
-TILES_ROOT="${TILES_ROOT:-/work/u26130998/result/cache/tiles}"
+# Which pre-tile cache the three axes' corpora are read from
+# (prepare_chain_stack.py's addresses; nothing is extracted here).
+PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
 CACHE_ROOT="${CACHE_ROOT:-}"
 
 # Unset -> job_result_dir('SurvivalAlphaAnalysis') (the single-run default).
@@ -152,7 +154,7 @@ echo ""
 python training/SuperPathPoint/cli/survival_alpha_analysis.py \
   --checkpoint "$CHECKPOINT" \
   --wsi-name "$WSI_NAME" \
-  --tiles-root "$TILES_ROOT" \
+  --pretile-cache-job "$PRETILE_CACHE_JOB" \
   --tile "$TILE" \
   --rungs $RUNGS \
   --c-rungs $C_RUNGS \

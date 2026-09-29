@@ -82,12 +82,12 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #
 #   homography   test_homography.py            geometry, both warp paths
 #   ladder       test_ds_ladder.py             level resolution, synthetic
-#   mask         test_tissues_regions_mask.py  from_mask: the half of from_wsi
-#                --wsi ''                      that Uni2PcaSegFunc and MaskStore
-#                                              use, plus has_tissue at 0.5 --
-#                                              query_sim's gate, not 3c's
-#   store        test_mask_store.py            the three stores: identity,
-#                test_pre_tile_store.py        round trips, and the refusals
+#   mask         test_tissue_mask.py           TissueMask, TissueSegFunc and
+#                                              TissueMaskConfig: derived ds, the
+#                                              span decoy, the 0.5 gate, views,
+#                                              the tiled read, the mask cache
+#   store        test_cache.py                 the stores: layout, identity,
+#                test_store.py                 round trips, and the refusals
 #                test_keypoint_label_store.py  that keep a reader from getting
 #                                              the WRONG artefact rather than
 #                                              none
@@ -137,7 +137,7 @@ STAGES="${STAGES:-homography ladder mask sampler store decoder ha student pretra
 
 # Every test this jobscript owns lives in one directory, named after the
 # jobscript that runs them. The two that do NOT are deliberate: their subjects
-# are shared modules, not SuperPathPoint's -- `TissuesRegionsMask` is used by
+# are shared modules, not SuperPathPoint's -- `TissueMask` is used by
 # LocaScopePipeline and PatchingLib, and `Uni2PcaSegFunc` is an encoder.
 # `SurvivalAnalysis`'s tests (chain-stack/survival/survival-report) stay HERE
 # even though the package itself was renamed from `PointsAnalysisByMpp`
@@ -235,26 +235,18 @@ for stage in $STAGES; do
       ;;
 
     mask)
-      # from_mask, which is everything from_wsi does AFTER a mask exists.
-      # aiNNModel/Uni2PcaSegFunc.py reads the slide itself and hands the
-      # finished mask here; utilities/MaskStore.py does the same coming back
-      # out of the cache; probe_tile_yield and extract_pretiles are its two
-      # readers. Every other validator in that file builds its fixture through
-      # make_trm, which calls _search_tissue_regions directly and therefore
-      # never exercises the three things from_mask decides -- what mask_ds is,
-      # where the mask starts, and what the slide contributes.
+      # The three mask modules: TissueMask (what mask_ds is, where the mask
+      # starts, what the slide contributes, views that cannot leak),
+      # TissueSegFunc (the level picked by ratio, a tiled read equal to the
+      # whole one) and TissueMaskConfig (seg_id / region_id, the mask cache and
+      # the segmenter's lifetime). No --wsi: synthetic only, seconds.
       #
-      # --wsi '' skips the real-slide tier. The synthetic tiers are the ones
-      # that carry the assertions; the slide tier prints a figure.
-      #
-      # `has_tissue` at 0.5 stays under test even though the SAMPLER no
-      # longer calls it: `TissuesRegionsMask` is shared, query_sim's Camera
-      # still gates on it at 0.3, and a method that keeps a caller keeps its
-      # test. What went away on 2026-08-27 is the sampler's OWN gate, which
-      # scored the same quantity as the richness buckets -- see RichnessConfig.
-      # Exactly half passes here, because has_tissue compares with >=.
-      run "mask  (from_mask: derived ds, the span decoy, the 0.5 gate)" \
-        python utilities/test_modules/test_tissues_regions_mask.py --wsi ''
+      # `has_tissue_l0` at 0.5 stays under test even though the SAMPLER no
+      # longer calls it: query_sim's Camera still gates on it, and a method
+      # that keeps a caller keeps its test. Exactly half passes, because it
+      # compares with >=.
+      run "mask  (derived ds, the span decoy, the 0.5 gate, the mask cache)" \
+        python utilities/test_modules/test_tissue_mask.py
       ;;
 
     sampler)
@@ -278,16 +270,14 @@ for stage in $STAGES; do
       ;;
 
     store)
-      # The three stores, in the order the pipeline fills them. All temp dirs,
-      # no data, no model -- and the first of them is a regression test for a
-      # bug that had already written six correct mask files before the probe
-      # that reads them raised on `f'{meta.mask_ds:.0f}'`: lazy annotations make
-      # `field.type` a STRING, so a decoder comparing it against `float` hands
-      # every field back as str.
-      run "store  (mask store: identity, components, the typed round trip)" \
-        python "$TESTS"/test_mask_store.py
-      run "store  (pre-tile store: centre crop, identity, codec)" \
-        python "$TESTS"/test_pre_tile_store.py
+      # The stores, in the order the pipeline fills them. All temp dirs, no
+      # data, no model. The typed-geometry regression (a mask_ds that came
+      # back as the string '14.0' after six correct mask files had been
+      # written) lives with SlideMask now, in the `mask` stage above.
+      run "store  (Cache: layout, atomic writes, sidecar, slide key)" \
+        python utilities/test_modules/test_cache.py
+      run "store  (features, map cache, pre-tile corpora: address, codec)" \
+        python utilities/test_modules/test_store.py
       run "store  (label store: threshold/NMS/border/cap, padding, two rounds)" \
         python "$TESTS"/test_keypoint_label_store.py
       ;;
@@ -634,7 +624,7 @@ for stage in $STAGES; do
       #
       # The assertion that justifies the whole design is in the last tier:
       # AFTER fit(wsi), segmenting a plane in one call and in four quadrants
-      # must agree pixel for pixel. That is the property from_wsi already names
+      # must agree pixel for pixel. That is the property a tiled read depends on
       # as the line between methods it may tile and methods it may not, and it
       # holds only because the PCA is fitted in fit() rather than in __call__.
       # It is scored against the rejected design -- refit per quadrant -- so

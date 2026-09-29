@@ -20,9 +20,9 @@ So this file imports `TileEncoderFunc` at the top -- which is only the base
 class and the registry, no HF -- and calls `encoder_config(name)` inside
 `build()`, where the one implementation module is imported and nowhere else.
 
-WHY IT INHERITS `TileEncoder` INSTEAD OF HOLDING ONE
------------------------------------------------------
-`TileEncoder.spatial()` (`TileEncoderFunc.py:913`) is an INFERENCE api. It goes
+WHY IT HOLDS AN ENCODER RATHER THAN CALLING `spatial()`
+--------------------------------------------------------
+`TileEncoder.spatial()` is an INFERENCE api. It goes
 through `_run`, which converts each image to PIL, applies the config's transform
 -- `Resize(256)` then `CenterCrop(224)` -- runs under `torch.no_grad()`, and
 brings the result back to the host. A training loop that feeds 256 px tiles and
@@ -30,21 +30,21 @@ wants the map on the device can use none of that: the resize alone would put
 the feature grid on a different pixel lattice than the labels were splatted onto
 and nothing would raise.
 
-What is wanted is one method below it, `_spatial_forward(batch)` -- batch in,
-map out, no transform, no host round trip. It is protected, and there were two
-ways to reach it: call it from outside (private access across a package
-boundary) or change `aiNNModel/TileEncoderFunc.py` to expose it. The third way
-is the one taken here: a SUBCLASS calling a protected method of its base is not
-reaching past anything, it is the ordinary use of a hook the base declared for
-exactly this -- `_spatial_forward` raises `NotImplementedError` naming the
-subclass, so it is a subclass extension point by construction.
+What is wanted is `TileEncoder.features_with_grad(batch)` -- batch in, map
+out, no transform, no host round trip, gradients intact. It is a public method
+on the base, so this file builds the encoder the ordinary way and calls it;
+nothing here re-parents, wraps or subclasses an encoder.
 
-The subclass has to be of the CONCRETE encoder, because the concrete class is
-what supplies `_spatial_forward` (`_vit_spatial_forward` for all three of them
-today) and `_compute_model_spec`. `SpatialTrunk.over()` therefore builds the
-encoder the normal way and re-parents the instance, using the same two lines
-`TileEncoder.variant()` already uses on itself (`:1103`): `object.__new__` and a
-`__dict__` copy. Nothing in `aiNNModel/` moves.
+WHAT IS LEFT HERE, THEN
+------------------------
+The Protocol adapter, and only that. `common.Interfaces.Backbone` is
+SuperPoint's interface, not a general one: `stride` is paired with `cell` (see
+that file -- `cell` is the detector head's prediction block, and
+`UpsampleDecoder`'s rung count is `log2(stride / cell)`), and the forward
+contract is `[0, 1]` images rather than a normalised batch. Those are facts
+about what a keypoint detector needs, so they are stated here rather than
+pushed down into `aiNNModel/`, which has no reason to know what a detector
+cell is.
 
 WHICH ENCODERS CAN DO THIS, AND AT WHAT TILE SIZE
 ---------------------------------------------------
@@ -105,7 +105,7 @@ already a no-op; only gigapath's removes anything.)
 
 The RESIZE is unnecessary once the crop is gone, because the tile size is not
 handed down from anywhere -- the tile is a centre crop of a 768 px pre-tile
-(`utilities/PreTileStore.py`), so asking for a different one costs nothing. Feed
+(`utilities/Store.py`), so asking for a different one costs nothing. Feed
 the trunk the tile, at its own pixel grid, and `stride` is the patch exactly.
 
 PATCH 14 CANNOT REACH CELL 8, AND NO TILE SIZE CHANGES THAT
@@ -207,61 +207,6 @@ from TileEncoderFunc import TileEncoder, encoder_config, encoder_names
 from common.Interfaces import check_shapes
 
 
-class SpatialTrunk(TileEncoder):
-    """A built `TileEncoder`, re-parented so `_spatial_forward` is inherited.
-
-    Adds exactly one method. Everything else -- the model, the config, the
-    device, `model_spec`, `identity_id` -- is the encoder's own and untouched,
-    which is the point: this must not become a second definition of what the
-    encoder is.
-    """
-
-    @classmethod
-    def over(cls, enc: TileEncoder) -> 'SpatialTrunk':
-        """Re-parent an already-built encoder into `cls` + its own class.
-
-        The dynamic class is what makes the inheritance real rather than
-        decorative: `SpatialTrunk(TileEncoder)` alone would inherit the base's
-        `_spatial_forward`, which raises. `(cls, type(enc))` puts the concrete
-        implementation second in the MRO, so `_spatial_forward` resolves to
-        `_vit_spatial_forward` and `_compute_model_spec` to the encoder's --
-        while anything defined HERE still wins.
-
-        `object.__new__` plus a `__dict__` copy is not a trick invented for
-        this file; it is what `TileEncoder.variant()` does to produce a second
-        encoder over one set of loaded weights. Building the encoder twice to
-        change its class would reload the weights.
-        """
-        if not isinstance(enc, TileEncoder):
-            raise TypeError(f'SpatialTrunk.over() takes a TileEncoder, got '
-                            f'{type(enc).__name__}')
-        merged = type(f'{cls.__name__}[{type(enc).__name__}]',
-                      (cls, type(enc)), {})
-        clone = object.__new__(merged)
-        clone.__dict__.update(enc.__dict__)
-        return clone
-
-    def trunk_forward(self, batch: torch.Tensor) -> torch.Tensor:
-        """`[N, 3, H, W]` normalised -> `[N, D, H/stride, W/stride]` fp32.
-
-        The batch is used as given: no PIL, no resize, no centre crop, and it
-        stays on the device it arrived on. That is the whole difference from
-        `spatial()` and the reason this class exists.
-
-        `.float()` AFTER the autocast block and before anything else reads it,
-        which is `_run`'s order and for `_run`'s reason: the map goes into a
-        decoder that is being trained, and fp16 features would put the
-        gradients of the only trainable half of this model in half precision
-        for no saving -- the trunk's activations are already the memory.
-        """
-        dtype = self.cfg.model.torch_dtype()
-        ctx = (torch.autocast(device_type=batch.device.type, dtype=dtype)
-               if dtype is not torch.float32 else nullcontext())
-        with ctx:
-            out = self._spatial_forward(batch)
-        return out.float()
-
-
 #: The zero point, written out the way `Backbones._VGG_BASELINE` is: the
 #: BASELINE attribute belongs to the IdentifiedBuild that holds this config --
 #: `KeypointNet._NET_BASELINE` -- not to the config itself, so what this dict
@@ -333,8 +278,7 @@ class TileEncoderBackboneConfig(IdentifiedConfig):
                           transform=replace(enc_cfg.transform,
                                             preprocess=self.preprocess))
         device = torch.device(device or 'cpu')
-        trunk = SpatialTrunk.over(enc_cfg.build(device))
-        return TileEncoderBackbone(self, trunk)
+        return TileEncoderBackbone(self, enc_cfg.build(device))
 
 
 class TileEncoderBackbone(nn.Module):
@@ -349,7 +293,7 @@ class TileEncoderBackbone(nn.Module):
 
     trainable = False
 
-    def __init__(self, cfg: TileEncoderBackboneConfig, trunk: SpatialTrunk):
+    def __init__(self, cfg: TileEncoderBackboneConfig, trunk: TileEncoder):
         super().__init__()
         self.cfg = cfg
         # A list, so nn.Module's __setattr__ does not register 1.1B parameters
@@ -400,7 +344,7 @@ class TileEncoderBackbone(nn.Module):
         check_shapes(self, image_size=tile, channels=3, device=self.device)
 
     @property
-    def trunk(self) -> SpatialTrunk:
+    def trunk(self) -> TileEncoder:
         return self._trunk[0]
 
     @property
@@ -454,7 +398,7 @@ class TileEncoderBackbone(nn.Module):
         batch = self.normalise(images)
         ctx = torch.no_grad() if not self.trainable else nullcontext()
         with ctx:
-            return self.trunk.trunk_forward(batch)
+            return self.trunk.features_with_grad(batch, exit_name='spatial')
 
 
 def _fit_input_size(model, tile: int, encoder: str) -> None:

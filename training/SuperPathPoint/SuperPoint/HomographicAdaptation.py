@@ -68,8 +68,8 @@ from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register
 
 from common.Homography import erode_valid, invert, sample_homography, warp_image
 from common.HomographyConfig import HOMOGRAPHY_BASELINE, HomographyConfig
-from PreTileStore import (centre_crop, centre_margin,
-                                pretile_valid_mask, warp_from_pretile)
+from TileSampler import centre_crop, centre_margin
+from common.Homography import pretile_valid_mask, warp_from_pretile
 
 #: The zero point. ConfigIdentity rule 1: editing this re-hashes every label
 #: ever written; editing a dataclass default splits new from old.
@@ -283,7 +283,7 @@ class HomographicAdaptation(IdentifiedBuild):
                        margin: int, shape: Tuple[int, int]) -> np.ndarray:
         """One warped view, sampled out of the pre-tile.
 
-        `PreTileStore.warp_from_pretile` owns the composition, because the
+        `Homography.warp_from_pretile` owns the composition, because the
         training pair dataset needs the identical one -- a student trained on
         pairs composed the other way round would be learning a different
         correspondence than its labels describe.
@@ -294,7 +294,7 @@ class HomographicAdaptation(IdentifiedBuild):
                      shape: Tuple[int, int]) -> np.ndarray:
         """Which output pixels came from inside the PRE-tile, as float.
 
-        See `PreTileStore.pretile_valid_mask` for why this is not
+        See `Homography.pretile_valid_mask` for why this is not
         `valid_mask(shape, matrix)`. Float rather than bool because it is
         multiplied into a probability map on the next line.
         """

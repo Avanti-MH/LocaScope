@@ -49,7 +49,8 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from _paths import RESULT_DIR, job_result_dir, setup_import_paths  # noqa: E402
+from cli import (RESULT_DIR, add_corpus_arg, add_pretile_args,    # noqa: E402
+                 corpus_arg, job_result_dir, setup_import_paths)
 
 setup_import_paths()
 
@@ -66,7 +67,6 @@ from SuperPoint.Teacher import SuperPointTeacher                  # noqa: E402
 from SuperPoint.Losses import SuperPointLossConfig                 # noqa: E402
 from SuperPoint.Trainer import TrainerConfig                       # noqa: E402
 
-DEFAULT_TILE_ROOT = os.path.join(RESULT_DIR, 'cache', 'tiles')
 DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 
 #: spec.md 6.5. `BRACS_1228` is deliberately in TRAIN: it is the slide
@@ -108,10 +108,9 @@ VAL_SLIDES = ('BRACS_1598', 'S1103627,G7E,110127')
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--tiles-root', default=DEFAULT_TILE_ROOT)
+    add_pretile_args(ap)            # --tile: v1 is 256; 512, 1024 are separate models
+    add_corpus_arg(ap)
     ap.add_argument('--labels-root', default=DEFAULT_LABEL_ROOT)
-    ap.add_argument('--tile', type=int, default=256,
-                    help='v1 is 256. 512 and 1024 are separate models')
     ap.add_argument('--channels', type=int, default=1, choices=(1, 3),
                     help='1 = model_256_gray, 3 = model_256_rgb. Same labels')
     ap.add_argument('--cell', type=int, default=8,
@@ -158,7 +157,10 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--no-amp', dest='amp', action='store_false')
     ap.add_argument('--wandb-project', default='superpathpoint')
-    ap.add_argument('--wandb-mode', default='online',
+    # Still online by default, but WANDB_MODE now reaches it: this value goes
+    # to `wandb.init(mode=...)` explicitly, and an explicit mode beats
+    # WANDB_MODE. See SuperPoint/Trainer.py's `wandb_mode` for the full note.
+    ap.add_argument('--wandb-mode', default=os.environ.get('WANDB_MODE', 'online'),
                     choices=('online', 'offline', 'disabled'))
     ap.add_argument('--pretrained', action='store_true',
                     help='initialise from upstream SuperPoint v6 instead of at '
@@ -215,7 +217,9 @@ def main():
     data_cfg = PairDatasetConfig(tile=args.tile, in_channels=args.channels,
                                  balance=args.balance, seed=args.seed,
                                  workers=args.workers, homography=homography)
-    train_set = data_cfg.build(args.tiles_root, args.labels_root,
+    corpus = corpus_arg(args)
+    print(f'corpus {corpus.key}', flush=True)
+    train_set = data_cfg.build(corpus, args.labels_root,
                                wsi_stems=args.train_slides, rungs=args.ds,
                                ha_id=args.ha_id)
     # The validation set takes `balance='none'`: balancing the held-out set
@@ -225,7 +229,7 @@ def main():
         tile=args.tile, in_channels=args.channels, balance='none',
         seed=args.seed, workers=args.workers,
         homography=data_cfg.homography).build(
-            args.tiles_root, args.labels_root, wsi_stems=args.val_slides,
+            corpus, args.labels_root, wsi_stems=args.val_slides,
             rungs=args.ds, ha_id=args.ha_id)
     print(f'train  {train_set.summary()}', flush=True)
     print(f'val    {val_set.summary()}', flush=True)
@@ -258,6 +262,9 @@ def main():
                 # format here re-hashes nothing.
                 'train_slides': json.dumps(sorted(args.train_slides)),
                 'val_slides': json.dumps(sorted(args.val_slides)),
+                # The corpus the pairs were cut from, so a re-score reads the
+                # same one without being told (reeval_density).
+                'corpus': corpus.key,
                 'ha_id': args.ha_id or '(the only one present)',
                 'init': 'superpoint-v6' if args.pretrained else 'random',
             })

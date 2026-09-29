@@ -619,3 +619,62 @@ def quad_polygon(sample: HomographySample, which: str = 'in') -> np.ndarray:
     """The quad as a closed (5, 2) polyline in (x, y), for plotting."""
     quad = sample.quad_in if which == 'in' else sample.quad_out
     return np.concatenate([quad, quad[:1]], axis=0)
+
+
+# ── a warp read out of a pre-tile ─────────────────────────────────────────────
+#
+# A pre-tile (TileSampler.pre_tile_px) is the tile plus `margin` px of context
+# on every side. These compose a TILE-frame homography with the translation
+# into that bigger image, so the warp reads real context instead of the border.
+#
+# THREE CALLERS, WHICH IS WHY THEY ARE FUNCTIONS. Homographic Adaptation warps
+# `num` views per tile; the training pair dataset warps one per sample; and
+# `demo_homography --calibrate` checks that no draw exceeds the factor. All
+# three must compose the translation the SAME way, because composing it on the
+# right instead of the left shifts the output frame rather than the input one --
+# it warps a different part of the tile, and it looks entirely reasonable.
+
+def translate(offset: int) -> np.ndarray:
+    """The 3x3 that carries TILE coordinates into PRE-TILE coordinates."""
+    matrix = np.eye(3, dtype=np.float64)
+    matrix[0, 2] = float(offset)
+    matrix[1, 2] = float(offset)
+    return matrix
+
+
+def warp_from_pretile(pre: np.ndarray, matrix: np.ndarray, margin: int,
+                      out_shape: Tuple[int, int]) -> np.ndarray:
+    """One warped TILE-sized view, sampled out of the pre-tile.
+
+    `matrix` is output(tile) -> input(tile), the matrix `sample_homography`
+    returned for the TILE's shape. Every coordinate recorded, warped or inverted
+    anywhere else stays in that frame; `translate(margin)` is applied on the
+    LEFT, so it changes only which pixels cv2 reads.
+
+    The network therefore still sees `out_shape`, not the pre-tile. Warping the
+    whole pre-tile and cropping afterwards would cost `factor**2` -- nine times,
+    at factor 3 -- for the same result.
+    """
+    return warp_image(pre, translate(margin) @ matrix, out_size=out_shape,
+                      interpolation='linear', border_value=0)
+
+
+def pretile_valid_mask(pre: np.ndarray, matrix: np.ndarray, margin: int,
+                       out_shape: Tuple[int, int],
+                       erosion_radius: int = 0) -> np.ndarray:
+    """Which output pixels came from inside the PRE-tile.
+
+    NOT `valid_mask(out_shape, matrix)`: that answers the question for a source
+    the size of the tile and would call two thirds of a legitimate view invalid
+    (spec.md 6.6 measured `valid 67.8%` for exactly that call). Built instead by
+    warping an all-ones array of the pre-tile's own extent through the same
+    composed matrix, so validity is asked of the pixels that were available.
+
+    With factor 3 the result is all-True apart from the eroded rim, and that is
+    spec.md 6.6's free assertion: a False in the interior means the draw ran off
+    the pre-tile.
+    """
+    ones = np.ones(np.asarray(pre).shape[:2], np.uint8)
+    mask = warp_image(ones, translate(margin) @ matrix, out_size=out_shape,
+                      interpolation='nearest', border_value=0)
+    return erode_valid(mask, erosion_radius)

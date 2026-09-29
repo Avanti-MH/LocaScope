@@ -60,7 +60,7 @@ NO PRE-TILE STORE NEEDED
 --------------------------
 `--wsi` cuts a pre-tile straight off the slide through the same `DsLadder` plan
 that `extract_pretiles` uses, so this runs while step 3c is still going.
-`--pretile-root` reads a stored one instead, once there is one.
+`--corpus` (with `--wsi-stem`) reads a stored one instead.
 """
 
 from __future__ import annotations
@@ -77,19 +77,19 @@ import matplotlib                                               # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
-from cli import job_result_dir, setup_import_paths              # noqa: E402
+from cli import (add_corpus_arg, add_pretile_args, corpus_arg,  # noqa: E402
+                 job_result_dir, setup_import_paths)
 
 setup_import_paths()
 
 import torch                                                    # noqa: E402
 
-import PreTileStore                                 # noqa: E402
+from Store import PreTileStore                                  # noqa: E402
 from common.Homography import sample_homography                 # noqa: E402
 from common.HomographyConfig import HomographyConfig            # noqa: E402
 from common.KeypointLabelStore import points_from_prob          # noqa: E402
-from PreTileStore import (PRE_TILE_FACTOR, centre_crop,  # noqa: E402
-                                 centre_margin, pre_tile_px,
-                                 warp_from_pretile)
+from TileSampler import centre_crop, centre_margin, pre_tile_px  # noqa: E402
+from common.Homography import warp_from_pretile  # noqa: E402
 from SuperPoint.HomographicAdaptation import HaConfig           # noqa: E402
 from SuperPoint.Teacher import TeacherConfig                    # noqa: E402
 
@@ -164,12 +164,12 @@ def styles_for(thresholds, cut: float) -> dict:
 
 def read_pre_tile(args) -> tuple:
     """The pre-tile to demonstrate on, and a one-line description of it."""
-    pre_px = pre_tile_px(args.tile, args.factor)
+    pre_px = pre_tile_px(args.tile, args.pre_tile_factor)
 
-    if args.pretile_root:
-        folder = PreTileStore.find_one(args.pretile_root,
-                                       wsi_stem=args.wsi_stem, ds=args.ds,
-                                       tile=args.tile)
+    if args.corpus:
+        if not args.wsi_stem:
+            raise SystemExit('--corpus reads a stored pre-tile: pass --wsi-stem')
+        folder = corpus_arg(args).rung_dir(args.wsi_stem, args.ds)
         meta = PreTileStore.load_meta(folder)
         records = PreTileStore.load_index(folder)
         record = records[int(args.index) % len(records)]
@@ -223,7 +223,7 @@ def main():
                             'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs')
     ap.add_argument('--ds', type=float, default=4.0)
     ap.add_argument('--tile', type=int, default=256)
-    ap.add_argument('--factor', type=int, default=PRE_TILE_FACTOR)
+    add_pretile_args(ap, tile=False)     # --pre-tile-factor, and the cache
     ap.add_argument('--num', type=int, nargs='+', default=[100],
                     help='views to aggregate. One panel per value, so '
                          '`--num 10 100` shows what the tenfold cost buys')
@@ -245,8 +245,7 @@ def main():
                          'Drawn as the red cross and named in the legend')
     ap.add_argument('--nms-radius', type=int, default=4)
     ap.add_argument('--border', type=int, default=4)
-    ap.add_argument('--pretile-root', default=None,
-                    help='read a stored pre-tile instead of cutting one')
+    add_corpus_arg(ap, default=None)     # given: read a stored pre-tile
     ap.add_argument('--wsi-stem', default=None)
     ap.add_argument('--index', type=int, default=0)
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available()
@@ -255,7 +254,7 @@ def main():
     args = ap.parse_args()
 
     tile = int(args.tile)
-    margin = centre_margin(tile, args.factor)
+    margin = centre_margin(tile, args.pre_tile_factor)
     shape = (tile, tile)
     rungs = sorted(set(float(t) for t in args.thresholds) | {float(args.cut)})
     style = styles_for(rungs, args.cut)
@@ -267,7 +266,7 @@ def main():
 
     pre, source = read_pre_tile(args)
     print(f'pre-tile {pre.shape[0]}x{pre.shape[1]}  tile {tile}  '
-          f'factor {args.factor}  margin {margin}')
+          f'factor {args.pre_tile_factor}  margin {margin}')
     print(f'  {source}')
 
     device = torch.device(args.device)
@@ -300,7 +299,7 @@ def main():
     for num in args.num:
         ha = HaConfig(num=int(num)).build(teacher)
         result = ha.run(pre, tile, rng=np.random.default_rng(args.seed),
-                        factor=args.factor)
+                        factor=args.pre_tile_factor)
         per_threshold = {}
         for t in rungs:
             xy, _, _ = points_from_prob(result.mean_prob, result.counts,

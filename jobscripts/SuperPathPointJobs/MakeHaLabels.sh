@@ -108,17 +108,16 @@ SCORE_THRESHOLD=0.015
 # did.
 LADDER="0.001 0.015 0.025"
 
-# Which corpus. result/cache/tiles/ holds TWO complete sets -- 36 stores cut at
-# 0.75 from before the 3b probe settled it, and 36 cut at 0.5 after. The store
-# design is why both survive: sampler_id is in the cfg hash, so neither
-# overwrote the other. make_ha_labels REFUSES a mixed store rather than
-# processing both, because both is this step run twice, half of it on a corpus
-# that was rejected.
-SAMPLER_ID=""   # empty = the store holds one corpus and it is unambiguous
+# Which corpus: a recipe name from common/Corpora.RECIPES, or a corpus key as
+# extract_pretiles prints it. ONE corpus by address -- the pre-tile cache holds
+# stage A and stage B of the same slides on purpose, and labelling both is this
+# step run twice, half of it on a corpus nobody asked for.
+CORPUS="${CORPUS:-stageA}"
+PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
 
 # The demo cuts its own pre-tile off the slide rather than reading the store,
 # so it needs a path and not a stem -- which is what lets it run while step 3c
-# is still filling result/cache/tiles/. Same slide as MEASURE_SLIDE below.
+# is still filling the pre-tile cache. Same slide as MEASURE_SLIDE below.
 WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
 
 # The measurement's slide and rung. ds 4 is native on both pyramid shapes, so
@@ -155,7 +154,7 @@ for stage in $STAGE; do
           --tile "$TILE" --num "$NUM" \
           --score-threshold "$SCORE_THRESHOLD" \
           --threshold-ladder $LADDER \
-          ${SAMPLER_ID:+--sampler-id "$SAMPLER_ID"} \
+          --corpus "$CORPUS" --pretile-cache-job "$PRETILE_CACHE_JOB" \
           --wsi-stem "$MEASURE_SLIDE" --ds "$MEASURE_DS" \
           --limit "$MEASURE_TILES" \
           --out "/work/u26130998/result/${SLURM_JOB_NAME:-MakeHaLabels}/measure"
@@ -175,7 +174,7 @@ for stage in $STAGE; do
           --tile "$TILE" --num "$NUM" \
           --score-threshold "$SCORE_THRESHOLD" \
           --threshold-ladder $LADDER \
-          ${SAMPLER_ID:+--sampler-id "$SAMPLER_ID"}
+          --corpus "$CORPUS" --pretile-cache-job "$PRETILE_CACHE_JOB"
       ;;
 
     demo)
@@ -206,7 +205,8 @@ for stage in $STAGE; do
     inspect)
       run "inspect  (the decision point, --with-model)" \
         python training/SuperPathPoint/cli/inspect_ha_labels.py \
-          --with-model --tiles "$INSPECT_TILES" --num "$NUM"
+          --with-model --tiles "$INSPECT_TILES" --num "$NUM" \
+          --pretile-cache-job "$PRETILE_CACHE_JOB"
       ;;
 
     *)

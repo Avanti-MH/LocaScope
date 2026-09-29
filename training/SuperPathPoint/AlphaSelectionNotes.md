@@ -278,10 +278,24 @@ first 合併下，幾乎所有在 ds=1 出現過的點，born_rung 就是 ds=1 �
 不相干東西」污染，高估)。**第 8 節那個「offset/ds 該是常數」的估計，因此不可
 靠——分子在不同 rung 根本不是同一種統計量,不能跨 rung 比、更不能外推。** 正
 確做法應該是算 offset 時排除掉 `j == born_rung(anchor)` 那一格，只統計真正的
-跨 rung 檢查，但這個修正還沒有動工。
+跨 rung 檢查。
+
+**2026-09-13 修掉**：`anchors_of`/`anchors_of_generations` 現在多回傳一個
+`source_rung`（每個錨點的座標實際複製自哪個 rung，合併時本來就算得出來、
+只是原本沒回傳），`offset_quantiles_of` 新增 `source_rung` 參數，第 j 欄排
+除 `source_rung == rungs[j]` 的列，不再把自我匹配的 0 算進去。`source_rung=
+None`（預設）維持修正前的舊行為，還沒接上這個參數的呼叫端不受影響。
+`cli/survival_alpha_analysis.py` 的 baseline/exp_decay 路徑已經接上；
+probability_map/scale_extremum 路徑本來就沒有 offset_quantiles_of 這個診
+斷，不受影響。測試見 `test_alpha_calibration.py`
+（`t_offset_quantiles_of_excludes_the_self_match_column`）跟
+`test_survival_process.py`
+（`t_anchors_of_source_rung_names_which_rung_each_anchor_survived_in`）。
 
 **結論（使用者定案）**：不要拿 p90 offset/ds 這種數字反推 alpha（例如拉到
-16 這種量級）——不適當，原因正是上述兩層污染。
+16 這種量級）——不適當，原因正是上述兩層污染。上面的修正解決了「細 rung 被
+自我匹配稀釋」那一層；粗 rung 的「附近沒有真配對、抓到不相干東西」污染仍
+未處理。
 
 ---
 
@@ -366,15 +380,100 @@ born_rung 那一格不用校準就保證 alive，但其餘 L-1 格的死活全�
 
 ---
 
-## 14. alive[j] 候選演算法命名（都還沒動工，等審核）
+## 14. alive[j] 候選演算法命名（1/2/3 已經接進 sweep 在跑，4 已寫出函式但還沒接
+CLI，實作都在 `AliveCandidates.py`；這裡只留公式跟取捨，完整設計見各函式自己
+的 docstring）
 
-| 名稱 | 公式 | 解決什麼問題 | 代價 |
-|---|---|---|---|
-| **絕對雙門檻法**（現況） | `score>score_threshold & 0<=dist<=tau` | — | 稀疏區域 offset 被撐大，污染統計 |
-| **機率圖法**（候選1，取代原本的密度正規化法） | 在錨點固定座標附近 tau 半徑內，直接讀原始機率圖（`maps[ds]`，到處有定義，不是只有peak才有值）的局部極大值，`alive=max(window)>score_threshold` | 從根本解決背景污染（視窗外的東西讀不到，不會撐大）；同時讓候選2不再循環（同一固定座標，每階都能直接讀值比較） | 需要`SurvivalProcess.detect_all_generations`保留並回傳原始機率圖（目前`_detect_one`把`prob`用完就丟），記憶體用量大幅增加 |
-| **尺度局部極值法**（候選2） | `maps[ds_{j-1}]`/`maps[ds_j]`在錨點固定座標上的值，比較是否為局部極值 | 真正貼近 SIFT 原始判準 | 必須搭配候選1（機率圖法）才不循環，單獨用「最近偵測點的score」比鄰階會循環論證 |
-| **指數衰減聯合分數法**（候選3） | `combined=score*exp(-dist/tau)`，門檻在 combined 上 | 兩個門檻融成一個，避免硬邊界 | 混淆 NONE（沒偵測到）跟「偵測到但遠」，違反既有的 sentinel 設計原則；跟機率圖法無關，不會被它解決 |
-| **雙成分混合模型法**（候選4） | 把 dist 分布擬合成「真配對」+「背景」兩個成分,用後驗機率判 alive | 最徹底地把(B)/(C)分開 | 最重：要選分布形狀、EM 擬合，C 軸只有 10 棵樹,資料量能不能撐起穩定擬合是疑問 |
+**絕對雙門檻法**（現況，`Patterns.alive_from` / `AliveCandidates.
+alive_absolute_dual_threshold`）
+
+    alive[i,j] = (score[i,j] > score_threshold)
+               & (dist[i,j] >= 0)
+               & (dist[i,j] <= tau[j])
+
+`score[i,j]`/`dist[i,j]` 是「離錨點最近的那個真實偵測點」的分數跟距離
+（`SurvivalProcess.nearest_detection`）。`dist < 0` 是這一階**完全沒偵測到任
+何東西**的 NONE sentinel，跟「有偵測到、只是很遠」是兩件不同的事，不能合併。
+代價：稀疏區域（沒有真實偵測點可比）offset 會被撐大，污染統計。
+
+**機率圖法**（候選1，`AliveCandidates.alive_probability_map`，需要
+`probe_via_probability_map` 先算出 `peak_value`/`peak_dist`）
+
+    步驟一（每個 anchor、每個 rung 各做一次）：
+      在錨點的固定座標附近，半徑 tau[j]/scale（換算成這個 rung 自己的像素單
+      位）的一個「圓」內（不是外接正方形），以 sample_step 為間距取樣候選
+      點，對原始機率圖（combined_map，到處有定義，不是只有 NMS 留下的 peak
+      才有值）做雙線性內插，取內插值最大的那個候選點：
+        peak_value[i,j] = 該候選點的內插值
+        peak_dist[i,j]  = 該候選點到錨點的距離（換算回 level-0 px）
+
+    步驟二：
+      alive[i,j] = (peak_value[i,j] > score_threshold)
+                 & (peak_dist[i,j] <= tau[j])
+
+沒有 `dist>=0` 這個 NONE 判斷——稠密機率圖只要視窗非空就一定有極大值，「這
+一階什麼都沒有」在這個候選裡不存在，只會讀出一個很低的 peak_value，靠
+score_threshold 一起濾掉。解決什麼：從根本解決背景污染（視窗外的東西讀不
+到，不會撐大稀疏區域的 offset），同時讓候選2不再循環（同一固定座標，每階
+都能直接讀值比較，不用靠「最近偵測點是不是同一個特徵」這個尚待回答的問
+題）。代價：需要 `SurvivalProcess.detect_all_generations` 保留並回傳原始機
+率圖（原本 `_detect_one` 把 `prob` 用完就丟），記憶體用量大幅增加；
+`sample_step` 是還沒調過的精度/速度旋鈕。
+
+**尺度局部極值法**（候選2，`AliveCandidates.alive_scale_local_extremum`，
+`margin` 預設 0，一樣需要候選1的 `peak_value`/`peak_dist`）
+
+    alive[i,j] = (peak_value[i,j] > score_threshold)
+               & (peak_dist[i,j] <= tau[j])
+               & (peak_value[i,j] >= peak_value[i,j-1] - margin)   （j>0 才比）
+               & (peak_value[i,j] >= peak_value[i,j+1] - margin)   （j<L-1 才比）
+
+頭尾兩個 rung（j=0 或 j=L-1）只有一個鄰居可比。`margin=0` 時這個條件有一個
+**結構性後果**：要 j 跟 j+1 同時活著，代入上式會同時要求
+`peak_value[j] >= peak_value[j+1]` 跟 `peak_value[j+1] >= peak_value[j]`，
+唯一解是兩者位元級相等——真實浮點機率值幾乎不可能剛好相等，所以**兩個相鄰
+rung 在這個判準下幾乎不可能同時活著**，六樣態會被迫塌縮成只剩「只在一階」
+跟「不連續」，其餘四種（需要連續帶寬度 ≥2）在結構上被排除，不是機率上比較
+少見（2026-09-11 實測 C 軸 sweep 觀察到這個塌縮）。解決什麼：真正
+貼近 SIFT 原始的 26-neighbour DoG 極值判準。代價：上面這個結構性副作用；必
+須搭配候選1才不循環，單獨拿「最近偵測點的 score」比鄰階，鄰階的最近偵測點
+是不是同一個特徵本身就是在問的問題，會循環論證。
+
+**指數衰減聯合分數法**（候選3，`AliveCandidates.alive_exp_decay_joint_score`）
+
+    combined[i,j] = score[i,j] * exp(-dist[i,j] / max(tau[j], 1e-9))
+    alive[i,j]    = (dist[i,j] >= 0) & (combined[i,j] > combined_threshold)
+
+`exp(-dist/tau)` 在 `dist=0` 時是 1.0，之後平滑衰減，所以 `combined` 在零
+偏移時跟 `score` 同一個尺度、其餘情況一定更小——`combined_threshold` 因此
+必須遠低於 `score_threshold` 才收得到任何非零偏移的點，兩者不能互換（這也
+是 CLI 要求顯式給 `--combined-threshold`、不會預設等於 `--score-threshold`
+的原因）。解決什麼：把兩個獨立門檻融成一個連續分數，避免絕對雙門檻法的硬邊
+界。代價：`combined` 把「完全沒偵測到」（`dist<0`，已經被 `valid` 濾掉）跟
+「偵測到但很遠」混進同一個連續數字裡，這個判準本身有這個問題；跟機率圖法無
+關，不會被它解決。
+
+**雙成分混合模型法**（候選4，`AliveCandidates.alive_two_component_mixture`，
+函式已寫出但沒接進 CLI/sweep）
+
+    對每個 rung j 單獨做（用這一欄「所有」錨點的 dist[:,j]，不是逐點）：
+      把 dist[:,j]（排除 NONE）的經驗分布擬合成兩個 Rayleigh 分量的混合
+      （EM，_fit_rayleigh_mixture）：
+        「真配對」分量 -- sigma 較小
+        「背景／沒配對」分量 -- sigma 較大
+      算每個點的後驗機率 P(真配對 | dist[i,j])
+
+    alive[i,j] = (score[i,j] > score_threshold)
+               & (P(真配對 | dist[i,j]) > posterior_threshold)
+
+跟其他四個候選不同：這個不是逐 (anchor, rung) 的純函式，要先看過整欄
+`dist[:,j]` 的分布才能擬合出兩個 sigma，所以是照 rung 迴圈，不是像其他候選
+一樣直接吃一個純量 `tau`。解決什麼：理論上最徹底地把「真配對」跟「背景」兩
+個成分分開，不用硬性 tau 切一刀。代價：最重，要選分布形狀（這裡選
+Rayleigh，理由見 `_rayleigh_pdf` 自己的 docstring）、EM 擬合；C 軸每棵樹每
+個 rung 各自獨立擬合，某棵樹在某個 rung 的錨點數 n<8 時 `_fit_rayleigh_
+mixture` 會退化成單一分量（全部判「真」），是有文件記載的降級，不是當機，
+但正是這個候選最大的風險（資料量能不能撐起穩定擬合）。
 
 候選5（排名/分位數判準）已被排除：方向可能相反——稀疏區域反而會放寬標準,跟
 想要的效果相反。
@@ -498,10 +597,17 @@ offset/decoy 這兩個界線之間的極大值，是目前唯一定案的候選 
 
 ## 目前狀態
 
-還沒決定任何一個具體 alpha 值，但決定 alpha 的**主判準已經定案（第 12
-節）：gap 的極大值，keypoint 精度/粗細階誤差的物理估計當輔助 cross-check**
-（目前這個物理估計本身因為第 9 節的自我匹配污染還不可靠，需要先修
-`offset_quantiles_of` 排除自我匹配才能真的拿來用）。
+決定 alpha 的**主判準已經定案（第 12 節）：gap 的極大值，keypoint 精度/粗
+細階誤差的物理估計當輔助 cross-check**。第 9 節的自我匹配污染已於
+2026-09-13 修掉（`offset_quantiles_of` 現在排除自我匹配那一格），但粗 rung
+「附近沒有真配對」那一層污染還沒處理，物理估計這個輔助判準還不能完全信任。
+
+**production(baseline)方法目前的建議值：alpha ≈ 3**（plan.md 2.2 節尾）——
+對 `SurvivalAlphaAnalysisSweep/` 的 gap 曲線做「跨 rung 收斂成一個 alpha」
+的分析結果，C/R 兩軸 bracket 的交集中心，跟 probability_map 候選已定的
+alpha~2.5 同一個數量級。跨 rung 收斂本身該用平均還是最差情況，仍未定案
+（見上）；rotate decoy 在 C 軸上顯著偏高（~5.5），原因是細/粗 rung 本來就
+想要不同的 alpha，尚待進一步檢視，見 plan.md 同一節。
 
 1. **下限**：offset 分位數（需要先修第 9 節的污染問題才可信）。
 2. **上限**：decoy_rate（原始版本）。

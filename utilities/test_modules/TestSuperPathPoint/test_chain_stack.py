@@ -37,16 +37,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
 sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                        # noqa: E402
+from _paths import setup_import_paths, add_training_package  # noqa: E402
 
 setup_import_paths()
+add_training_package('SuperPathPoint')
+
+from pathlib import Path                                      # noqa: E402
 
 import numpy as np                                           # noqa: E402
 
-import PreTileStore                                           # noqa: E402
-from PreTileStore import (PRE_TILE_FACTOR, PreTileMeta,        # noqa: E402
-                          PreTileRecord, pre_tile_px)
-from TileSampler import degrade_resolution                   # noqa: E402
+from Store import (PreTileCorpus, PreTileMeta, PreTileRecord,  # noqa: E402
+                   PreTileStore)
+from TileSampler import (PRE_TILE_FACTOR, degrade_resolution,  # noqa: E402
+                         pre_tile_px)
 from PatchingLib import PatchInfo                             # noqa: E402
 from SurvivalAnalysis import ChainStack                    # noqa: E402
 FStack, RStack, CStack = ChainStack.FStack, ChainStack.RStack, ChainStack.CStack
@@ -377,17 +380,26 @@ def t_derive_refuses_own_rather_than_guessing():
     raise AssertionError("source='own' should have raised")
 
 
+def _corpus(root, sampler_id):
+    """A corpus address under `root`; only `sampler_id` varies between tests."""
+    return PreTileCorpus(Path(root), 'seg0', 'reg0', sampler_id,
+                         'ladder-test', _FACTOR)
+
+
 def _make_store(root, wsi_stem, ds, tile, sampler_id, records):
-    """A finished `PreTileStore` folder with `records` (list of kwargs for
-    `PreTileRecord`), each tile a uniform patch coloured by its own index --
-    so a round-trip through `centre_crop`/`from_tile` is checkable by colour
-    alone, the same trick `test_pre_tile_store.py` uses.
+    """A finished rung of `_corpus(root, sampler_id)` with `records` (list of
+    kwargs for `PreTileRecord`), each tile a uniform patch coloured by its own
+    index -- so a round-trip through `centre_crop`/`from_tile` is checkable by
+    colour alone, the same trick `test_store.py` uses.
     """
+    corpus = _corpus(root, sampler_id)
     meta = PreTileMeta(wsi_stem=wsi_stem, ds=float(ds), tile=int(tile),
-                      sampler_id=sampler_id, seed=0, segmenter_id='deadbeef',
+                      seg_id=corpus.seg_id, region_id=corpus.region_id,
+                      sampler_id=sampler_id, plan=corpus.plan, seed=0,
+                      segmenter_id='deadbeef',
                       pre_tile_factor=_FACTOR, level=0, level_ds=float(ds),
                       shrink=1.0, read_size=pre_tile_px(tile, _FACTOR))
-    folder = PreTileStore.create(root, meta)
+    folder = PreTileStore.create(corpus, meta)
     out = []
     pre = pre_tile_px(tile, _FACTOR)
     for kwargs in records:
@@ -395,7 +407,7 @@ def _make_store(root, wsi_stem, ds, tile, sampler_id, records):
         image = np.full((pre, pre, 3), rec.index, dtype=np.uint8)
         PreTileStore.save_tile(folder, rec, image, meta)
         out.append(rec)
-    PreTileStore.write_index(folder, out, meta)
+    PreTileStore.write_index(folder, out)
     return folder, meta
 
 
@@ -407,7 +419,7 @@ def t_FStack_from_own_is_lazy_and_reads_a_chain_on_getitem():
                    [dict(index=0, x=1000, y=1000, inherit_id=7)])
         _make_store(root, 'SLIDE_A', 2.0, _TILE, 'aaaa1111',
                    [dict(index=0, x=900, y=900, inherit_id=7)])
-        own = FStack.from_own(root, 'SLIDE_A', tile=_TILE, rungs=[1.0, 2.0])
+        own = FStack.from_own(_corpus(root, 'aaaa1111'), 'SLIDE_A', tile=_TILE, rungs=[1.0, 2.0])
         if len(own) != 1 or list(own) != [7]:
             raise AssertionError(f'expected one chain keyed 7, got {list(own)}')
         stack = own[7]
@@ -426,7 +438,7 @@ def t_RStack_from_own_scans_every_rung_not_just_one():
                    [dict(index=0, x=0, y=0), dict(index=1, x=200, y=200)])
         _make_store(root, 'SLIDE_A', 4.0, _TILE, 'bbbb2222',
                    [dict(index=0, x=1000, y=1000)])
-        own = RStack.from_own(root, 'SLIDE_A', [1.0, 4.0], tile=_TILE)
+        own = RStack.from_own(_corpus(root, 'bbbb2222'), 'SLIDE_A', [1.0, 4.0], tile=_TILE)
         if len(own) != 3:
             raise AssertionError(f'expected 3 own tiles across both rungs, got {len(own)}')
         stacks = [own[i] for i in own]
@@ -443,11 +455,11 @@ def t_RStack_from_own_cache_off_by_default_on_when_asked():
         tempfile.TemporaryDirectory() as cache_root:
         _make_store(root, 'SLIDE_A', 1.0, _TILE, 'cccc3333',
                    [dict(index=5, x=300, y=400)])
-        off = RStack.from_own(root, 'SLIDE_A', [1.0, 2.0], tile=_TILE)
+        off = RStack.from_own(_corpus(root, 'cccc3333'), 'SLIDE_A', [1.0, 2.0], tile=_TILE)
         off[0]
         if ChainStack._cache_get(cache_root, 'SLIDE_A', 300, 400, 2.0, _TILE) is not None:
             raise AssertionError('a fresh cache_root must start empty')
-        on = RStack.from_own(root, 'SLIDE_A', [1.0, 2.0], tile=_TILE,
+        on = RStack.from_own(_corpus(root, 'cccc3333'), 'SLIDE_A', [1.0, 2.0], tile=_TILE,
                              cache_root=cache_root)
         on[0]
         if ChainStack._cache_get(cache_root, 'SLIDE_A', 300, 400, 2.0, _TILE) is None:
@@ -463,7 +475,7 @@ def t_CStack_from_own_builds_forest_geometry_without_a_wsi():
     with tempfile.TemporaryDirectory() as root:
         _make_store(root, 'SLIDE_A', 16.0, _TILE, 'dddd4444',
                    [dict(index=0, x=10_000, y=10_000)])
-        forest = CStack.from_own(root, 'SLIDE_A', [4.0, 8.0, 16.0], None,
+        forest = CStack.from_own(_corpus(root, 'dddd4444'), 'SLIDE_A', [4.0, 8.0, 16.0], None,
                                  tile=_TILE)
         if len(forest) != 1:
             raise AssertionError(f'expected 1 tree, got {len(forest)}')

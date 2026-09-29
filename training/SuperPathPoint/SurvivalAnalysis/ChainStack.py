@@ -1,6 +1,6 @@
 """The three axes of Stage B. spec.md 3.2 "三個軸，一張表".
 
-    chains = chains(tiles_root, wsi_stem, tile=256)
+    chains = chains(corpus, wsi_stem, tile=256)      # corpus: Store.PreTileCorpus
     f = FStack.read(chains[7], tile=256)             # {ds: [tile,tile,3] uint8}
     r = RStack.derive(chains[7], rungs, tile=256)     # derived, no second read
     groups = CStack.pyramid(chains[7].cx, chains[7].cy, rungs, tile=256)
@@ -44,9 +44,8 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import PreTileStore                                          # noqa: E402
-from PreTileStore import centre_crop                         # noqa: E402
-from TileSampler import degrade_resolution                   # noqa: E402
+from Store import PreTileStore                               # noqa: E402
+from TileSampler import centre_crop, degrade_resolution      # noqa: E402
 from PatchingLib import PatchGrid, PatchInfo                  # noqa: E402
 from DsLadder import DsLadder                                 # noqa: E402
 from _paths import RESULT_DIR                                 # noqa: E402
@@ -190,9 +189,8 @@ class Chain:
         return sorted(self.members)
 
 
-def chains(tiles_root, wsi_stem: str, *, tile: int,
-           rungs: Optional[Sequence[float]] = None,
-           sampler_id: Optional[str] = None) -> Dict[int, Chain]:
+def chains(corpus, wsi_stem: str, *, tile: int,
+           rungs: Optional[Sequence[float]] = None) -> Dict[int, Chain]:
     """Every COMPLETE chain of one slide, keyed by `inherit_id`.
 
     Complete against `rungs` when given, and against whatever rungs the store
@@ -204,50 +202,24 @@ def chains(tiles_root, wsi_stem: str, *, tile: int,
     'F' members; 'R' derives from the same object and 'C' roots its pyramid
     at the same `(cx, cy)`. There is one `chains()`, not one per class.
 
-    `sampler_id` narrows to ONE corpus when `tiles_root` legitimately holds
-    more than one (stage A and stage B share `result/cache/tiles/` on purpose,
-    2026-09-05 -- `sampler_id` is what tells them apart, not a separate
-    directory per corpus). Passed straight to `PreTileStore.find`. Leave it
-    unset only when the root holds a single corpus for this slide.
+    `corpus` (a `Store.PreTileCorpus`) is ONE extraction: stage A and stage
+    B share a cache root on purpose, and their different sampler_ids put them
+    in different directories, so a chain can never be assembled from two.
     """
     want = sorted(float(r) for r in rungs) if rungs else None
     found: Dict[int, Dict[float, tuple]] = {}
     centres: Dict[int, tuple] = {}
     seen_rungs = set()
-    # ONE STORE PER (slide, rung, sampler_id), REFUSED RATHER THAN UNIONED, and
-    # the failure here is worse than the one the same guard prevents in
-    # `Datasets`. Two corpora in a root both number their chains from 0, so a
-    # union does not merely double the data -- it MERGES CHAINS THAT ARE NOT
-    # THE SAME CHAIN, and a "complete" one can be four rungs of one corpus and
-    # two of another at a different level-0 centre. Every survival number
-    # computed on it would be about points that were never co-registered, and
-    # nothing would say so. It happened: two smoke runs into one root,
-    # 2026-09-01. `sampler_id` is what should have disambiguated it and did
-    # not, because nothing threaded it down to `PreTileStore.find` yet -- this
-    # raise now only fires on a genuine duplicate (same `sampler_id`, same
-    # slide, same ds, extracted twice), not on stage A and stage B coexisting.
-    seen: Dict[float, object] = {}
-
-    find_kwargs = dict(tile=int(tile))
-    if sampler_id is not None:
-        find_kwargs['sampler_id'] = sampler_id
-    for folder in sorted(PreTileStore.find(tiles_root, **find_kwargs)):
+    # ONE CORPUS, BY ADDRESS. Two corpora in one root both number their chains
+    # from 0, so a union would MERGE CHAINS THAT ARE NOT THE SAME CHAIN -- a
+    # "complete" one could be four rungs of one corpus and two of another at a
+    # different level-0 centre. It happened: two smoke runs into one root,
+    # 2026-09-01. The corpus key is the directory now, so one call reads one
+    # extraction and there is nothing to refuse.
+    for folder in corpus.rung_dirs(wsi_stem):
         meta = PreTileStore.load_meta(folder)
-        if meta.wsi_stem != wsi_stem:
-            continue
         if want is not None and not any(abs(meta.ds - r) < 1e-6 for r in want):
             continue
-        if float(meta.ds) in seen:
-            raise ValueError(
-                f'two pre-tile stores for {wsi_stem} at ds {meta.ds:g} under '
-                f'{tiles_root}:\n  {seen[float(meta.ds)].name}\n  '
-                f'{folder.name}\nBoth number their chains from 0, so reading '
-                f'them together merges chains that are not the same chain -- a '
-                f'stack whose rungs are at different level-0 centres, which is '
-                f'the one thing this whole analysis assumes cannot happen. '
-                f'Narrow it with sampler_id=... (they differ, or this would '
-                f'already have been one folder)')
-        seen[float(meta.ds)] = folder
         seen_rungs.add(float(meta.ds))
         for record in PreTileStore.load_index(folder):
             cid = int(getattr(record, 'inherit_id', -1))
@@ -378,17 +350,15 @@ class FStack:
         return out
 
     @staticmethod
-    def from_own(tiles_root, wsi_stem: str, *, tile: int,
-                rungs: Optional[Sequence[float]] = None,
-                sampler_id: Optional[str] = None) -> OwnChains:
+    def from_own(corpus, wsi_stem: str, *, tile: int,
+                rungs: Optional[Sequence[float]] = None) -> OwnChains:
         """Every complete chain in `stageB-fOwn`'s store -- LAZY, see
         `OwnChains`. `chains()` already does the whole enumeration (groups by
         `inherit_id`, drops incomplete chains); this just wraps its result so
         `__getitem__` can call `read()` on demand instead of eagerly reading
         every chain's pixels up front.
         """
-        found = chains(tiles_root, wsi_stem, tile=tile, rungs=rungs,
-                      sampler_id=sampler_id)
+        found = chains(corpus, wsi_stem, tile=tile, rungs=rungs)
         return OwnChains(found, int(tile))
 
 
@@ -596,9 +566,8 @@ class RStack:
         raise ValueError(f"source must be 'F', 'C' or 'own', got {source!r}")
 
     @staticmethod
-    def from_own(tiles_root, wsi_stem: str, rungs: Sequence[float], *,
-                tile: int, sampler_id: Optional[str] = None,
-                cache_root: Optional[str] = None) -> 'OwnTiles':
+    def from_own(corpus, wsi_stem: str, rungs: Sequence[float], *,
+                tile: int, cache_root: Optional[str] = None) -> 'OwnTiles':
         """Every record in `stageB-rOwn`'s store -- LAZY, see `OwnTiles`.
 
         Scans EVERY rung the store holds, not one -- own's batch can span
@@ -617,13 +586,8 @@ class RStack:
         `None` for anything that scans a real corpus.
         """
         items = []
-        find_kwargs = dict(tile=int(tile))
-        if sampler_id is not None:
-            find_kwargs['sampler_id'] = sampler_id
-        for folder in sorted(PreTileStore.find(tiles_root, **find_kwargs)):
+        for folder in corpus.rung_dirs(wsi_stem):
             meta = PreTileStore.load_meta(folder)
-            if meta.wsi_stem != wsi_stem:
-                continue
             for record in PreTileStore.load_index(folder):
                 items.append((folder, record, meta))
         return OwnTiles(items, list(rungs), int(tile), wsi_stem, cache_root)
@@ -748,8 +712,8 @@ class CStack:
     `x_offset` are given in is the unit `PatchInfo.x/y` comes back in, so
     `_children_of` passes `parent.x`/`parent.size_px` straight through
     (level-0) rather than dividing by `d_child` first the way the one other
-    WSI caller (`ReferenceSampler.py:305`, which is reading real pixels and
-    needs a native size for that) does. An EARLIER version of this function
+    WSI caller of the time (the since-retired `ReferenceSampler`, which read
+    real pixels and needed a native size for that) did. An EARLIER version of this function
     divided and multiplied back, matching that convention, and it was wrong:
     `parent.x` has no reason to be a multiple of `d_child`, so
     `round(parent.x/d_child)*d_child` silently drops up to `d_child/2` level-0
@@ -782,7 +746,7 @@ class CStack:
         WAS WRONG. The first version of this function built the grid in
         CHILD-NATIVE units (`x_offset=round(parent.x / d_child)`, converting
         back with `x=round(info.x * d_child)` afterward) to mirror
-        `ReferenceSampler.py:305`'s convention for an actual pixel READ. But
+        the retired `ReferenceSampler`'s convention for an actual pixel READ. But
         this function never reads a pixel -- it only computes positions -- and
         `parent.x` is an arbitrary level-0 integer with no reason to be a
         multiple of `d_child`. `round(parent.x / d_child) * d_child` silently
@@ -930,9 +894,8 @@ class CStack:
         return out
 
     @staticmethod
-    def from_own(tiles_root, wsi_stem: str, rungs: Sequence[float], wsi, *,
-                tile: int, sampler_id: Optional[str] = None,
-                cache_root: Optional[str] = DEFAULT_CACHE_ROOT
+    def from_own(corpus, wsi_stem: str, rungs: Sequence[float], wsi, *,
+                tile: int, cache_root: Optional[str] = DEFAULT_CACHE_ROOT
                 ) -> 'OwnForest':
         """Every record in `stageB-cOwn`'s store -> one tree each, as a
         mother -- LAZY, see `OwnForest`, but UNLIKE `OwnChains`/`OwnTiles`:
@@ -950,13 +913,8 @@ class CStack:
         this record actually is.
         """
         items = []
-        find_kwargs = dict(tile=int(tile))
-        if sampler_id is not None:
-            find_kwargs['sampler_id'] = sampler_id
-        for folder in sorted(PreTileStore.find(tiles_root, **find_kwargs)):
+        for folder in corpus.rung_dirs(wsi_stem):
             meta = PreTileStore.load_meta(folder)
-            if meta.wsi_stem != wsi_stem:
-                continue
             for record in PreTileStore.load_index(folder):
                 if any(float(r) > float(meta.ds) + 1e-6 for r in rungs):
                     raise ValueError(

@@ -54,7 +54,8 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from _paths import RESULT_DIR, job_result_dir, setup_import_paths  # noqa: E402
+from cli import (RESULT_DIR, add_corpus_arg, add_pretile_args,    # noqa: E402
+                 corpus_arg, job_result_dir, setup_import_paths)
 
 setup_import_paths()
 
@@ -62,13 +63,12 @@ import numpy as np                                                # noqa: E402
 import torch                                                      # noqa: E402
 
 from common import KeypointLabelStore                # noqa: E402
-import PreTileStore
+from Store import PreTileStore                                   # noqa: E402
 from common.KeypointLabelStore import (LabelMeta, batch_from_lists,  # noqa: E402
                                        cap_for, points_from_prob)
 from SuperPoint.HomographicAdaptation import HaConfig              # noqa: E402
 from SuperPoint.Teacher import TeacherConfig                       # noqa: E402
 
-DEFAULT_TILE_ROOT = os.path.join(RESULT_DIR, 'cache', 'tiles')
 DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 
 #: Upstream's HA EXPORT value, `magic-point_coco_export.yaml:9`, which is the
@@ -107,13 +107,11 @@ DEFAULT_POINTS_PER_MPX = 30000.0
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--tiles-root', default=DEFAULT_TILE_ROOT)
+    add_pretile_args(ap)            # --tile: which extraction to read, v1 is 256
+    add_corpus_arg(ap)
     ap.add_argument('--labels-root', default=DEFAULT_LABEL_ROOT)
-    ap.add_argument('--tile', type=int, default=256,
-                    help='which extraction to read. v1 is 256')
     ap.add_argument('--wsi-stem', nargs='*', default=None,
-                    help='slides to do. Default: every store under --tiles-root '
-                         'with this tile size')
+                    help='slides to do. Default: every slide the corpus has')
     ap.add_argument('--ds', type=float, nargs='*', default=None,
                     help='rungs to do. Default: every one present')
     ap.add_argument('--num', type=int, default=100,
@@ -136,11 +134,6 @@ def main():
                     default=DEFAULT_POINTS_PER_MPX,
                     help='the per-tile cap, as a DENSITY so that three tile '
                          'sizes get comparable label densities')
-    ap.add_argument('--sampler-id', default=None,
-                    help='which corpus, when result/cache/tiles/ holds more '
-                         'than one. Not a filter for convenience: without it a '
-                         'mixed store is REFUSED, because processing both is '
-                         'the expensive step run twice')
     ap.add_argument('--threshold-ladder', type=float, nargs='+',
                     default=list(THRESHOLD_LADDER),
                     help='which thresholds to REPORT beside the one the store '
@@ -169,10 +162,11 @@ def main():
     print(teacher.summary(), flush=True)
     print(f'ha {ha.identity_id()}   N={args.num}   device {device}', flush=True)
 
-    stores = _stores(args)
+    corpus = corpus_arg(args)
+    stores = _stores(corpus, args)
     if not stores:
-        print(f'no pre-tile stores under {args.tiles_root} for tile '
-              f'{args.tile}. Run cli/extract_pretiles.py first.')
+        print(f'no finished pre-tile rungs at {corpus.root}/{corpus.key}. '
+              f'Run cli/extract_pretiles.py first.')
         return 1
     print(f'{len(stores)} (slide, rung) stores', flush=True)
 
@@ -185,7 +179,8 @@ def main():
             rows.append(_label_one(folder, meta, ha, args))
         except Exception as e:                                   # noqa: BLE001
             print(f'    FAILED  {type(e).__name__}: {e}', flush=True)
-            failures.append((folder.name, f'{type(e).__name__}: {e}'))
+            failures.append((f'{meta.wsi_stem} ds{meta.ds:g}',
+                             f'{type(e).__name__}: {e}'))
 
     summary = os.path.join(out_dir, 'make_ha_labels.csv')
     if rows:
@@ -203,46 +198,22 @@ def main():
     return 1 if failures else 0
 
 
-def _stores(args):
-    """Every finished pre-tile store matching the filters, in a stable order.
+def _stores(corpus, args):
+    """Every finished rung of ONE corpus matching the filters, coarse rungs last.
 
-    REFUSES A MIXED sampler_id RATHER THAN PROCESSING BOTH. `find` matches on
-    tile size, and `sampler_id` is part of the store's cfg hash, so a corpus
-    cut at 0.75 and one cut at 0.5 sit side by side as two complete sets of
-    directories -- which is the store design working: neither overwrote the
-    other. What does NOT work is this function quietly returning both, because
-    the caller then spends the hours-to-days step twice and writes labels for a
-    corpus that was rejected. Nothing would raise; the run would just take twice
-    as long and the extra labels would look exactly like the wanted ones.
-
-    So: name one with `--sampler-id`, or delete the set you do not want.
+    One corpus by address, never a search by tile size: a cache root holds
+    stage A and stage B of the same slides on purpose, and a search that
+    returned both would spend the hours-to-days HA step twice and write labels
+    for a corpus nobody asked for -- nothing would raise, and the extra labels
+    would look exactly like the wanted ones.
     """
-    hits = PreTileStore.find(args.tiles_root, tile=int(args.tile))
-    ratios = {}
-    for folder in hits:
-        meta = PreTileStore.load_meta(folder)
-        ratios.setdefault(str(meta.sampler_id), []).append(folder)
-    if args.sampler_id is None and len(ratios) > 1:
-        listing = '   '.join(
-            f'{r:g}: {len(v)} stores' for r, v in sorted(ratios.items()))
-        raise SystemExit(
-            f'{args.tiles_root} holds pre-tiles cut at {len(ratios)} different '
-            f'sampler_ids and none was named.\n  {listing}\n'
-            f'Pass --sampler-id, or delete the set you are not training on. '
-            f'Running both is not a slower version of the right answer -- it '
-            f'is HA over a corpus that was rejected, at full price.')
-
     kept = []
-    for folder in hits:
-        meta = PreTileStore.load_meta(folder)
-        if (args.sampler_id is not None
-                and str(meta.sampler_id) != str(args.sampler_id)):
-            continue
-        if args.wsi_stem and meta.wsi_stem not in args.wsi_stem:
-            continue
-        if args.ds and not any(abs(meta.ds - d) < 1e-6 for d in args.ds):
-            continue
-        kept.append(folder)
+    for stem in (args.wsi_stem or corpus.slides()):
+        for folder in corpus.rung_dirs(stem):
+            ds = PreTileStore.load_meta(folder).ds
+            if args.ds and not any(abs(ds - d) < 1e-6 for d in args.ds):
+                continue
+            kept.append(folder)
     return sorted(kept, key=lambda p: PreTileStore.load_meta(p).ds)
 
 
@@ -263,7 +234,7 @@ def _label_one(folder, meta, ha, args):
     """One (slide, rung): every pre-tile through HA, one store file out."""
     existing = KeypointLabelStore.find(
         args.labels_root, wsi_stem=meta.wsi_stem, ds=meta.ds,
-        ha_id=ha.identity_id(), pretile_id=meta.cfg_hash())
+        ha_id=ha.identity_id(), pretile_id=meta.corpus_key)
     if existing and not args.overwrite:
         print(f'    have it: {existing[0].name}   (--overwrite to redo)',
               flush=True)

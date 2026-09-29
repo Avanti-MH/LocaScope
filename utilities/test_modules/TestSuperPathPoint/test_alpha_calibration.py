@@ -19,9 +19,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
 sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                        # noqa: E402
+from _paths import setup_import_paths, add_training_package  # noqa: E402
 
 setup_import_paths()
+add_training_package('SuperPathPoint')
 
 import numpy as np                                            # noqa: E402
 
@@ -215,6 +216,46 @@ def t_offset_quantiles_of_matches_numpy_on_filtered_data():
         raise AssertionError(f'{out[0, 0]} != {expected} -- the NONE row '
                              f'should have been excluded, not counted as 0')
     return f'median {out[0, 0]} over the 4 valid rows, NONE row excluded'
+
+
+def t_offset_quantiles_of_excludes_the_self_match_column():
+    """`source_rung[i] == rungs[j]` means anchor i's own coordinates were
+    copied from rung j (AlphaSelectionNotes.md §9) -- probing rung j with
+    it always finds itself at distance 0, which is not a real cross-rung
+    offset. Two anchors born at ds=1 (rows 0/1, dist=0.0 at column ds=1 by
+    construction) and one born at ds=2 (row 2, a real 6.0 offset measured
+    back at ds=1) -- the ds=1 column must drop rows 0/1 and keep only the
+    real 6.0, while the ds=2 column (nobody born there) keeps every row.
+    """
+    dist = np.array([[0.0, 3.0],
+                     [0.0, 5.0],
+                     [6.0, 0.0]])
+    source_rung = np.array([1.0, 1.0, 2.0])
+    out = AC.offset_quantiles_of(dist, rungs=[1.0, 2.0], source_rung=source_rung,
+                                 quantiles=[0.5])
+    if not np.isclose(out[0, 0], 6.0):
+        raise AssertionError(f'ds=1 column: {out[0, 0]} != 6.0 -- the two '
+                             f'self-matched rows (born at ds=1) should have '
+                             f'been excluded, leaving only the real offset')
+    expected_ds2 = np.quantile([3.0, 5.0, 0.0], 0.5)
+    if not np.isclose(out[1, 0], expected_ds2):
+        raise AssertionError(f'ds=2 column: {out[1, 0]} != {expected_ds2} -- '
+                             f'no anchor was born at ds=2, so nothing here '
+                             f'should be excluded')
+    return f'ds=1 median {out[0, 0]} (self-matches excluded), ds=2 median {out[1, 0]}'
+
+
+def t_offset_quantiles_of_without_source_rung_keeps_old_contaminated_behaviour():
+    """`source_rung=None` (the default) must reproduce the pre-2026-09-13
+    behaviour exactly -- existing callers that have not been updated yet
+    see no change."""
+    dist = np.array([[0.0], [0.0], [6.0]])
+    out = AC.offset_quantiles_of(dist, rungs=[1.0], quantiles=[0.5])
+    expected = np.quantile([0.0, 0.0, 6.0], 0.5)
+    if not np.isclose(out[0, 0], expected):
+        raise AssertionError(f'{out[0, 0]} != {expected} -- source_rung=None '
+                             f'should not exclude anything')
+    return f'median {out[0, 0]}, no exclusion applied'
 
 
 def t_aggregate_offset_quantiles_shares_the_curve_aggregator():
@@ -416,6 +457,8 @@ _SECTIONS = {
     'aggregate': ['t_aggregate_curves_margin_uses_log_space_not_linear',
                  't_aggregate_curves_match_rate_is_a_plain_linear_mean'],
     'offset':    ['t_offset_quantiles_of_matches_numpy_on_filtered_data',
+                 't_offset_quantiles_of_excludes_the_self_match_column',
+                 't_offset_quantiles_of_without_source_rung_keeps_old_contaminated_behaviour',
                  't_aggregate_offset_quantiles_shares_the_curve_aggregator'],
     'probmap':   ['t_probe_positions_real_fixed_decoy_shifts_per_rung',
                  't_probability_map_alive_true_at_the_peak_false_off_the_map',

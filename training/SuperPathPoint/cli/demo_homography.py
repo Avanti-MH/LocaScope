@@ -63,8 +63,8 @@ from common.Homography import (invert, points_input_to_output,  # noqa: E402
                                points_output_to_input,
                                sample_homography, valid_mask, warp_image)
 from common.HomographyConfig import HomographyConfig             # noqa: E402
-from PreTileStore import (PRE_TILE_FACTOR, centre_margin,  # noqa: E402
-                                 pre_tile_px, pretile_valid_mask)
+from TileSampler import (PRE_TILE_FACTOR, centre_margin, pre_tile_px)  # noqa: E402
+from common.Homography import pretile_valid_mask  # noqa: E402
 
 #: The four switches, in the order `sample_homography` applies them. Order
 #: matters and is not commutative, so the panels are laid out in it.

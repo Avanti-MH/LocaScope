@@ -4,22 +4,22 @@
     python training/SuperPathPoint/cli/extract_pretiles.py \
         --tile 256 --n 500
 
-Outputs (in result/cache/tiles/ by default):
-    <wsi_stem>__ds<d>__t<tile>__<cfg8>/000000.png ... index.csv, meta.json
+Outputs:
+    result/cache/<--pretile-cache-job>_pretiles/<seg_id>/<slide>/
+        <region_id>_<sampler_id>_<plan>/f<factor>/ds<d>/000000.png ... index.csv, meta.json
     extract_pretiles.csv        in result/<SLURM_JOB_NAME or ExtractPreTiles>/
 
 argparse, a loop, and printed progress. Everything that decides anything is in
-`utilities/PreTileStore.py` (the format, the identity, the centre-crop
-geometry),
-`common/DsLadder.py` (which level to read) and `utilities/TileSampler.py` (which
-positions exist). CLAUDE.md: a library layer that prints cannot be called by a
+`utilities/Store.py` (the format and the corpus address), `utilities/TileSampler.py`
+(which positions exist, and the centre-crop geometry), `utilities/DsLadder.py`
+(which level to read) and `common/Corpora.py` (the sampler config). CLAUDE.md: a library layer that prints cannot be called by a
 bench.
 
 WHAT COMES OUT IS A PRE-TILE, NOT A TILE
 -----------------------------------------
 Each PNG is `tile * factor` on a side, centred on a position the sampler's
 richness buckets admitted. The tile itself is never written: it is
-`PreTileStore.centre_crop(pre, tile)` and lives only in the training loop.
+`TileSampler.centre_crop(pre, tile)` and lives only in the training loop.
 
 The reason is spec.md 6.6 -- a production homography needs 1.78x the source it
 is given, so a warp of a bare tile is a third pure black, and pure black is a
@@ -47,7 +47,7 @@ every crop downstream would be of the wrong place) and carried some background
 at one edge.
 
 `TileSampler` is now given the pre-tile as `reserve_l0`, so the lattice never
-OFFERS such a position: `filter_patchable` gets the reserve rather than the
+OFFERS such a position: `patchable` gets the reserve rather than the
 tile, and the first legal corner sits a margin inside the region. `clip_px` is
 therefore 0 on every record, and the loop below asserts it rather than writing
 it. A non-zero clip now means the reserve stopped binding, and every tile after
@@ -59,8 +59,8 @@ ds 32 on one slide. Those are not wrong, they are the older contract.
 RESUMABLE ON PURPOSE
 ---------------------
 `index.csv` is written last, and its presence is what marks a directory
-complete. A job killed at walltime therefore leaves directories that `find()`
-skips and that a re-run rebuilds, rather than a short index that reads as a
+complete. A job killed at walltime therefore leaves directories that
+`PreTileCorpus.rung_dirs` skips and that a re-run rebuilds, rather than a short index that reads as a
 small dataset.
 """
 
@@ -78,46 +78,40 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from _paths import RESULT_DIR, job_result_dir, setup_import_paths  # noqa: E402
+from cli import (add_pretile_args, job_result_dir, mask_root,     # noqa: E402
+                 pretile_root, setup_import_paths)
 
 setup_import_paths()
 
 import cv2                                                        # noqa: E402
+import torch                                                      # noqa: E402
 
-import MaskStore                                                  # noqa: E402
+from Cache import find, read_meta, wsi_stem_of                    # noqa: E402
 from SafeSlide import SafeSlide                                    # noqa: E402
-from TileSampler import (InheritConfig, OverlapConfig,             # noqa: E402
-                         RichnessConfig, SamplerConfig, TileSampler)
-from TissuesRegionsMask import TissuesRegionsMask                  # noqa: E402
+from TileSampler import (RichnessConfig,                            # noqa: E402
+                         SamplerConfig, TileSampler, pre_tile_px)
+from TissueMaskConfig import MASK_RECIPES, MaskMaker              # noqa: E402
 
-import PreTileStore                                    # noqa: E402
-from DsLadder import DEFAULT_RUNGS, DsLadder                # noqa: E402
-from PreTileStore import (PRE_TILE_FACTOR, PreTileMeta,     # noqa: E402
-                                 PreTileRecord, pre_tile_px)
-
-DEFAULT_MASK_ROOT = os.path.join(RESULT_DIR, 'cache', 'masks')
-DEFAULT_TILE_ROOT = os.path.join(RESULT_DIR, 'cache', 'tiles')
+from DsLadder import DEFAULT_RUNGS, DsLadder                      # noqa: E402
+from Store import (PreTileCorpus, PreTileMeta, PreTileRecord,     # noqa: E402
+                   PreTileStore, StoreMismatch)
+from common.Corpora import ladder, sampler_config                 # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--mask-root', default=DEFAULT_MASK_ROOT,
-                    help='where build_mask_store.py wrote the masks')
-    ap.add_argument('--root', default=DEFAULT_TILE_ROOT,
-                    help='where the pre-tiles go (default: result/cache/tiles/)')
+    # --pretile-cache-job, --mask-cache-job, --seg, --pre-tile-factor, --tile.
+    # --tile is what the model sees: v1 is 256, and 512 and 1024 are separate
+    # models and separate extractions (spec.md 6.5). --pre-tile-factor 3 is
+    # derived (spec.md 6.6, bound 2.49) and is NOT a knob to tune for disk.
+    add_pretile_args(ap)
     ap.add_argument('--wsi', nargs='*', default=None,
-                    help='slide paths. Default: every mask in the store')
-    ap.add_argument('--tile', type=int, default=256,
-                    help='what the model sees. v1 is 256; 512 and 1024 are '
-                         'separate models and separate extractions (spec.md 6.5)')
-    ap.add_argument('--pre-tile-factor', type=int, default=PRE_TILE_FACTOR,
-                    help='pre-tile side / tile side. 3 is derived (spec.md 6.6, '
-                         'bound 2.49) and is NOT a knob to tune for disk: it is '
-                         'an identity field, so a different value is a different '
-                         'dataset, not a cheaper version of this one')
-    ap.add_argument('--ds', type=float, nargs='+', default=list(DEFAULT_RUNGS),
-                    help='the ladder rungs to extract')
+                    help='slide paths. Default: every mask in the mask cache')
+    ap.add_argument('--rungs', type=float, nargs='+', default=list(DEFAULT_RUNGS),
+                    help='the ladder rungs to extract. Part of the corpus '
+                         'address: a chain is only a chain over rungs sampled '
+                         'together, so another list is another corpus')
     ap.add_argument('--n', type=int, default=500,
                     help='tiles per (slide, ds). The probe of step 3b says '
                          'which cells can actually supply this')
@@ -202,20 +196,36 @@ def main():
         f'{nm}:{f:.0%}/{c:.0%}' for nm, f, c
         in zip(_rich.names, _rich.floors, _rich.caps)) + '   (floor/cap)',
         flush=True)
-    print(f'masks {args.mask_root}\ntiles {args.root}', flush=True)
+
+    # THE CONFIG AND THE CORPUS ARE KNOWN BEFORE ANY SLIDE IS OPENED. Every
+    # knob is slide-independent, so the directory this run writes is fixed
+    # here and printed -- the key a reader passes to find it again.
+    cfg = sampler_config(
+        tile=args.tile, n=args.n, seed=args.seed, candidates=args.candidates,
+        max_tries=args.max_tries, grid_step=args.grid_step,
+        max_overlap=args.max_overlap,
+        overlapping_share=args.overlapping_share,
+        bucket_frame=args.bucket_frame,
+        inherit_share=args.inherit_share,
+        inherit_source_rung=args.inherit_source_rung)
+    mask_cfg = MASK_RECIPES[args.seg]
+    corpus = PreTileCorpus.of(pretile_root(args), mask_cfg, cfg,
+                              ladder(args.rungs), args.pre_tile_factor)
+    seg_dir = mask_root(args) / mask_cfg.seg_id()
+    print(f'masks  {seg_dir}\ntiles  {corpus.root}\ncorpus {corpus.key}',
+          flush=True)
 
     paths = args.wsi
     # A PATH, NOT A STEM, and the difference used to surface four frames down
     # as openslide's "Unsupported or missing image file" -- which reads as a
     # corrupt slide, not as a wrong argument. The stem is what every OTHER
-    # thing here is keyed by (the mask store, the tile store, --wsi-stem in
+    # thing here is keyed by (the mask cache, the pre-tile cache, --wsi-stem in
     # make_ha_labels), so reaching for it is the expected mistake.
     for candidate in paths or ():
         if not os.path.exists(candidate):
-            hit = MaskStore.find(args.mask_root)
-            known = sorted(MaskStore.load_meta(p).wsi_path for p in hit)
-            match = [k for k in known
-                     if MaskStore.wsi_stem_of(k) == candidate]
+            hit = find(seg_dir, '*/mask_meta.json')
+            known = sorted(read_meta(p)['wsi_path'] for p in hit)
+            match = [k for k in known if wsi_stem_of(k) == candidate]
             ap.error(
                 f'--wsi takes slide PATHS, not stems, and {candidate!r} is not '
                 f'a file.' + (f' Did you mean {match[0]}?' if match else
@@ -223,64 +233,34 @@ def main():
                               f'{" ..." if len(known) > 4 else ""}'))
 
     if not paths:
-        found = MaskStore.find(args.mask_root)
+        found = find(seg_dir, '*/mask_meta.json')
         if not found:
-            print(f'no masks under {args.mask_root}. Run '
-                  f'utilities/cli/build_cache/build_mask_store.py first.')
+            print(f'no masks under {seg_dir}. Run '
+                  f'utilities/cli/build_cache/build_mask_store.py first, or '
+                  f'pass --wsi and the mask is made on the way.')
             return 1
-        paths = [MaskStore.load_meta(p).wsi_path for p in found]
-        print(f'{len(paths)} slides from the mask store', flush=True)
+        paths = [read_meta(p)['wsi_path'] for p in found]
+        print(f'{len(paths)} slides from the mask cache', flush=True)
 
     rows, failures = [], []
-    for index, wsi_path in enumerate(paths, 1):
-        stem = MaskStore.wsi_stem_of(wsi_path)
-        print(f'\n[{index}/{len(paths)}] {stem}', flush=True)
-        try:
-            mask_path = MaskStore.find_one(args.mask_root, wsi_stem=stem)
-        except Exception as e:                                   # noqa: BLE001
-            print(f'    no mask: {e}', flush=True)
-            failures.append((stem, str(e)))
-            continue
-
-        slide_mask, mask_meta = MaskStore.load(mask_path)
-        print(f'    mask {mask_meta.rows}x{mask_meta.cols} at ds '
-              f'{mask_meta.mask_ds:.0f}, tissue {mask_meta.fraction:.1%}   '
-              f'({mask_meta.segmenter_id})', flush=True)
-
-        with SafeSlide(wsi_path) as wsi:
-            trm = TissuesRegionsMask.from_mask(wsi, slide_mask.mask,
-                                               slide_mask.origin, slide_mask.span)
-            # ONE SAMPLER FOR THE WHOLE SLIDE. Inheritance fixes a set of
-            # centres BEFORE any rung is filled and validates it at each; a
-            # sampler per rung chooses its own centres and no two rungs share
-            # one, which is why the 2026-08-27 corpus has `inherit_id = -1` on
-            # all 6,388 rows. Per-rung resume still works -- the sampling is
-            # redone, the writes are skipped -- see `_extract_slide`.
-            #
-            # `cfg` IS BUILT HERE, NOT INSIDE `_extract_slide` (2026-09-06) --
-            # see that function's docstring: it takes a finished config now,
-            # the same one `cli/prepare_chain_stack.py` builds a different
-            # way for F's/C's own corpora. `_plans_for` is still called twice
-            # per slide (once here just for the `tile_size` `cfg` needs, again
-            # inside `_extract_slide`) -- cheap, no IO, and it keeps
-            # `_extract_slide` self-contained rather than threading `plans`
-            # through as a second parameter that has to agree with the first.
-            plans, _pre_plans, _pre_px = _plans_for(
-                wsi, tile=args.tile, pre_tile_factor=args.pre_tile_factor,
-                ds=args.ds)
-            cfg = _sampler_config(
-                plans, n=args.n, seed=args.seed, candidates=args.candidates,
-                max_tries=args.max_tries, grid_step=args.grid_step,
-                max_overlap=args.max_overlap,
-                overlapping_share=args.overlapping_share,
-                bucket_frame=args.bucket_frame,
-                inherit_share=args.inherit_share,
-                inherit_source_rung=args.inherit_source_rung)
-            rows += _extract_slide(
-                wsi, trm, slide_mask, mask_meta, cfg,
-                tile=args.tile, pre_tile_factor=args.pre_tile_factor,
-                ds=args.ds, n=args.n, root=args.root,
-                overwrite=args.overwrite, stem=stem, failures=failures)
+    # A MISSING MASK IS MADE, NOT REFUSED: MaskMaker segments on a miss and
+    # writes it to the same cache a later run hits. The segmenter is built
+    # only on that first miss and released when the loop ends.
+    # THE DEVICE IS NOT OPTIONAL. `Uni2PcaSegConfig.build(None)` (and hest's)
+    # falls back to CPU, and a ViT over ~10^5 tiles on CPU ran at ~2.5 tiles/s
+    # against the ~650 the GPU does: one slide took over ten hours, all of it
+    # lost when the job was cancelled, because a mask is written only when its
+    # slide is finished.
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'mask segmenter on {device}', flush=True)
+    with MaskMaker(mask_cfg, mask_root(args), device) as masks:
+        for index, wsi_path in enumerate(paths, 1):
+            stem = wsi_stem_of(wsi_path)
+            print(f'\n[{index}/{len(paths)}] {stem}', flush=True)
+            with SafeSlide(wsi_path) as wsi:
+                rows += _extract_slide(
+                    wsi, masks, cfg, corpus, args.rungs, n=args.n,
+                    overwrite=args.overwrite, failures=failures)
 
     summary = os.path.join(out_dir, 'extract_pretiles.csv')
     if rows:
@@ -309,7 +289,7 @@ def main():
     return 1 if failures else 0
 
 
-def _plans_for(wsi, *, tile: int, pre_tile_factor: int, ds):
+def _plans_for(wsi, *, tile: int, pre_tile_factor: int, rungs):
     """`(sampler plans, per-rung pre-tile plans, pre_px)`, all rungs at once.
 
     Two plans per rung and they are not interchangeable:
@@ -326,22 +306,15 @@ def _plans_for(wsi, *, tile: int, pre_tile_factor: int, ds):
     every coarser rung is then skipped, which is only expressible if the
     coarser ones have not been filled yet.
 
-    KEYWORD ARGUMENTS, NOT `args` (2026-09-06) -- this and the three
-    functions after it used to take an `argparse.Namespace` because only
-    `main()`'s CLI ever called them. `cli/prepare_chain_stack.py` (plan.md
-    2.1, F's/C's own extractions) needs to call the same functions directly,
-    in-process, with values that never went through argparse -- a second,
-    parallel implementation of "mask -> plans -> sample -> write" was the
-    alternative, and that is the exact kind of duplication this whole
-    session's `ChainStack.py`/`ExtractPreTiles.sh` work has been removing
-    everywhere else. `main()`'s own behaviour is unchanged -- it now unpacks
-    `args` into keywords at the call site instead of passing `args` through.
+    KEYWORD ARGUMENTS, NOT `args`: `cli/prepare_chain_stack.py` calls this
+    and `_extract_slide` in process for F's and C's own corpora, with values
+    that never went through argparse.
     """
     pre_px = pre_tile_px(tile, pre_tile_factor)
-    rungs = sorted(float(d) for d in ds)
-    ladder = DsLadder(rungs=tuple(rungs))
-    tiles = ladder.plan(wsi.level_downsamples, tile)
-    pres = ladder.plan(wsi.level_downsamples, pre_px)
+    rungs = sorted(float(d) for d in rungs)
+    dsl = DsLadder(rungs=tuple(rungs))
+    tiles = dsl.plan(wsi.level_downsamples, tile)
+    pres = dsl.plan(wsi.level_downsamples, pre_px)
 
     plans, pre_plans = [], {}
     for plan_tile, plan_pre in zip(tiles, pres):
@@ -364,72 +337,46 @@ def _plans_for(wsi, *, tile: int, pre_tile_factor: int, ds):
     return plans, pre_plans, pre_px
 
 
-def _richness(*, bucket_frame: str) -> RichnessConfig:
-    return RichnessConfig(bucket_frame=bucket_frame)
-
-
-def _sampler_config(plans, *, n: int, seed: int, candidates: str,
-                    max_tries: int, grid_step: int, max_overlap: float,
-                    overlapping_share: float, bucket_frame: str,
-                    inherit_share: float, inherit_source_rung) -> SamplerConfig:
-    """One config for every rung, which is what inheritance requires.
-
-    ONE SAMPLER OVER ALL RUNGS, NOT ONE PER RUNG, and that is the change that
-    makes chains possible at all. `_choose_centres` runs once, before any rung
-    is filled, and `_place_inherited` then validates each centre at each rung;
-    a sampler per rung would choose its own centres and no two rungs would
-    share one. The corpus of 2026-08-27 has `inherit_id = -1` on all 6,388
-    rows for exactly this reason -- not because the option was set wrong, but
-    because it was never reachable.
-
-    `tile` is taken from the FINEST plan. Every plan has the same
-    `tile_size` -- it is `tile` in level pixels -- and asserting that here
-    beats letting one rung's differing value decide the whole config silently.
-    """
-    sizes = {int(q.tile_size) for q in plans}
-    if len(sizes) != 1:
-        raise AssertionError(
-            f'the rungs disagree about tile_size: {sorted(sizes)}. '
-            f'SamplerConfig.tile is one number for the whole ladder, so one '
-            f'rung would be gated on a square the others are not')
-
-    return SamplerConfig(
-        tile=sizes.pop(), n_per_rung=n, seed=seed,
-        candidates=candidates,
-        max_tries_per_tile=max(1, max_tries // max(n, 1)),
-        overlap=OverlapConfig(grid_step=grid_step,
-                              max_overlap_ratio=max_overlap,
-                              overlapping_share=overlapping_share),
-        richness=_richness(bucket_frame=bucket_frame),
-        inherit=InheritConfig(stack_kind='F', share=inherit_share,
-                              source_rung=inherit_source_rung))
-
-
-def _extract_slide(wsi, trm, slide_mask, mask_meta, cfg: SamplerConfig, *,
-                   tile: int, pre_tile_factor: int, ds, n: int, root,
-                   overwrite: bool, stem: str, failures: list):
+def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
+                   corpus: PreTileCorpus, rungs, *, n: int, overwrite: bool,
+                   failures: list):
     """Every rung of one slide, from ONE sampler. Returns a row per rung written.
 
-    The sampler runs once and is then split by rung into the per-rung stores.
-    The store layout does not change -- one directory per (slide, ds) -- but
-    every directory now carries the same `sampler_id`, which is the honest
-    thing: the rungs were cut by one decision, and under inheritance they are
-    not independent of each other.
+    The sampler runs once and is then split by rung into the per-rung
+    directories of `corpus`. Every rung carries the same `sampler_id`, which
+    is the honest thing: the rungs were cut by one decision, and under
+    inheritance they are not independent of each other.
 
     RESUME IS PER RUNG AND THE SAMPLING IS NOT SKIPPED. A rung whose directory
-    already exists is skipped at the WRITE, not at the sample -- because the
-    inheritance set is chosen across all rungs at once and cannot be rebuilt
-    from a subset. So a re-run after a walltime kill pays the sampling again
-    and none of the reads, which is where the hours are.
+    is already finished is skipped at the WRITE, not at the sample -- because
+    the inheritance set is chosen across all rungs at once and cannot be
+    rebuilt from a subset. So a re-run after a walltime kill pays the sampling
+    again and none of the reads, which is where the hours are.
 
-    `cfg` IS BUILT BY THE CALLER, NOT HERE (2026-09-06) -- `main()`'s CLI
-    builds it from argparse via `_sampler_config`; `cli/prepare_chain_stack.py`
-    builds it from `_sampler_config_for` (F's/C's own corpora, plan.md 2.1).
-    Neither is this function's business; it only needs the finished config.
+    `cfg` and `corpus` ARE BUILT BY THE CALLER: `main()` from argparse,
+    `cli/prepare_chain_stack.py` from `common/Corpora.RECIPES`. `rungs` must
+    be the ladder `corpus` was addressed with, and that is checked -- a rung
+    list that disagrees with the address would file one corpus's tiles under
+    another's key.
     """
+    if ladder(rungs).key() != corpus.plan:
+        raise AssertionError(
+            f'rungs {sorted(rungs)} are plan {ladder(rungs).key()}, but the '
+            f'corpus is addressed as {corpus.plan}')
+    stem = wsi_stem_of(wsi)
+    tile, pre_tile_factor = int(cfg.tile), int(corpus.factor)
+    mask, _hit = masks.mask(wsi)
+    segmenter_id = read_meta(
+        masks.slide_dir(stem) / 'mask_meta.json').get('segmenter_id', '')
+    frac = float(mask.main_mask.mean())
+    print(f'    mask {mask.main_mask.shape[0]}x{mask.main_mask.shape[1]}, '
+          f'tissue {frac:.1%}, {len(mask.tissue_regions)} regions   '
+          f'({segmenter_id})', flush=True)
+
     plans, pre_plans, pre_px = _plans_for(wsi, tile=tile,
-                                          pre_tile_factor=pre_tile_factor, ds=ds)
-    sampler = TileSampler(wsi, trm, cfg).sample(plans)
+                                          pre_tile_factor=pre_tile_factor,
+                                          rungs=rungs)
+    sampler = TileSampler(wsi, mask, cfg).sample(plans)
 
     by_rung = {}
     for sample in sampler:
@@ -444,13 +391,12 @@ def _extract_slide(wsi, trm, slide_mask, mask_meta, cfg: SamplerConfig, *,
     for plan in plans:
         ds_ = float(plan.rung_ds)
         try:
-            rows.append(_write_rung(wsi, slide_mask, mask_meta, cfg,
-                                    pre_plans[ds_], pre_px, ds_,
+            rows.append(_write_rung(wsi, mask.slide_mask, segmenter_id, cfg,
+                                    corpus, pre_plans[ds_], pre_px, ds_,
                                     by_rung.get(ds_, []),
                                     sampler.reports.get(ds_),
-                                    tile=tile, pre_tile_factor=pre_tile_factor,
-                                    n=n, root=root, overwrite=overwrite))
-        except PreTileStore.PreTileMismatch as e:
+                                    n=n, overwrite=overwrite))
+        except StoreMismatch as e:
             # An existing finished directory. Not a failure -- it is what
             # --overwrite is for, and skipping is what makes this script safe
             # to re-run after a walltime kill.
@@ -463,20 +409,14 @@ def _extract_slide(wsi, trm, slide_mask, mask_meta, cfg: SamplerConfig, *,
     return rows
 
 
-def _write_rung(wsi, slide_mask, mask_meta, cfg: SamplerConfig, plan_pre,
-                pre_px, ds, samples, report, *, tile: int,
-                pre_tile_factor: int, n: int, root, overwrite: bool):
+def _write_rung(wsi, slide_mask, segmenter_id: str, cfg: SamplerConfig,
+                corpus: PreTileCorpus, plan_pre, pre_px, ds, samples, report, *,
+                n: int, overwrite: bool):
     """One (slide, ds) directory, from samples the shared sampler already chose."""
-    # BUILT BEFORE THE META, because `sampler_id` is part of the store's
-    # identity and the meta cannot be assembled without it. It replaced
-    # `tissue_ratio`, which named a gate the sampler no longer has -- and which
-    # covered only one of the three axes, so two corpora differing in their
-    # bucket floors used to share a directory.
-    meta = PreTileMeta.of(wsi, plan_pre, tile=tile,
-                          sampler_id=cfg.sampler_id(), seed=cfg.seed,
-                          segmenter_id=mask_meta.segmenter_id,
-                          factor=pre_tile_factor, n_requested=n)
-    folder = PreTileStore.create(root, meta, overwrite=overwrite)
+    meta = PreTileMeta.of(wsi, plan_pre, corpus, tile=int(cfg.tile),
+                          seed=cfg.seed, segmenter_id=segmenter_id,
+                          n_requested=n)
+    folder = PreTileStore.create(corpus, meta, overwrite=overwrite)
     origin, span = slide_mask.origin, slide_mask.span
 
     records, written = [], 0
@@ -502,7 +442,7 @@ def _write_rung(wsi, slide_mask, mask_meta, cfg: SamplerConfig, plan_pre,
                 f'scanned region, but the sampler reserved '
                 f'{int(info.reserve)} px around every tile. The reserve is '
                 f'not binding -- check that plan.reserve_l0 reached '
-                f'filter_patchable and that the mask origin is the one the '
+                f'the patchable view and that the mask origin is the one the '
                 f'lattice used')
 
         # The RESERVE, not the tile: the store holds pre-tiles and the tile is
@@ -529,7 +469,7 @@ def _write_rung(wsi, slide_mask, mask_meta, cfg: SamplerConfig, plan_pre,
         records.append(record)
         sample.release()          # streaming: the pixels are on disk now
 
-    PreTileStore.write_index(folder, records, meta)
+    PreTileStore.write_index(folder, records)
 
     chains = sum(1 for r in records if r.inherit_id >= 0)
     # `n_inherit_refused` IS THE COST OF `on_incomplete='drop'`, PER RUNG.
@@ -553,7 +493,7 @@ def _write_rung(wsi, slide_mask, mask_meta, cfg: SamplerConfig, plan_pre,
             'n_requested': n, 'n_got': len(records), 'n_clipped': 0,
             'n_chain': chains, 'n_inherit_refused': refused,
             'n_inherit_breaching': breaching,
-            'bytes': written, 'dir': os.path.basename(str(folder))}
+            'bytes': written, 'corpus': corpus.key}
 
 
 if __name__ == '__main__':

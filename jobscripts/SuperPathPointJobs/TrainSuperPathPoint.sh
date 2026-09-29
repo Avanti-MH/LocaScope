@@ -181,7 +181,10 @@ BALANCE=none
 #
 # Set `offline` and `wandb sync $WANDB_DIR` from a login node afterwards only
 # if a node turns out to be firewalled.
-WANDB_MODE=online
+# A `${WANDB_MODE:-online}` rather than a hardcoded `online` since 2026-09-16,
+# so that `sbatch --export=ALL,WANDB_MODE=offline ...` can keep a smoke run off
+# the server. Everything above stays the default and stays true.
+WANDB_MODE="${WANDB_MODE:-online}"
 
 status=0
 run () {   # run <label> <command...>

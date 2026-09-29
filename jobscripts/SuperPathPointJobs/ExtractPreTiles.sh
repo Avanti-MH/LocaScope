@@ -52,7 +52,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # BEFORE THIS RUNS, two things must be true, and neither is checked by the
 # script because both are cheap to check by hand:
 #
-#   1. result/cache/masks/ holds six masks   (jobscripts/BuildMaskStore.sh)
+#   1. result/cache/BuildMaskStore_mask/ holds the masks (BuildMaskStore.sh);
+#      a missing one is made on the way, at a segmentation's cost
 #   2. tile_yield.csv says how many tiles each (ratio, tile, ds) cell can
 #      actually supply, and N below has been set from it, and no floor is
 #      reported unmet
@@ -95,18 +96,17 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # script goes back to being the one thing it was before that detour, the
 # `stageA` training corpus, human-run.
 #
-# `sampler_id` is still what would tell two corpora under one root apart if
-# there ever were more than one here (`ChainStack.chains()`/`Datasets.py`'s
-# loader both take an optional `sampler_id=`), but there is only `stageA`
-# again as far as this script is concerned.
+# The defaults below ARE `common/Corpora.RECIPES['stageA']` -- the address a
+# reader computes for "stageA" -- so a run with no override lands exactly where
+# `--corpus stageA` looks. Any knob can still be overridden on top, which is
+# what a smoke run is; the run then prints its own corpus key, which is what a
+# reader passes as `--corpus <key>`:
 #
-# Any single knob can still be overridden on top, which is what a smoke run is:
-#
-#   N=20 DS="1 2 4 8 16" WSI=<path> ROOT=<scratch> sbatch ...
+#   N=20 DS="1 2 4 8 16" WSI=<path> CACHE_JOB=ExtractPreTilesSmoke sbatch ...
 #
 _share=0     ; _source=      ; _frame=per_rung
 _step=0      ; _overlap=0    ; _ovshare=0
-_n=100       ; _root=/work/u26130998/result/cache/tiles
+_n=100
 
 # 100 per (slide, rung), across TWELVE slides rather than six: five per stain
 # in train and one per stain held out. The corpus is therefore 12 x 6 x 100
@@ -137,7 +137,7 @@ MAX_TRIES=2500
 #
 #   N=20 DS="1 2 4 8 16" \
 #     WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_BT/Type_N/BRACS_1598.svs \
-#     ROOT=/work/u26130998/result/cache/tiles_smoke \
+#     CACHE_JOB=ExtractPreTilesSmoke \
 #     sbatch jobscripts/SuperPathPointJobs/ExtractPreTiles.sh
 #
 # WSI IS A PATH, NOT A STEM. Every other thing here is keyed by the stem --
@@ -146,11 +146,10 @@ MAX_TRIES=2500
 # openslide's "Unsupported or missing image file", which reads as a corrupt
 # slide. The CLI now says so by name and suggests the path.
 #
-# A SEPARATE ROOT FOR THE SMOKE RUN, still -- not because `Datasets`/`chains()`
-# would refuse the real corpus sitting beside it (both now take `sampler_id=`
-# to pick one out), but because keeping the smoke corpus somewhere else means
-# deleting it is `rm -rf` of one directory instead of hunting one `sampler_id`
-# out of the real corpus.
+# A SEPARATE CACHE JOB FOR THE SMOKE RUN -- not because a reader would mix
+# them (a corpus is read by its address, and N alone moves the address), but
+# because deleting it is then `rm -rf result/cache/ExtractPreTilesSmoke_pretiles`
+# instead of hunting one corpus out of the real root.
 #
 DS="${DS:-}"
 WSI="${WSI:-}"
@@ -208,14 +207,14 @@ INHERIT_SOURCE_RUNG="${INHERIT_SOURCE_RUNG:-$_source}"
 #     N=100 INHERIT_SHARE=0 BUCKET_FRAME=per_rung \
 #       GRID_STEP=0 MAX_OVERLAP=0 OVERLAPPING_SHARE=0 \
 #       WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_BT/Type_N/BRACS_1598.svs \
-#       ROOT=/work/u26130998/result/cache/tiles_repro \
+#       CACHE_JOB=ExtractPreTilesRepro \
 #       sbatch jobscripts/SuperPathPointJobs/ExtractPreTiles.sh
 #
-#   The directory names must come out `__d581d527` -- the same cfg_hash as the
-#   old store, because the config is the same -- and `index.csv` must match it
-#   row for row. The RUNGS AFTER ds 1 ARE THE TEST: ds 1 is the first consumer
-#   of the stream and was never affected, so a check that stops there proves
-#   nothing.
+#   `index.csv` must match the 2026-08-27 corpus row for row. The RUNGS AFTER
+#   ds 1 ARE THE TEST: ds 1 is the first consumer of the stream and was never
+#   affected, so a check that stops there proves nothing. (The directory name
+#   does not carry over: the mask recipe and the rung plan are in the address
+#   now, and the old store had neither.)
 
 # AN OVERLAPPING LATTICE, because the gate above shrinks the candidate pool and
 # this is what puts it back. grid_step 128 on a 256 tile halves the step in
@@ -249,34 +248,37 @@ OVERLAPPING_SHARE="${OVERLAPPING_SHARE:-$_ovshare}"
 # contract's mix.
 BUCKET_FRAME="${BUCKET_FRAME:-$_frame}"
 
-# ONE ROOT FOR ALL FOUR CORPORA (2026-09-05). `sampler_id` is in the directory
-# name, so re-extracting at another setting adds a directory beside the old
-# ones rather than replacing it -- and used to mean `Datasets`/`chains()` would
-# read EVERY store matching (slide, ds) and call the union a corpus. Both now
-# take an optional `sampler_id=` to pick one out instead, which is what lets
-# stage A, stage B, `rOwn` and `cOwn` share `result/cache/tiles/` rather than
-# each needing its own root to avoid that collision.
-ROOT="${ROOT:-$_root}"
+# ONE ROOT FOR EVERY CORPUS: result/cache/<CACHE_JOB>_pretiles/. Below it
+# each corpus has its own address -- mask, region, sampler, rung plan, factor
+# (utilities/Store.py, PreTileCorpus) -- so re-extracting at another setting
+# adds a directory beside the old one, and a reader reads exactly one of them.
+# prepare_chain_stack.py writes F's and C's own corpora into the same root.
+CACHE_JOB="${CACHE_JOB:-ExtractPreTiles}"
+# Which mask the tiles are cut through, and which job made it.
+SEG="${SEG:-uni2_pca}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-BuildMaskStore}"
 
 echo "======== ExtractPreTiles  corpus: stageA ========"
 echo "  tile $TILE   pre-tile $((TILE * 3))   n $N"
 echo "  chains: share $INHERIT_SHARE   source ds $INHERIT_SOURCE_RUNG   bucket $BUCKET_FRAME"
 echo "  lattice step $GRID_STEP   max overlap $MAX_OVERLAP"
-echo "  root  : $ROOT"
-echo "  slides: ${WSI:-every mask in result/cache/masks/}   rungs: ${DS:-DsLadder default}"
+echo "  cache : result/cache/${CACHE_JOB}_pretiles/   mask: $SEG (${MASK_CACHE_JOB})"
+echo "  slides: ${WSI:-every mask in the mask cache}   rungs: ${DS:-DsLadder default}"
 echo ""
 
 python training/SuperPathPoint/cli/extract_pretiles.py \
   --tile "$TILE" \
   --n "$N" \
-  --root "$ROOT" \
+  --pretile-cache-job "$CACHE_JOB" \
+  --seg "$SEG" \
+  --mask-cache-job "$MASK_CACHE_JOB" \
   --inherit-share "$INHERIT_SHARE" \
   ${INHERIT_SOURCE_RUNG:+--inherit-source-rung "$INHERIT_SOURCE_RUNG"} \
   --bucket-frame "$BUCKET_FRAME" \
   --grid-step "$GRID_STEP" \
   --max-overlap "$MAX_OVERLAP" \
   --overlapping-share "$OVERLAPPING_SHARE" \
-  ${DS:+--ds $DS} \
+  ${DS:+--rungs $DS} \
   ${WSI:+--wsi $WSI} \
   --max-tries "$MAX_TRIES"
 
@@ -284,7 +286,8 @@ status=$?
 
 echo ""
 echo "======== done  (exit $status) ========"
-echo "  pre-tiles -> $ROOT/<slide>__ds<d>__t${TILE}__<cfg8>/"
+echo "  pre-tiles -> result/cache/${CACHE_JOB}_pretiles/<seg_id>/<slide>/<region>_<sampler>_<plan>/f3/ds<d>/"
+echo "             (the corpus key is printed at the top of the log)"
 echo "  table     -> result/\${SLURM_JOB_NAME}/extract_pretiles.csv"
 echo ""
 echo "  Two numbers to read before anything else:"

@@ -307,7 +307,7 @@ metadata 一直都在，pixel 只有 `__getitem__` 才讀）：
 
 **`cli/prepare_chain_stack.py`**：決定三軸各自的 `sampler_id`，直接從
 `_RECIPES`（F/C own 兩份 `SamplerConfig` 的唯一定義）算出 `sampler_id()`，不
-猜磁碟上哪個 store 屬於誰。找不到就直接用 `MaskStore`/`TissuesRegionsMask` 讀
+猜磁碟上哪個 store 屬於誰。找不到就直接用 `MaskStore`/`TissueMask` 讀
 mask，呼叫（重構成吃關鍵字參數的）`extract_pretiles._extract_slide` 現場抽——
 同一個 process，不開 subprocess，不碰 `ExtractPreTiles.sh`。R 一律指向
 `stageA`，找不到就報錯請人去跑 `ExtractPreTiles.sh`，不會現抽——那是獨立、
@@ -377,7 +377,8 @@ decoy（0.902 vs 0.104、0.923 vs 0.020）。六張圖都產出。
 設計
 │
 ├── 0. 桶(bucket)= F/R/C
-│       cli/survival_alpha_analysis.py:main()
+│       cli/survival_alpha_analysis.py:main()，--alive-method 選 alive 判準
+│         (baseline/exp_decay/probability_map/scale_extremum，見下方分岔)
 │
 ├── 1. 每個 ChainStack
 │   │
@@ -385,46 +386,88 @@ decoy（0.902 vs 0.104、0.923 vs 0.020）。六張圖都產出。
 │   │   SurvivalAnalysis/SurvivalProcess.py:
 │   │     anchors_of_generations(per_rung_tiles, order, tile_merge_radius, cross_rung_base)   [新]
 │   │     _merge_within_radius(points, radius) -> keep_idx        (私有,anchors_of/
-│   │                                              anchors_of_generations 共用)   [新]
+│   │                                              anchors_of_generations/
+│   │                                              AlphaCalibration.merge_anchors 共用)
+│   │       演算法:網格雜湊合併法——依 priority(高分先)排序訪問,一個點只跟
+│   │       它自己 radius 網格格的 3x3 鄰域裡「已保留」的點比,不是全體已保留
+│   │       點,倖存者是同一堆裡最先被訪問到的那個                     [新]
 │   │
 │   ├── 建錨點清單(核心,不管有沒有要校準 alpha 都要做)
 │   │     F/R:  SurvivalProcess.py:anchors_of(...)                 [留]
 │   │     C:    SurvivalProcess.py:anchors_of_generations(...)     [新]
 │   │
-│   ├── 對每一階:真實探測(核心)
-│   │     SurvivalProcess.py:
-│   │       detect / nearest_detection / rival_at                 [留]
-│   │       probe_real(anchors, per_rung_detections)
-│   │         -> dist, score, rival                                [新,取代 run() 的真實那半]
+│   ├── alive 判準:兩條資料路徑,由 --alive-method 二選一(2026-09-11 定案,
+│   │   AlphaSelectionNotes.md §14 有候選 1-4 完整取捨)
+│   │   │
+│   │   ├── 路徑 A -- (score, dist, tau) 判準:baseline / exp_decay
+│   │   │   對每一階:真實探測(核心)
+│   │   │     SurvivalProcess.py:
+│   │   │       detect / nearest_detection / rival_at                 [留]
+│   │   │       演算法(nearest_detection):scipy.spatial.cKDTree,精確全域
+│   │   │       最近鄰——2026-09-11 從手刻網格雜湊環狀搜尋換過來，因為後者
+│   │   │       per-query 成本隨「離點雲多遠」增長，C 軸粗階小而密的偵測點
+│   │   │       雲被跨全樹的錨點探測時會卡住(production 實測 20-40 分鐘
+│   │   │       still running)；先前更早的版本是 O(N*M) 全對全距離矩陣，
+│   │   │       在 C 軸 ds=1 一階上會 OOM(~70,000 點雙邊時要價 ~78 GB)
+│   │   │       probe_real(anchors, per_rung_detections)
+│   │   │         -> dist, score, rival                                [新,取代 run() 的真實那半]
+│   │   │   對每一階:誘餌探測(支線,只有校準 alpha 才做這步)
+│   │   │     AlphaCalibration.py:
+│   │   │       probe_decoy(anchors, per_rung_detections, decoy_shift)
+│   │   │         -> decoy_dist, decoy_score
+│   │   │         (內部呼叫 SurvivalProcess.nearest_detection,decoy_shift 決定 shifted 座標)  [新]
+│   │   │     cli/survival_alpha_analysis.py:
+│   │   │       decoy_shift_fixed(offset_xy) -> Callable
+│   │   │       decoy_shift_random(min_mag, max_mag, rng) -> Callable
+│   │   │       decoy_shift_rotate(angle_range, rng) -> Callable       [新,傳進 probe_decoy]
+│   │   │       _make_alive_fn(method)：'baseline' -> None（沿用 alpha_curve/
+│   │   │         pattern_curve 自帶的 alive_absolute_dual_threshold 快速路徑）；
+│   │   │         'exp_decay' -> 包一層呼叫 AliveCandidates.
+│   │   │         alive_exp_decay_joint_score                          [新]
+│   │   │   -> 吃 AlphaCalibration.py:alpha_curve(dist, score, decoy_dist,
+│   │   │        decoy_score, *, rungs, alphas, tau_floor, threshold, alive_fn)
+│   │   │
+│   │   └── 路徑 B -- 機率圖判準:probability_map(候選1) / scale_extremum(候選2)
+│   │       不吃 dist/score，直接重探機率場；候選4(雙成分混合模型)函式已寫出
+│   │       但還沒接進這裡，見 AlphaSelectionNotes.md §14
+│   │         SurvivalAnalysis/AliveCandidates.py:
+│   │           assemble_generation_map(...) -> combined_map            [新]
+│   │           probe_via_probability_map(combined_map, anchors, ...)
+│   │             -> peak_value, peak_dist                              [新]
+│   │           alive_probability_map(peak_value, peak_dist, ...)   候選1  [新]
+│   │           alive_scale_local_extremum(peak_value, peak_dist, ...) 候選2 [新]
+│   │         AlphaCalibration.py:
+│   │           _probe_positions(anchors, order, decoy_shift)
+│   │             -> real_by_rung, decoy_by_rung(每階各自的 decoy 位移)     [新]
+│   │           _probability_map_alive(combined_maps, anchors_by_rung, *, kind=...)
+│   │             -> alive[N, L]，kind 切候選1/候選2                       [新]
+│   │         cli/survival_alpha_analysis.py 每軸各多一份 worker(跟原本
+│   │         _one_f_chain/_one_r_tile/_one_c_tree 並存,不是取代):
+│   │           _one_f_chain_probability_map / _one_r_tile_probability_map /
+│   │           _one_c_tree_probability_map                               [新]
+│   │       -> 吃 AlphaCalibration.py:probability_map_curve(combined_maps,
+│   │            anchors, decoy_shift, *, kind=...)——輸出 shape/keys 跟
+│   │            alpha_curve 完全一樣，下游彙總/畫圖不用分流
 │   │
-│   ├── 對每一階:誘餌探測(支線,只有校準 alpha 才做這步)
-│   │     SurvivalAnalysis/AlphaCalibration.py:
-│   │       probe_decoy(anchors, per_rung_detections, decoy_shift)
-│   │         -> decoy_dist, decoy_score
-│   │         (內部呼叫 SurvivalProcess.nearest_detection,decoy_shift 決定 shifted 座標)  [新]
-│   │
-│   │     cli/survival_alpha_analysis.py:
-│   │       decoy_shift_fixed(offset_xy) -> Callable
-│   │       decoy_shift_random(min_mag, max_mag, rng) -> Callable
-│   │       decoy_shift_rotate(angle_range, rng) -> Callable       [新,傳進 probe_decoy]
-│   │
-│   ├── merge_radius_2nd(迴圈外,一次,支線專用旋鈕)
+│   ├── merge_radius_2nd(迴圈外,一次,支線專用旋鈕,兩條路徑共用)
 │   │     AlphaCalibration.py:merge_anchors(anchors, merge_radius_2nd)
 │   │       (內部呼叫 SurvivalProcess._merge_within_radius)        [新,從 Report.py 搬過來]
 │   │
-│   └── alphas_sweep + tau_floor(支線)
-│         AlphaCalibration.py:alpha_curve(dist, score, decoy_dist, decoy_score, *,
-│                                        rungs, alphas, tau_floor, threshold)
+│   └── alphas_sweep + tau_floor(支線,兩條路徑各自算,輸出同一種 shape)
+│         路徑 A：AlphaCalibration.py:alpha_curve(dist, score, decoy_dist, decoy_score, *,
+│                                        rungs, alphas, tau_floor, threshold, alive_fn)
+│         路徑 B：AlphaCalibration.py:probability_map_curve(...)
 │           -> 這個 ChainStack 的 match_rate/decoy_rate/gap/margin,[L, len(alphas)]   [新]
 │
-├── 2. 桶內彙總(支線)
+├── 2. 桶內彙總(支線,兩條路徑共用同一個彙總函式)
 │       AlphaCalibration.py:aggregate_curves(list_of_每ChainStack結果)
 │         -> 桶內平均矩陣 + 標準差矩陣(margin 取 log 再平均)         [新]
 │
 ├── 3. 圖:1D 三格(match+decoy、gap、margin 對 alpha)
 │       cli/survival_alpha_analysis.py:_plot_alpha_curves(...)      [新]
 │
-└── 4. offset_quantiles 等價物(支線)
+└── 4. offset_quantiles 等價物(支線,只有路徑 A 有 dist 可用;路徑 B 目前沒有
+    等價的 offset 診斷)
         AlphaCalibration.py:offset_quantiles_of(dist, *, rungs, quantiles)
           (彙總邏輯重用 aggregate_curves)                          [新]
         cli/survival_alpha_analysis.py:_plot_heatmaps(...)
@@ -462,24 +505,28 @@ decoy（0.902 vs 0.104、0.923 vs 0.020）。六張圖都產出。
 - `margin` 是乘性量，跨 ChainStack 平均前先取 log；`match_rate`/`decoy_rate`/
   `gap` 有界，不取 log。
 
-**測試（2026-09-06，23/23；2026-09-11 補「同一個點的定義」、移除
-`overlap_mode='intersection'` 後 26/26）**：
-`test_modules/TestSuperPathPoint/test_survival_process.py`（14 個，`SurvivalProcess.py`
-純邏輯那半：合併、`anchors_of`/`anchors_of_generations`、`nearest_detection`,
-2026-09-11 新增 5 個（同 rung 排除、跨 rung 加法公式的邊界、`rung_scale` 覆寫
-[R 軸用]、C 軸多階場景真的合併到一個粗階重複點）、移除 2 個（`overlap_mode`
-相關，`intersection` 分支本身已刪除，見上）、`test_alpha_calibration.py`
-（12 個，`AlphaCalibration.py` 全部：`alpha_curve` 的門檻/tau_floor/gap 有號、
-`aggregate_curves` 的 log 空間、`offset_quantiles_of`）。兩個都掛進
-`jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh`（`survival-process`/
-`alpha-calibration` 兩個 stage）。`detect`/`detect_all_rungs`/
-`detect_all_generations`/`rival_at` 需要真的 net，沒有涵蓋。
-
-**卡在語料**：見 2.1③，正式的 12 片 chain 語料還沒抽。純邏輯部分
-（`SurvivalProcess.py`/`AlphaCalibration.py` 新函式）不受影響，先寫先測。
-
 **alpha 定案之後才要做的事，先不展開**：建正式的六樣態分類 + 歸因表、
 `NullModel`/`Report.py` 的樣態統計、三張報告圖。
+
+**alive 用 `probability_map` 候選法時，alpha ~ 2.5。**
+
+**production（baseline）方法：alpha ≈ 3。** 理由：
+
+- 落在 C 軸兩種收斂讀法的 bracket（2.5–3.5）裡，也落在 R 軸的 bracket（1.5–4.5）
+  裡——兩軸交集的中心值。
+- 跟 probability_map 候選已經定的 2.5 同一個數量級，兩個獨立方法互相印證，不是
+  各說各話。
+- 對 rotate/C 那個異常值保持謹慎：如果你在意 C 軸粗階（ds=16 那種）的可靠度多
+  一點，可以考慮往 3.5–4.5 靠；如果你比較在意細階不要被稀釋，3 附近的原值就夠。
+
+**TODO：統計「真實 offset 分布」的方法還沒實作，以後有空再討論怎麼做。**
+2026-09-13 討論過一個方向——`offset_quantiles_of` 再對 `decoy_dist`（誘餌，
+`probe_decoy` 早就算好，CSV 目前沒有這欄）也算一次分位數，兩條曲線疊在一起
+看某個 rung 的真錨點 offset 像訊號還是像背景。**但這只是軟性診斷，跟
+excess/NullModel 同一個等級**——它是分布層級的比較，沒辦法逐點判斷哪一筆是
+真配對、哪一筆是雜訊，所以不會產生新的硬性規則，也不會讓「不能拿 p90 offset
+反推 alpha」（第 9 節的結論）變得可以用。真的要修，得先想清楚這張圖到底要
+回答什麼問題，不是現在就動手接。
 
 ### 2.3 相鄰響應 + 相依型 keypoint 比對
 
@@ -492,17 +539,67 @@ decoy（0.902 vs 0.104、0.923 vs 0.020）。六張圖都產出。
 精確不重疊密鋪，overlap 格是內角格，跟周圍 4 個 main 格各共用 1/4 面積。子嗣的
 幾何跟抽取本身已經在 2.1 做完（`ChainStack.CStack`），這裡要做的只剩比對邏輯：
 
-**要做的事，還沒拆成檔案清單：**
+**這一節能不能證偽 spec.md §3.2「(i) 尺度結構 / (ii) 上下文」現有靠 NMS 分支的
+判準**——同一階、只換周圍框住的組織，理論上乾淨地只測得到 (ii)。下面的設計
+就是在回答這個問題。
 
-- 覆蓋率確認：粗階 tile 裡的某個 anchor，有沒有真的被某張子嗣 tile 的 footprint
-  覆蓋到——純幾何，`SurvivalProcess.run` 本身大概不用改
-- **相依型 keypoint** 的比對邏輯：同一階、overlap 格跟角落 main 格共用的那 1/4
-  範圍裡，同一個位置只有一邊測到 = 相依型。這是新的比對，`SurvivalTable` 現有
-  欄位（跨 rung 的 `alive[L]`）不覆蓋跨「同階不同框」這個軸——2026-09-05 定案：
-  **開一張新表**（不是加欄位進 `SurvivalTable`），理由是語意乾淨、不用碰 F/R 的
-  identity_id 邏輯，代價是要跟 `SurvivalTable` 用 chain/anchor id 對得起來
-- 這一節能不能證偽 spec.md §3.2「(i) 尺度結構 / (ii) 上下文」現有靠 NMS 分支的
-  判準——同一階、只換周圍框住的組織，理論上乾淨地只測得到 (ii)
+**主程式（2026-09-13 定案）**：`training/SuperPathPoint/cli/
+dependent_keypoint_analysis.py`——跟 `demo_survival_analysis.py` 一樣，可以
+只分析一個 case、也可以吃很多 case 統計。**不另外開 `SurvivalAnalysis/` 模
+組**——跟 `AlphaCalibration.py` 那種有大量可重用純函式的情況不同，這裡看不
+出有分出去的必要，比對邏輯直接寫在 CLI 檔案裡就好。
+
+**單一 case 的呈現（demo 模式，一張 keypoint 圖 + 一張指標圖）**：一組 4 張
+main tile + 1 張 overlap tile 稱一個 case。用 4 張 main tile 拼出母 tile；5
+張 sub-tile 的 keypoint 中，挑出落在 overlap 象限範圍內的——**overlap 的一個
+象限只跟它對應的那一個 main tile 比，不是跟 4 張全部比**（`PatchGrid` 的內角
+格跟周圍每個 main 格只共用 1/4 面積，見上）。keypoint 圖：黑 X = 兩邊都測
+到，紅 = 只有 overlap 測到，綠 = 只有 main 測到。
+
+**「同一個點」的容忍度：1 個 tile 輸出解析度的 px**（這一階等於 `ds` 個
+level-0 px，換算成 level-0 座標時要乘 `ds`，跟 `tile_merge_radius`/
+`nms_radius` 現有的 level-0 單位慣例一致）——不是 2.2 的 `tau=alpha*ds`：
+overlap/main 是同一個 ds，沒有降採樣量化誤差要容忍，同一個真實特徵理論上要
+落在幾乎完全相同的位置，容忍度該遠比跨 rung 的 tau 緊。
+
+**兩段式統計/分析（2026-09-13 定案）**：
+
+1. **`mismatch_rate`（存在跟周圍資訊有沒有關係的直接量測，主要指標）**——
+   `mismatch_rate = (紅+綠) / (黑+紅+綠)`，`red_rate`/`green_rate` 分開報，
+   不只報一個合併數字（紅綠不對稱本身可能是訊號，例如 overlap 格更靠內角、
+   跟 main 格的邊界效應不對稱）。逐階（逐 ds）分開算；彙總沿用
+   `aggregate_curves` 的既有慣例——每個 case 先算完自己的 rate，再跨 case 取
+   mean/std，不把所有 case 的點混在一起算一個全域比例。同一階出現紅/綠點，
+   本身就是「上下文（而非尺度結構）影響了 keypoint 存不存在」的直接證據，不
+   需要額外證明。
+2. **descriptor 相似度分析（這些紅/綠點是「有意義、受周圍內容影響」還是
+   「純雜訊/detector 邊界抖動」，次要、補強指標，回報有意義/雜訊各佔的比
+   例）**——對每個紅/綠點，拿它的 descriptor，跟 (a) 它對應的那一個 main
+   tile 全部的點算相似度、(b) 其他 3 個象限的點算相似度，各自組成一個分
+   布（一個點對很多點 = 一個分布），一個 case 裡同一類（紅/綠）的點再 pool
+   成一個 case 級的正/負分布。用 AUC 量兩組分布可不可分（Mann-Whitney U，
+   不需要密度估計，小樣本穩）——**負類（其他象限）取樣時要用距離配對取樣
+   法**：只抽跟正類集合距離範圍相近的點，讓兩組的空間距離分布先對齊，避免
+   「只是離得近所以像」這個混淆解釋掉分開的結果。AUC 高（可分）→ 判定這批
+   紅/綠點「有意義，受周圍內容影響」；AUC 低（分不開，像隨機）→「雜訊/邊
+   界抖動」。
+   （2026-09-13 考慮過、否決的做法：改用「同一位置、兩種裁切各自的 dense
+   feature 直接比」——detector head 跟 descriptor head 共用 backbone，紅綠
+   點的定義本身就代表兩邊 feature 已經不同，這樣比接近套套邏輯，沒有帶來新
+   的獨立證據，所以維持「跟其他點比」這個間接但非循環的設計。）
+
+**先決條件（2026-09-13 定案：要做）**：`SurvivalProcess.detect`/
+`detect_all_generations` 現在只回傳 `(xy, score)`，從來沒有算過或存過
+descriptor，整個 descriptor 相似度分析目前完全沒有資料可用——要接上
+`Heads.py` 的 `sample_descriptors`，讓兩個函式也回傳每個偵測點的 descriptor。
+這不是實作到那步才會發現的小事，是動工前就存在、而且已經決定要填的缺口。
+
+**還沒定案的細節**：AUC 多高算「可分/有意義」的門檻還沒選；距離配對取樣的
+具體做法（怎麼定義「距離範圍相近」）還沒寫清楚；`SurvivalTable`/
+`SurvivalBatch` 目前在 production code 從沒被真的呼叫過（只在自己 docstring
+的 usage example 出現）——2.3 這裡到底需不需要靠它對齊 chain/anchor id，還是
+直接吃 `anchors_of_generations`/`probe_real` 的 in-memory 結果就夠，還沒決
+定。這些等真的要動手實作時再逐一決定。
 
 ### 2.4 新生死亡歸因
 
@@ -613,3 +710,30 @@ hinge。軟標籤是實驗。
   `ChainStack.py`（`FStack`/`RStack`/`CStack` 三個 class），`test_survival.py`
   裡跟 F/R 幾何有關的兩節（`rung_scale`/`rung_shrink`、'R' 的降解）搬進新的
   `test_chain_stack.py`，一起補了 `CStack` 原本完全沒有的單元測試。見 2.1。
+
+---
+
+## 六樣態與特徵尺度的關聯性檢驗（2026-09-14）
+
+假說：細部存活/晚生型/中間帶這幾類存活模式，是否可以用這個點自身的「特徵尺度」
+（scale-space 意義下）解釋——衰減得快的點存活範圍窄，衰減得慢的點存活範圍廣。
+
+方法：`cli/demo_survival_analysis.py --parts scale_diagnostic` 對每個 anchor 算一個
+古典（非網路、避免跟 `alive_from` 用的 `score` 循環論證）衰減速率——
+`classical_blur_stack` 產生的 Gaussian 模糊圖上 `|Laplacian|` 響應，`log(R)` 對
+`log(ds)` 做 Theil-Sen 回歸取斜率負值——跟 `_survival_breadth`（該點最粗撐到哪個
+ds，不是 alive 幾階的計數）做 Spearman 相關性，加上打散配對的 permutation test
+（`--decay-permutations` 次，margin over 誘餌，不是裸 p 值）。
+
+先用 `--parts scale_synthetic_control` 驗證這把尺本身可信：已知半徑（1~16px，log-
+uniform）的合成高斯斑點，同一套流程（`classical_blur_stack`/`_laplacian_maps`/
+`_decay_rate` 完全共用，不是另外一份實作）量出來 **rho=-0.987、p=0.000
+（n=2917）**——尺是準的，不是量測工具本身量不到已知的尺度差異。
+
+**目前站得住腳的結論**：在這批資料、這個古典衰減速率定義下，「六樣態存活模式」
+（至少細部存活/晚生型/中間帶這三類）看不出跟特徵尺度有系統性關聯——這是一個真的
+空結果，不是量測工具的問題。
+
+重跑驗證：
+
+    PARTS=scale_synthetic_control sbatch jobscripts/SuperPathPointJobs/DemoSurvivalAnalysis.sh

@@ -33,12 +33,11 @@ WHAT WOULD RUN AND BE WRONG
    on a `dynamic_img_size` model and asserts deep inside timm on the other.
 
 Sections:
-  1. adopt     -- SpatialTrunk.over: the MRO, the shared weights, the refusal
-  2. shapes    -- stride and width, against the inference-grid decoy
-  3. refusals  -- what cannot be built, and why each one is silent otherwise
-  4. forward   -- normalisation, the frozen trunk, and where the gradient goes
-  5. identity  -- what moves the hash
-  6. model     -- --with-model only: a real encoder at a real tile size
+  1. shapes    -- stride and width, against the inference-grid decoy
+  2. refusals  -- what cannot be built, and why each one is silent otherwise
+  3. forward   -- normalisation, the frozen trunk, and where the gradient goes
+  4. identity  -- what moves the hash
+  5. model     -- --with-model only: a real encoder at a real tile size
 """
 
 from __future__ import annotations
@@ -62,17 +61,17 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
 sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
+from _paths import setup_import_paths, add_training_package  # noqa: E402
 
 setup_import_paths()
+add_training_package('SuperPathPoint')
 
 import torch                                                     # noqa: E402
 import torch.nn as nn                                            # noqa: E402
 
 from ConfigIdentity import ModelConfig, register                 # noqa: E402
 from common.Interfaces import Backbone, ShapeMismatch            # noqa: E402
-from SuperPoint.EncoderBackbone import (SpatialTrunk,            # noqa: E402
-                                        TileEncoderBackbone,
+from SuperPoint.EncoderBackbone import (TileEncoderBackbone,     # noqa: E402
                                         TileEncoderBackboneConfig,
                                         _TILE_ENCODER_BASELINE)
 from TileEncoderFunc import (ModelOutputSpec, TileEncoder,       # noqa: E402
@@ -166,7 +165,8 @@ class _FakeEncoderConfig(TileEncoderConfig):
 class _FakeEncoder(TileEncoder):
     """A `TileEncoder` in the two places that matter: it answers
     `_compute_model_spec` and `_spatial_forward`, which are the two the base
-    refuses. Everything `SpatialTrunk.over` needs is here and nothing else is.
+    refuses. Everything `TileEncoder.features_with_grad` needs is here and nothing
+    else is.
     """
 
     def __init__(self, cfg, device, **kw):
@@ -186,11 +186,11 @@ class _FakeEncoder(TileEncoder):
         return self.model(batch)
 
 
-def _trunk(**kw) -> SpatialTrunk:
+def _trunk(**kw) -> TileEncoder:
     preprocess = kw.pop('preprocess', 'none')
     cfg = _FakeEncoderConfig()
     cfg = replace(cfg, transform=replace(cfg.transform, preprocess=preprocess))
-    return SpatialTrunk.over(cfg.build('cpu', **kw))
+    return cfg.build('cpu', **kw)
 
 
 def _backbone(cfg_over=None, **kw) -> TileEncoderBackbone:
@@ -201,62 +201,21 @@ def _backbone(cfg_over=None, **kw) -> TileEncoderBackbone:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  1. adopt
+#  1. shapes
 # ══════════════════════════════════════════════════════════════════════════════
 
-def t_over_reparents_without_rebuilding_the_model():
-    """The whole reason `over()` exists rather than a second `build()`.
+def t_features_with_grad_hands_back_the_map_at_the_fed_size():
+    """`TileEncoder.features_with_grad` -- the batch goes in as given.
 
-    A foundation trunk is gigabytes. Building it twice to change its class is
-    the cost this replaces, and the check is object identity: the SAME model
-    and the SAME config, under a class that now has `trunk_forward`.
-    """
-    enc = _FakeEncoderConfig().build('cpu')
-    trunk = SpatialTrunk.over(enc)
-    assert trunk.model is enc.model, 'the weights were rebuilt'
-    assert trunk.cfg is enc.cfg
-    assert isinstance(trunk, SpatialTrunk)
-    assert isinstance(trunk, _FakeEncoder), \
-        'the concrete class left the MRO; _spatial_forward would raise'
-    assert isinstance(trunk, TileEncoder)
-    return f'MRO {" -> ".join(c.__name__ for c in type(trunk).__mro__[:4])}'
-
-
-def t_over_resolves_the_concrete_spatial_forward_and_not_the_base_refusal():
-    """`SpatialTrunk(TileEncoder)` alone inherits the base's `_spatial_forward`,
-    which raises `NotImplementedError` naming the subclass. That is the decoy:
-    if the dynamic class were dropped and `SpatialTrunk` used directly, this is
-    what would happen instead of a feature map.
+    The size matters more than it looks: `spatial()` would have run the
+    config's transform first, so a TILE px input would have come back as a
+    `crop_size` grid instead. This asserts the grid the FED size implies.
     """
     trunk = _trunk()
-    out = trunk.trunk_forward(torch.zeros(1, 3, TILE, TILE))
+    out = trunk.features_with_grad(torch.zeros(1, 3, TILE, TILE))
     assert out.shape == (1, DIM, TILE // PATCH, TILE // PATCH), out.shape
-    assert out.dtype is torch.float32, 'trunk_forward must hand back fp32'
-
-    bare = object.__new__(SpatialTrunk)
-    bare.__dict__.update(trunk.__dict__)
-    try:
-        bare.trunk_forward(torch.zeros(1, 3, TILE, TILE))
-    except NotImplementedError:
-        pass
-    else:
-        raise AssertionError(
-            'a bare SpatialTrunk produced a map; then the dynamic class in '
-            'over() is doing nothing and the concrete encoder is not in the MRO')
-
-
-def t_over_refuses_something_that_is_not_an_encoder():
-    for bad in (_FakeVit(), object(), None):
-        try:
-            SpatialTrunk.over(bad)
-        except TypeError:
-            continue
-        raise AssertionError(f'over() accepted {type(bad).__name__}')
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  2. shapes
-# ══════════════════════════════════════════════════════════════════════════════
+    assert out.dtype is torch.float32, 'features_with_grad must hand back fp32'
+    return f'{tuple(out.shape)} fp32'
 
 def t_stride_is_the_patch_and_not_the_inference_grid():
     """THE ONE THIS FILE EXISTS FOR.
@@ -331,7 +290,7 @@ def t_a_lying_width_is_caught_at_construction():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  3. refusals
+#  2. refusals
 # ══════════════════════════════════════════════════════════════════════════════
 
 def t_a_tile_the_patch_does_not_divide_is_refused():
@@ -452,7 +411,7 @@ def t_an_unknown_encoder_name_is_refused_before_anything_loads():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  4. forward
+#  3. forward
 # ══════════════════════════════════════════════════════════════════════════════
 
 def t_normalise_is_the_transform_minus_its_geometry():
@@ -547,7 +506,7 @@ def t_the_gradient_stops_at_the_trunk_and_flows_in_the_head():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  5. identity
+#  4. identity
 # ══════════════════════════════════════════════════════════════════════════════
 
 def t_identity_moves_with_what_changes_the_features():
@@ -579,7 +538,7 @@ def t_encoder_id_reports_the_trunk_and_not_this_config():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  6. model  (--with-model)
+#  5. model  (--with-model)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def with_model(encoder: str, tile: int, device: str):
@@ -616,10 +575,8 @@ def with_model(encoder: str, tile: int, device: str):
 
 
 _SECTIONS = {
-    'adopt':    ['t_over_reparents_without_rebuilding_the_model',
-                 't_over_resolves_the_concrete_spatial_forward_and_not_the_base_refusal',
-                 't_over_refuses_something_that_is_not_an_encoder'],
-    'shapes':   ['t_stride_is_the_patch_and_not_the_inference_grid',
+    'shapes':   ['t_features_with_grad_hands_back_the_map_at_the_fed_size',
+                 't_stride_is_the_patch_and_not_the_inference_grid',
                  't_the_backbone_satisfies_the_protocol_and_its_own_check',
                  't_a_lying_stride_is_caught_at_construction',
                  't_a_lying_width_is_caught_at_construction'],

@@ -93,7 +93,23 @@ class TrainerConfig(IdentifiedConfig):
     val_every: int = 1
     amp: bool = True
     wandb_project: str = 'superpathpoint'
-    wandb_mode: str = 'online'
+
+    #: 'online' still, and now ALSO read off `WANDB_MODE` when that is set.
+    #:
+    #: THE ENV VAR COULD NOT REACH THIS BEFORE. `_start_wandb` calls
+    #: `wandb.init(mode=self.cfg.wandb_mode)`, and an explicit `mode=` beats
+    #: `WANDB_MODE` -- so the literal 'online' that used to be here made the
+    #: environment variable look like it was being ignored, which is the worst
+    #: kind of knob. Reading it as the DEFAULT is the whole fix: a real run is
+    #: online as before, and `WANDB_MODE=offline` (a smoke run, a node with no
+    #: route out) now actually takes effect without editing anything.
+    #:
+    #: Online IS reachable from normal2 -- verified 2026-08-28 after the
+    #: opposite had been written as a fact in TrainSuperPathPoint.sh and cost a
+    #: run. Do not turn that into a default here on an assumption.
+    #:
+    #: In NOT_IDENTITY below, so none of this can re-hash a checkpoint.
+    wandb_mode: str = os.environ.get('WANDB_MODE', 'online')
     run_name: str = ''
 
     #: HOW MANY POINTS THE REPEATABILITY IS MEASURED AT, per view, taken as the

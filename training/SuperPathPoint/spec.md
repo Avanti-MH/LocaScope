@@ -699,9 +699,25 @@ training/SuperPathPoint/
     Datasets.py                # WsiTileDataset / HomographyPairDataset
     HomographicAdaptation.py   # label 產生器
     Trainer.py
-  SurvivalAnalysis/         # Stage B
-    ChainStack.py              # FStack/RStack/CStack 三個 class，各自幾何+IO 分開
-    SurvivalTable.py           # 配對、落表
+  SurvivalAnalysis/         # Stage B -- 核心
+    ChainStack.py              # F/R/C stack 準備
+    SurvivalProcess.py         # 真實量測（不含誘餌）：detect / anchors_of /
+                               #   anchors_of_generations(C) / nearest_detection /
+                               #   rival_at / probe_real(anchors, per_rung_detections)
+                               #   -> dist, score, rival
+    SurvivalTable.py           # SurvivalBatch/SurvivalMeta 容器
+    Patterns.py                # alive 向量 -> 六樣態（純函式）
+    Attribution.py             # 四種歸因（純函式）
+    Report.py（收斂後）        # pattern_table / attribution_table / cross_table / alive_of
+    NullModel.py               # 樣態分布顯著性（跟六樣態分類綁在一起，不是支線）
+                               # -- 支線：alpha 校準，獨立新檔案
+    AlphaCalibration.py         # probe_decoy(anchors, per_rung_detections, decoy_shift)
+                               #   -> decoy_dist, decoy_score（只在校準 alpha 時呼叫，
+                               #   重用 SurvivalProcess.nearest_detection 這個底層）；
+                               #   alpha_curve(dist, score, decoy_dist, decoy_score,
+                               #   rungs, alphas, tau_floor, threshold)；
+                               #   aggregate_curves(...)；offset_quantiles_of(...)；
+                               #   merge_anchors(...)（從 Report.py 搬過來，先歸這邊）
   SemanticPoints/              # Stage C
     ResolutionHead.py
     Losses.py
@@ -712,7 +728,8 @@ training/SuperPathPoint/
                                #   label，三個閾值同框，每個 num 一格
     make_ha_labels.py
     train_superpathpoint.py
-    build_survival_table.py
+    prepare_chain_stack.py     # F/R/C 三軸各自的 pre-tile，一條龍抽取入口
+    survival_alpha_analysis.py # decoy_shift_* factory、畫圖、orchestration
     train_semantic_points.py
     inspect_ha_labels.py       # diagnostic：把產出的 label 畫回 tile 上
 ```
@@ -792,13 +809,20 @@ config 的 transform（`Resize(256)` 然後 `CenterCrop(224)`）、`torch.no_gra
 一件用得上——光是那個 resize 就會把特徵格點放到和 label 不同的像素格上，而且不會
 報錯。
 
-要的是它下面一層的 `_spatial_forward(batch)`。**走法是繼承**：`SpatialTrunk`
-繼承 `TileEncoder`，`SpatialTrunk.over(enc)` 用 `object.__new__` 加 `__dict__`
-複製（和 `TileEncoder.variant()` 同一招，`:1103`）把已經建好的 encoder 換到
-`(SpatialTrunk, type(enc))` 這個動態類別底下。子類別呼叫父類別的 protected 方法
-不是「伸手進去拿私有東西」——`_spatial_forward` 的 base 實作就是拋
-`NotImplementedError` 並點名子類別，它本來就是給子類別覆寫的掛勾。**`aiNNModel/`
-一行都不動。**
+要的是 **`TileEncoder.features_with_grad(batch, exit_name='spatial')`**：batch 進、特徵圖
+出，沒有 transform、沒有搬回 host、梯度保留。它是基底上的 public 方法
+（`TileEncoderFunc.py`），所以這邊就是照常 build encoder 然後呼叫它——不包裝、不改
+類別、不繼承。
+
+`exit_name` 有兩個值，而且 `spatial` **取代不了** `tokens`：`spatial` 會把 prefix
+token 丟掉，所以一個把 head 接在 CLS 上做 fine-tune 的 trunk，從 spatial 這個出口
+看不到那個 token。SuperPoint 的 decoder 只讀最後的特徵圖，所以這邊用 `spatial`。
+
+`EncoderBackbone.py` 剩下的就只有 **Protocol 轉接**：`common.Interfaces.Backbone`
+是 SuperPoint 自己的介面（`stride` 跟 `cell` 是配成一對的，`cell` 是偵測頭的預測
+區塊、`UpsampleDecoder` 的層數是 `log2(stride / cell)`），forward 的約定是吃
+`[0, 1]` 的影像而不是已正規化的 batch。那些是「關鍵點偵測器需要什麼」的事實，所以
+留在這一層講，而不是推到 `aiNNModel/`——那邊沒有理由知道什麼是 detector cell。
 
 **哪一個 encoder 做得到，以及在什麼 tile 尺寸下**——只有**一個**數字決定，而且它是
 從模型身上讀出來、不是從 arch 名字推的：`patch_embed.patch_size`。
@@ -1042,7 +1066,7 @@ by name」。照著寫一份就好。
 
 | 要的 | 用什麼 |
 |---|---|
-| 組織遮罩、region | `utilities/TissuesRegionsMask.py` |
+| 組織遮罩、region | `utilities/TissueMask.py` |
 | 在組織內取 tile | `utilities/TileSampler.py:58`，`TileInfo(level, x, y, tile_size, mpp)`，x/y 是 level-0 |
 | 安全讀圖 | `utilities/SafeSlide.py`。**讀圖一律走 `read_region_rgb`（`:371`）**，不要 `.convert('RGB')` |
 
@@ -1066,19 +1090,18 @@ is noise**」——講的是 `segment()`（`:218`），EoMT 的頭是隨機初�
 得到、HA 照樣跑完，只是全部長在背景上。**所以要包的是 PCA 那條，不是 EoMT 那條**
 ——即使檔案叫 EoMT。
 
-**它套不進 `method=` 的介面，不要硬塞。** `TissuesRegionsMask.from_wsi(method=...)`
-（`TissuesRegionsMask.py:545-565`）要的是 `callable(img: np.ndarray) -> np.ndarray`，
-一張圖進、一張遮罩出。`slide_pca_mask` 不是那個形狀：它自己讀 slide、在分層抽樣的
-tile 上擬合一個 PCA、再投影每一格。
+**它是 slide 分割器，不是逐圖分割器。** `aiNNModel/TissueSegFunc.py` 的契約是
+`segment_slide(wsi) -> SlideMask`，並分成兩種：plane 分割器（hsv/otsu/hest）
+讀一層、逐圖套 `__call__`，讀取與切塊由 `PlaneSegmenter` 負責；slide 分割器自己
+讀 slide。`slide_pca_mask` 屬於後者：它在分層抽樣的 tile 上擬合一個 PCA、再投影
+每一格。
 
-而且 **PCA 必須整片擬合一次**，這不是實作偏好。`:516-519` 的 docstring 講了為什麼
-不能逐格：`MinMaxScaler` 把每一格自己的極值映到 0 和 1，所以一格全是組織時，它的
-閾值會落在組織內部。分割器因此天生是 slide-scoped 的，做不成無狀態的逐圖 callable。
+而且 **PCA 必須整片擬合一次**，這不是實作偏好。`Uni2PcaSegFunc` 的 docstring
+講了為什麼不能逐格：`MinMaxScaler` 把每一格自己的極值映到 0 和 1，所以一格全是
+組織時，它的閾值會落在組織內部。
 
-作法是繞過那個便利建構子：`slide_pca_mask` 產出遮罩與它的 ds（= UNI2 的
-`patch_size` = 14，比 `from_wsi` 預設的 32 細得多），拿它直接建構
-`TissuesRegionsMask`（該類別持有的就是 `mask` / `ds_x` / `ds_y` / `regions`）。
-遮罩已經在手上時不需要 `from_wsi`。
+作法是讓 `Uni2PcaSegmenter` 覆寫 `segment_slide`，產出遮罩與它的 ds（= UNI2 的
+`patch_size` = 14），再由 `TissueMask(wsi, slide_mask)` 建出 region。
 
 包裝的形狀照 `aiNNModel/TissueSegFunc.py`：`@register('...')` 的
 `IdentifiedConfig` + `IdentifiedBuild`，於是遮罩的來源自動進 `identity_id`，
@@ -1346,20 +1369,19 @@ ladder = (1, 2, 4, 8, 16, 32)
 
 實測的牆（`tissue_ratio=0.5`，`max_tries=500`，tile 256）：
 
-| footprint | 觀察 | 出處 |
-|---|---|---|
-| 4096 | BRACS L2 `only sampled 90/100 after 500 tries` | BenchMarkV2 log |
-| 8192 | BRACS L3、Ki67 L5 都 100/100 | 同上 |
-| 16384 | Ki67 L6 `0/100 after 500 tries` | RealTest_uni2 log |
-| 32768 | Ki67 L7 `[SKIP] no region fits tile_size=256` | 同上 |
+| footprint | 觀察 |
+|---|---|
+| 4096 | BRACS L2 `only sampled 90/100 after 500 tries` |
+| 8192 | BRACS L3、Ki67 L5 都 100/100 |
+| 16384 | Ki67 L6 `0/100 after 500 tries` |
+| 32768 | Ki67 L7 `[SKIP] no region fits tile_size=256` |
 
 所以粗體那三格在 `tissue_ratio=0.5` 就已經是空的，18 格裡先天只有 15 格有資料。
 把 `tissue_ratio` 拉到 0.75 只會讓牆往左移，而且視窗越大移得越多——大視窗更容易
 跨到組織邊緣。BRACS 在 footprint 4096 燒完 500 次只拿到 90 張，那還是 0.5 的成績。
 
-順帶一提：4096 拿 90 而 8192 拿 100 是**非單調的**，這份 spec 不解釋它。`_sample_level`
-每層都重跑一次 `filter_regions -> merge_overlapping -> filter_patchable` 再撤銷，
-所以每層存活的 region 集合不同，這是最可能的原因——但沒有量過，而
+順帶一提：4096 拿 90 而 8192 拿 100 是**非單調的**，這份 spec 不解釋它。sampler
+每層取一個 `patchable(footprint)` view，所以每層存活的 region 集合不同，這是最可能的原因——但沒有量過，而
 「兩個觀察共用一個表面特徵」不等於機制（ClaudeRules §10）。要判定就印出每層存活
 的 region 數與面積。
 
@@ -1508,8 +1530,8 @@ floors <= caps        逐元素
 `TrainSuperPathPoint.sh` 的 `BALANCE=none` 帶著上一節第二張表當理由。
 
 `tissue_ratio` 這個名字在別處還活著，而那些是別的東西：
-`TissuesRegionsMask.has_tissue(...)` 是一個對矩形的述詞（`query_sim` 的 Camera 用
-0.3），`TileSampler.caps_for_tissue_ratio()` 是翻譯層，給 `GigaPathKnnEstiMpp` 的
+`TissueMask.has_tissue(...)` 是一個對矩形的述詞（`query_sim` 的 Camera 用
+0.3），`TileSampler.caps_for_tissue_ratio()` 是翻譯層，給 `KnnEstMpp` 的
 參考庫與 `bench_gigapath_accuracy` 把舊閘門原封不動地表示成一組上限，行為逐位元
 相同。**退役的是取樣策略裡的那一個。**
 
@@ -1578,8 +1600,8 @@ held out」）：
 ——誘餌和模型看同一片、同一批位置，片子的個性在相減時被抵消掉。絕對值會隨片子
 飄，差距不會。
 
-**`BRACS_1228` 刻意留在 train。** 它是 `SlideWinTest`、`BenchMarkV2`、
-`SlidewinPooling` 都跑過的那片，既有的 SIFT 與 retrieval 數字全在它身上。放在 train
+**`BRACS_1228` 刻意留在 train。** 它是既有 SIFT 與 retrieval 分析都跑過的那片，
+既有的數字全在它身上。放在 train
 才能拿它當 sanity check——「新 detector 在這片上的行為和舊數字對不對得起來」是一個
 隨時可以問的問題，而問它不會污染 held-out。
 
@@ -1606,10 +1628,13 @@ MRXS 在 DataLoader 的多個 worker 裡邊訓練邊讀是一件會咬人的事�
 所以照 prov-gigapath 的作法：**離線切一次 tile 落地，訓練完全不碰 WSI**
 （`gigapath/preprocessing/` 與 `finetune/` 是分開的兩件事，訓練迴圈只讀
 預先算好的東西）。落地位置
-`result/cache/tiles/<wsi_stem>__ds<d>__t<tile>__<cfg8>/`，和
-`KeypointLabelStore` 一對一對齊，同一組 `(wsi_stem, ds, tile)` 索引。目錄名帶
-cfg hash 的理由見 `PreTileStore.PreTileMeta.dirname`：`tissue_ratio`、seed 與
-**遮罩的 `segmenter_id`** 也決定內容，而那三個在名字裡看不見。
+`result/cache/<job>_pretiles/<seg_id>/<slide>/<region_id>_<sampler_id>_<plan>/f<factor>/ds<d>/`
+（`utilities/Store.py` 的 `PreTileCorpus`），`KeypointLabelStore` 以
+`pretile_id = corpus key` 對上它。位址的每一層都是決定內容的東西：遮罩
+（`seg_id`、`region_id`）、抽樣（`sampler_id` 涵蓋三個取樣軸、tile 與 seed）、
+一起抽的 rung（`plan`：chain 只在同一次抽的 rung 之間成立）、context 倍率。
+讀端從自己的參數算出位址（`common/Corpora.py` 的 recipe 名或完整 key），
+不在根目錄底下搜尋長得像的東西。
 
 #### 落地的是 pre-tile，所以是 9 倍，而這件事會決定 512/1024 做不做得起
 
@@ -1657,7 +1682,7 @@ store），但 1024 那一族單獨就 153 GB，不是零頭。
 
 v1 不必現在決定——256 這條線走完之前 1024 一張都不會抽。**但它必須在
 `extract_pretiles.py` 支援 `--pre-tile-factor` 這件事上先留好位置**，而不是把 3
-寫死在抽取程式裡。`PreTileStore` 因此把 `pre_tile_factor` 當成 identity 欄位：
+寫死在抽取程式裡。`PreTileCorpus` 因此把倍率放進位址（`f<factor>`）：
 倍率不同的兩批 tile 是兩個資料集，不是同一批的兩個版本。
 
 探針（12 節第 3b 步）跑完之後這些上界會往下修。
@@ -1831,7 +1856,7 @@ tile 的另一個位置，而且看起來完全合理。
 | **不改** `common/Homography.py` | `warp_image` 的 `BORDER_CONSTANT` 是原語該有的行為，黑邊是它誠實的輸出 |
 | **不改** `cli/demo_homography.py` | demo 的工作是展示這個 op 實際做什麼，黑邊看得見才對 |
 | **改** 資料模組 | `Datasets.py` 的 `HomographyPairDataset`、`HomographicAdaptation.py` |
-| **改** 落地格式 | `result/cache/tiles/` 存 **pre-tile**，第 12 節 3c 抽的是 pre-tile |
+| **改** 落地格式 | pre-tile 快取存 **pre-tile**，第 12 節 3c 抽的是 pre-tile |
 
 現在是最便宜的時機：12 節才走到第 3 步，**一張 tile 都還沒抽**。這件事現在只花一次 spec
 編輯；抽完之後才發現，就是整批重抽。
@@ -2073,9 +2098,9 @@ CLAUDE.md 的規則：在任何以小時或數十 GB 計的執行之前，先寫
 | `test_homographic_adaptation` | 塞一個只回固定點的假 detector：aggregate 的峰值在那個點、`counts` 等於 valid mask 蓋到它的 homography 數；且贏過「位移一個 cell」的誘餌 | aggregate 的座標系反了（用 H 而不是 H_inv warp 回來）。結果會是一張看起來合理但整體偏移的機率圖 |
 | `test_detector_decoder` | depth-to-space 來回：已知 argmax 的 cell 張量，解碼後最大值落在對應像素；dustbin 是被丟掉而不是被算進去 | 通道排列錯（`(cell,cell)` 的 row-major/col-major），keypoint 會轉置 |
 | `test_mpp_stack` | 同中心兩階 tile，細的降採樣後與粗的算正規化互相關 > 0.9，且贏過位移一 tile 的誘餌 | co-registration 的中心算錯。這是 `test_camera_output_to_level0` 在 Stage B 的對應物，那個測試找到過真 bug |
-| `test_keypoint_label_store` | 存讀來回；`require=` 對不上時拒絕；`n_kp` 與 `kp_xy` 的 padding 一致 | 兩個設定的 label 互相覆蓋。照 `test_feature_store` |
+| `test_keypoint_label_store` | 存讀來回；`require=` 對不上時拒絕；`n_kp` 與 `kp_xy` 的 padding 一致 | 兩個設定的 label 互相覆蓋。照 `test_store` |
 | `test_ds_ladder` | 每個 rung 挑到的 level 的 ds ≤ 目標；在 4x 與 2x 兩種金字塔上各驗一次 | 挑到偏粗的一側 -> 靜靜地上採樣。這正是不能重用 `coarser_level_for_downsample` 的原因 |
-| `test_pre_tile_store` | 中心裁切取回植入的方塊，而偏 ±1 格的裁切取不回（誘餌）；PNG 來回逐位元相同；七個 identity 欄位各自改動都會換目錄，而 `wsi_path`／層／計數都不會 | 裁切偏一格 -> 每張圖對每個 label 都偏一像素，訓練照樣收斂，模型只是「差一點」。這條是擋在 3c 那 32 GB 前面的秒級斷言 |
+| `test_tile_sampler --only pretile`、`test_store` | 中心裁切取回植入的方塊，而偏 ±1 格的裁切取不回（誘餌）；PNG 來回逐位元相同（雜訊圖，連 RGB 順序一起驗）；遮罩、抽樣、plan、倍率各自改動都會換位址；沒寫完 index 的 rung 讀不到 | 裁切偏一格 -> 每張圖對每個 label 都偏一像素，訓練照樣收斂，模型只是「差一點」。這條是擋在 3c 那 32 GB 前面的秒級斷言 |
 
 再加一個不是單元測試但同等重要的：**第一輪 HA 的 label 產出來之後，先跑
 `cli/inspect_ha_labels.py` 把機率圖畫出來看**，再決定要不要進第二輪。第一輪的
@@ -2327,7 +2352,7 @@ HA label 是**上游 v6** 產的（第 4 節 Teacher）。gray student 從上游
 `KeypointNetConfig.backbone` 標的是 `VggBackboneConfig`（`KeypointNet.py:130`），
 `wired()`（`:208-222`）在不載入權重的情況下用 `VggBackboneConfig.out_channels`
 算出 detector/descriptor 的寬度——VGG 做得到是因為 channel 數是寫在型別裡的常數。
-`SpatialTrunk`/`TileEncoderBackboneConfig`（`EncoderBackbone.py:186-191`）的輸出
+`TileEncoderBackboneConfig`（`EncoderBackbone.py`）的輸出
 維度是模型的屬性，要嘛先 build 出來再讀（`KeypointNet` 收一個已經 build 好的
 backbone），要嘛替每個 encoder 名字寫一張寬度表。前者不用維護第二份會過期的表，
 後者不用改 `wired()` 的介面——選哪個是接線當天的決定，不是現在猜。
@@ -2420,11 +2445,12 @@ normalize 要由呼叫端（這裡是 `Datasets.py`）保證，不是 encoder �
 `agree_hsv` 也不能當裁判：HSV 遮罩對淡染的切片本來就少算（0.5 閾值下 Ki67 的 HSV
 只給 1.4%，PCA 給 14.7%），拿它當基準等於把 PCA 校準到一個已知會漏的東西上。
 
-**怎麼定：對存下來的成分做掃描，不要重跑編碼。** `MaskStore` 的每個檔案帶第二個
+**怎麼定：對存下來的成分做掃描，不要重跑編碼。** mask 快取
+（`<job>_mask/<seg_id>/<slide>/mask.safetensors`）的每個 uni2_pca 檔帶第二個
 tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是這個 bit 被
 閾值切出來之前的那個場。於是
 
-    slide_mask, meta = MaskStore.load(path, with_components=True)
+    slide_mask = SlideMask.load(path, with_components=True)   # utilities/TissueMask.py
     pc1 = slide_mask.components[..., 0]
     # 對每個候選閾值：mask = pc1 > t，close-then-open，量 fraction 與區域數
 
@@ -2443,8 +2469,8 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 
 **在那之前，store 用的是 0.5。** 這不是把一個猜測凍起來——0.5 是 notebook 的值，而
 這一輪建 store 的目的正是把那個場放到磁碟上，好讓這個問題問得成。掃描完若改了值，
-`background_threshold` 是 hashed 欄位，新的遮罩會是**另一個檔**而不是覆蓋，第 3c 步
-讀哪一個由 `require={'segmenter_id': ...}` 說了算。
+`background_threshold` 是 `seg_id` 的一部分，新的遮罩會落在**另一個 `<seg_id>/`**
+而不是覆蓋，第 3c 步讀哪一個由 `--seg` 選的 recipe 說了算。
 
 ### 第一輪 label 的品質
 
@@ -2467,18 +2493,18 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 
 | # | 檔案 | 做什麼 |
 |---|---|---|
-| 1 | `utilities/MaskStore.py` | `SlideMask` + 落地格式 + `build_one(wsi, segmenter)`。遮罩之外還存 `components` |
+| 1 | `utilities/TissueMaskConfig.py`（`MaskMaker`）、`utilities/TissueMask.py`（`SlideMask`） | mask 的 recipe、快取與落地格式。遮罩之外還存 `components` |
 | 2 | `utilities/cli/build_cache/build_mask_store.py` | 對 6 片跑分割器、寫 store |
 | 3 | `utilities/cli/diagnostics/probe_tile_yield.py` | 3b 探針，`(片, ratio, tile, ds)` 216 格 |
-| 4 | `training/SuperPathPoint/common/PreTileStore.py` | pre-tile 的落地格式與索引 |
+| 4 | `utilities/Store.py`（`PreTileCorpus`／`PreTileStore`）、`training/SuperPathPoint/common/Corpora.py` | pre-tile 的位址、落地格式與索引；三批具名 pre-tile 的 recipe |
 | 5 | `training/SuperPathPoint/cli/extract_pretiles.py` | 3c 抽取 |
 
-`SlideMask` 從 `aiNNModel/Uni2PcaSegFunc.py` **搬到** `utilities/MaskStore.py`。層次
-問題：store 在 utilities，而 utilities 不該 import aiNNModel。搬過去之後 store 也就與
-分割器無關——存 hsv 或 hest 的遮罩用同一個。
+`SlideMask` 在 `utilities/TissueMask.py`，不在任何分割器裡：產品不 import 產生它的
+模組，所以存 hsv、hest 或 uni2_pca 的遮罩用同一個格式。
 
-第 2 支薄到只剩 argparse、迴圈、印進度；建構邏輯在 `MaskStore.build_one`。`FeatureStore`
-與 `utilities/cli/build_cache/build_reference_store.py` 是同一個分法，而 CLAUDE.md 說庫層不放 CLI 解析與 print。
+第 2 支薄到只剩 argparse、迴圈、印進度；建構邏輯在 `MaskMaker.slide_mask`（未命中
+才建分割器）。`Store.py` 與 `utilities/cli/build_cache/build_reference_store.py` 是同一個
+分法，而 CLAUDE.md 說庫層不放 CLI 解析與 print。
 
 **每個遮罩檔存兩個 tensor**：`mask`（一片一個 bit / cell）與 `components`
 （`[rows, cols, k]` float16，581-814 MB）。理由在 §13 的 `background_threshold`：
@@ -2537,8 +2563,8 @@ label，而且不會報錯。
 
 | # | 檔案 |
 |---|---|
-| 20 | `utilities/test_modules/TestSuperPathPoint/test_mask_store.py` |
-| 20b | `utilities/test_modules/TestSuperPathPoint/test_pre_tile_store.py` |
+| 20 | `utilities/test_modules/test_tissue_mask.py` |
+| 20b | `utilities/test_modules/test_store.py` |
 | 21 | `utilities/test_modules/TestSuperPathPoint/test_homographic_adaptation.py`（第 10 節那條誘餌檢查） |
 | 22 | `utilities/test_modules/TestSuperPathPoint/test_keypoint_label_store.py` |
 | 23 | `utilities/test_modules/TestSuperPathPoint/test_detector_decoder.py`（depth-to-space 來回） |
@@ -2562,7 +2588,7 @@ label，而且不會報錯。
 
 | 檔 | 為什麼 |
 |---|---|
-| `utilities/test_modules/TestSuperPathPoint/test_pre_tile_store.py` | CLAUDE.md 那條「在昂貴的執行之前放一條便宜的斷言」。3c 讀六片、寫約 32 GB、跑數小時，而它會壞的四種方式沒有一種會拋例外——中心裁切偏一格、pre-tile 存錯尺寸、兩批抽取撞同一個目錄、換成有損編碼。四種都是秒級可釘，其中三種釘的是**誘餌**而不是容忍度 |
+| `utilities/test_modules/test_store.py`、`test_tile_sampler.py` 的 `pretile` 節 | CLAUDE.md 那條「在昂貴的執行之前放一條便宜的斷言」。3c 讀六片、寫約 32 GB、跑數小時，而它會壞的四種方式沒有一種會拋例外——中心裁切偏一格、pre-tile 存錯尺寸、兩批抽取撞同一個位址、換成有損編碼。四種都是秒級可釘，其中三種釘的是**誘餌**而不是容忍度 |
 | `common/HomographyConfig.py` | 13 個 sampler 選項被 `HaConfig` 與 `PairDatasetConfig` 各要一次。放不進 `common/Homography.py`：那支刻意不在 import 時碰 torch（`warp_image_torch` 自己 lazy import），而 `ConfigIdentity` 會拉 torch 進來，登入節點上跑得動的 demo 就跑不動了 |
 | `jobscripts/ExtractPreTiles.sh` | 3c 要在叢集上跑，而原本的清單沒有給它一支 |
 | `utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py` | 第 11-19 支**一支測試都沒有**。它刻意違反「測試以被測 module 命名」那條——被測的不是八個 module，是它們**之間的合約**：`space_to_depth` 對 `depth_to_space_prob`、`check_shapes` 對 backbone、dataset 的 warp 對 loss 的對應遮罩。拆成八個檔，每個檔只會拿到半句話 |
