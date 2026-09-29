@@ -1,0 +1,30 @@
+# No ruff config existed before this (2026-09-22) -- `# noqa` comments were
+# already in 800+ places across the repo, which only makes sense if ruff was
+# already being run locally, just with settings that lived in whoever ran it
+# and nowhere else. This file makes those settings discoverable instead of
+# archaeological.
+#
+# The rule list below is not a guess: `grep -roE "noqa: [A-Z0-9,]+"` over
+# the whole tree and counted which codes actually appear --
+#   E402 (658)  PLC0415 (69)  BLE001 (60)  E731 (13)  F401 (10)
+# -- and every one of those five is selected here, nothing more. E501
+# (line-too-long) was left OUT on purpose despite two existing `noqa: E501`
+# comments: the repo already has 108 lines over 100 characters (max 172)
+# with no noqa at all, so two isolated instances are not evidence of an
+# enforced limit -- selecting E501 now would raise ~100+ new warnings this
+# file did not intend to create. If a real line-length policy gets decided
+# later, add E501 (and a `line-length`) then, deliberately.
+target-version = "py39"
+
+[lint]
+select = [
+    "E402",     # module level import not at top of file -- every entry
+                # point's sys.path.insert-before-import bootstrap needs this
+    "E731",     # lambda assigned to a name (raw_of = lambda p: ...) -- used
+                # deliberately throughout for one-line encoder binders
+    "F401",     # unused import
+    "PLC0415",  # import not at top of module -- the `from X import Y  # noqa: PLC0415`
+                # pattern inside functions (e.g. lazy `from TileEncoderFunc import ...`)
+    "BLE001",   # bare `except Exception:` -- flagged, not banned; several
+                # call sites noqa it deliberately (e.g. optional wandb import)
+]
