@@ -2534,3 +2534,82 @@ Both frames agree exactly wherever supply exceeds the ask, which is ds 1-4, so
 the default costs nothing there. `probe_tile_yield` runs BOTH arms every cell
 and records `n_got_if_taken`, so the number that would decide the switch is in
 front of whoever flips it.
+
+================================================================================
+
+[ ] 2026-09-24 | 數字斷點：mask / 取樣 / 快取重構之後，哪些數字不能跟之前直接比
+                 沒有量過差多少；這裡記的是「會變」與「為什麼」，比較前先看這節
+
+    以下任何一項都會讓重構前後的同名數字不是同一個量。沒有一項是 bug fix
+    的副作用 —— 都是刻意改的預設或刻意換掉的來源。
+
+    1. MASK 的預設（TissueSegFunc / TissueMaskConfig）
+       - 金字塔 level 只剩 nearest：`nearest_level` 依 ds 的比例挑最近的一層。
+         舊的其他 level_rule 已刪。同一個 mask_ds 在 2x 金字塔（Ki67 MRXS）
+         上可能讀到跟以前不同的一層。
+       - 整層讀取改成有界分塊：read_chunk_px / seg_chunk_px 預設 4,000,000，
+         接縫重疊 128 px（stitch_overlap）。以前某些路徑是一次讀整層 ——
+         也就是 test_patching_lib 在 MRXS level 2 OOM 的那條。分塊邊界上的
+         像素可能跟整層讀不同。
+       - 基準 recipe 是 hest（MASK_RECIPES['hest']）。retrieval、bench、
+         query_sim 以前各自建 mask（多數是 hsv），現在一律吃 `--seg` 指定的
+         recipe。同一張 slide 換 hest 之後 region 數與 tissue 比例都不一樣：
+         TissueMaskTest 上 Ki67 一張 hsv 1.5%、hest 6.5%。
+       - region 步驟固定一個順序：filtered(min_region_ratio) -> merged ->
+         patchable(footprint)，而且都是 view、不改原 mask。以前每個呼叫端
+         自己排順序、而且原地改。
+
+    2. 參考庫 / 距離樣本的取樣器
+       - ReferenceSampler 已刪。KnnEstMpp 的參考庫、build_reference_store、
+         bench_gigapath_pooling 都改由 TileSampler 抽（native plans、
+         REFERENCE_BANK_RICHNESS）。位置、每層張數、分桶都跟舊的不同。
+       - bench_gigapath_pooling：valid 低於 MIN_VALID=0.95 的 distractor
+         直接丟掉、不補抽，所以每張 slide 的池大小會小於要求值且各不相同；
+         `--quota-*` 旗標已刪。recall@k 的分母跟著變。
+
+    3. PRE-TILE 集合（corpus）的位址（Store.PreTileCorpus）
+       - 位址現在含 mask recipe（seg_id、region_id）和 rung plan。
+         2026-08-27 的 stageA 兩者都沒記，所以任何讀端都定址不到它，
+         必須重切：ExtractPreTiles -> PrepareChainStack -> MakeHaLabels
+         -> TrainSuperPathPoint。
+       - 重切的 stageA 不保證與 2026-08-27 逐列相同：mask 現在經由
+         MaskMaker 與 region view 取得。要確認的話，用 ExtractPreTiles.sh
+         裡「REPRODUCE THE 2026-08-27 CORPUS」那段比 index.csv。
+       - KeypointLabelStore 的 pretile_id 改成 corpus key，舊的 label 對不到
+         任何一批 pre-tile，必須重跑 HA。
+
+    4. MppRoutingHead / PrototypicalRoutingHead 的 checkpoint 檔名不再帶 seg
+       - 換 seg 重訓會覆蓋同名檔（使用者決定：seg 在這個階段不重要）。seg
+         仍記在 checkpoint 的 args 裡，evaluate 遇到不一致會拒絕。舊
+         checkpoint 由使用者自行刪除。
+
+================================================================================
+
+[ ] 2026-09-24 | 數字斷點：W9 之後的 PrototypicalRoutingHead val 和兩邊的 ord_a
+                 跟之前的同名數字不是同一個量，比較前先看這節
+
+    1. PrototypicalRoutingHead 的 val 定義換了
+       - 舊：每 epoch 隨機抽 30 個 val episode（3 個 held-out combo 隨機落），
+         一個 combo 的 acc 是它所有 query tile 混在一起的比例。
+       - 新：每個 dataset、每個 held-out combo 抽 K 批 S x K 批 Q，K x K 對
+         全部計分；rung = K x K 對的平均，combo = rung 的平均，dataset =
+         combo 的平均，total = dataset 的平均（使用者定義）。
+       - `_best.pt` 改成選 total；舊的 `_best.pt` 是「每個 combo 都比上次進
+         步」，已刪。`_6rung.pt` 從 n 加權改成兩個 dataset 的平均。
+       - test（evaluate.py）舊表保留不變；另外多一張 K x K 表
+         （test_scores_kxk_*）。跟舊結果比要用舊表。
+
+    2. PrototypicalRoutingHead 的訓練抽樣換了
+       - 混池：不再分 support WSI / query WSI，拿掉 p_same_wsi 和跨 WSI 借位。
+       - 重疊規則：同一張 WSI 上 footprint 重疊的位置不會分到兩邊。
+       - 每 epoch 39 個組合各一次（舊：隨機抽 126 次、組合隨機），
+         episode reuse none / hold_s / hold_q，每 epoch 都是 39 x K 步。
+       - K 預設 auto = 實際抽得出的最大值，隨 pool 供應量而定；
+         log 開頭的 "given -> used" 那幾行寫著這次用的是多少。
+       - 檔名多了 `<reuse>-k<K>` 一段，舊 checkpoint 對不上新檔名。
+
+    3. ord_a 的回歸項加上了類別權重（兩個套件都改）
+       - 舊：F.mse_loss，整個 batch 等權平均；新：sum(w_y * sq) / sum(w_y)，
+         跟 L_bal 同一套權重。MppRoutingHead 上 rung 32 只佔 0.3%，舊式子
+         裡幾乎不算數，所以 ord_a 的數字會變，不能跟舊 ord_a 比。
+       - bal、ord_b 沒動。

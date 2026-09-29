@@ -8,6 +8,8 @@
 > | `class LocaScope` | `class LocaScopePipeline` |
 > | `locate(query, mpp=None, ...)` | `run(img)` |
 > | `LocaScopeResult` | `LocaScopeQueryResult` |
+> | `TissuesRegionsMask.from_wsi(wsi, ds=seg_ds).filter_regions(r)` | `TissueMaskConfig.build(wsi)`（recipe 由 `mask_cfg` 決定；cache 走 `MaskMaker`） |
+> | `mask.filter_patchable(tile_size, ds)` | `mask.patchable(side_l0)`，回傳 view，不改原 mask |
 >
 > 實作另外多了本文件沒有的 level routing、per-level retriever cache、
 > `unusable_level`，以及三個 stage 各自 try/except。下面保留為當初的設計
