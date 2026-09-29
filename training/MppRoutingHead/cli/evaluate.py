@@ -15,8 +15,9 @@ A checkpoint carries everything needed to rebuild its model (see
 and no head geometry: passing any of those would be a second source of truth
 able to disagree with the weights.
 
-The split comes from `wsi_split.csv`, written by `train.py` next to each
-dataset's manifest. Read rather than re-derived: a split recomputed from
+The split comes from `wsi_split.csv`, written once by
+`utilities/cli/build_cache/make_split.py`.
+Read rather than re-derived: a split recomputed from
 `--seed` is one library version away from silently becoming a different
 experiment, and then the "test" set contains slides the model selected on.
 
@@ -52,32 +53,20 @@ from typing import Dict, List
 # for this file. Same idiom every test_modules/cli entry point uses.
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'utilities'))
-from _paths import setup_import_paths                                   # noqa: E402
+from _paths import setup_import_paths                                  # noqa: E402
 setup_import_paths()
 
 import torch                                                        # noqa: E402
 
 import _paths                                                       # noqa: E402
-from Datasets import (build_manifest, manifest_parts, manifest_path,  # noqa: E402
-                      read_manifest, read_wsi_split, write_manifest,
-                      write_manifest_key)
-from Runtime import (build_from_checkpoint, encode_raw, predict,     # noqa: E402
-                     trunk_raw)
+from training.MppRoutingHead.Datasets import (                      # noqa: E402
+    RUNGS, add_cache_args, build_manifest, open_caches)
+from WsiSplit import read_split, split_path                          # noqa: E402
+from training.MppRoutingHead.Runtime import (                       # noqa: E402
+    build_from_checkpoint, encode_raw, predict, rescore_by_rung, trunk_raw)
 
 
-def test_names(path: Path) -> List[str]:
-    '''The test half of the recorded split, in recorded order. Read, never
-    derived: a split recomputed here could disagree with the one that selected
-    the checkpoints, and the disagreement would show up as a good score.'''
-    if not path.exists():
-        raise FileNotFoundError(
-            f'{path} does not exist -- run cli/train.py first; it is what '
-            f'writes the val/test split. Deriving the split here instead would '
-            f'make this file able to disagree with the one that selected on it')
-    return read_wsi_split(path)[1]
-
-
-def test_rows(args, cache_root, dataset_id: str) -> List:
+def test_rows(args, caches, out_dir, dataset_id: str) -> List:
     '''`--n-wsi` slides from the test half, `--n-per-rung` positions on each
     rung of each.
 
@@ -86,24 +75,21 @@ def test_rows(args, cache_root, dataset_id: str) -> List:
     order, so the test rows in the file are already randomised -- taking a
     prefix is a sample, and it is the SAME sample every time without a second
     seed to keep in step with the first. Which five were used is then readable
-    off the manifest's own `wsi_name` column.
+    off the rows' own `wsi_name` column and the sampler reports.
+
+    The split is READ (`read_split` refuses when it is missing): a split
+    derived here could disagree with the one that selected the checkpoints,
+    and the disagreement would show up as a good score.
     '''
-    ddir = cache_root / dataset_id.replace('/', '_')
-    names = test_names(ddir / 'wsi_split.csv')[:args.n_wsi]
-    parts = manifest_parts(dataset_id=dataset_id, tile_size=args.tile,
-                           n_per_rung=args.n_per_rung, seed=args.seed,
-                           n_wsi=args.n_wsi, wsi_names=names)
-    manifest = manifest_path(ddir, 'test', parts)
-    if manifest.exists():
-        return read_manifest(manifest)
-    print(f'[test]  {dataset_id}: building manifest over {len(names)} WSIs '
-          f'({", ".join(names)}) ...', flush=True)
-    rows = build_manifest(dataset_id, tile_size=args.tile,
-                          n_per_rung=args.n_per_rung, seed=args.seed,
-                          wsi_names=names)
-    write_manifest(rows, manifest)
-    write_manifest_key(manifest, parts)
-    return rows
+    names = read_split(split_path(caches.split_job, dataset_id))[1][:args.n_wsi]
+    print(f'[test]  {dataset_id}: {len(names)} WSIs ({", ".join(names)})',
+          flush=True)
+    return build_manifest(
+        dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
+        report_dir=(out_dir / 'sampler_reports'
+                    / f'{dataset_id.replace("/", "_")}_test'),
+        tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
+        wsi_names=names)
 
 
 def find_weights(args, out_dir: Path) -> List[Path]:
@@ -145,18 +131,21 @@ def main() -> int:
     ap.add_argument('--encode-batch', type=int, default=256)
     ap.add_argument('--num-workers', type=int, default=8)
     ap.add_argument('--seed', type=int, default=42)
+    # --seg: every checkpoint scored must have been trained under the same one
+    add_cache_args(ap)
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
     device = torch.device(args.device)
-    cache_root = Path(_paths.RESULT_DIR) / 'cache' / 'mpp_routing_head'
+    caches = open_caches(args, 'MppRoutingHead', device)
     out_dir = Path(args.out or _paths.job_result_dir('MppRoutingHead'))
     weights = find_weights(args, out_dir)
     print(f'{len(weights)} checkpoint(s), test split of '
           f'{", ".join(args.eval_datasets)}', flush=True)
 
-    rows = {d: test_rows(args, cache_root, d) for d in args.eval_datasets}
+    rows = {d: test_rows(args, caches, out_dir, d) for d in args.eval_datasets}
+    caches.masks.close()
     out_rows: List[Dict] = []
     tile_rows: List[Dict] = []
     for path in weights:
@@ -175,6 +164,14 @@ def main() -> int:
                 f'{path.name} was trained at tile_size={tile} and --tile is '
                 f'{args.tile}: scoring it at a different tile size measures a '
                 f'different question, so this is a refusal rather than a warning')
+        # Same refusal for the mask recipe: the test positions would come from
+        # a different mask than the ones it learned on.
+        seg = ckpt['args']['seg']
+        if seg != args.seg:
+            raise ValueError(
+                f'{path.name} was trained with seg={seg!r} and --seg is '
+                f'{args.seg!r}: the test positions would come from a different '
+                f'mask than the ones it learned on')
 
         head_name = ckpt['head_name']
         for dataset_id, drows in rows.items():
@@ -183,16 +180,46 @@ def main() -> int:
                 wsi_group_size=args.wsi_group_size,
                 batch_size=args.batch_size, num_workers=args.num_workers)
             result = scores[head_name]
+            # `level_accuracy` OVERWRITTEN with the mean of the six rungs'
+            # own accuracies, NOT the pooled per-tile value `scores[...]`
+            # still carries in every other key -- the exact fix `cli/
+            # train.py`'s `val_report` already applies to VAL (2026-09-20),
+            # extended here to TEST (2026-09-23): RICHNESS's own coarse-rung
+            # supply shortfall means a tile-pooled average is dominated by
+            # whichever rungs happen to have the most test tiles, the same
+            # `rescore_by_rung` finding val_report's own docstring cites.
+            # Before this fix, `print_and_plot` below computed this SAME
+            # corrected number via its own `overall_view` and only printed
+            # it -- the number that got saved to `test_scores_<tag>.csv`
+            # was the uncorrected one.
+            per_rung = rescore_by_rung(detail[head_name])
+            result['level_accuracy'] = sum(
+                per_rung[rung]['level_accuracy'] for rung in RUNGS) / len(RUNGS)
             print(f'  {ckpt["encoder"]:12s} '
                   f'{"frozen" if frozen else "finetuned":10s} '
                   f'{head_name:12s} {dataset_id:17s} {result}', flush=True)
-            identity = dict(weights=path.name, encoder=ckpt['encoder'],
-                            trunk='frozen' if frozen else 'finetuned',
-                            head=head_name)
+            # identity = dict(weights=path.name, encoder=ckpt['encoder'],
+            #                 trunk='frozen' if frozen else 'finetuned',
+            #                 head=head_name)
+            # out_rows.append(dict(
+            #     **identity, train_epoch=ckpt['epoch'],
+            #     val_accuracy=ckpt['val']['level_accuracy'],
+            #     test_dataset=dataset_id, **result))
+            loss_kind = ckpt.get('args', {}).get('loss', 'bal')
+            identity = dict(
+                weights=path.name,
+                encoder=ckpt['encoder'],
+                trunk='frozen' if frozen else 'finetuned',
+                head=head_name,
+                loss_kind=loss_kind,
+            )
             out_rows.append(dict(
-                **identity, train_epoch=ckpt['epoch'],
+                **identity,
+                train_epoch=ckpt['epoch'],
                 val_accuracy=ckpt['val']['level_accuracy'],
-                test_dataset=dataset_id, **result))
+                test_dataset=dataset_id,
+                **result,
+            ))
             tile_rows += [dict(**identity, **d) for d in detail[head_name]]
 
     status = write_csvs(out_dir, args.tag, out_rows, tile_rows)
@@ -264,14 +291,19 @@ HEAD_COLORS = {
 }
 _INK, _INK_SECONDARY = '#0b0b0b', '#52514e'
 _GRIDLINE, _AXIS, _SURFACE = '#e1e0d9', '#c3c2b7', '#fcfcfb'
-
+LOSS_STYLES = {
+    'bal': '-',
+    'ord_a': '--',
+    'ord_b': ':',
+}
 
 def method_of(row: dict) -> str:
     """`<encoder>+<head>` -- `test_predictions` has no separate `reduction`
     column (unlike stage1_compare's per-shot csv) because `head` already
     names it: 'attn_linear' IS reduction='attn', 'linear' IS reduction='fixed'
     -- see `Runtime.HEAD_CHOICES`."""
-    return f'{row["encoder"]}+{row["head"]}'
+    # return f'{row["encoder"]}+{row["head"]}'
+    return f'{row["encoder"]}+{row["head"]}+{row["loss_kind"]}'
 
 
 def _levels_off(row: dict):
@@ -405,8 +437,11 @@ def encoder_of(method: str) -> str:
 
 
 def head_of(method: str) -> str:
-    return method.split('+', 1)[1]
-
+    # return method.split('+', 1)[1]
+    return method.split('+')[1]
+    
+def loss_of(method: str) -> str:
+    return method.split('+')[2]
 
 def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
     """One PNG: accuracy vs rung, one subplot per encoder -- see
@@ -432,22 +467,48 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
     fig, axes = plt.subplots(1, len(encoders), figsize=(4.2 * len(encoders), 3.6),
                              sharey=True, facecolor=_SURFACE)
     axes = [axes] if len(encoders) == 1 else list(axes)
-    seen_heads = []
+    # seen_heads = []
+
+    # for ax, encoder in zip(axes, encoders):
+    #     ax.set_facecolor(_SURFACE)
+    #     by_head = collections.defaultdict(list)
+    #     for r in rows:
+    #         if encoder_of(r['method']) == encoder:
+    #             by_head[head_of(r['method'])].append(r)
+    #     for head, head_rows in sorted(by_head.items()):
+    #         head_rows.sort(key=lambda r: r['rung'])
+    #         color = HEAD_COLORS.get(head, _INK_SECONDARY)
+    #         ax.plot([r['rung'] for r in head_rows],
+    #                 [r['level_accuracy'] for r in head_rows],
+    #                 color=color, linewidth=2, marker='o', markersize=8, label=head)
+    #         if head not in seen_heads:
+    #             seen_heads.append(head)
+    seen_methods = []
 
     for ax, encoder in zip(axes, encoders):
         ax.set_facecolor(_SURFACE)
-        by_head = collections.defaultdict(list)
+        by_method = collections.defaultdict(list)
+
         for r in rows:
             if encoder_of(r['method']) == encoder:
-                by_head[head_of(r['method'])].append(r)
-        for head, head_rows in sorted(by_head.items()):
-            head_rows.sort(key=lambda r: r['rung'])
-            color = HEAD_COLORS.get(head, _INK_SECONDARY)
-            ax.plot([r['rung'] for r in head_rows],
-                    [r['level_accuracy'] for r in head_rows],
-                    color=color, linewidth=2, marker='o', markersize=8, label=head)
-            if head not in seen_heads:
-                seen_heads.append(head)
+                key = (head_of(r['method']), loss_of(r['method']))
+                by_method[key].append(r)
+
+        for (head, loss), method_rows in sorted(by_method.items()):
+            method_rows.sort(key=lambda r: r['rung'])
+            label = f'{head}+{loss}'
+            ax.plot(
+                [r['rung'] for r in method_rows],
+                [r['level_accuracy'] for r in method_rows],
+                color=HEAD_COLORS.get(head, _INK_SECONDARY),
+                linestyle=LOSS_STYLES.get(loss, '-'),
+                linewidth=2,
+                marker='o',
+                markersize=8,
+                label=label,
+            )
+            if label not in seen_methods:
+                seen_methods.append(label)
         ax.set_xscale('log', base=2)
         ticks = sorted({r['rung'] for r in rows})
         ax.set_xticks(ticks)
@@ -461,9 +522,21 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
         ax.tick_params(colors=_AXIS, labelcolor=_INK_SECONDARY)
 
     axes[0].set_ylabel('level accuracy', color=_INK_SECONDARY, fontsize=9)
-    handles = [plt.Line2D([0], [0], color=HEAD_COLORS.get(h, _INK_SECONDARY),
-                          linewidth=2, marker='o', markersize=6, label=h)
-              for h in seen_heads]
+    # handles = [plt.Line2D([0], [0], color=HEAD_COLORS.get(h, _INK_SECONDARY),
+    #                       linewidth=2, marker='o', markersize=6, label=h)
+    #           for h in seen_heads]
+    handles = []
+    for label in seen_methods:
+        head, loss = label.rsplit('+', 1)
+        handles.append(plt.Line2D(
+            [0], [0],
+            color=HEAD_COLORS.get(head, _INK_SECONDARY),
+            linestyle=LOSS_STYLES.get(loss, '-'),
+            linewidth=2,
+            marker='o',
+            markersize=6,
+            label=label,
+        ))
     fig.legend(handles=handles, loc='lower center', ncol=min(len(handles), 4),
               bbox_to_anchor=(0.5, 0.0), frameon=False,
               fontsize=9, labelcolor=_INK_SECONDARY)

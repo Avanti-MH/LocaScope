@@ -11,9 +11,17 @@ question here needs it -- not the other way round.
     csv columns (one row per (query, method)):
         dataset, wsi_name, x, y, h, w        -- FoV identity
         rung, native, gt_mpp, gt_ds          -- ground truth
-        encoder, classifier, reduction, weights   -- which method/config;
+        encoder, classifier, reduction, loss,
+        weights                               -- which method/config;
                                               KnnEstMpp leaves classifier/
-                                              reduction/weights blank
+                                              reduction/loss/weights blank.
+                                              `loss` (2026-09-22): bal/ord_a/
+                                              ord_b, blank on a checkpoint
+                                              trained before --loss existed
+                                              (treated as 'bal' by
+                                              method_of(), never as blank --
+                                              see that function's own
+                                              docstring)
         estimated_ds, estimated_mpp,
         chosen_ds, chosen_mpp, chosen_level   -- EstMppResult's five
         extra_json                            -- method-specific secondary
@@ -82,22 +90,46 @@ import _paths                                                       # noqa: E402
 
 BAR = '=' * 78
 
-#: Fixed categorical order, first 5 of the dataviz skill's validated 8-slot
-#: adjacent-safe palette (references/palette.md) -- a line chart only ever
-#: puts ADJACENT series next to each other, so a leading subset of an
-#: adjacent-validated order stays validated; only `--pairs all` (scatter,
-#: small multiples of the SAME axes) would need the 3-slot all-pairs cap.
-#: Keyed by "head recipe" (classifier+reduction, or 'baseline' for a bare
-#: KnnEstMpp with neither) rather than by full method string, so `mlp` is
-#: the SAME color in every encoder's subplot -- color follows the entity,
-#: not its position in whichever list happened to be drawn that run.
+#: Keyed by "head recipe" (`<head_name>+<reduction>`, or 'baseline' for a
+#: bare KnnEstMpp with neither) so `mlp` is the SAME colour in every
+#: encoder's subplot -- colour follows the entity, not its position in
+#: whichever list happened to be drawn that run. LOSS-INDEPENDENT: see
+#: `head_recipe_of`'s own docstring for why loss changes linestyle instead
+#: of colour.
+#:
+#: 2026-09-22: rebuilt against `training/MppRoutingHead/Runtime.
+#: HEAD_CHOICES`'s actual registered names -- the previous version's keys
+#: (`'LinearHead+fixed'`, `'ArcFaceHead+fixed'`, ...) were the CLASS names
+#: `classifier` used to hold before `bench_mpp_feature_decomposition.py`'s
+#: own `_method_specs` switched it to `head_name` (that switch's own
+#: comment explains why: 'classifier' collapsed all five mlp variants into
+#: one label). Nothing here was ever updated to match, so every lookup has
+#: been falling through to the `_INK_SECONDARY` grey fallback since that
+#: switch -- this was found and fixed the same day as the `loss` column,
+#: not a regression it introduced. Colours reused from `training/
+#: MppRoutingHead/cli/evaluate.py`'s own `HEAD_COLORS` (same head_name
+#: keys, one extra file keying off the same 8) for consistency across the
+#: two reports; `mlp_narrow` (present in `HEAD_CHOICES`, absent from that
+#: file's own dict too) gets a 9th colour here, not yet backfilled there.
 HEAD_RECIPE_COLORS = {
-    'baseline':          '#2a78d6',   # slot 1 blue    -- raw KnnEstMpp
-    'LinearHead+fixed':  '#eb6834',   # slot 2 orange
-    'LinearHead+attn':   '#1baf7a',   # slot 3 aqua
-    'MlpHead+fixed':     '#eda100',   # slot 4 yellow
-    'ArcFaceHead+fixed': '#e87ba4',   # slot 5 magenta
+    'baseline':              '#2a78d6',   # raw KnnEstMpp
+    'linear+fixed':          '#eb6834',
+    'attn_linear+attn':      '#1baf7a',
+    'mlp+fixed':             '#eda100',
+    'mlp_deep+fixed':        '#e87ba4',
+    'mlp_wide+fixed':        '#008300',
+    'mlp_deep_wide+fixed':   '#4a3aa7',
+    'mlp_deep_residual+fixed': '#e34948',
+    'mlp_narrow+fixed':      '#17a2b8',
+    'arcface+fixed':         '#8b5a2b',
 }
+
+#: Loss changes the LINE, not the colour (`head_recipe_of`'s own docstring)
+#: -- 'bal' solid (every checkpoint before `--loss` existed was this,
+#: unlabelled), 'ord_a' dashed, 'ord_b' dotted. `.get(loss, '-')` covers a
+#: blank `loss` (KnnEstMpp rows, which have no classifier/reduction either)
+#: the same way solid covers 'bal'.
+LOSS_LINESTYLES = {'bal': '-', 'ord_a': '--', 'ord_b': ':'}
 _INK = '#0b0b0b'
 _INK_SECONDARY = '#52514e'
 _GRIDLINE = '#e1e0d9'
@@ -105,10 +137,19 @@ _AXIS = '#c3c2b7'
 _SURFACE = '#fcfcfb'
 
 
-def head_recipe_of(method: str) -> str:
-    """`method_of()`'s output, minus the leading encoder -- 'baseline' for a
-    bare KnnEstMpp (no '+' in the string at all)."""
-    return method.split('+', 1)[1] if '+' in method else 'baseline'
+def head_recipe_of(classifier: str, reduction: str) -> str:
+    """`<classifier>+<reduction>` (e.g. `'arcface+fixed'`), 'baseline' for a
+    bare KnnEstMpp (blank classifier) -- LOSS-INDEPENDENT on purpose
+    (2026-09-22): colour follows which HEAD this is, the same entity
+    `HEAD_RECIPE_COLORS` keys on; which --loss trained it changes the
+    LINESTYLE instead (`plot_dataset`'s own `LOSS_LINESTYLES`), not the
+    colour -- giving every (head, loss) pair its own colour would need
+    9 heads x 3 losses = 27 slots, well past any categorical palette this
+    codebase's dataviz skill validates. Takes the two fields directly
+    (`cross_slide_rung`'s own `classifier`/`reduction` columns), not a
+    composed `method` string, so it cannot accidentally include `loss` by
+    parsing past it."""
+    return f'{classifier}+{reduction}' if classifier else 'baseline'
 
 
 def encoder_of(method: str) -> str:
@@ -146,15 +187,29 @@ def boolean(row: dict, key: str):
 def method_of(row: dict) -> str:
     """One string identifying which method+config a row belongs to.
 
-    `classifier`/`reduction`/`weights` are blank for `KnnEstMpp` (see the
-    module docstring), so the label collapses to just the encoder there --
-    the same rule `_paths.encoder_tag` uses for an encoder with no head.
+    `classifier`/`reduction`/`loss`/`weights` are blank for `KnnEstMpp` (see
+    the module docstring), so the label collapses to just the encoder there
+    -- the same rule `_paths.encoder_tag` uses for an encoder with no head.
+
+    `loss` (2026-09-22) is appended ONLY when it is present AND not 'bal':
+    every checkpoint trained before `--loss` existed, and every 'bal' run
+    since, keeps the exact label it already had (no '+bal' suffix appearing
+    everywhere) -- same reasoning `bench_mpp_feature_decomposition.py`'s own
+    `_prototype_weight_filename`-style filenames only tag a NON-default
+    loss. Without this, a bal- and an ord_a-trained checkpoint of the same
+    encoder+head+reduction would collapse into one label and get averaged
+    together -- the same bug `classifier` switching from the class name to
+    `head_name` already fixed once for the mlp variants (see the module
+    docstring's csv columns note).
     """
     parts = [cell(row, 'encoder') or '?']
     for k in ('classifier', 'reduction'):
         v = cell(row, k)
         if v:
             parts.append(v)
+    loss = cell(row, 'loss')
+    if loss and loss != 'bal':
+        parts.append(loss)
     return '+'.join(parts)
 
 
@@ -225,7 +280,16 @@ def cross_slide_rung(rows: list) -> list:
     that contributed one. `n` says how many shots that actually is -- read it
     before trusting the accuracy next to it, especially under
     `--native-only` where a rung some slides lack natively rests on fewer
-    slides' worth of shots than one that every slide has."""
+    slides' worth of shots than one that every slide has.
+
+    `classifier`/`reduction`/`loss` (2026-09-22) are carried through
+    alongside the composed `method` string, read off `grp[0]` since every
+    row a `method` groups together shares the same three values by
+    construction (`method_of` is a deterministic function of them) --
+    `plot_dataset` needs them SEPARATELY (colour follows classifier+
+    reduction, loss only changes the linestyle), not re-parsed back out of
+    the composed string.
+    """
     g = collections.defaultdict(list)
     for r in rows:
         g[(cell(r, 'dataset'), num(r, 'rung'), method_of(r))].append(r)
@@ -234,6 +298,9 @@ def cross_slide_rung(rows: list) -> list:
             g.items(), key=lambda kv: (kv[0][0] or '', kv[0][1] or 0)):
         n_slides = len({cell(r, 'wsi_name') for r in grp})
         out.append(dict(dataset=dataset, rung=rung, method=method,
+                        classifier=cell(grp[0], 'classifier') or '',
+                        reduction=cell(grp[0], 'reduction') or '',
+                        loss=cell(grp[0], 'loss') or '',
                         n_slides=n_slides, **score_group(grp)))
     return out
 
@@ -331,13 +398,16 @@ def print_overall(rows: list) -> None:
 
 def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
     """One PNG: accuracy vs rung, one subplot per ENCODER (small multiples --
-    13 methods on one axes would need 13 distinguishable colors, well past
-    what any categorical palette guarantees; faceting by encoder keeps each
-    subplot's line count inside the validated 5), one line per head recipe
-    (`HEAD_RECIPE_COLORS`, the SAME color for `mlp` in every subplot -- color
-    follows the entity). Never pooled across datasets: BRACS steps 4x per
-    pyramid level and Ki67 steps 2x, so one dataset's rung axis does not mean
-    the same magnification jump as the other's -- see the module docstring.
+    faceting by encoder keeps each subplot's line count down to that
+    encoder's own heads x losses, not every encoder's at once), one line per
+    (head recipe, loss) pair -- colour follows the HEAD (`HEAD_RECIPE_
+    COLORS`, the SAME colour for `mlp` in every subplot regardless of loss),
+    linestyle follows the LOSS (`LOSS_LINESTYLES` -- solid/dashed/dotted for
+    bal/ord_a/ord_b) -- see `head_recipe_of`'s own docstring for why loss
+    is a second visual channel instead of a 27th colour. Never pooled
+    across datasets: BRACS steps 4x per pyramid level and Ki67 steps 2x, so
+    one dataset's rung axis does not mean the same magnification jump as
+    the other's -- see the module docstring.
 
     matplotlib is imported HERE, not at module level -- this file's whole
     point (its own module docstring) is running on a bare login node with no
@@ -365,24 +435,33 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
     fig, axes = plt.subplots(1, len(encoders), figsize=(4.2 * len(encoders), 3.6),
                              sharey=True, facecolor=_SURFACE)
     axes = [axes] if len(encoders) == 1 else list(axes)
-    seen_recipes = []
+    #: `{(recipe, loss): label}`, filled as lines are drawn -- the legend is
+    #: built from this AFTER the loop rather than from `HEAD_RECIPE_COLORS`'
+    #: own keys, since only the (recipe, loss) pairs actually PRESENT in
+    #: this dataset's rows should appear in it.
+    seen: dict = {}
 
     for ax, encoder in zip(axes, encoders):
         ax.set_facecolor(_SURFACE)
-        by_recipe = collections.defaultdict(list)
+        by_line = collections.defaultdict(list)
         for r in rows:
             if encoder_of(r['method']) == encoder:
-                by_recipe[head_recipe_of(r['method'])].append(r)
-        for recipe, recipe_rows in sorted(by_recipe.items()):
-            recipe_rows.sort(key=lambda r: r['rung'])
+                recipe = head_recipe_of(r['classifier'], r['reduction'])
+                by_line[(recipe, r['loss'])].append(r)
+        for (recipe, loss), line_rows in sorted(by_line.items()):
+            line_rows.sort(key=lambda r: r['rung'])
             color = HEAD_RECIPE_COLORS.get(recipe, _INK_SECONDARY)
-            ax.plot([r['rung'] for r in recipe_rows],
-                    [r['level_accuracy'] for r in recipe_rows],
+            # baseline (KnnEstMpp) has no loss at all -- dashed regardless,
+            # same as before this change; every classifier row's linestyle
+            # comes from ITS OWN loss instead (`head_recipe_of`'s own
+            # docstring: colour is head identity, loss is the line).
+            style = '--' if recipe == 'baseline' else LOSS_LINESTYLES.get(loss, '-')
+            label = recipe if loss in ('', 'bal') else f'{recipe} ({loss})'
+            ax.plot([r['rung'] for r in line_rows],
+                    [r['level_accuracy'] for r in line_rows],
                     color=color, linewidth=2, marker='o', markersize=8,
-                    linestyle='--' if recipe == 'baseline' else '-',
-                    label=recipe)
-            if recipe not in seen_recipes:
-                seen_recipes.append(recipe)
+                    linestyle=style, label=label)
+            seen[(recipe, loss)] = (color, style, label)
         ax.set_xscale('log', base=2)
         ax.set_xticks(RUNGS)
         ax.set_xticklabels([f'{int(r)}' for r in RUNGS], color=_INK_SECONDARY)
@@ -395,10 +474,9 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
         ax.tick_params(colors=_AXIS, labelcolor=_INK_SECONDARY)
 
     axes[0].set_ylabel('level accuracy', color=_INK_SECONDARY, fontsize=9)
-    handles = [plt.Line2D([0], [0], color=HEAD_RECIPE_COLORS.get(r, _INK_SECONDARY),
-                          linewidth=2, marker='o', markersize=6,
-                          linestyle='--' if r == 'baseline' else '-', label=r)
-              for r in seen_recipes]
+    handles = [plt.Line2D([0], [0], color=color, linewidth=2, marker='o',
+                          markersize=6, linestyle=style, label=label)
+              for color, style, label in seen.values()]
     fig.legend(handles=handles, loc='lower center', ncol=min(len(handles), 5),
               bbox_to_anchor=(0.5, 0.0), frameon=False,
               fontsize=9, labelcolor=_INK_SECONDARY)

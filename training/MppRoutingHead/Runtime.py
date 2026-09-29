@@ -27,12 +27,13 @@ from typing import Dict, List
 # for this file. Same idiom every test_modules/cli entry point uses.
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', 'utilities'))
-from _paths import setup_import_paths                                   # noqa: E402
+from _paths import setup_import_paths                                  # noqa: E402
 setup_import_paths()
 
 import torch                                                        # noqa: E402
 
-from Datasets import RUNGS, RenderConfig, iterate_epoch             # noqa: E402
+from training.MppRoutingHead.Datasets import (                      # noqa: E402
+    RUNGS, RenderConfig, iterate_epoch)
 from Heads import ArcFaceHead, HeadConfig, LinearHead, MlpHead       # noqa: E402
 from Head import Head, grid_view, pooled_view                       # noqa: E402
 from Features import encode_raw, normalise_patches, trunk_raw       # noqa: E402
@@ -95,6 +96,8 @@ HEAD_CHOICES = {
                       dict(mlp_depth=2, mlp_width_mult=2)),
     'mlp_deep_residual': ('fixed', MlpHead, (2, 3),
                       dict(mlp_depth=2, mlp_residual=True)),
+    'mlp_narrow':    ('fixed', MlpHead,     (2, 3),
+                      dict(mlp_width_mult=0.5)),  # narrower than in_dim, not wider
     'attn_linear':   ('attn',  LinearHead,  (2, 3), {}),  # 2-6/3-3  learnable pool
     'arcface':       ('fixed', ArcFaceHead, (2,),   {}),  # 2-3      angular margin
 }
@@ -192,7 +195,7 @@ def score(pred_class: torch.Tensor, true_class: torch.Tensor,
     ratio, leaving `|RUNGS[pred] - RUNGS[true]| / RUNGS[true]`. That is the
     same quantity the KNN bench reports, restricted to a discrete ladder.
 
-    `native` (`Datasets._render_row`'s third element,
+    `native` (`Datasets.render_row`'s third element,
     `QueryFromWSI.reads_natively`) splits `level_accuracy` a second way, and
     the split is a CONFOUND CHECK rather than a breakdown for its own sake.
 
@@ -257,6 +260,30 @@ def rescore(detail_rows: List[Dict]) -> Dict:
                  pick('native', torch.bool))
 
 
+def rescore_by_rung(detail_rows: List[Dict]) -> Dict[float, Dict]:
+    '''`rescore` again, split by `gt_rung` -- one `score()` per rung rather
+    than one pooled over all of them.
+
+    `level_accuracy`'s single pooled number cannot show whether a SPECIFIC
+    rung is improving: `RICHNESS`'s own coarse-rung shortfall means fine
+    rungs are oversupplied relative to coarse ones, so a tile-pooled average
+    is dominated by whichever rungs happen to have the most val tiles --
+    2026-09-19's own finding was a run posting ~90% pooled while its worst
+    rung sat under 10% the entire time, invisible in that one number. This
+    is the one place a rung's own trajectory across epochs can be read at
+    all, which is what decides whether `--loss ord_a`/`ord_b` are actually
+    helping the rungs they target rather than moving the pooled average by
+    accident.
+
+    Caller filters by dataset FIRST, same reasoning `rescore`'s own
+    docstring gives for native/resampled: a rung's accuracy is only
+    comparable within one dataset, since which rungs are native differs by
+    pyramid and a resampled rung is a harder question than a native one.
+    '''
+    return {rung: rescore([r for r in detail_rows if r['gt_rung'] == rung])
+            for rung in RUNGS}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  running a split
 # ══════════════════════════════════════════════════════════════════════════
@@ -280,7 +307,7 @@ def predict(rows, heads: Dict[str, Head], raw_of, num_prefix: int, *,
     The caller decides whether to write them -- the training loop discards its
     copy, `cli/evaluate.py` writes them out.
 
-    NOTHING IS CACHED. `split='eval'` makes `_render_row` seed its rng from the
+    NOTHING IS CACHED. `split='eval'` makes `render_row` seed its rng from the
     row's own identity, so the same position renders the same pixels on every
     call -- which is what a val curve and a reported test number both need, and
     it is a SEED rather than a stored corpus.

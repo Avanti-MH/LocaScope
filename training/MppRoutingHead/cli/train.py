@@ -19,12 +19,14 @@
 THREE SPLITS, SPLIT BY WSI
 ---------------------------
     train   ki67_pure, every WSI
-    val     `--val-n-wsi` (10) WSIs from EACH of the eval datasets
+    val     10 WSIs from EACH of the eval datasets (make_split.py --val-n-wsi)
     test    the rest of those datasets -- NOT touched here at all
 
-The val half is drawn per dataset by `Datasets.split_wsi_names` and written to
-`wsi_split.csv`, so which slides were held out is a recorded fact rather than a
-consequence of `--seed`. Val spans BOTH eval datasets on purpose: selecting on
+The val half is drawn per dataset by `utilities/cli/build_cache/make_split.py`
+(run it first) and recorded in `result/cache/<job>_split/<dataset>/
+wsi_split.csv`, so which slides
+were held out is a recorded fact rather than a consequence of `--seed` -- and
+the same fact for every package that reads it. Val spans BOTH eval datasets on purpose: selecting on
 it selects for cross-dataset generalisation, which is what this package is for.
 
 Scoring the test split is `cli/evaluate.py`'s job, off a saved checkpoint.
@@ -33,8 +35,13 @@ once per training run.
 
 WHAT THIS WRITES
 -----------------
-    weights/<encoder>_<frozen|finetuned>_<head>_<last|best>.pt
+    weights/<encoder>_<frozen|finetuned>_<head>[_<loss>]_<last|best>.pt
     val_scores.csv      one row per (head, epoch)
+    sampler_reports/<dataset>_<split>/sampler_report_<slide>.md + samples_<slide>.csv
+
+Positions are drawn per slide through `TileSampler.cached`: masks into
+result/cache/<--mask-cache-job>_mask/, draws into <--sampler-cache-job>_sampler/
+(`--seg`, default hest; `Datasets.add_cache_args`).
 
 Optionally also one wandb run per MODEL (one per baseline-2 encoder, one per
 baseline-3 head -- see `Runtime.wandb_init`), logging the SAME rows that go
@@ -79,7 +86,7 @@ import os
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 # _paths holds the one definition of every package's sys.path entry
 # (setup_import_paths) -- utilities/ goes on the path here, by hand, because
@@ -87,72 +94,78 @@ from typing import Dict, List
 # for this file. Same idiom every test_modules/cli entry point uses.
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'utilities'))
-from _paths import setup_import_paths                                   # noqa: E402
+from _paths import setup_import_paths                                  # noqa: E402
 setup_import_paths()
 
 import torch                                                        # noqa: E402
 import torch.nn.functional as F                                     # noqa: E402
 
 import _paths                                                       # noqa: E402
-from Datasets import (NUM_CLASSES, RUNGS, RenderConfig,             # noqa: E402
-                      build_manifest, class_weights, iterate_epoch,
-                      manifest_parts, manifest_path, read_manifest,
-                      write_manifest, write_manifest_key, wsi_split)
+from training.MppRoutingHead.Datasets import (                      # noqa: E402
+    NUM_CLASSES, RUNGS, RenderConfig, add_cache_args, build_manifest,
+    class_weights, iterate_epoch, open_caches)
+from WsiSplit import read_split, split_path                          # noqa: E402
 from Heads import HeadConfig                                        # noqa: E402
-from Runtime import (BASELINE3_ENCODER, HEAD_CHOICES, encode_raw,   # noqa: E402
-                     heads_for, predict, rescore, save_checkpoint,
-                     trunk_raw, wandb_epoch_metrics, wandb_finish,
-                     wandb_init, wandb_log, weight_filename)
+from training.MppRoutingHead.Runtime import (                       # noqa: E402
+    BASELINE3_ENCODER, HEAD_CHOICES, encode_raw, heads_for, predict,
+    rescore, rescore_by_rung, save_checkpoint, trunk_raw,
+    wandb_epoch_metrics, wandb_finish, wandb_init, wandb_log, weight_filename)
 from Head import Head                                                # noqa: E402
+from Resume import ResumeFile, resume_identity                       # noqa: E402
+
+#: Arguments that change where output goes, how many epochs in total, how it is
+#: logged, or which models this invocation covers -- not what one model IS.
+#: `resume_identity` leaves them out.
+_NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
+                 'wandb_mode', 'run_name', 'merge', 'num_workers', 'encoders',
+                 'heads', 'baseline', 'encode_batch', 'mask_cache_job',
+                 'sampler_cache_job', 'split_cache_job')
+
+
+def _resume_name(baseline: int, encoder_name: str, loss: str, head: str = '') -> str:
+    '''The resume unit: baseline 2 is one ENCODER with every head it feeds
+    (one shared forward, one shared epoch loop), baseline 3 one HEAD with its
+    own fine-tuned trunk.'''
+    loss_seg = '' if loss == 'bal' else f'_{loss}'
+    return (f'b2_{encoder_name}_frozen{loss_seg}' if baseline == 2 else
+            f'b3_{encoder_name}_finetuned_{head}{loss_seg}')
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  manifests -- the only thing this package persists, and it holds no pixels
+#  positions -- drawn per slide through TileSampler.cached, which is the only
+#  thing this package persists, and it holds no pixels
 # ══════════════════════════════════════════════════════════════════════════
 
-def _manifest(ddir, split: str, parts, build) -> List:
-    '''Read the manifest this key names, or build and write it. The key is a
-    hash of everything the content depends on (`manifest_parts`), so a changed
-    `--tile`/`--seed`/`--n-per-rung` cannot land on a stale file.'''
-    path = manifest_path(ddir, split, parts)
-    if path.exists():
-        return read_manifest(path)
-    rows = build()
-    write_manifest(rows, path)
-    write_manifest_key(path, parts)
-    return rows
+def _report_dir(out_dir, dataset_id: str, split: str) -> Path:
+    return Path(out_dir) / 'sampler_reports' / f'{dataset_id.replace("/", "_")}_{split}'
 
 
-def train_rows(args, cache_root) -> List:
+def train_rows(args, caches, out_dir) -> List:
     '''Positions only -- the pixels are rendered fresh every epoch (spec.md,
     "Camera: train vs eval"), so there is nothing here to go stale.'''
-    ddir = cache_root / args.train_dataset.replace('/', '_')
-    parts = manifest_parts(dataset_id=args.train_dataset, tile_size=args.tile,
-                           n_per_rung=args.n_per_rung, seed=args.seed,
-                           max_wsi=args.max_wsi)
-    rows = _manifest(ddir, 'train', parts, lambda: build_manifest(
-        args.train_dataset, tile_size=args.tile, n_per_rung=args.n_per_rung,
-        seed=args.seed, max_wsi=args.max_wsi))
+    rows = build_manifest(
+        args.train_dataset, masks=caches.masks,
+        sampler_root=caches.sampler_root,
+        report_dir=_report_dir(out_dir, args.train_dataset, 'train'),
+        tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
+        max_wsi=args.max_wsi)
     print(f'[train] {args.train_dataset}: {len(rows)} positions', flush=True)
     return rows
 
 
-def val_rows(args, cache_root) -> List:
-    '''The val halves of every eval dataset, concatenated. The split itself is
-    recorded next to the manifest (`wsi_split.csv`) rather than left implicit
-    in `--seed`, and an EXISTING record is reused rather than re-derived --
-    see `Datasets.wsi_split`.'''
+def val_rows(args, caches, out_dir) -> List:
+    '''The val halves of every eval dataset, concatenated. The split is READ
+    (`WsiSplit.read_split`), never derived here -- `make_split.py` is the
+    one place that writes it.'''
     rows: List = []
     for dataset_id in args.eval_datasets:
-        ddir = cache_root / dataset_id.replace('/', '_')
-        val_names, test_names = wsi_split(dataset_id, args.val_n_wsi,
-                                          ddir / 'wsi_split.csv', seed=args.seed)
-        parts = manifest_parts(dataset_id=dataset_id, tile_size=args.tile,
-                               n_per_rung=args.val_n_per_rung, seed=args.seed,
-                               n_wsi=args.val_n_wsi, wsi_names=val_names)
-        part = _manifest(ddir, 'val', parts, lambda: build_manifest(
-            dataset_id, tile_size=args.tile, n_per_rung=args.val_n_per_rung,
-            seed=args.seed, wsi_names=val_names))
+        val_names, test_names = read_split(
+            split_path(caches.split_job, dataset_id))
+        part = build_manifest(
+            dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
+            report_dir=_report_dir(out_dir, dataset_id, 'val'),
+            tile_size=args.tile, n_per_rung=args.val_n_per_rung,
+            seed=args.seed, wsi_names=val_names)
         print(f'[val]   {dataset_id}: {len(part)} positions from '
               f'{len(val_names)} WSIs ({len(test_names)} held back for test)',
               flush=True)
@@ -167,7 +180,7 @@ def val_rows(args, cache_root) -> List:
 def print_composition(rows, seen_class, native_class) -> None:
     '''What the epoch was actually MADE OF -- neither number is in the
     manifest, because both are decided at render time. `trained on` counts what
-    survived the off-slide drop (`_render_row` returns None near a region edge
+    survived the off-slide drop (`render_row` returns None near a region edge
     and `collate_routing_batch` drops it, silently); `native` says how much came
     off a pyramid level at the requested mpp rather than being resampled down
     (see `Runtime.score`). Printed rather than assumed: the training set being
@@ -190,15 +203,39 @@ def print_class_weights(weights) -> None:
           flush=True)
 
 
-def val_report(val: Dict[str, Dict], detail: Dict[str, List[Dict]],
-               datasets: List[str], epoch: int, epochs: int,
-               losses: Dict[str, float], **identity) -> List[Dict]:
+#: Field width for a head NAME column in the prints below -- wide enough
+#: for the longest registered `HEAD_CHOICES` key (`mlp_deep_residual`, 17
+#: chars) plus a margin, so a name never runs longer than its field.
+#: STILL followed by an explicit literal space at every call site, never
+#: relied on alone -- `f'{name:_NAME_W}s'` does not TRUNCATE a name that
+#: somehow exceeds this width, it just stops padding, so a name and the
+#: field after it would glue together with no separator at all if the
+#: field boundary were the only thing keeping them apart. This is exactly
+#: the 2026-09-20 bug this fixes: `f'{name:12s}{dataset_id:17s}'` (no space
+#: between the two fields) printed `mlp_deep_residualbracs/test` once
+#: `name` (17 chars) exceeded the old 12-char field.
+_NAME_W = 18
+
+
+def val_report(name: str, combined: Dict, rows: List[Dict],
+               datasets: List[str], epoch: int, epochs: int, loss: float,
+               **identity) -> List[Dict]:
     '''Print the val line and return the CSV rows -- one per dataset plus an
-    `all` row, per head. MUTATES `combined` (i.e. `val[name]`) to add
-    `level_accuracy_unweighted` -- `save_tagged` reads it back off the same
-    dict `run_baseline2`/`run_baseline3` already hold, rather than this
-    function returning a second value every call site would have to thread
-    through.
+    `all` row, for ONE head. Called once per head, from a loop the CALLER
+    owns (`run_baseline2`'s `for name in heads`, `run_baseline3`'s own
+    `for name in names`) -- NOT looped over every head internally the way
+    this function did before 2026-09-20, because that shape is what put
+    the print for `rung_report`'s ENTIRE pass after `val_report`'s entire
+    pass: every head's val block, then every head's rung block, so by the
+    time a head's rung breakdown printed, its own val block could be many
+    lines above with nothing on screen saying which head the numbers in
+    between belonged to. The caller now calls `val_report` THEN
+    `rung_report` for the SAME head before moving to the next one.
+
+    MUTATES `combined` to add `level_accuracy_unweighted` -- `save_tagged`
+    reads it back off the same dict `run_baseline2`/`run_baseline3` already
+    hold, rather than this function returning a second value every call
+    site would have to thread through.
 
     PER DATASET, not only combined. `level_accuracy_native` against
     `level_accuracy_resampled` is the check for whether a head is scoring on
@@ -207,97 +244,112 @@ def val_report(val: Dict[str, Dict], detail: Dict[str, List[Dict]],
     datasets together the "native" side is BRACS's native rungs plus all of
     Ki67 while the "resampled" side is BRACS alone.
 
-    TWO `all` NUMBERS, not one -- `level_accuracy` (pooled: every val example
-    from both datasets scored together, so a dataset with more val positions
-    gets proportionally more say -- 2026-09-18, BRACS had 1094 against Ki67's
-    847) and `level_accuracy_unweighted` (the plain mean of each dataset's
-    OWN accuracy, so both count equally regardless of how many positions
-    either happened to contribute). `save_tagged` selects `_best.pt` on the
-    first and `_best_unweighted.pt` on the second -- see
-    `Checkpoints.weight_filename`'s own docstring for why two files rather
-    than a knob.
+    TWO `all` NUMBERS, not one. Each dataset's OWN `level_accuracy` here is
+    the plain mean of its six rungs' own accuracies (not pooled over its
+    tiles -- 2026-09-20, `rescore(dataset_rows)`'s pooled-per-tile number is
+    computed and then DISCARDED, `per_rung`'s mean used instead: RICHNESS's
+    coarse-rung shortfall means a tile-pooled average is dominated by
+    whichever rungs happen to have the most val tiles, exactly
+    `rescore_by_rung`'s own "90% pooled while the worst rung sat under 10%"
+    finding). `level_accuracy` ("all, n-weighted") then combines those SIX-
+    RUNG-AVERAGED per-dataset numbers weighted by each dataset's own total n
+    -- so a dataset with more val positions still gets proportionally more
+    say (2026-09-18, BRACS had 1094 against Ki67's 847), just no longer at
+    the tile level. `level_accuracy_unweighted` ("all, dataset-avg") is the
+    plain mean of the two dataset numbers instead, so both datasets get
+    equal say regardless of n. `save_tagged` selects `_best.pt` on the first
+    and `_best_unweighted.pt` on the second -- see `Checkpoints.
+    weight_filename`'s own docstring for why two files rather than a knob
+    (that docstring's own "pooled" wording is stale the same way this one
+    was; not fixed here since it lives in the generic layer, shared with
+    `PrototypicalRoutingHead`'s checkpoint code).
+    '''
+    per_dataset = []
+    for dataset_id in datasets:
+        dataset_rows = [row for row in rows if row['dataset'] == dataset_id]
+        result = rescore(dataset_rows)
+        per_rung = rescore_by_rung(dataset_rows)
+        # 單一 dataset 的 acc = 六個 rung accuracy 直接平均
+        result['level_accuracy'] = sum(
+            per_rung[rung]['level_accuracy'] for rung in RUNGS) / len(RUNGS)
+        per_dataset.append((dataset_id, result))
+
+    # all, n-weighted：dataset accuracy（六個 rung 的平均）根據該 dataset 的
+    # sample 數量加權 -- 不是「所有 tile 攤平在一起」的那種 pooled 了
+    total_n = sum(r['n'] for _, r in per_dataset)
+    combined['level_accuracy'] = (
+        sum(r['n'] * r['level_accuracy'] for _, r in per_dataset) / total_n
+        if total_n else float('nan'))
+
+    # all, dataset-avg：dataset accuracy 直接平均
+    combined['level_accuracy_unweighted'] = (
+        sum(r['level_accuracy'] for _, r in per_dataset) / len(per_dataset)
+        if per_dataset else float('nan'))
+
+    print(f'    val  epoch {epoch}/{epochs}  {name:{_NAME_W}s} '
+         f'acc {combined["level_accuracy"]:.4f} (all, n-weighted)  '
+         f'{combined["level_accuracy_unweighted"]:.4f} (all, dataset-avg)',
+         flush=True)
+    out = []
+    for dataset_id, r in per_dataset:
+        print(f'         {"":{_NAME_W}s} {dataset_id:17s} '
+              f'acc {r["level_accuracy"]:.4f}  '
+              f'native {r["level_accuracy_native"]:.4f} (n={r["n_native"]})  '
+              f'resampled {r["level_accuracy_resampled"]:.4f} '
+              f'(n={r["n_resampled"]})', flush=True)
+        # `level_accuracy_unweighted` is an 'all'-row-only property (the
+        # mean ACROSS datasets), meaningless for one dataset's own row --
+        # still given a value here (NaN) so every row this function
+        # emits carries the SAME key set. csv.DictWriter derives its
+        # fieldnames from the first row it sees (`main()`'s out_rows[0]`,
+        # a per-dataset row): a later row with a key that first one
+        # lacks is a ValueError, not a wider table.
+        out.append(dict(**identity, head=name, epoch=epoch,
+                        train_loss=loss, val_dataset=dataset_id,
+                        level_accuracy_unweighted=float('nan'), **r))
+    out.append(dict(**identity, head=name, epoch=epoch,
+                    train_loss=loss, val_dataset='all', **combined))
+    return out
+
+
+def rung_report(name: str, rows: List[Dict], datasets: List[str],
+                epoch: int, **identity) -> List[Dict]:
+    '''Print the per-rung val line and return `val_scores_per_rung.csv`'s
+    rows: one per (head, val_dataset, rung). Called once per head, right
+    after that SAME head's own `val_report` call -- see `val_report`'s own
+    docstring for why the caller interleaves the two rather than calling
+    each once over every head.
+
+    `val_report`'s own `level_accuracy` pools every rung of a dataset into
+    one number, which is exactly what hides whether a specific rung is
+    improving (`rescore_by_rung`'s own docstring). This is what answers "did
+    rung 32 get better", which no column of `val_scores.csv` can -- written
+    every epoch, same as that file, so a training curve per rung is
+    possible, not just a final number.
+
+    Per dataset, never pooled across them, same reasoning as `val_report`'s
+    own per-dataset loop: which rungs are native differs by pyramid, so a
+    rung's accuracy on bracs/test and on ki67_with_photo are not the same
+    quantity even when they carry the same rung label.
     '''
     out = []
-    for name, combined in val.items():
-        rows = detail[name]
-        per_dataset = [(d, rescore([r for r in rows if r['dataset'] == d]))
-                       for d in datasets]
-        combined['level_accuracy_unweighted'] = (
-            sum(r['level_accuracy'] for _, r in per_dataset) / len(per_dataset)
-            if per_dataset else float('nan'))
-        print(f'    val  epoch {epoch}/{epochs}  {name:12s} '
-              f'acc {combined["level_accuracy"]:.4f} (all, pooled)  '
-              f'{combined["level_accuracy_unweighted"]:.4f} (all, dataset-avg)',
-              flush=True)
-        for dataset_id, r in per_dataset:
-            print(f'         {"":21s}{dataset_id:17s} '
-                  f'acc {r["level_accuracy"]:.4f}  '
-                  f'native {r["level_accuracy_native"]:.4f} (n={r["n_native"]})  '
-                  f'resampled {r["level_accuracy_resampled"]:.4f} '
-                  f'(n={r["n_resampled"]})', flush=True)
-            # `level_accuracy_unweighted` is an 'all'-row-only property (the
-            # mean ACROSS datasets), meaningless for one dataset's own row --
-            # still given a value here (NaN) so every row this function
-            # emits carries the SAME key set. csv.DictWriter derives its
-            # fieldnames from the first row it sees (`main()`'s out_rows[0]`,
-            # a per-dataset row): a later row with a key that first one
-            # lacks is a ValueError, not a wider table.
+    for dataset_id in datasets:
+        per_rung = rescore_by_rung(
+            [r for r in rows if r['dataset'] == dataset_id])
+        print(f'         {name:{_NAME_W}s} {dataset_id:17s} rung   '
+             + '  '.join(f'{r:>7g}' for r in RUNGS), flush=True)
+        print(f'         {"":{_NAME_W}s} {"":17s} acc    '
+             + '  '.join(f'{per_rung[r]["level_accuracy"]:>7.4f}'
+                         for r in RUNGS), flush=True)
+        for rung, r in per_rung.items():
             out.append(dict(**identity, head=name, epoch=epoch,
-                            train_loss=losses[name], val_dataset=dataset_id,
-                            level_accuracy_unweighted=float('nan'), **r))
-        out.append(dict(**identity, head=name, epoch=epoch,
-                        train_loss=losses[name], val_dataset='all', **combined))
+                            val_dataset=dataset_id, rung=rung, **r))
     return out
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  baseline 2: one frozen encoder, every head off its one forward pass
 # ══════════════════════════════════════════════════════════════════════════
-
-def _maybe_resume(resume_dir, encoder_name: str, frozen: bool, head_name: str,
-                  head: Head, encoder):
-    '''Loads `head` (and, for a fine-tuned run, `encoder`'s trunk) from an
-    existing `weight_filename(..., 'best')` checkpoint under `resume_dir`, if
-    one is there. Returns `(start_epoch, best, optimizer_state)`:
-
-      start_epoch       the checkpoint's own `epoch` -- callers run
-                        `range(start_epoch + 1, start_epoch + args.epochs + 1)`
-                        so `--epochs` always means "this many MORE epochs",
-                        resumed or not, and a from-scratch run (start_epoch=0)
-                        gets the exact range it always has.
-      best              the checkpoint's own val accuracy, not -1.0, so an
-                        early epoch that dips before the optimizer re-settles
-                        cannot overwrite `_best` with something worse than
-                        what was already loaded in.
-      optimizer_state   `ckpt['optimizer_state']` for the caller to
-                        `opt.load_state_dict(...)` AFTER building `opt` --
-                        this function never builds one itself. `None` for a
-                        checkpoint saved before that key existed, or when
-                        there is nothing to resume from -- either way the
-                        caller just skips the load and Adam starts fresh.
-
-    `(0, -1.0, None)` when `resume_dir` is None or has no matching file,
-    which is exactly training from scratch.
-    '''
-    if not resume_dir:
-        return 0, -1.0, None
-    path = Path(resume_dir) / weight_filename(encoder_name, frozen, head_name, 'best')
-    if not path.exists():
-        print(f'  [resume] no {path.name} in {resume_dir} -- training from scratch')
-        return 0, -1.0, None
-    ckpt = torch.load(path, map_location='cpu')
-    head.load_state_dict(ckpt['head_state'])
-    if not frozen:
-        encoder.model.load_state_dict(ckpt['trunk_state'])
-    acc = ckpt['val']['level_accuracy']
-    start_epoch = int(ckpt['epoch'])
-    opt_state = ckpt.get('optimizer_state')
-    print(f'  [resume] {head_name}: resumed from {path} (epoch {start_epoch}, '
-         f'val level_accuracy={acc:.4f}, optimizer_state='
-         f'{"yes" if opt_state is not None else "no (pre-optimizer-state checkpoint)"})',
-         flush=True)
-    return start_epoch, acc, opt_state
-
 
 def _head_cfg_for(name: str, in_dim: int, args) -> HeadConfig:
     '''`HeadConfig` for one head NAME -- reads `HEAD_CHOICES[name]`'s
@@ -318,6 +370,70 @@ def _head_cfg_for(name: str, in_dim: int, args) -> HeadConfig:
         mlp_width=mlp_width,
         mlp_residual=overrides.get('mlp_residual', args.mlp_residual),
         mlp_dropout=args.mlp_dropout)
+
+
+def _compute_loss(logits: torch.Tensor, target: torch.Tensor, weights,
+                  loss_kind: str, ordinal_weight: float,
+                  ordinal_sigma: float) -> torch.Tensor:
+    '''`spec.md`'s "Ordinal-aware loss" section, formulas 2/3a/3b, as one
+    switch so both baselines' training loops share it rather than each
+    growing their own copy.
+
+        L_bal   = -w_y log p_y                              (today's default)
+        L_ord_a = L_bal + lambda * sum_i w_i (E_c[ell_c] - ell_y)^2 / sum_i w_i
+                                                     (regression term, class-weighted)
+        L_ord_b = w_y * (-sum_c q_c(y) log p_c)              (soft target)
+
+    `ell_c = log2(rung_c)`, matching `analyze_stage1_metrics.nearest_rung`'s
+    own reasoning that pyramid scales are geometric, not linear. `ord_b`
+    REPLACES the CE target rather than adding to it -- `q_c(y)` already
+    carries `w_y` outside the sum (the class weight scales the whole
+    per-sample loss, the same normalisation `F.cross_entropy(weight=...)`
+    uses: divide by the batch's SUMMED weight, not by N), so there is no
+    separate `L_bal` term added underneath it the way `ord_a` does.
+
+    `loss_kind='bal'` ignores `ordinal_weight`/`ordinal_sigma` entirely and
+    is exactly the `F.cross_entropy(logits, target, weight=weights)` call
+    this replaces -- a run that never passes `--loss` is byte-for-byte the
+    old behaviour.
+    '''
+    if loss_kind == 'bal':
+        return F.cross_entropy(logits, target, weight=weights)
+
+    log2_rungs = torch.log2(
+        torch.tensor(RUNGS, dtype=torch.float32, device=logits.device))
+
+    if loss_kind == 'ord_a':
+        l_bal = F.cross_entropy(logits, target, weight=weights)
+        probs = F.softmax(logits.float(), dim=-1)
+        expected_log_rung = (probs * log2_rungs).sum(dim=-1)
+        true_log_rung = log2_rungs[target]
+        # Class-weighted like L_bal (2026-09-24). Unweighted, the regression
+        # term is a plain mean over the batch, and rung 32 -- 0.3 per cent of
+        # the training manifest -- would barely move it.
+        sq = (expected_log_rung - true_log_rung).pow(2)
+        if weights is None:
+            l_ord = sq.mean()
+        else:
+            w = weights[target]
+            l_ord = (w * sq).sum() / w.sum()
+        return l_bal + ordinal_weight * l_ord
+
+    if loss_kind == 'ord_b':
+        # [N, K] squared log2-rung distance from each sample's true rung to
+        # every rung, then a softmax turns "closer" into "more soft-target
+        # mass" -- sigma->0 collapses this to one-hot, i.e. L_bal's own
+        # target, which is why 'bal' (not sigma=0) is the off switch.
+        dist2 = (log2_rungs.unsqueeze(0) - log2_rungs[target].unsqueeze(1)).pow(2)
+        soft_target = F.softmax(-dist2 / (2 * ordinal_sigma ** 2), dim=-1)
+        log_probs = F.log_softmax(logits.float(), dim=-1)
+        per_sample = -(soft_target * log_probs).sum(dim=-1)
+        if weights is None:
+            return per_sample.mean()
+        w = weights[target]
+        return (w * per_sample).sum() / w.sum()
+
+    raise ValueError(f'unknown --loss {loss_kind!r}')
 
 
 def _clip_grad(opt, max_norm: float) -> None:
@@ -351,12 +467,9 @@ def _apply_warmup(opt, epoch: int, warmup_epochs: int, base_lrs: List[float]) ->
     target, and the ramp would decay toward zero instead of climbing to it.
 
     Call at the TOP of each epoch, before that epoch's batch loop -- one
-    call per epoch, not per batch; the ramp is epoch-grained; and on a
-    RESUMED run `epoch` starts above `warmup_epochs` already (`_maybe_resume`
-    returns the checkpoint's own `epoch`, and training continues from
-    `epoch + 1`), so this is naturally a no-op for a resumed head, which is
-    correct -- it is not freshly initialised, so there is nothing for
-    warmup to protect it from.
+    call per epoch, not per batch; the ramp is epoch-grained. A RESUMED run
+    continues from the epoch after the saved one, so it ramps exactly where the
+    uninterrupted run would have been.
     '''
     if warmup_epochs <= 0 or epoch > warmup_epochs:
         return
@@ -365,12 +478,12 @@ def _apply_warmup(opt, epoch: int, warmup_epochs: int, base_lrs: List[float]) ->
         group['lr'] = base_lr * scale
 
 
-def run_baseline2(args, encoder_name: str, cache_root, out_dir,
-                  device) -> List[Dict]:
+def run_baseline2(args, encoder_name: str, caches, out_dir,
+                  device) -> Tuple[List[Dict], List[Dict]]:
     from TileEncoderFunc import encoder_config                   # noqa: PLC0415
     names = heads_for(args.heads, 2)
     if not names:
-        return []
+        return [], []
     # `--dtype` governs the FROZEN ENCODER's inference precision here --
     # fp16 forward, no gradient, the same case `TileEncoderFunc` was built for
     # (cos=0.99995 against fp32, log/TODO.log). It does NOT reach `head_cfg`
@@ -408,38 +521,44 @@ def run_baseline2(args, encoder_name: str, cache_root, out_dir,
     print(f'baseline 2  {encoder_name}  dim={spec.dim} kind={spec.kind} '
           f'num_prefix={num_prefix}  (frozen)', flush=True)
 
-    rows, vrows = train_rows(args, cache_root), val_rows(args, cache_root)
+    rows = train_rows(args, caches, out_dir)
+    vrows = val_rows(args, caches, out_dir)
+    caches.masks.close()        # the segmenter is not needed past here
     # Fixed for the whole run -- see Datasets.class_weights. `weights=None`
     # under --class-weight none restores plain unweighted cross_entropy.
     weights = class_weights(rows, device) if args.class_weight == 'balanced' else None
     if weights is not None:
         print_class_weights(weights)
-    resumed = {n: _maybe_resume(args.resume_dir, encoder_name, True, n, h, encoder)
-              for n, h in heads.items()}
-    # (best_pooled, best_unweighted) -- a resumed checkpoint only recorded
-    # the pooled val accuracy (`_maybe_resume` reads `ckpt['val']
-    # ['level_accuracy']`), so best_unweighted always restarts at -1.0 even
-    # on resume; see save_tagged's own docstring for what the two track.
-    best = {n: (r[1], -1.0) for n, r in resumed.items()}
+    # (best_n_weighted, best_unweighted) per head -- see save_tagged.
+    best = {n: (-1.0, -1.0) for n in names}
     opts = {n: torch.optim.Adam(h.parameters(), lr=args.lr)
             for n, h in heads.items()}
-    for n, (_, _, opt_state) in resumed.items():
-        if opt_state is not None:
-            opts[n].load_state_dict(opt_state)
-    # Captured BEFORE any warmup call ever overwrites `param_group['lr']` --
-    # see `_apply_warmup`'s own docstring for why.
+    # Captured BEFORE any warmup call or resume overwrites `param_group['lr']`
+    # -- see `_apply_warmup`'s own docstring for why.
     base_lrs = {n: [g['lr'] for g in opt.param_groups] for n, opt in opts.items()}
-    # ONE shared epoch loop below covers every head trained off this
-    # encoder, so a single starting point has to serve all of them -- the
-    # FURTHEST-ALONG head's own epoch, so a head resumed from an earlier
-    # checkpoint gets a few epochs of harmless catch-up rather than rolling
-    # the whole loop (and every other head) back to its own earlier point.
-    start_epoch = max((r[0] for r in resumed.values()), default=0)
-    end_epoch = start_epoch + args.epochs   # "epoch N/end_epoch" reads right
-                                            # whether this run started at 0
-                                            # or resumed partway in
-    raw_of = lambda p: encode_raw(encoder, p, args.encode_batch, device)  # noqa: E731
     out: List[Dict] = []
+    out_rung: List[Dict] = []
+
+    # RESUME: one file for the encoder and every head it feeds, since they
+    # share one forward and one epoch loop (Resume.py has the rule).
+    resume = ResumeFile.for_model(args.resume_dir,
+                                  _resume_name(2, encoder_name, args.loss))
+    identity = dict(resume_identity(args, _NOT_IDENTITY), baseline=2,
+                    encoder=encoder_name, heads=list(names))
+    start_epoch = 0
+    state = resume.load(identity)
+    if state is not None:
+        ResumeFile.restore(state, modules=heads, optimizers=opts)
+        start_epoch = int(state['epoch'])
+        best = state['best']
+        out, out_rung = state['extra']
+        print(f'  [resume] {resume.path}: continuing after epoch {start_epoch} '
+              f'of {args.epochs}', flush=True)
+    elif resume.enabled:
+        print(f'  [resume] no {resume.path.name} yet -- training from scratch, '
+              f'writing it every epoch', flush=True)
+    end_epoch = args.epochs
+    raw_of = lambda p: encode_raw(encoder, p, args.encode_batch, device)  # noqa: E731
 
     # ONE run for this encoder, covering every head trained off it -- see
     # `Runtime.wandb_init`'s docstring for why the boundary is per encoder
@@ -448,12 +567,13 @@ def run_baseline2(args, encoder_name: str, cache_root, out_dir,
     wb = wandb_init(args.wandb_project, args.wandb_mode, run_name, config=dict(
         baseline=2, encoder=encoder_name, heads=names,
         encoder_dtype=args.dtype, head_dtype='fp32',
-        class_weight=args.class_weight,
+        class_weight=args.class_weight, loss=args.loss, seg=args.seg,
+        ordinal_weight=args.ordinal_weight, ordinal_sigma=args.ordinal_sigma,
         lr=args.lr, epochs=args.epochs, n_per_rung=args.n_per_rung,
         tile=args.tile, batch_size=args.batch_size, seed=args.seed,
         train_dataset=args.train_dataset, eval_datasets=args.eval_datasets))
 
-    for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
+    for epoch in range(start_epoch + 1, end_epoch + 1):
         for n, opt in opts.items():
             _apply_warmup(opt, epoch, args.warmup_epochs, base_lrs[n])
         for head in heads.values():
@@ -474,8 +594,9 @@ def run_baseline2(args, encoder_name: str, cache_root, out_dir,
             native_class += torch.bincount(batch['labels'][batch['native']],
                                            minlength=NUM_CLASSES)
             for name, head in heads.items():
-                loss = F.cross_entropy(head(raw, num_prefix, target), target,
-                                       weight=weights)
+                loss = _compute_loss(head(raw, num_prefix, target), target,
+                                     weights, args.loss, args.ordinal_weight,
+                                     args.ordinal_sigma)
                 opts[name].zero_grad()
                 loss.backward()
                 _clip_grad(opts[name], args.clip_grad_norm)
@@ -495,26 +616,38 @@ def run_baseline2(args, encoder_name: str, cache_root, out_dir,
                               wsi_group_size=args.wsi_group_size,
                               batch_size=args.batch_size,
                               num_workers=args.num_workers)
-        epoch_rows = val_report(val, detail, args.eval_datasets, epoch,
-                                end_epoch,
-                                losses={n: t[0] / max(t[1], 1)
-                                        for n, t in totals.items()},
-                                baseline=2, encoder=encoder_name)
+        # PER HEAD, val_report then rung_report for the SAME head before
+        # moving to the next one -- see val_report's own docstring for why.
+        epoch_rows: List[Dict] = []
+        epoch_rung_rows: List[Dict] = []
+        for name in heads:
+            epoch_rows += val_report(
+                name, val[name], detail[name], args.eval_datasets, epoch,
+                end_epoch, totals[name][0] / max(totals[name][1], 1),
+                baseline=2, encoder=encoder_name, loss_kind=args.loss,
+                seg=args.seg)
+            epoch_rung_rows += rung_report(
+                name, detail[name], args.eval_datasets, epoch,
+                baseline=2, encoder=encoder_name, loss_kind=args.loss,
+                seg=args.seg)
         out += epoch_rows
+        out_rung += epoch_rung_rows
         wandb_log(wb, epoch, wandb_epoch_metrics(epoch_rows))
         for name, head in heads.items():
             best[name] = save_tagged(out_dir, head, encoder, encoder_name, True,
                                      name, head_cfgs[name], args, epoch, val[name],
                                      best[name], opts[name])
+        resume.save(identity, epoch=epoch, modules=heads, optimizers=opts,
+                    best=best, extra=(out, out_rung))
     wandb_finish(wb)
-    return out
+    return out, out_rung
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  baseline 3: the trunk is fine-tuned, so every head gets its OWN copy
 # ══════════════════════════════════════════════════════════════════════════
 
-def run_baseline3(args, cache_root, out_dir, device) -> List[Dict]:
+def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]]:
     '''ONE INDEPENDENT RUN PER HEAD, not one loop over several heads sharing a
     trunk. Baseline 2's heads share an encoder pass because the encoder is
     frozen; here each head's gradient moves the trunk a different way, so
@@ -524,14 +657,17 @@ def run_baseline3(args, cache_root, out_dir, device) -> List[Dict]:
     from TileEncoderFunc import encoder_config                   # noqa: PLC0415
     names = heads_for(args.heads, 3)
     if not names:
-        return []
-    rows, vrows = train_rows(args, cache_root), val_rows(args, cache_root)
+        return [], []
+    rows = train_rows(args, caches, out_dir)
+    vrows = val_rows(args, caches, out_dir)
+    caches.masks.close()        # the segmenter is not needed past here
     # Fixed for the whole run and the SAME across heads (all trained off the
     # same `rows`) -- computed once here rather than per head.
     weights = class_weights(rows, device) if args.class_weight == 'balanced' else None
     if weights is not None:
         print_class_weights(weights)
     out: List[Dict] = []
+    out_rung: List[Dict] = []
 
     for name in names:
         reduction, classifier = HEAD_CHOICES[name][:2]
@@ -556,12 +692,8 @@ def run_baseline3(args, cache_root, out_dir, device) -> List[Dict]:
               f'classifier={classifier.__name__}): fine-tuning '
               f'{BASELINE3_ENCODER} dim={head_cfg.in_dim} '
               f'trunk_lr={args.trunk_lr} head_lr={args.lr}', flush=True)
-        start_epoch, best_pooled, opt_state = _maybe_resume(
-            args.resume_dir, BASELINE3_ENCODER, False, name, head, encoder)
-        # (best_pooled, best_unweighted) -- see run_baseline2's identical
-        # comment for why best_unweighted always restarts at -1.0.
-        best = (best_pooled, -1.0)
-        end_epoch = start_epoch + args.epochs
+        best = (-1.0, -1.0)     # (best_n_weighted, best_unweighted)
+        end_epoch = args.epochs
 
         # Two param groups: a trunk pretrained on natural images and a head
         # initialised at random do not want the same step size -- the standard
@@ -570,11 +702,29 @@ def run_baseline3(args, cache_root, out_dir, device) -> List[Dict]:
             {'params': encoder.model.parameters(), 'lr': args.trunk_lr},
             {'params': head.parameters(), 'lr': args.lr},
         ])
-        if opt_state is not None:
-            opt.load_state_dict(opt_state)
-        # Captured BEFORE any warmup call ever overwrites `param_group['lr']`
-        # -- see `_apply_warmup`'s own docstring for why.
+        # Captured BEFORE any warmup call or resume overwrites
+        # `param_group['lr']` -- see `_apply_warmup`'s own docstring for why.
         base_lrs = [g['lr'] for g in opt.param_groups]
+
+        modules = {'head': head, 'trunk': encoder.model}
+        resume = ResumeFile.for_model(
+            args.resume_dir, _resume_name(3, BASELINE3_ENCODER, args.loss, name))
+        identity = dict(resume_identity(args, _NOT_IDENTITY), baseline=3,
+                        encoder=BASELINE3_ENCODER, head=name)
+        start_epoch = 0
+        head_rows: List[Dict] = []
+        head_rung_rows: List[Dict] = []
+        state = resume.load(identity)
+        if state is not None:
+            ResumeFile.restore(state, modules=modules, optimizers={'adam': opt})
+            start_epoch = int(state['epoch'])
+            best = tuple(state['best'])
+            head_rows, head_rung_rows = state['extra']
+            print(f'  [resume] {resume.path}: continuing after epoch '
+                  f'{start_epoch} of {args.epochs}', flush=True)
+        elif resume.enabled:
+            print(f'  [resume] no {resume.path.name} yet -- training from '
+                  f'scratch, writing it every epoch', flush=True)
         raw_of = lambda p: trunk_raw(encoder, p, device)          # noqa: E731
 
         # ONE run for this head -- it owns its own trunk/optimizer/epoch loop,
@@ -587,7 +737,8 @@ def run_baseline3(args, cache_root, out_dir, device) -> List[Dict]:
         wb = wandb_init(args.wandb_project, args.wandb_mode, run_label, config=dict(
             baseline=3, encoder=BASELINE3_ENCODER, head=name, reduction=reduction,
             classifier=classifier.__name__, trunk_dtype='fp32', head_dtype='fp32',
-            class_weight=args.class_weight,
+            class_weight=args.class_weight, loss=args.loss, seg=args.seg,
+            ordinal_weight=args.ordinal_weight, ordinal_sigma=args.ordinal_sigma,
             lr=args.lr, trunk_lr=args.trunk_lr, epochs=args.epochs,
             n_per_rung=args.n_per_rung, tile=args.tile, batch_size=args.batch_size,
             seed=args.seed, train_dataset=args.train_dataset,
@@ -608,8 +759,9 @@ def run_baseline3(args, cache_root, out_dir, device) -> List[Dict]:
                 seen_class += torch.bincount(batch['labels'], minlength=NUM_CLASSES)
                 native_class += torch.bincount(batch['labels'][batch['native']],
                                                minlength=NUM_CLASSES)
-                loss = F.cross_entropy(head(raw_of(batch['patches']), 0, target),
-                                       target, weight=weights)
+                loss = _compute_loss(head(raw_of(batch['patches']), 0, target),
+                                     target, weights, args.loss,
+                                     args.ordinal_weight, args.ordinal_sigma)
                 opt.zero_grad()
                 loss.backward()
                 _clip_grad(opt, args.clip_grad_norm)
@@ -626,16 +778,26 @@ def run_baseline3(args, cache_root, out_dir, device) -> List[Dict]:
                                   wsi_group_size=args.wsi_group_size,
                                   batch_size=args.batch_size,
                                   num_workers=args.num_workers)
-            epoch_rows = val_report(val, detail, args.eval_datasets, epoch,
-                                    end_epoch,
-                                    losses={name: total / max(seen, 1)},
-                                    baseline=3, encoder=BASELINE3_ENCODER)
-            out += epoch_rows
+            epoch_rows = val_report(
+                name, val[name], detail[name], args.eval_datasets, epoch,
+                end_epoch, total / max(seen, 1),
+                baseline=3, encoder=BASELINE3_ENCODER, loss_kind=args.loss,
+                seg=args.seg)
+            head_rows += epoch_rows
+            head_rung_rows += rung_report(
+                name, detail[name], args.eval_datasets, epoch,
+                baseline=3, encoder=BASELINE3_ENCODER, loss_kind=args.loss,
+                seg=args.seg)
             wandb_log(wb, epoch, wandb_epoch_metrics(epoch_rows))
             best = save_tagged(out_dir, head, encoder, BASELINE3_ENCODER, False,
                                name, head_cfg, args, epoch, val[name], best, opt)
+            resume.save(identity, epoch=epoch, modules=modules,
+                        optimizers={'adam': opt}, best=best,
+                        extra=(head_rows, head_rung_rows))
         wandb_finish(wb)
-    return out
+        out += head_rows
+        out_rung += head_rung_rows
+    return out, out_rung
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -647,7 +809,7 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
     improves, and `_best_unweighted` when the per-dataset-AVERAGED val
     accuracy improves -- see `val_report`'s and `Checkpoints.weight_filename`'s
     own docstrings for why these two can pick different epochs. `best` is
-    `(best_pooled, best_unweighted)` in, the same tuple (possibly updated)
+    `(best_n_weighted, best_unweighted)` in, the same tuple (possibly updated)
     out.
 
     THREE files rather than one per epoch: with `--epochs 10` and several
@@ -656,11 +818,10 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
     "the one that scored best" -- now two answers to "scored best", since
     the two weightings do not always agree.
 
-    `optimizer.state_dict()` travels with every file (`_maybe_resume` is the
-    reader) so a resumed run continues Adam's own momentum/variance instead
-    of restarting them on top of loaded weights -- the standard PyTorch
-    resume recipe (model + optimizer + epoch, saved and loaded together).'''
-    best_pooled, best_unweighted = best
+    `optimizer.state_dict()` still travels with every file, for whoever
+    wants to fine-tune from one; RESUMING a run is `--resume-dir`'s job
+    (`aiNNModel/models/common/Resume.py`), not these files'.'''
+    best_n_weighted, best_unweighted = best
     wdir = Path(out_dir) / 'weights'
     # `extra`: this package's own label-space facts, which the generic
     # checkpoint format (`aiNNModel/models/common/Checkpoints.py`) has no
@@ -678,37 +839,48 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
                   # checkpoint was actually trained against.
                   extra=dict(tile_size=args.tile, rungs=RUNGS))
     save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                           'last'), **common)
+                                           'last', loss=args.loss), **common)
 
     acc = val['level_accuracy']
-    if acc > best_pooled:
+    if acc > best_n_weighted:
         save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                               'best'), **common)
-        print(f'      new best, pooled ({acc:.4f}) -> '
-              f'{weight_filename(encoder_name, frozen, head_name, "best")}',
+                                               'best', loss=args.loss), **common)
+        print(f'      new best, n-weighted ({acc:.4f}) -> '
+              f'{weight_filename(encoder_name, frozen, head_name, "best", loss=args.loss)}',
               flush=True)
-        best_pooled = acc
+        best_n_weighted = acc
 
     acc_u = val['level_accuracy_unweighted']
     if acc_u > best_unweighted:
         save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                               'best_unweighted'), **common)
+                                               'best_unweighted', loss=args.loss), **common)
         print(f'      new best, unweighted ({acc_u:.4f}) -> '
-              f'{weight_filename(encoder_name, frozen, head_name, "best_unweighted")}',
+              f'{weight_filename(encoder_name, frozen, head_name, "best_unweighted", loss=args.loss)}',
               flush=True)
         best_unweighted = acc_u
 
-    return best_pooled, best_unweighted
+    return best_n_weighted, best_unweighted
 
 
 def _merge_val_scores(path: Path, out_rows: List[Dict]) -> List[Dict]:
-    '''Under `--merge`: `out_rows`' own `(baseline, encoder, head)` keys
-    REPLACE the matching rows already in `path` -- a rerun of one head
+    '''Under `--merge`: `out_rows`' own `(baseline, encoder, head, loss_kind)`
+    keys REPLACE the matching rows already in `path` -- a rerun of one head
     overwrites that head's history, one epoch row at a time, same as a plain
     overwrite would if it were the only head trained. Every OTHER head's
     rows already on disk are kept untouched, and a key `path` has never seen
     is a plain append. `path` not existing yet is just `out_rows` alone --
     the first run has nothing to merge with.
+
+    `loss_kind` (2026-09-22) joined the key the same day `Checkpoints.
+    weight_filename` gained a `loss` segment -- without it, a `bal` run and
+    an `ord_a` run of the SAME (baseline, encoder, head) would --merge into
+    ONE row per epoch instead of two, one silently overwriting the other's
+    history, exactly the gap `PrototypicalRoutingHead/cli/train.py`'s own
+    `_IDENTITY_FIELDS` closed for `support_context`/`query_context` a day
+    earlier. `.get(..., 'bal')`, not `[...]`: a row written before this
+    field existed has no `loss_kind` column at all, and 'bal' was every
+    run's behaviour before `--loss` existed, so it is the correct default
+    for an old row, not a guess.
 
     `csv.DictReader` reads every value as a str (`baseline` is `'2'`/`'3'`,
     not `2`/`3`) -- the key comparison normalizes `out_rows`' own values to
@@ -718,10 +890,12 @@ def _merge_val_scores(path: Path, out_rows: List[Dict]) -> List[Dict]:
     '''
     if not path.exists():
         return out_rows
-    new_keys = {(str(r['baseline']), r['encoder'], r['head']) for r in out_rows}
+    new_keys = {(str(r['baseline']), r['encoder'], r['head'],
+                r.get('loss_kind', 'bal')) for r in out_rows}
     with open(path, newline='') as fh:
         kept = [r for r in csv.DictReader(fh)
-               if (r['baseline'], r['encoder'], r['head']) not in new_keys]
+               if (r['baseline'], r['encoder'], r['head'],
+                  r.get('loss_kind', 'bal')) not in new_keys]
     return kept + out_rows
 
 
@@ -743,8 +917,6 @@ def main() -> int:
                     default=['bracs/test', 'ki67_with_photo'],
                     help='val is drawn from these; the rest is test, which '
                          'only cli/evaluate.py ever touches')
-    ap.add_argument('--val-n-wsi', type=int, default=10,
-                    help='WSIs held out per eval dataset for val')
     ap.add_argument('--val-n-per-rung', type=int, default=20)
     ap.add_argument('--tile', type=int, default=256)
     ap.add_argument('--n-per-rung', type=int, default=100)
@@ -770,6 +942,27 @@ def main() -> int:
                          "the common rungs' gradient drown the rare ones out. "
                          "'none' restores plain unweighted cross_entropy, for "
                          "comparison")
+    ap.add_argument('--loss', choices=('bal', 'ord_a', 'ord_b'), default='bal',
+                    help="spec.md's \"Ordinal-aware loss\" section, formulas "
+                         "2/3a/3b. 'bal' (default): today's weighted CE alone "
+                         "(--class-weight decides the weight -- this flag is "
+                         "orthogonal to that one, not a replacement for it). "
+                         "'ord_a': + a regression penalty on the softmax's "
+                         "own expected log2-rung against the true one "
+                         "(--ordinal-weight). 'ord_b': REPLACES the one-hot "
+                         "target with a Gaussian kernel over log2-rung "
+                         "distance (--ordinal-sigma) -- 'bal' is what sigma->0 "
+                         "would recover, so there is no off-by-default value "
+                         "for sigma the way --ordinal-weight=0 is for ord_a")
+    ap.add_argument('--ordinal-weight', type=float, default=1.0,
+                    help="ord_a's lambda: (E_c[log2 rung] - log2 rung_true)^2, "
+                         "weight on top of the weighted-CE term. Unvalidated "
+                         "starting value, same status as DomainGapConfig's "
+                         "OPTICS_P=0.5 -- sweep it")
+    ap.add_argument('--ordinal-sigma', type=float, default=1.0,
+                    help="ord_b's kernel bandwidth in log2-rung units. 1.0 = "
+                         "one rung-step gets meaningful soft-target mass, two "
+                         "steps away much less. Unvalidated starting value")
     ap.add_argument('--mlp-depth', type=int, default=1,
                     help="MlpHead only ('mlp'/'attn_linear' do NOT use "
                          "this -- 'attn_linear' is LinearHead behind an attn "
@@ -789,7 +982,8 @@ def main() -> int:
                          'excluded. Nothing to wrap at --mlp-depth 1.')
     ap.add_argument('--mlp-dropout', type=float, default=0.1,
                     help='MlpHead only.')
-    ap.add_argument('--epochs', type=int, default=10)
+    ap.add_argument('--epochs', type=int, default=10,
+                    help='TOTAL epochs, resumed or not')
     ap.add_argument('--lr', type=float, default=1e-3, help='the HEAD')
     ap.add_argument('--trunk-lr', type=float, default=1e-4,
                     help='baseline 3 only. Below --lr on purpose: the trunk is '
@@ -820,19 +1014,22 @@ def main() -> int:
                          'the faster, still-safe frozen-inference path '
                          '(cos=0.99995 against fp32, log/TODO.log) once the '
                          'pipeline itself is trusted')
+    add_cache_args(ap)
     ap.add_argument('--seed', type=int, default=42,
                     help='sampling AND the val/test WSI split')
-    ap.add_argument('--max-wsi', type=int, default=None, help='smoke run')
+    ap.add_argument('--max-wsi', type=int, default=None,
+                    help='smoke run: N training WSIs, chosen at random with --seed')
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--out', default=None)
     ap.add_argument('--resume-dir', default=None,
-                    help='directory of existing weight_filename()-named '
-                         'checkpoints (e.g. an old --out/weights) to warm-'
-                         'start each arm/encoder from before training. '
-                         'WEIGHTS ONLY -- save_checkpoint has never stored '
-                         'optimizer state, so this restarts Adam\'s own '
-                         'momentum/variance from zero on top of the loaded '
-                         'weights; see _maybe_resume\'s docstring')
+                    help='write each model\'s full state here every epoch '
+                         '(<model>_resume.pt: weights, optimizer, epoch, best '
+                         'scores, RNG, the val rows so far), and continue from '
+                         'it when it is already there. Unset: train from '
+                         'scratch and write nothing. --epochs is the TOTAL, so '
+                         'a finished model resumes into nothing. A model is an '
+                         'encoder with all its heads (baseline 2) or one head '
+                         'with its trunk (baseline 3)')
     ap.add_argument('--wandb-project', default='mpp-routing-head')
     # Reads WANDB_MODE, same convention as SuperPathPoint/FewShotEoMT's own
     # --wandb-mode: `wandb.init(mode=...)` takes an EXPLICIT argument, which
@@ -857,7 +1054,7 @@ def main() -> int:
     args = ap.parse_args()
 
     device = torch.device(args.device)
-    cache_root = Path(_paths.RESULT_DIR) / 'cache' / 'mpp_routing_head'
+    caches = open_caches(args, 'MppRoutingHead', device)
     out_dir = Path(args.out or _paths.job_result_dir('MppRoutingHead'))
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -869,6 +1066,9 @@ def main() -> int:
     if '3' in wanted:
         print(f'  baseline 3 encoder:  {BASELINE3_ENCODER} (bound)')
     print(f'  class_weight: {args.class_weight}')
+    print(f'  loss: {args.loss}' + (
+        f'  ordinal_weight={args.ordinal_weight}' if args.loss == 'ord_a' else
+        f'  ordinal_sigma={args.ordinal_sigma}' if args.loss == 'ord_b' else ''))
     # NOT "wandb auto-names it" when --run-name is unset -- run_baseline2/3
     # build a real name either way (`b2-<encoder>`, `b3-<head>`, optionally
     # prefixed by --run-name). wandb's own random name generator
@@ -878,12 +1078,17 @@ def main() -> int:
          f'run_name prefix={prefix}')
 
     out_rows: List[Dict] = []
+    out_rung_rows: List[Dict] = []
     if '2' in wanted:
         for encoder_name in args.encoders:
-            out_rows += run_baseline2(args, encoder_name, cache_root, out_dir,
-                                      device)
+            rows, rung_rows = run_baseline2(args, encoder_name, caches,
+                                            out_dir, device)
+            out_rows += rows
+            out_rung_rows += rung_rows
     if '3' in wanted:
-        out_rows += run_baseline3(args, cache_root, out_dir, device)
+        rows, rung_rows = run_baseline3(args, caches, out_dir, device)
+        out_rows += rows
+        out_rung_rows += rung_rows
 
     if not out_rows:
         # Reachable without a bug: every requested head can be one the
@@ -906,6 +1111,23 @@ def main() -> int:
         wr.writerows(write_rows)
     print(f'\n{path}  ({len(write_rows)} rows'
          f'{f", merged with existing (kept {len(write_rows) - len(out_rows)})" if args.merge else ""})')
+
+    # Per-rung breakdown -- see rung_report's own docstring for why this is
+    # a SEPARATE file rather than a `rung` column added to val_scores.csv:
+    # that file's one row per (head, val_dataset) would become six, and
+    # every existing reader of it (save_tagged does not, but a dashboard or
+    # a by-hand `awk` over it might) would see rows multiply under it
+    # without warning. Same merge key, same reasoning, reused as-is.
+    if out_rung_rows:
+        rung_path = out_dir / 'val_scores_per_rung.csv'
+        write_rung_rows = (_merge_val_scores(rung_path, out_rung_rows)
+                          if args.merge else out_rung_rows)
+        with open(rung_path, 'w', newline='') as fh:
+            wr = csv.DictWriter(fh, fieldnames=list(out_rung_rows[0].keys()))
+            wr.writeheader()
+            wr.writerows(write_rung_rows)
+        print(f'{rung_path}  ({len(write_rung_rows)} rows)')
+
     print(f'{out_dir / "weights"}  '
           f'(*_last.pt and *_best.pt; cli/evaluate.py scores them on test)')
     return 0

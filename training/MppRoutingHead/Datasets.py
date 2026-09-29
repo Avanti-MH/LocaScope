@@ -2,7 +2,9 @@
 eval", "Caching" and "Handle count" sections for the reasoning; this file is
 the implementation of all three.
 
-    rows = build_manifest('ki67_pure', n_per_rung=100)      # positions only
+    rows = build_manifest('ki67_pure', mask_cfg=MASK_RECIPES['hest'],
+                          cache_root=cache_root(job, 'sampler'),
+                          n_per_rung=100)                    # positions only
 
     # TRAIN -- fresh augmentation every access, WSI-batched so open handles
     # stay bounded (see group_by_wsi/iterate_epoch)
@@ -21,13 +23,14 @@ eval corpus into `.pt` shards and cached a frozen encoder's output on top of
 them. Both are gone: a row is one patch now rather than twenty, so re-rendering
 is cheap, and the feature cache in particular was storing the un-reduced exit
 of every patch -- 197 x 1536 fp16 each -- to save a forward pass. The ONLY
-thing persisted is the manifest, which is positions and no pixels.
+things persisted are the per-slide mask and draw (`TileSampler.cached`), which
+are positions and no pixels.
 
-`split='eval'` is a SEED, not a cache: `_render_row` derives its rng from the
+`split='eval'` is a SEED, not a cache: `render_row` derives its rng from the
 row's own identity, so the same position always renders the same photo without
 anything being stored.
 
-Every split renders through `Camera` (`query_sim/camera.py`) via `_render_row`
+Every split renders through `Camera` (`query_sim/camera.py`) via `render_row`
 -- ONE place that turns a `ManifestRow` into `(patch, label, native)`, so train
 and eval cannot come to mean different pixels.
 
@@ -38,13 +41,10 @@ rather than a simplification.
 '''
 from __future__ import annotations
 
-import csv
 import hashlib
-import json
-import os
 import random
 import sys
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -61,10 +61,12 @@ import torch.utils.data                                             # noqa: E402
 
 from AccessDatasets import locate, list_names                        # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from TissuesRegionsMask import TissuesRegionsMask                    # noqa: E402
-from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
-                         TileSampler)
-from DsLadder import DEFAULT_RUNGS, DsLadder                        # noqa: E402
+from Cache import cache_root, job_name                               # noqa: E402
+from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
+                         SamplerConfig, TileSampler)
+from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
+from TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
+from WsiSplit import SPLIT_JOB                                       # noqa: E402
 from camera import Camera                                            # noqa: E402
 from config import DomainGapConfig                                   # noqa: E402
 
@@ -101,15 +103,87 @@ NUM_CLASSES = len(RUNGS)
 #: unit the ENCODER consumes either way -- a 1440x1024 frame reaches the model
 #: only as 20 separate 256 patches -- so rendering the tile directly is the
 #: same input by a shorter route, with two exceptions handled in
-#: `_CameraBank.camera_for`.
+#: `CameraBank.camera_for`.
 TILE_WH_RATIO = '1:1'
 
 #: How often the two FRAME-REFERENCED optics (vignette, lens distortion) are
-#: present on a shot -- see `_CameraBank.camera_for` for why they cannot simply
+#: present on a shot -- see `CameraBank.camera_for` for why they cannot simply
 #: be always-on at this sensor size, and `DomainGapConfig.vignette_p` for the
 #: mechanism. 0.5 is a starting value, not a measured one: it says a tile is as
 #: likely to have come from a frame's lit centre as from its darkened edge.
 OPTICS_P = 0.5
+
+#: Two COMPLETE, explicit `DomainGapConfig` templates -- `CameraBank.camera_
+#: for`'s `native` switch (2026-09-22) picks one, then `replace()`s only the
+#: three fields that are genuinely per-camera (`wh_ratio`/`MPixels`/
+#: `query_mpp` -- baked in per (WSI, rung), see `camera_for`'s own
+#: docstring) plus `stage_shift_max` (from `RenderConfig`, see below). Every
+#: OTHER field -- all 19 of them -- is spelled out here BY VALUE on both,
+#: not left for `DomainGapConfig`'s own dataclass defaults to silently
+#: supply -- `camera_for` used to build one `DomainGapConfig(...)` call
+#: passing only 6 fields explicitly and relying on the class's own defaults
+#: for the rest, which is exactly the "almost a key" trap CLAUDE.md's
+#: `manifest_path` already objects to for a different reason: a reader had
+#: to go open `DomainGapConfig`'s own source to know what a tile actually
+#: got. Verified by constructing both and printing every field back
+#: (2026-09-22) -- `DomainGapConfig` has SEVEN fields
+#: (`distortion_k1_range`/`distortion_k2`/`defocus_radius`/
+#: `chromatic_shift`/`noise_sigma`/`jpeg_quality`/`photometric`/`geometric`
+#: -- eight, not seven) the first draft of these two constants missed
+#: entirely, silently inheriting the class's own defaults for them.
+#:
+#: `photometric`/`geometric` (`query_sim/config.py`'s own comment: "if
+#: False, skip color/vignette/lens/noise/jpeg" / "if False, skip rotation +
+#: scale", enforced in `query_sim/pipeline.py:195,209`) are REAL master
+#: switches, not decorative -- `CAMERA_GEOMETRY_ONLY` sets `photometric=
+#: False` so `pipeline.py` skips that whole branch regardless of what any
+#: individual colour/vignette/distortion/noise/jpeg field below says. Every
+#: one of those fields is STILL spelled out explicitly underneath the
+#: switch (not left at the class default) -- belt and suspenders: the
+#: switch is the actual guarantee, the explicit no-op values are what a
+#: reader sees without having to know the switch exists.
+#:
+#: CAMERA_FULL: simulates a real photograph taken through a microscope --
+#: `photometric=True`, `geometric=True`, every value the class's own real
+#: production default (unchanged from before this constant existed). What
+#: EVERY tile (support and query alike) rendered before 2026-09-22.
+#:
+#: CAMERA_GEOMETRY_ONLY: `geometric=True` (rotation stays on -- a real
+#: photo's own framing genuinely varies by it) but `scale_range=(1.0,1.0)`
+#: (no scale JITTER specifically -- `geometric` alone cannot separate
+#: rotation from scale, both live under one switch in `pipeline.py`).
+#: `photometric=False` (colour/vignette/lens/noise/jpeg all off). Built for
+#: `Episodes.render_episode`'s `support_native` switch: at real Stage 1
+#: inference, a reference/support tile is read straight off the target WSI
+#: (`KnnEstMpp`'s own reference bank does exactly this, no photo simulation
+#: at all), so training support this way is what lets training match what
+#: deployment will actually feed the model on that side, while `query` --
+#: always `CAMERA_FULL` -- keeps simulating the real photograph a query
+#: genuinely is.
+_CAMERA_TEMPLATE_KWARGS = dict(
+    wh_ratio=TILE_WH_RATIO, MPixels=0.0, query_mpp=0.0, stage_shift_max=0)
+
+CAMERA_FULL = DomainGapConfig(
+    rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+    scale_range=(0.90, 1.15), query_mpp_jitter=0.0,
+    brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
+    saturation=1.0, color_temp_range=(-0.12, 0.12),
+    vignette_range=(0.15, 0.45), vignette_p=OPTICS_P, distortion_p=OPTICS_P,
+    distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
+    defocus_radius=2, chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
+    photometric=True, geometric=True,
+    **_CAMERA_TEMPLATE_KWARGS)
+
+CAMERA_GEOMETRY_ONLY = DomainGapConfig(
+    rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+    scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
+    brightness_range=(0.0, 0.0), contrast_range=(0.0, 0.0),
+    saturation=1.0, color_temp_range=(0.0, 0.0),
+    vignette_range=(0.0, 0.0), vignette_p=0.0, distortion_p=0.0,
+    distortion_k1_range=(0.0, 0.0), distortion_k2=0.0,
+    defocus_radius=0, chromatic_shift=0, noise_sigma=0.0, jpeg_quality=100,
+    photometric=False, geometric=True,
+    **_CAMERA_TEMPLATE_KWARGS)
 
 #: This package's richness contract: `bg50_70` and `bg70_85` capped at 0 on top
 #: of `RichnessConfig`'s own zeros for `bg85_95`/`bg95_100`, so NO tile above 50
@@ -130,7 +204,13 @@ OPTICS_P = 0.5
 #: That is why the training loop prints a per-rung `trained on` line: the
 #: shortfall is now a number on screen every epoch instead of an assumption.
 RICHNESS = RichnessConfig(caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0))
-
+# OVERLAP = OverlapConfig()
+OVERLAP = OverlapConfig(
+    grid_step=128,
+    max_overlap_ratio=0.5,
+    overlapping_share=1.0,
+    jitter_cap= 0.25,
+)
 
 # ══════════════════════════════════════════════════════════════════════════
 #  manifest -- position identity only, no pixels, no Camera
@@ -157,145 +237,124 @@ class ManifestRow:
     #: number that actually placed the tile.
     bucket: str = 'mid'
 
+    #: `SampleMeta.footprint_l0` -- the level-0 side this position covers.
+    #: Carried for the same reason as `bucket`: it is what the sampler placed,
+    #: and an overlap test between two positions (`Episodes`' support/query
+    #: rule) needs it without re-deriving a rung's footprint from a tile size
+    #: that might not be the one this row was cut at.
+    footprint_l0: int = 0
+
     @property
     def label(self) -> int:
         return RUNG_TO_CLASS[self.rung]
 
 
-_MANIFEST_FIELDS = tuple(f.name for f in fields(ManifestRow))
+def add_cache_args(ap) -> None:
+    """The four flags that say where positions come from -- the same four in
+    every CLI that draws a manifest, so they cannot drift apart."""
+    ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default='hest',
+                    help='tissue-mask recipe the positions are drawn inside '
+                         '(TissueMaskConfig.MASK_RECIPES)')
+    ap.add_argument('--mask-cache-job', default=None,
+                    help='whose mask cache to read and fill: result/cache/'
+                         '<this>_mask/. Default: this job')
+    ap.add_argument('--sampler-cache-job', default=None,
+                    help='whose sampler cache to read and fill: result/cache/'
+                         '<this>_sampler/. Default: this job')
+    ap.add_argument('--split-cache-job', default=None,
+                    help=f'whose val/test split to read: result/cache/<this>_'
+                         f'split/. Default: {SPLIT_JOB}. Written only by '
+                         f'make_split.py')
 
 
-def _atomic_write(path, write_body) -> Path:
-    '''Write via a temp file in the SAME directory, then `os.replace` --
-    atomic on POSIX, so a reader never sees a half-written file.
-
-    Exists because two of this package's cache files (a manifest, `wsi_split.
-    csv`) can legitimately be built by TWO PROCESSES that have never
-    coordinated: `jobscripts/MppRoutingHead/MppRoutingHead.sh`'s `PARALLEL`
-    mode runs baseline 2 and baseline 3 as separate `train.py` invocations
-    sharing one `cache_root`, and both call `train_rows`/`val_rows`
-    independently. On the first run ever, both can see the file missing and
-    both build it -- deterministically, from the same seed, so the CONTENT
-    they compute agrees. What a plain `open(path, 'w')` from each would risk
-    is not disagreement, it is INTERLEAVING: two writers to one path can
-    produce a file that is neither writer's version, and a reader mid-write
-    sees a truncated one. `PID` in the temp name means two writers never
-    collide on the temp file either, so the cost of the race is redundant
-    computation, never a corrupt file.'''
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f'{path.name}.tmp{os.getpid()}')
-    write_body(tmp)
-    os.replace(tmp, path)
-    return path
+@dataclass
+class Caches:
+    """What `add_cache_args` resolved to. `masks` owns the segmenter: call
+    `masks.close()` once the manifests are drawn, or it stays on the card."""
+    masks: MaskMaker
+    sampler_root: Path
+    split_job: str
 
 
-def split_wsi_names(dataset_id: str, n_val: int, *,
-                    seed: int = 42) -> Tuple[List[str], List[str]]:
-    '''`(val_names, test_names)` -- a WSI-LEVEL split, so no position from one
-    slide can appear on both sides. The val half is the first `n_val` of a
-    seeded shuffle.
+def open_caches(args, job: str, device) -> Caches:
+    """`job` is the calling package's default job name. Each cache defaults to
+    THIS job's (`Cache.job_name`, SLURM_JOB_NAME first); the split defaults to
+    its one writer's."""
+    made_by = job_name(job)
+    return Caches(
+        masks=MaskMaker(MASK_RECIPES[args.seg],
+                        cache_root(args.mask_cache_job or made_by, 'mask'),
+                        device),
+        sampler_root=cache_root(args.sampler_cache_job or made_by, 'sampler'),
+        split_job=args.split_cache_job or SPLIT_JOB)
 
-    `sorted()` before the shuffle on purpose: `list_names` returns whatever
-    order the registry happens to hold, so shuffling it directly would make
-    the split depend on something nobody controls. Sorted first, the seed is
-    the only input, and the same seed gives the same twenty slides on any
-    machine.
 
-    Write the answer down (`write_wsi_split`) rather than re-deriving it at
-    each use. A split that exists only as "whatever `--seed 42` produces" is
-    one library version away from silently becoming a different experiment.
+def pick_wsi_names(names: Sequence[str], max_wsi: Optional[int], seed: int
+                   ) -> List[str]:
+    '''`max_wsi` of `names`, chosen AT RANDOM (seeded), returned in the order
+    `names` had. `None`, or a cap at or above `len(names)`, returns every name
+    unchanged -- so a cap of "all of them" changes nothing, not even the order.
+
+    Random and not the first N: a dataset's names are sorted, and the first N
+    of a sorted list are one contiguous run of ids -- for BRACS one stretch of
+    slides whose stain and pathology mix nobody has checked. The same
+    (names, cap, seed) always picks the same slides, so a rerun, the
+    supply-only pass and the real run agree.
     '''
-    names = sorted(list_names(dataset=dataset_id))
-    if not 0 < n_val < len(names):
-        raise ValueError(f'n_val={n_val}: dataset {dataset_id!r} has '
-                         f'{len(names)} WSIs, need 0 < n_val < that')
-    random.Random(seed).shuffle(names)
-    return names[:n_val], names[n_val:]
+    names = list(names)
+    if max_wsi is None or max_wsi >= len(names):
+        return names
+    keep = set(random.Random(seed).sample(range(len(names)), int(max_wsi)))
+    return [n for i, n in enumerate(names) if i in keep]
 
 
-def write_wsi_split(val_names: Sequence[str], test_names: Sequence[str],
-                    path) -> Path:
-    '''`split,wsi_name` rows -- the record of which slides were held out. Row
-    ORDER is part of the record: `split_wsi_names` shuffles before it splits,
-    so a prefix of the `test` rows is already a random sample and callers take
-    one instead of drawing again. Written atomically -- see `_atomic_write`.'''
-    def body(tmp):
-        with open(tmp, 'w', newline='') as fh:
-            writer = csv.writer(fh)
-            writer.writerow(('split', 'wsi_name'))
-            writer.writerows(('val', n) for n in val_names)
-            writer.writerows(('test', n) for n in test_names)
-    return _atomic_write(path, body)
-
-
-def read_wsi_split(path) -> Tuple[List[str], List[str]]:
-    '''`(val_names, test_names)` as recorded, in file order.'''
-    with open(Path(path), newline='') as fh:
-        rows = list(csv.DictReader(fh))
-    return ([r['wsi_name'] for r in rows if r['split'] == 'val'],
-            [r['wsi_name'] for r in rows if r['split'] == 'test'])
-
-
-def wsi_split(dataset_id: str, n_val: int, path, *,
-              seed: int = 42) -> Tuple[List[str], List[str]]:
-    '''The recorded split if `path` exists, a fresh one written there if not.
-
-    EXISTING WINS, always. Re-deriving on every run would mean that adding or
-    removing one slide from a dataset silently reshuffles which ten are held
-    out -- and then checkpoints selected on the old val split get scored
-    against a test set containing some of it, with nothing anywhere saying so.
-    Deleting the file is how you ask for a new split, and doing that
-    invalidates every checkpoint beside it.
-    '''
-    path = Path(path)
-    if path.exists():
-        return read_wsi_split(path)
-    val_names, test_names = split_wsi_names(dataset_id, n_val, seed=seed)
-    write_wsi_split(val_names, test_names, path)
-    return val_names, test_names
-
-
-def build_manifest(dataset_id: str, *, tile_size: int = 256,
+def build_manifest(dataset_id: str, *, masks, sampler_root,
+                   report_dir=None, tile_size: int = 256,
                    rungs: Sequence[float] = RUNGS, n_per_rung: int = 100,
                    seed: int = 42, max_wsi: Optional[int] = None,
                    wsi_names: Optional[Sequence[str]] = None,
                    ) -> List[ManifestRow]:
     '''One row per drawn position. Over `wsi_names` when given (that is how the
     val/test halves of one dataset get separate manifests -- see
-    `split_wsi_names`), otherwise over every WSI `list_names(dataset=
-    dataset_id)` currently finds. Cheap -- `TileSampler.sample()` consults
-    only the mask, no pixel reads -- so this is fast enough to rebuild
-    whenever the sampling recipe changes rather than invalidated by hand.
+    `WsiSplit`), otherwise over every WSI `list_names(dataset=
+    dataset_id)` currently finds.
+
+    Every slide goes through `TileSampler.cached`: a slide already drawn under
+    this recipe, config and plan is read back from `sampler_root` without
+    being opened; one that is not is opened, its mask taken from `masks` (a
+    `TissueMaskConfig.MaskMaker`: the recipe, the device and the mask cache),
+    and its draw written back. So there is no manifest-level cache any more -- the
+    per-slide one is finer (a different WSI list or `max_wsi` still reuses
+    every slide it shares) and it is the same cache every other sampler uses.
+
+    The recipe HAS NO DEFAULT. It used to be an hsv mask at ds 32, built right
+    here and recorded nowhere. The caller names one (`MASK_RECIPES[--seg]`)
+    and owns the MaskMaker, so a segmentation model loaded for a miss is
+    dropped when the caller's `with` block ends rather than staying on the
+    card through training.
+
+    `report_dir`, when given, receives one `sampler_report_<slide>.md` and
+    `samples_<slide>.csv` per slide.
 
     Identical for every split; `Camera` (with its own randomness / determinism
-    concerns) only enters at render time, in `_render_row` below.
+    concerns) only enters at render time, in `render_row` below.
     '''
     rows: List[ManifestRow] = []
     names = list(wsi_names) if wsi_names is not None else list_names(dataset=dataset_id)
-    if max_wsi is not None:
-        names = names[:max_wsi]
-    ladder = DsLadder(rungs=tuple(sorted(rungs)))
+    names = pick_wsi_names(names, max_wsi, seed)
+    cfg = SamplerConfig(tile=tile_size, n_per_rung=n_per_rung, seed=seed,
+                        richness=RICHNESS, overlap=OVERLAP)
+    plan = PlanSpec('ladder', tuple(rungs))
     for name in names:
-        entry = locate(name, dataset=dataset_id)
-        wsi = SafeSlide(entry.path)
-        try:
-            from TissueSegFunc import TissueSegConfig                # noqa: PLC0415
-            mask = TissuesRegionsMask.from_wsi(
-                wsi, method=TissueSegConfig('hsv').build())
-            plans = ladder.plan_for(wsi, tile_size)
-            cfg = SamplerConfig(tile=tile_size, n_per_rung=n_per_rung,
-                                seed=seed, richness=RICHNESS,
-                                overlap=OverlapConfig())
-            sampler = TileSampler(wsi, mask, cfg)
-            sampler.sample(plans)
-            for s in sampler:
-                rows.append(ManifestRow(dataset=dataset_id, wsi_name=name,
-                                        x=int(s.meta.x), y=int(s.meta.y),
-                                        rung=float(s.meta.ds),
-                                        bucket=str(s.meta.bucket)))
-        finally:
-            wsi.close()
+        sampler = TileSampler.cached(
+            locate(name, dataset=dataset_id).path, cfg, plan, sampler_root,
+            masks=masks, report_dir=report_dir)
+        for s in sampler:
+            rows.append(ManifestRow(dataset=dataset_id, wsi_name=name,
+                                    x=int(s.meta.x), y=int(s.meta.y),
+                                    rung=float(s.meta.ds),
+                                    bucket=str(s.meta.bucket),
+                                    footprint_l0=int(s.meta.footprint_l0)))
     return rows
 
 
@@ -303,7 +362,7 @@ def class_weights(rows: List[ManifestRow], device) -> torch.Tensor:
     '''Inverse-frequency weights for `F.cross_entropy(..., weight=...)`, from
     the TRAINING manifest's own rung distribution -- not per-epoch render
     counts. Those drop a handful of positions near a region edge and vary
-    trivially epoch to epoch (see `_render_row`); the manifest is what the
+    trivially epoch to epoch (see `render_row`); the manifest is what the
     sampler was actually asked to produce, and it is the same for the whole
     run, so the weight is computed once and reused every epoch rather than
     recomputed from a moving target.
@@ -337,102 +396,6 @@ def class_weights(rows: List[ManifestRow], device) -> torch.Tensor:
     return weights.float().to(device)
 
 
-def manifest_parts(*, dataset_id: str, tile_size: int, n_per_rung: int,
-                   seed: int, rungs: Sequence[float] = RUNGS,
-                   n_wsi: Optional[int] = None,
-                   max_wsi: Optional[int] = None,
-                   wsi_names: Optional[Sequence[str]] = None) -> List[str]:
-    '''Everything a manifest's content depends on, as the `key=value` strings
-    `ConfigIdentity.short_id` hashes.
-
-    `richness` is spelled out BY VALUE, not by class name. It was by name while
-    this package used `RichnessConfig()` unchanged; `RICHNESS` now caps
-    `bg50_70`/`bg70_85` at 0, and a key that said only "RichnessConfig" would
-    hash the same before and after that change -- i.e. it would hand back the
-    old manifest for the new contract. `overlap` stays by name because
-    `OverlapConfig()` really is the default here; that line has to grow the
-    same way if it ever stops being.
-
-    `seg=hsv` for the same reason: `build_manifest` hardcodes
-    `TissueSegConfig('hsv')`, and a different mask is a different set of
-    positions.
-    '''
-    return [
-        f'dataset={dataset_id}',
-        f'tile={int(tile_size)}',
-        f'rungs={",".join(f"{float(r):g}" for r in rungs)}',
-        f'n_per_rung={int(n_per_rung)}',
-        f'seed={int(seed)}',
-        f'n_wsi={n_wsi}',
-        f'max_wsi={max_wsi}',
-        # NOT the literal string "all". `list_names(dataset=dataset_id)` is
-        # read and hashed here, not just recorded as a name for the default
-        # case -- a manifest is reused whenever its hash exists, so if this
-        # said "all" as a constant, a WSI added or removed from the dataset
-        # (as happened on 2026-09-16: five holed slides deleted from
-        # ki67_pure) would leave the hash UNCHANGED, and a cache built before
-        # the deletion would go on being served after it, silently, with
-        # positions on slides that no longer exist on disk.
-        f'wsi={",".join(wsi_names) if wsi_names is not None else ",".join(sorted(list_names(dataset=dataset_id)))}',
-        'seg=hsv',
-        f'richness_scorer={RICHNESS.scorer}',
-        f'richness_edges={",".join(f"{e:g}" for e in RICHNESS.edges)}',
-        f'richness_floors={",".join(f"{f:g}" for f in RICHNESS.floors)}',
-        f'richness_caps={",".join(f"{c:g}" for c in RICHNESS.caps)}',
-        f'richness_frames={RICHNESS.bucket_frame},{RICHNESS.floor_frame}',
-        'overlap=OverlapConfig()',
-    ]
-
-
-def manifest_path(ddir, split: str, parts: Sequence[str]) -> Path:
-    '''`<ddir>/<split>_<8 hex>.csv`, with a `.json` beside it saying what the
-    eight characters cover.
-
-    A HASH, not the parameters spelled out. The readable-name version --
-    `test_w5_r50.csv` -- keyed on the two flags that happened to be on the
-    command line and silently reused a stale manifest when `--tile` or `--seed`
-    changed, which are just as much part of what the positions are. A name that
-    is ALMOST a key is worse than either a full one or an opaque one, because
-    it looks like it is protecting you.
-
-    The sidecar is what keeps the hash from being the opaque kind CLAUDE.md
-    objects to: `ls` shows eight characters, and the JSON next to it says
-    exactly which eleven facts they stand for.
-    '''
-    from ConfigIdentity import short_id                            # noqa: PLC0415
-    ddir = Path(ddir)
-    stem = f'{split}_{short_id(list(parts))}'
-    return ddir / f'{stem}.csv'
-
-
-def write_manifest_key(path, parts: Sequence[str]) -> Path:
-    '''The sidecar for `manifest_path`. Written next to the CSV, same stem,
-    atomically -- see `_atomic_write`.'''
-    path = Path(path).with_suffix('.json')
-    def body(tmp):
-        with open(tmp, 'w') as fh:
-            json.dump(list(parts), fh, indent=2)
-    return _atomic_write(path, body)
-
-
-def write_manifest(rows: List[ManifestRow], path) -> Path:
-    '''Written atomically -- see `_atomic_write`.'''
-    def body(tmp):
-        with open(tmp, 'w', newline='') as fh:
-            writer = csv.DictWriter(fh, fieldnames=_MANIFEST_FIELDS)
-            writer.writeheader()
-            writer.writerows(row.__dict__ for row in rows)
-    return _atomic_write(path, body)
-
-
-def read_manifest(path) -> List[ManifestRow]:
-    with open(path, newline='') as fh:
-        return [ManifestRow(dataset=r['dataset'], wsi_name=r['wsi_name'],
-                            x=int(r['x']), y=int(r['y']), rung=float(r['rung']),
-                            bucket=r['bucket'])
-               for r in csv.DictReader(fh)]
-
-
 # ══════════════════════════════════════════════════════════════════════════
 #  rendering: one ManifestRow -> (patches, label), the ONE place this happens
 # ══════════════════════════════════════════════════════════════════════════
@@ -440,7 +403,7 @@ def read_manifest(path) -> List[ManifestRow]:
 @dataclass(frozen=True)
 class RenderConfig:
     '''What every render needs besides the row itself -- one object threaded
-    through `_CameraBank`/`RoutingHeadDataset`/`iterate_epoch` instead of
+    through `CameraBank`/`RoutingHeadDataset`/`iterate_epoch` instead of
     separate keyword arguments repeated at each of them (the first draft's
     shape: easy for one call site to pass an inconsistent value and nothing
     would catch it).
@@ -466,7 +429,7 @@ class RenderConfig:
        ignores them and draws its own pair from the GLOBAL `np.random`
        (`augment/field.py:107-108`). The recorded ground truth is therefore
        not what was applied, and the applied shift is not reachable by any
-       `rng` a caller passes -- which would break `_render_row`'s
+       `rng` a caller passes -- which would break `render_row`'s
        `deterministic=True` guarantee for the eval split. At 0 all three
        layers agree (the ternary at pipeline.py:46-47, the guard at :153,
        and field.py:103's own early return), so no divergence is possible.
@@ -483,18 +446,18 @@ class RenderConfig:
         '''What `DomainGapConfig.MPixels` has to be for `QueryFromWSI` to
         arrive back at `tile_size`: it computes `output_w = int(sqrt(MPixels *
         1e6 / (w_r * h_r)) * w_r)`, which at 1:1 is `int(sqrt(MPixels*1e6))`.
-        Derived rather than typed so the two cannot drift; `_CameraBank`
+        Derived rather than typed so the two cannot drift; `CameraBank`
         asserts the round trip anyway, because `int()` on a float square root
         is exactly the kind of step that lands one px low without complaint.'''
         return (self.tile_size ** 2) / 1e6
 
 
-class _CameraBank:
+class CameraBank:
     '''Lazily-built `{(dataset, wsi_name, rung): Camera}` cache, one `SafeSlide`
     handle opened per WSI (not per rung -- the six rungs of one WSI share it;
     `Camera` accepts an already-open handle and does not reopen). Built fresh
     inside whichever process first uses it -- a `RoutingHeadDataset` under
-    `DataLoader(num_workers>0)` gets one `_CameraBank` PER WORKER this way,
+    `DataLoader(num_workers>0)` gets one `CameraBank` PER WORKER this way,
     never one shared across a fork/spawn boundary (an `openslide` handle is
     not safely shared across processes; see spec.md's "Camera: train vs
     eval"). Never evicts -- see spec.md's "Handle count": the caller bounds
@@ -510,7 +473,7 @@ class _CameraBank:
     def __init__(self, cfg: RenderConfig):
         self.cfg = cfg
         self._wsi: Dict[Tuple[str, str], SafeSlide] = {}
-        self._camera: Dict[Tuple[str, str, float], Camera] = {}
+        self._camera: Dict[Tuple[str, str, float, bool], Camera] = {}
 
     def _wsi_for(self, dataset_id: str, wsi_name: str) -> SafeSlide:
         key = (dataset_id, wsi_name)
@@ -521,38 +484,50 @@ class _CameraBank:
             self._wsi[key] = wsi
         return wsi
 
-    def camera_for(self, dataset_id: str, wsi_name: str, rung: float) -> Camera:
-        key = (dataset_id, wsi_name, rung)
+    def camera_for(self, dataset_id: str, wsi_name: str, rung: float, *,
+                   native: bool = False) -> Camera:
+        '''`native=False` (default): `CAMERA_FULL` -- simulates a real
+        photograph, every rotation/scale/colour/vignette/distortion channel
+        active. `native=True`: `CAMERA_GEOMETRY_ONLY` -- only rotation, every
+        other channel pinned to its own no-op value -- for a caller that
+        wants a tile closer to what reading straight off the WSI gives (see
+        that constant's own module-level docstring for why: a real Stage 1
+        reference/support tile, unlike a query, is never actually
+        photographed).
+
+        `native` is part of the cache KEY, not just the config: the same
+        (WSI, rung) needs up to two DIFFERENT `Camera` instances now, one
+        per style, since a caller (`Episodes.render_episode`'s own
+        `support_native` switch) may ask for both across one run.
+
+        THE TWO FRAME-REFERENCED OPS, PRESENT ONLY SOMETIMES (on `CAMERA_
+        FULL`; always off on `CAMERA_GEOMETRY_ONLY`). Every other op in
+        `query_sim/augment/` is per-pixel or local (colour, colour
+        temperature, brightness/contrast, defocus, chromatic shift, noise,
+        JPEG) or a scene transform (rotation, scale), and so means the same
+        thing whatever the frame is. These two do not: `apply_vignette`'s
+        falloff and `apply_distortion`'s k1 are both normalised to the
+        SENSOR's half-width (`pipeline._apply_params` says so, and records
+        the episode where taking them from the oversized read left the
+        photo seeing only the central 53% of the falloff curve). The sensor
+        here is one tile, so a tile always carrying a complete centred
+        vignette would be a cue the deployed input does not have: a real
+        photograph's tiles are slices of ONE vignette, and a tile from the
+        centre of the frame has none at all. A probability is what models
+        both kinds -- widening the strength range only ever models the
+        first, more weakly.
+        '''
+        key = (dataset_id, wsi_name, rung, native)
         cam = self._camera.get(key)
         if cam is None:
             wsi = self._wsi_for(dataset_id, wsi_name)
-            gap_cfg = DomainGapConfig(
-                wh_ratio=TILE_WH_RATIO,
-                MPixels=self.cfg.mpixels,
-                query_mpp=wsi.base_mpp * rung,
-                stage_shift_max=self.cfg.stage_shift_max,
-                # THE TWO FRAME-REFERENCED OPS, PRESENT ONLY SOMETIMES. Every
-                # other op in `query_sim/augment/` is per-pixel or local
-                # (colour, colour temperature, brightness/contrast, defocus,
-                # chromatic shift, noise, JPEG) or a scene transform (rotation,
-                # scale), and so means the same thing whatever the frame is.
-                # These two do not: `apply_vignette`'s falloff and
-                # `apply_distortion`'s k1 are both normalised to the SENSOR's
-                # half-width (`pipeline._apply_params` says so, and records the
-                # episode where taking them from the oversized read left the
-                # photo seeing only the central 53% of the falloff curve).
-                #
-                # The sensor here is one tile, so a tile always carrying a
-                # complete centred vignette would be a cue the deployed input
-                # does not have: a real photograph's tiles are slices of ONE
-                # vignette, and a tile from the centre of the frame has none at
-                # all. A probability is what models both kinds -- widening the
-                # strength range only ever models the first, more weakly.
-                vignette_p=OPTICS_P,
-                distortion_p=OPTICS_P,
-            )
+            template = CAMERA_GEOMETRY_ONLY if native else CAMERA_FULL
+            gap_cfg = replace(template, wh_ratio=TILE_WH_RATIO,
+                             MPixels=self.cfg.mpixels,
+                             query_mpp=wsi.base_mpp * rung,
+                             stage_shift_max=self.cfg.stage_shift_max)
             # seed=None (the default): determinism, where wanted, is handled
-            # per-call via capture(..., rng=...) in _render_row -- a fixed
+            # per-call via capture(..., rng=...) in render_row -- a fixed
             # Camera-level seed here would apply to every caller alike and
             # give neither train nor eval what it actually needs.
             cam = Camera(wsi, cfg=gap_cfg)
@@ -578,13 +553,28 @@ def _eval_seed(row: ManifestRow) -> int:
     return int(hashlib.sha256(key.encode()).hexdigest()[:8], 16)
 
 
-def _render_row(bank: _CameraBank, row: ManifestRow, cfg: RenderConfig, *,
-                deterministic: bool) -> Optional[Tuple[np.ndarray, int, bool]]:
+def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
+                deterministic: bool, native: bool = False,
+                rng: Optional[random.Random] = None
+                ) -> Optional[Tuple[np.ndarray, int, bool]]:
     '''The one place a `ManifestRow` becomes pixels: `Camera.capture` (fresh
     randomness if `deterministic=False`, `train`'s own case; seeded from the
     row's identity if `deterministic=True`, `eval`'s case -- see spec.md's
     "Camera: train vs eval"). One row is ONE patch, `[tile, tile, 3]` uint8:
     the camera's sensor IS the tile, so there is nothing left to cut up.
+
+    `native` (2026-09-22, default `False` -- every caller before this got
+    exactly today's `False` behaviour, unchanged): passed straight through
+    to `CameraBank.camera_for`'s own switch of the same name -- see that
+    method's docstring. `MppRoutingHead`'s own callers never pass this, so
+    nothing here changes for them; it exists for `Episodes.render_episode`'s
+    `support_native` switch.
+
+    `rng` (training only, ignored when `deterministic`): the generator this
+    one capture's augmentation is drawn from. None (every existing caller)
+    keeps the camera's own unseeded generator. `PrototypicalRoutingHead`
+    passes one derived from its episode sampler, so a run resumed from a saved
+    RNG state renders the same photos it would have rendered uninterrupted.
 
     `None` if the read ran off the slide, same as `Camera.capture` returns.
     That is now a rare, per-position event rather than a whole rung's worth:
@@ -607,8 +597,9 @@ def _render_row(bank: _CameraBank, row: ManifestRow, cfg: RenderConfig, *,
     the first draft of this file wrote this logic out twice, once for training
     and once for building a cached eval corpus; this is the one copy.
     '''
-    cam = bank.camera_for(row.dataset, row.wsi_name, row.rung)
-    rng = random.Random(_eval_seed(row)) if deterministic else None
+    cam = bank.camera_for(row.dataset, row.wsi_name, row.rung, native=native)
+    if deterministic:
+        rng = random.Random(_eval_seed(row))
     patch = cam.capture(row.x, row.y, rng=rng)
     if patch is None:
         return None
@@ -620,11 +611,11 @@ def _render_row(bank: _CameraBank, row: ManifestRow, cfg: RenderConfig, *,
 # ══════════════════════════════════════════════════════════════════════════
 
 class RoutingHeadDataset(torch.utils.data.Dataset):
-    '''One manifest row -> one rendered patch, via `_render_row`.
+    '''One manifest row -> one rendered patch, via `render_row`.
 
     `split='train'` renders with fresh randomness every access, which is the
     augmentation and the point of it. `split='eval'` renders deterministically
-    -- `_render_row` seeds from the row's own identity -- which is what a val
+    -- `render_row` seeds from the row's own identity -- which is what a val
     curve and a reported test number both need. Same class, same render path,
     same everything else: the only difference is where the rng comes from.
 
@@ -633,7 +624,7 @@ class RoutingHeadDataset(torch.utils.data.Dataset):
     spec.md's "Handle count: WSI-batching, not LRU eviction". Nothing in
     this class enforces that; it iterates whatever `rows` it is given, and
     the bound on how many WSIs get touched (and so how many `Camera`/
-    `SafeSlide` handles this instance's `_CameraBank` ends up holding) comes
+    `SafeSlide` handles this instance's `CameraBank` ends up holding) comes
     entirely from how big a `rows` list `iterate_epoch` hands it.
 
     Returns `None` for a position whose read runs off the slide --
@@ -648,16 +639,16 @@ class RoutingHeadDataset(torch.utils.data.Dataset):
         self.split = split
         self.cfg = cfg
         # Built lazily in __getitem__, NOT here -- __init__ runs in the main
-        # process before DataLoader forks/spawns workers, and a _CameraBank
+        # process before DataLoader forks/spawns workers, and a CameraBank
         # holds open WSI handles that must not cross that boundary.
-        self._bank: Optional[_CameraBank] = None
+        self._bank: Optional[CameraBank] = None
 
     def __len__(self) -> int:
         return len(self.rows)
 
-    def _bank_for_this_process(self) -> _CameraBank:
+    def _bank_for_this_process(self) -> CameraBank:
         if self._bank is None:
-            self._bank = _CameraBank(self.cfg)
+            self._bank = CameraBank(self.cfg)
         return self._bank
 
     def __getitem__(self, i: int):
@@ -669,7 +660,7 @@ class RoutingHeadDataset(torch.utils.data.Dataset):
         of plain scalars, so it pickles across the worker boundary as it is.'''
         row = self.rows[i]
         bank = self._bank_for_this_process()
-        rendered = _render_row(bank, row, self.cfg,
+        rendered = render_row(bank, row, self.cfg,
                                deterministic=self.split == 'eval')
         return None if rendered is None else (row, *rendered)
 
@@ -688,7 +679,7 @@ def collate_routing_batch(items):
     `_ShardWriter` existed to avoid.
 
     `native` is not used by the loss. It rides along so that a run can report
-    the composition of what it actually saw (`_render_row` says what it is);
+    the composition of what it actually saw (`render_row` says what it is);
     the training set being all-native is a fact worth being able to check
     rather than assume from the pyramid.
     '''
@@ -709,10 +700,10 @@ def collate_routing_batch(items):
 #  Handle count: WSI-batching, not LRU eviction
 # ══════════════════════════════════════════════════════════════════════════
 #
-# A `_CameraBank` never evicts -- it does not need to, as long as whoever
+# A `CameraBank` never evicts -- it does not need to, as long as whoever
 # builds one only ever hands it rows drawn from a BOUNDED number of WSIs.
 # That bound is structural, not a cache-size guess: `iterate_epoch` gives
-# each WSI-batch its OWN `RoutingHeadDataset` (and so its own `_CameraBank`
+# each WSI-batch its OWN `RoutingHeadDataset` (and so its own `CameraBank`
 # per worker) and its OWN `DataLoader`, exhausts it, and lets it go out of
 # scope before building the next one -- workers exit, `SafeSlide`/`Camera`
 # handles close with them, and the next WSI-batch starts from zero. At any

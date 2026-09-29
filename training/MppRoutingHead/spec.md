@@ -12,9 +12,13 @@ Ultimate goal (not this package): a model that, given a handful of prototype
 tiles each labelled with their own mpp/ds, tells an unknown tile which
 prototype it is closest to in SCALE and can hand back an mpp/ds number, not
 just a class id — Prototypical / Relation / Siamese-networks territory. That
-line is not started; the user is still reading the papers. This package is
-the classifier-head baseline that any of those has to beat, not a step
-towards them.
+line is not started as code; the design is being worked out in discussion
+with AI (2026-09-18: how a prototype is generated -- per-WSI support tiles
+through a learned embedding, averaged per rung -- and how it is used --
+nearest-prototype classification, `StageInterface.MppEstimator`-shaped so it
+can sit beside `KnnEstMpp`/`ClassifierEstMpp` on the same `stage1_compare`
+scorecard). This package is the classifier-head baseline that any of those
+has to beat, not a step towards them.
 
 ## Task
 
@@ -47,10 +51,115 @@ full space, so there is nothing to gain from adding that step here.
 | 3-1 | trunk (fine-tuned) → Linear | 3 | trunk + head | **main line** — matches the checkpoint's own validated head shape; more head capacity does not help bridge the natural→pathology domain gap (that is what fine-tuning the trunk itself already does) and this dataset's scale (10-50k tiles fine-tuning a 28M-param trunk, not training it from scratch) argues for fewer trainable head params, not more |
 | 3-2 | trunk (fine-tuned) → MLP → Linear | 3 | trunk + head | **observation arm**, not a default — exists to empirically check the 3-1 reasoning rather than assert it: does an extra projection layer actually hurt cross-dataset generalisation (train=ki67_pure, eval=bracs/test+ki67_with_photo) the way the capacity argument predicts, or not |
 | 2-6 / 3-3 | AttentionPoolHead (learnable pooling over the UN-pooled grid, CLS excluded) → LinearHead | 2 and 3 | head only (2) / trunk+head (3) | **genuine learnable pooling**, not just added capacity — takes `[N, L, D]` (L = 196 patch tokens for GigaPath/UNI2 with the CLS token excluded, or 49 spatial cells for ConvNeXt V2's 7x7 map), learns one query that attends over the L positions to produce `[N, D]`, then classifies with the SAME `LinearHead` class 2-1/3-1 use. CLS excluded on purpose: CLS is already a pooled summary the encoder's OWN pretraining trained it to be, and mixing it into a pooler meant to learn a TASK-specific aggregation would muddy which one the comparison is actually testing. Parameter count depends on `in_dim`/`n_head`, not on L — unlike flattening the grid into one giant Linear, which for GigaPath's 14x14x1536 grid would be a ~231M-parameter first layer alone (measured 2026-09-15), several orders above what a 10-50k-tile fine-tuning set can support without overfitting |
-| — | Prototypical Networks | independent | yes (episodic) | **deferred — user reading papers** |
-| — | Relation Networks | independent | yes | **deferred** |
-| — | Siamese / Triplet | independent | yes | **deferred** |
+| — | Prototypical Networks | independent | yes (episodic) | **deferred — design in discussion with AI, not yet code** |
+| — | Relation Networks | independent | yes | **deferred**, same reason |
+| — | Siamese / Triplet | independent | yes | **deferred**, same reason |
 | — | Ordinal regression head | stacks on any encoder | yes | **deferred**, same reason |
+
+### Ordinal-aware loss (`--loss bal|ord_a|ord_b`)
+
+Motivated by `test_scores_best.csv`'s own native/resampled split on bracs/test
+(BRACS's 4x pyramid: rungs 1/4/16 native, 2/8/32 resampled). The gap is
+encoder-dependent, not universal:
+
+| weights | native | resampled | gap |
+|---|---|---|---|
+| `uni2_frozen_mlp_wide_best.pt` | 0.667 | 0.669 | 0.002 |
+| `uni2_frozen_arcface_best.pt` | 0.411 | 0.414 | 0.003 |
+| `gigapath_frozen_mlp_best.pt` | 0.624 | 0.388 | 0.236 |
+| `gigapath_frozen_linear_best.pt` | 0.603 | 0.279 | 0.324 |
+| `gigapath_frozen_arcface_best.pt` | 0.581 | 0.169 | 0.412 |
+
+Training is 100% `ki67_pure`, whose 2x pyramid makes every rung native — so
+no run has ever backpropagated through a resampled tile. A per-rung
+breakdown of `test_predictions_best.csv` on bracs/test rules out the
+simplest alternative explanation (some rungs are just intrinsically harder,
+independent of native/resampled status): gigapath's native rungs {1,4,16}
+beat their resampled counterparts {2,8,32} at every one of the three ranks
+(0.692>0.333, 0.687>0.215, 0.454>0.411 for `linear`; 0.892>0.217,
+0.390>0.122, 0.523>0.263 for `arcface`) — a consistent ordering, not one
+rung dragging an average. uni2's `mlp_wide` shows no such ordering (its
+resampled rung 8 outscores its own native rung 4 and 16). So the gap is real
+for gigapath and not an artifact of which specific rungs happen to be
+native on BRACS — the open question is WHY a model that never saw a
+resampled tile in training is nonetheless vulnerable to one at test time:
+the working hypothesis is that gigapath's frozen features let a head key
+off fine-texture/sharpness as a correlate of scale, which genuinely does
+track scale on Ki67's native reads but breaks under BRACS's LANCZOS
+resampling — a shortcut, not a memorised artifact. Unverified; the
+ordinal-aware loss below does not depend on this explanation being right,
+it only depends on rung 1..32 being ordered, which they are regardless.
+
+**Notation.** `K=6`, rungs `r_1..r_K = DsLadder.DEFAULT_RUNGS = (1,2,4,8,16,32)`,
+`ℓ_c = log2(r_c) = (0,1,2,3,4,5)` (log-space, matching
+`analyze_stage1_metrics.nearest_rung`'s own reasoning: pyramid scales are
+geometric, so linear rung-index distance is not the right metric either).
+`z` = one sample's `K` logits, `p_c = softmax(z)_c`, `y` = true class index,
+`w_c = N / (K · n_c)` (`Datasets.class_weights`'s existing balanced formula,
+`0` where `n_c=0`).
+
+**1. Current loss** (`cli/train.py:477`, `:611` — plain, unweighted case):
+
+```
+L_CE(z, y) = -log p_y
+```
+
+**2. + class imbalance** (already implemented, `--class-weight balanced`,
+the default): reweights by how UNDER-supplied `y`'s class is, says nothing
+about which WRONG class was predicted.
+
+```
+L_bal(z, y) = -w_y · log p_y
+```
+batched as PyTorch's own `weight=` convention: `Σ_i w_{y_i} L_i / Σ_i w_{y_i}`
+(divides by the batch's summed weight, not `N`).
+
+**3a. + class imbalance + ordinal regression term (A, minimal diff).**
+Penalises HOW FAR the prediction's own expected rung is from the true one.
+Adds one soft-regression term on top of the weighted CE, and weights it the
+same way (user, 2026-09-24) -- unweighted, it is a plain batch mean, and
+rung 32 (0.3 per cent of the training manifest) barely moves it:
+
+```
+ℓ̂(z) = Σ_c p_c · ℓ_c                    (expected log2-rung under the softmax)
+L_ord = Σ_i w_{y_i} (ℓ̂(z_i) - ℓ_{y_i})² / Σ_i w_{y_i}    (class-weighted MSE)
+
+L = L_bal + λ · L_ord
+```
+`λ` is `--ordinal-weight`.
+
+**3b. + class imbalance + soft ordinal target (B, label-smoothing version).**
+Replaces the one-hot target `F.cross_entropy` uses internally with a
+Gaussian kernel over log-rung distance from `y`, so a near-miss costs less
+than a far one BY CONSTRUCTION rather than through an added penalty term:
+
+```
+q_c(y) = exp(-(ℓ_c - ℓ_y)² / 2σ²) / Σ_j exp(-(ℓ_j - ℓ_y)² / 2σ²)   (q_y largest, K-1 others share the rest)
+L_soft(z, y) = -Σ_c q_c(y) · log p_c
+
+L = w_y · L_soft(z, y)                  (same weighted-mean batching as 2.)
+```
+`σ` a new hyperparameter controlling how much mass bleeds to neighbouring
+rungs (`σ→0` recovers plain one-hot CE, i.e. line 2 above, exactly).
+
+**In code.** `cli/train.py`'s `_compute_loss` is the one switch both
+baselines call: `bal` is `F.cross_entropy(weight=w)`, `ord_a` adds the
+weighted regression term above (`--ordinal-weight`), `ord_b` replaces the
+target with the Gaussian kernel (`--ordinal-sigma`). The loss is a segment
+of every checkpoint name (`_ord_a`/`_ord_b`; `bal` has none) and part of
+the `--merge` key, so the three never overwrite each other.
+`PrototypicalRoutingHead/Losses.compute_loss` is the same three formulas per
+episode; `test_ordinal_loss.py` holds the two to the same numbers.
+
+**Resume** (`--resume-dir`, `aiNNModel/models/common/Resume.py`). Unset:
+train from scratch, write nothing. Set: every epoch writes
+`<model>_resume.pt` there -- weights, optimizer, epoch, best scores, the val
+rows so far and every RNG -- and a run that finds one continues after its
+epoch. A model is one encoder with every head it feeds (baseline 2, one
+shared forward) or one head with its trunk (baseline 3). `--epochs` is the
+total, so a finished model resumes into nothing; a file from a different
+identity is refused by name. (The augmentations rendered in the DataLoader
+workers are not seeded, before or after a resume.)
 
 ConvNeXt V2 size/init tiers considered and the reasoning: see the session log
 around 2026-09-14; landed on Tiny (28M params, `convnextv2_tiny.

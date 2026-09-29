@@ -19,8 +19,23 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  training/MppRoutingHead -- train every arm of baselines 2 and 3, then score
-#  the saved checkpoints on the test split. TWO STEPS IN ONE JOB because they
+#  training/MppRoutingHead -- ONE JOB, THREE TRAINING PASSES, then test:
+#
+#    [1a] bal     baseline 2 (gigapath, uni2) + baseline 3 (convnext_v2),
+#                 every head
+#    [1b] ord_a   baseline 2, uni2 only, every head
+#    [1c] ord_b   baseline 2, uni2 only, every head
+#    [2]  evaluate every *_best.pt on the test split
+#
+#  RESUMABLE. RESUME_DIR (default $OUT/resume) receives every model's full
+#  state every epoch; re-submitting THIS SAME COMMAND after a walltime kill
+#  continues each model from its last finished epoch and skips the finished
+#  ones (--epochs is the total). RESUME_DIR= (empty) turns it off.
+#
+#  --merge is always on: the three passes write into the same val_scores.csv,
+#  keyed by (baseline, encoder, head, loss), so none erases another's rows.
+#
+#  Train and evaluate are TWO STEPS IN ONE JOB because they
 #  are two halves of one question and the second one is minutes next to the
 #  first one's hours; keeping them in separate submissions only creates a gap
 #  in which the weights sit unscored.
@@ -46,27 +61,19 @@ SMOKE="${SMOKE:-0}"
 PARALLEL="${PARALLEL:-0}"
 BASELINE="${BASELINE:-all}"
 ENCODERS="${ENCODERS:-gigapath uni2}"
-ARMS="${ARMS:-arcface attn_linear linear mlp}"
+ARMS="${ARMS:-arcface attn_linear linear mlp mlp_deep mlp_deep_residual mlp_wide mlp_deep_wide mlp_narrow}"
+# The ordinal passes: which losses, and on which baseline-2 encoders.
+# ORD_LOSSES= (empty) skips both.
+ORD_LOSSES="${ORD_LOSSES:-ord_a ord_b}"
+ORD_ENCODERS="${ORD_ENCODERS:-uni2}"
 EPOCHS="${EPOCHS:-20}"
+SEG="${SEG:-hest}"         # tissue-mask recipe (TissueMaskConfig.MASK_RECIPES)
 N_PER_RUNG="${N_PER_RUNG:-100}"
-BATCH_SIZE="${BATCH_SIZE:-128}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
 WSI_GROUP="${WSI_GROUP:-8}"
 MAX_WSI="${MAX_WSI:-}"
-# Empty by default -- training from scratch, unchanged. Set to a directory
-# of weight_filename()-named checkpoints (e.g. the 2026-09-17 stale batch,
-# moved aside to result/MppRoutingHead/weights_old/) to warm-start each
-# arm/encoder instead -- see cli/train.py's --resume-dir help for what this
-# does and does not carry over (weights only, no optimizer state).
-RESUME_DIR="${RESUME_DIR:-}"
-# 0 (default): val_scores.csv is a plain overwrite, same as always. 1: this
-# run's own (baseline, encoder, head) rows replace their old ones and every
-# OTHER head's rows already on disk are kept -- e.g. retraining just
-# convnext_v2/attn_linear (BASELINE=3 ARMS=attn_linear) no longer wipes out
-# the other 10 heads' val_scores.csv history. See cli/train.py's --merge
-# help. Note: test_scores/test_predictions (step 2, evaluate.py) need no
-# such flag -- they already rescore EVERY *_best.pt under weights/ each run,
-# old and new alike, so they regenerate complete and correct on their own.
-MERGE="${MERGE:-0}"
+# Set below, once $OUT is known: default $OUT/resume. RESUME_DIR= (set but
+# empty) disables resume -- every model trains from scratch, nothing written.
 # 0 (default) = off for both. CLIP_GRAD_NORM caps every optimizer's L2
 # gradient norm before each step; WARMUP_EPOCHS linearly ramps LR from 0
 # over that many epochs. Both per --case, not project-wide defaults -- e.g.
@@ -76,6 +83,11 @@ MERGE="${MERGE:-0}"
 # help.
 CLIP_GRAD_NORM="${CLIP_GRAD_NORM:-0}"
 WARMUP_EPOCHS="${WARMUP_EPOCHS:-0}"
+# ord_a/ord_b = spec.md's "Ordinal-aware loss" section, formulas 3a/3b -- see
+# cli/train.py's --loss help. ORDINAL_WEIGHT/ORDINAL_SIGMA only matter under
+# ord_a/ord_b respectively.
+ORDINAL_WEIGHT="${ORDINAL_WEIGHT:-1.0}"
+ORDINAL_SIGMA="${ORDINAL_SIGMA:-1.0}"
 # 1: skip step 1 entirely and go straight to step 2 -- rescores whatever is
 # already sitting in $OUT/weights (nothing trained this run). For testing
 # evaluate.py itself (e.g. its print_and_plot output) without paying for a
@@ -123,6 +135,7 @@ if [ "$SMOKE" = "1" ]; then
     BASELINE="${BASELINE_SMOKE:-2}"
     ENCODERS="${ENCODERS_SMOKE:-gigapath}"
     ARMS="${ARMS_SMOKE:-linear}"
+    ORD_LOSSES="${ORD_LOSSES_SMOKE:-}"
     EPOCHS=1
     N_PER_RUNG=4
     MAX_WSI=2
@@ -150,27 +163,29 @@ print(_paths.job_result_dir('MppRoutingHead'))
 ")
 fi
 mkdir -p "$OUT"
+# `${RESUME_DIR-...}` (no colon): unset -> the default, set-but-empty -> off.
+RESUME_DIR="${RESUME_DIR-$OUT/resume}"
 MAX_WSI_ARG=""
 [ -n "$MAX_WSI" ] && MAX_WSI_ARG="--max-wsi $MAX_WSI"
 RESUME_DIR_ARG=""
 [ -n "$RESUME_DIR" ] && RESUME_DIR_ARG="--resume-dir $RESUME_DIR"
-MERGE_ARG=""
-[ "$MERGE" = "1" ] && MERGE_ARG="--merge"
-CLIP_WARMUP_ARGS=""
-[ "$CLIP_GRAD_NORM" != "0" ] && CLIP_WARMUP_ARGS="$CLIP_WARMUP_ARGS --clip-grad-norm $CLIP_GRAD_NORM"
-[ "$WARMUP_EPOCHS" != "0" ] && CLIP_WARMUP_ARGS="$CLIP_WARMUP_ARGS --warmup-epochs $WARMUP_EPOCHS"
+# Always --merge: three passes share val_scores.csv (see the header).
+MERGE_ARG="--merge"
+TRAIN_EXTRA_ARGS=""
+[ "$CLIP_GRAD_NORM" != "0" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --clip-grad-norm $CLIP_GRAD_NORM"
+[ "$WARMUP_EPOCHS" != "0" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --warmup-epochs $WARMUP_EPOCHS"
 
 echo "======== MppRoutingHead ========"
 echo "  out       $OUT"
 echo "  baseline  $BASELINE   parallel=$PARALLEL"
 echo "  encoders  $ENCODERS"
 echo "  arms      $ARMS"
+echo "  bal on    baseline $BASELINE   ordinal passes: ${ORD_LOSSES:-(none)} on ${ORD_ENCODERS}"
 echo "  epochs    $EPOCHS   n_per_rung $N_PER_RUNG   cpus $CPUS"
 echo "  wandb     project=$WANDB_PROJECT   mode=${WANDB_MODE:-online, unset here -- train.py falls back to the same}"
 echo "  run_name  prefix=${RUN_NAME:-(none)}   (defaults to \$SLURM_JOB_ID; runs are still b2-<encoder> / b3-<arm> even with no prefix)"
 [ -n "$MAX_WSI" ] && echo "  max_wsi   $MAX_WSI"
-[ -n "$RESUME_DIR" ] && echo "  resume_dir  $RESUME_DIR  (weights only, no optimizer state)"
-[ "$MERGE" = "1" ] && echo "  merge     val_scores.csv rows outside this run's own heads are kept"
+echo "  resume    ${RESUME_DIR:-off (RESUME_DIR set empty)}"
 [ "$CLIP_GRAD_NORM" != "0" ] && echo "  clip_grad_norm  $CLIP_GRAD_NORM"
 [ "$WARMUP_EPOCHS" != "0" ] && echo "  warmup_epochs   $WARMUP_EPOCHS"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
@@ -179,7 +194,15 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 #  Step 1: train
 # =============================================================================
 echo ""
-echo "======== [1/2] train ========"
+# The val/test split is written once, by make_split.py, and only READ by
+# train/evaluate (and by PrototypicalRoutingHead and the stage-1 bench). A
+# split that already exists is kept -- deleting it is how you ask for a new one.
+# --cache-job MakeSplit: this runs under SLURM_JOB_NAME=MppRoutingHead, and
+# every reader defaults to the split make_split.py writes under its OWN name.
+echo "======== [0] make_split ========"
+python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
+
+echo "======== [1a] train, loss bal ========"
 
 if [ "$EVAL_ONLY" = "1" ]; then
     echo "  EVAL_ONLY=1 -- skipping training, scoring whatever is already in $OUT/weights"
@@ -194,12 +217,13 @@ elif [ "$PARALLEL" = "1" ]; then
     # a full truncate-then-write. Two processes finishing around the same
     # moment and pointed at the SAME file would have the second one's write
     # clobber the first's, silently -- one baseline's rows just vanish. The
-    # cache under result/cache/mpp_routing_head/ IS shared on purpose (that is
-    # the whole point of caching), and `Datasets.py`'s manifest/`wsi_split.csv`
-    # writers are atomic (temp file + os.replace) for exactly this: two
-    # processes racing to build the SAME manifest for the first time compute
-    # the same deterministic content and one atomic rename wins, rather than
-    # two writers interleaving into one corrupt file.
+    # mask and sampler caches under result/cache/<job>_mask/ and <job>_sampler/
+    # ARE shared on purpose (that is the whole point of caching), and their
+    # writes are atomic
+    # (utilities/Cache.py) for exactly this: two processes racing to draw the
+    # SAME slide for the first time compute the same deterministic content and
+    # the first rename wins, rather than two writers interleaving into one
+    # corrupt entry.
     #
     # Logs go to separate files -- interleaved stdout from two training loops
     # printing per-epoch lines at their own pace is not "still readable, just
@@ -215,6 +239,7 @@ elif [ "$PARALLEL" = "1" ]; then
         --encoders $ENCODERS \
         --heads $ARMS \
         --epochs "$EPOCHS" \
+        --seg "$SEG" \
         --n-per-rung "$N_PER_RUNG" \
         --batch-size "$BATCH_SIZE" \
         --wsi-group-size "$WSI_GROUP" \
@@ -222,7 +247,7 @@ elif [ "$PARALLEL" = "1" ]; then
         --device cuda:0 \
         --wandb-project "$WANDB_PROJECT" \
         $RUN_NAME_ARG \
-        $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $CLIP_WARMUP_ARGS --out "$OUT/b2" \
+        $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $TRAIN_EXTRA_ARGS --out "$OUT/b2" \
         > "$LOG2" 2>&1 &
     pid2=$!
 
@@ -230,6 +255,7 @@ elif [ "$PARALLEL" = "1" ]; then
         --baseline 3 \
         --heads $ARMS \
         --epochs "$EPOCHS" \
+        --seg "$SEG" \
         --n-per-rung "$N_PER_RUNG" \
         --batch-size "$BATCH_SIZE" \
         --wsi-group-size "$WSI_GROUP" \
@@ -237,7 +263,7 @@ elif [ "$PARALLEL" = "1" ]; then
         --device cuda:1 \
         --wandb-project "$WANDB_PROJECT" \
         $RUN_NAME_ARG \
-        $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $CLIP_WARMUP_ARGS --out "$OUT/b3" \
+        $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $TRAIN_EXTRA_ARGS --out "$OUT/b3" \
         > "$LOG3" 2>&1 &
     pid3=$!
 
@@ -293,18 +319,52 @@ else
         --encoders $ENCODERS \
         --heads $ARMS \
         --epochs "$EPOCHS" \
+        --seg "$SEG" \
         --n-per-rung "$N_PER_RUNG" \
         --batch-size "$BATCH_SIZE" \
         --wsi-group-size "$WSI_GROUP" \
         --num-workers "$NUM_WORKERS" \
         --wandb-project "$WANDB_PROJECT" \
         $RUN_NAME_ARG \
-        $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $CLIP_WARMUP_ARGS --out "$OUT"
+        $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $TRAIN_EXTRA_ARGS --out "$OUT"
     rc=$?
     if [ $rc -ne 0 ]; then
         echo "train.py exited $rc -- not scoring test on weights that may not exist"
         exit $rc
     fi
+fi
+
+# ---------------- [1b]/[1c] the ordinal passes ----------------
+# Baseline 2 only, on ORD_ENCODERS only (uni2 by default): an ordinal loss is
+# a question about the head on the encoder whose bal numbers are the ones
+# worth moving, not a sweep over every trunk. Same heads, same data, same
+# resume directory; the loss is in every file name, so nothing collides.
+if [ "$EVAL_ONLY" != "1" ]; then
+    for L in $ORD_LOSSES; do
+        echo ""
+        echo "======== [1] train, loss $L  (baseline 2: $ORD_ENCODERS) ========"
+        python training/MppRoutingHead/cli/train.py \
+            --baseline 2 \
+            --encoders $ORD_ENCODERS \
+            --heads $ARMS \
+            --loss "$L" \
+            --ordinal-weight "$ORDINAL_WEIGHT" \
+            --ordinal-sigma "$ORDINAL_SIGMA" \
+            --epochs "$EPOCHS" \
+            --seg "$SEG" \
+            --n-per-rung "$N_PER_RUNG" \
+            --batch-size "$BATCH_SIZE" \
+            --wsi-group-size "$WSI_GROUP" \
+            --num-workers "$NUM_WORKERS" \
+            --wandb-project "$WANDB_PROJECT" \
+            $RUN_NAME_ARG \
+            $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $TRAIN_EXTRA_ARGS --out "$OUT"
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            echo "train.py ($L) exited $rc -- not scoring test"
+            exit $rc
+        fi
+    done
 fi
 
 # =============================================================================
@@ -318,9 +378,10 @@ fi
 # this point, and evaluate.py has no baseline split to parallelise across --
 # it loops over CHECKPOINTS, which is a few minutes next to training's hours.
 echo ""
-echo "======== [2/2] evaluate ========"
+echo "======== [2] evaluate ========"
 python training/MppRoutingHead/cli/evaluate.py \
     --tag "$TAG" \
+    --seg "$SEG" \
     --num-workers "$NUM_WORKERS" \
     --out "$OUT"
 rc=$?
