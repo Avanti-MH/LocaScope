@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                # openslide reads + the CPU transform
 #SBATCH --mem=128G                       # per-tile reads, not whole regions
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH -o /work/u26130998/log/TileRetrievalBench      # STDOUT
-#SBATCH -e /work/u26130998/log/TileRetrievalBench      # STDERR
+#SBATCH -o /work/u26130998/log/%x      # STDOUT
+#SBATCH -e /work/u26130998/log/%x      # STDERR
 
 # ---------------- Load modules ----------------
 ml purge

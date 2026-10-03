@@ -1,0 +1,433 @@
+'''The one place pixels leave a slide.
+
+    reader = SlideReader(wsi, resize='lanczos' | 'area', workers=budget.workers)
+    tile   = reader.read(x, y, ReadSpec(256, 256), ds)              # one position
+    for block in reader.read_grid(regions, grids, ds, tile=256):     # a region grid
+        block.main, block.offset                                     # uint8 tensors
+
+Coordinates are level-0, magnifications are ds (downsample from level 0). An
+mpp enters at the caller, once (`ds = mpp / base_mpp`).
+
+WHAT A READ IS (`read`, `plan`, `_read`)
+-----------------------------------------
+`ReadSpec` says how big: the sensor's output px, the bounding square if it
+rotates, the sensor margin if it does not. `ReadGeometry` turns that into a
+level-0 rectangle (`FovGeometry.read_rect`), the level (`level_for`: never
+upsample) and the level px (`level_px`: rounded, from output px, so a native
+read needs no resize). `_read` is the one `read_region_rgb` and the one
+resample (`resample`, the reader's filter). An arbitrary rectangle is
+`read(x0, y0, ReadSpec(w_out, h_out), ds)`; a read off the slide is None.
+
+`stack='R'` reads the same rectangle at ds 1 and degrades it to ds
+(`degrade_resolution`); `level=` forces a finer level (the routing heads'
+resampled read modes).
+
+WHAT A GRID READ IS (`read_grid`)
+----------------------------------
+Every tile of the regions' `PatchGrid`s, at a pyramid level's own ds, in
+blocks, in DataLoader workers. At an integer downsample (level 0; a 2x
+pyramid's levels) a block is `block_rows` main rows of one region read in ONE
+call, with the offset rows inside it cut from the same pixels. At any other
+(BRACS's 4.00014, 16.001) each region is read once and cut into the same
+blocks: a read's level origin is `origin / ds`, and reads with their own
+origins would each sit at their own sub-pixel phase -- features up to 0.079
+apart at BRACS level 1. Regions are the unit of work there, so different
+regions of one level are read by different workers in parallel; one region
+is one call, which is what bounds a level made of a few large regions
+(BRACS_1228 level 1: 313 tiles/s against 3,780 at level 0).
+
+A grid read is NOT `read` in a loop, for both reasons above: speed (one call
+per tile was ~270 tiles/s, blocks over 7 workers ~1,060) and phase.
+
+HISTORY. This was `GridReader` (the grid half), `QueryFromWSI` (the
+single-position half, inside the Camera) and `Render.py` (the resample and
+the degrade) until 2026-10-03. `diag_read_exp.py` ran every flow through
+both before the move: 566/566 reads identical, 14/14 timings not slower.
+'''
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, List, Optional, Sequence, Tuple, Union
+
+import numpy as np
+import torch
+
+from ReadGeometry import (LEVEL_REL_TOL, FovGeometry, ReadRect, ReadSpec,
+                          level_for, level_px)
+from SafeSlide import SafeSlide
+
+#: The resampling filters a reader can be built with.
+#:   lanczos  PIL LANCZOS -- what the microscope simulation always used
+#:   area     cv2 INTER_AREA -- the ladder's filter; anything else invents
+#:            high-frequency texture, and a keypoint detector learns to fire
+#:            on it (reference tiles, pre-tiles)
+RESIZE = ('lanczos', 'area')
+
+#: Where a read's pixels come from (`RungPlan.stack_kind`).
+#:   F  the footprint grows with ds, read off the pyramid
+#:   R  the ds 1 footprint, degraded to ds and restored
+STACKS = ('F', 'R')
+
+
+def resample(img: np.ndarray, w: int, h: int, method: str) -> np.ndarray:
+    """`img` at (w, h) px; returned as is when it already is that size, so a
+    native read is never filtered."""
+    if img.shape[1] == w and img.shape[0] == h:
+        return img
+    if method not in RESIZE:
+        raise ValueError(f'resize must be one of {RESIZE}, got {method!r}')
+    if method == 'lanczos':
+        from PIL import Image                                    # noqa: PLC0415
+        return np.asarray(Image.fromarray(img).resize((int(w), int(h)),
+                                                      Image.LANCZOS))
+    import cv2                                                   # noqa: PLC0415
+    return cv2.resize(img, (int(w), int(h)), interpolation=cv2.INTER_AREA)
+
+
+def degrade_resolution(img, ds: float, out_side: Optional[int] = None):
+    """An 'R' rung's degradation: shrink by `ds`, grow back. THE ONE DEFINITION.
+
+    INTER_AREA down, INTER_LINEAR up. Area-averaging is the non-aliasing
+    downsample; coming back up with it would be a second box filter rather than
+    the interpolation a real coarser level would have gone through.
+
+    `read(stack='R')` applies it, and Stage B applies it to derive an 'R' stack
+    from a chain's ds 1 tile without a second extraction (TileSampler
+    re-exports it under this name). Two spellings would make a survival number
+    a statement about which resampling filter each half used.
+    """
+    import cv2                                                  # noqa: PLC0415
+    side = int(out_side or img.shape[0])
+    if float(ds) <= 1.0:
+        return (img if img.shape[0] == side else
+                cv2.resize(img, (side, side), interpolation=cv2.INTER_AREA))
+    small = max(1, int(round(side / float(ds))))
+    img = cv2.resize(img, (small, small), interpolation=cv2.INTER_AREA)
+    return cv2.resize(img, (side, side), interpolation=cv2.INTER_LINEAR)
+
+
+@dataclass(frozen=True)
+class ReadPlan:
+    """Everything one read decides, before any IO."""
+    rect: ReadRect                  # level-0: the origin, and what must be on the slide
+    level: int
+    read_wh: Tuple[int, int]        # level px
+    out_wh: Tuple[int, int]         # output px
+
+
+# ── the grid read ────────────────────────────────────────────────────────────
+
+@dataclass
+class GridBlock:
+    """Rows `row0 ..` of one region: its main tiles and offset tiles."""
+    region: int                 # index into the regions the read was given
+    row0: int                   # first row, the same index on both lattices
+    cols: int                   # main tiles per row; the offset lattice has cols - 1
+    main_rows: int
+    offset_rows: int
+    main: torch.Tensor          # uint8 [main_rows * cols, T, T, 3], row-major
+    offset: torch.Tensor        # uint8 [offset_rows * (cols - 1), T, T, 3]
+
+
+def lattice_dims(grid, lattice: str) -> Tuple[int, int]:
+    """(rows, cols) of one lattice of a region's `PatchGrid`. The offset lattice
+    is one row and one column smaller: its tiles sit between the main ones."""
+    if lattice == 'main':
+        return grid.grid_rows, grid.grid_cols
+    return grid.overlap_rows, grid.overlap_cols
+
+
+def integer_downsample(ds: float) -> bool:
+    """Does every block read at this downsample land on the same sub-pixel
+    phase as the whole-region read? Only when level-0 rows map to whole level
+    rows, i.e. the downsample is an integer."""
+    return abs(float(ds) - round(float(ds))) < 1e-9
+
+
+def _offset_rows(grid, row0: int, main_rows: int, offset: bool) -> int:
+    """Offset rows starting at `row0` that a block of `main_rows` main rows holds."""
+    if not offset:
+        return 0
+    off_rows_total, off_cols = lattice_dims(grid, 'offset')
+    return max(0, min(main_rows, off_rows_total - row0)) if off_cols else 0
+
+
+def _cut(arr: np.ndarray, y0: int, grid, tile: int, main_rows: int,
+         n_off: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Main and offset tiles of `main_rows` rows whose first row starts `y0`
+    level px down `arr`, which starts at the region's left edge. Tile (r, c)
+    of the main lattice sits at (c * T, r * T) level px from the region's
+    origin, the offset lattice half a tile further on both axes --
+    `PatchGrid`'s placement, and `WsiTissuesContainer`'s cut."""
+    half = tile // 2
+    _, cols = lattice_dims(grid, 'main')
+    _, off_cols = lattice_dims(grid, 'offset')
+    main = (arr[y0:y0 + main_rows * tile, :cols * tile]
+            .reshape(main_rows, tile, cols, tile, 3)
+            .transpose(0, 2, 1, 3, 4)
+            .reshape(main_rows * cols, tile, tile, 3))
+    if not n_off:
+        return np.ascontiguousarray(main), np.zeros((0, tile, tile, 3), np.uint8)
+    off = (arr[y0 + half:y0 + half + n_off * tile, half:half + off_cols * tile]
+           .reshape(n_off, tile, off_cols, tile, 3)
+           .transpose(0, 2, 1, 3, 4)
+           .reshape(n_off * off_cols, tile, tile, 3))
+    return np.ascontiguousarray(main), np.ascontiguousarray(off)
+
+
+def read_block(slide, region, ds: float, level: int, grid, tile: int, row0: int,
+               main_rows: int, offset: bool) -> Tuple[np.ndarray, np.ndarray]:
+    """One region's rows `row0 .. row0 + main_rows - 1` in one level read, with
+    the offset rows the read covers (it is made tall enough for them)."""
+    half = tile // 2
+    _, cols = lattice_dims(grid, 'main')
+    n_off = _offset_rows(grid, row0, main_rows, offset)
+    height = max(main_rows * tile, n_off * tile + half if n_off else 0)
+    x_l0 = int(round(region.x))
+    y_l0 = int(round(region.y + (row0 * tile) * ds))
+    arr = slide.read_region_rgb((x_l0, y_l0), level, (cols * tile, height))
+    return _cut(arr, 0, grid, tile, main_rows, n_off)
+
+
+def read_region_whole(slide, region, ds: float, level: int) -> np.ndarray:
+    """The whole region in ONE read, at its level-0 origin and size --
+    `WsiTissuesContainer`'s call, so a tile cut from it is the container's."""
+    size = (int(region.w / ds), int(region.h / ds))
+    return slide.read_region_rgb((region.x, region.y), level, size)
+
+
+class _Blocks(torch.utils.data.Dataset):
+    """The unit of work a worker takes; each worker opens its own SafeSlide (a
+    handle is not shared across processes). Integer ds: an item is one block.
+    Otherwise: an item is a whole region, read once and returned as all its
+    blocks, and the workers split the regions between them."""
+
+    def __init__(self, path, regions, grids, ds, level, tile, block_rows, offset):
+        self.path, self.regions, self.grids = str(path), list(regions), list(grids)
+        self.ds, self.level, self.tile = float(ds), int(level), int(tile)
+        self.offset = bool(offset)
+        self.whole = not integer_downsample(self.ds)
+        self.plan: List[Tuple[int, int, int]] = []      # every block, in order
+        for r, grid in enumerate(self.grids):
+            rows, cols = lattice_dims(grid, 'main')
+            if rows == 0 or cols == 0:
+                continue
+            for row0 in range(0, rows, block_rows):
+                self.plan.append((r, row0, min(block_rows, rows - row0)))
+        if self.whole:
+            in_plan = list(dict.fromkeys(r for r, _, _ in self.plan))
+            self.items = [[p for p in self.plan if p[0] == r] for r in in_plan]
+        else:
+            self.items = [[p] for p in self.plan]
+        self._slide = None
+
+    def __len__(self):
+        return len(self.items)
+
+    def _block(self, r, row0, n, main, off) -> GridBlock:
+        cols = lattice_dims(self.grids[r], 'main')[1]
+        return GridBlock(region=r, row0=row0, cols=cols, main_rows=n,
+                         offset_rows=len(off) // max(1, cols - 1) if len(off) else 0,
+                         main=torch.from_numpy(main), offset=torch.from_numpy(off))
+
+    def __getitem__(self, i) -> List[GridBlock]:
+        if self._slide is None:
+            self._slide = SafeSlide(self.path)
+        blocks = self.items[i]
+        r = blocks[0][0]
+        grid = self.grids[r]
+        if not self.whole:
+            _, row0, n = blocks[0]
+            main, off = read_block(self._slide, self.regions[r], self.ds, self.level,
+                                   grid, self.tile, row0, n, self.offset)
+            return [self._block(r, row0, n, main, off)]
+        img = read_region_whole(self._slide, self.regions[r], self.ds, self.level)
+        out = []
+        for _, row0, n in blocks:
+            main, off = _cut(img, row0 * self.tile, grid, self.tile, n,
+                             _offset_rows(grid, row0, n, self.offset))
+            out.append(self._block(r, row0, n, main, off))
+        return out
+
+
+def _identity(item):
+    return item
+
+
+class GridRead:
+    """What `read_grid` returns: iterate it for the blocks, in order (region,
+    then block of rows); `len` (blocks), `n_tiles` and `one_read_per_region`
+    are known before reading."""
+
+    def __init__(self, blocks: _Blocks, workers: int):
+        self._blocks, self.workers = blocks, int(workers)
+
+    def __len__(self) -> int:
+        return len(self._blocks.plan)
+
+    @property
+    def one_read_per_region(self) -> bool:
+        return self._blocks.whole
+
+    @property
+    def n_tiles(self) -> int:
+        """Main + offset tiles this read yields."""
+        n = 0
+        for r, row0, rows in self._blocks.plan:
+            grid = self._blocks.grids[r]
+            cols = lattice_dims(grid, 'main')[1]
+            n += rows * cols
+            n += _offset_rows(grid, row0, rows, self._blocks.offset) * max(0, cols - 1)
+        return n
+
+    def __iter__(self) -> Iterator[GridBlock]:
+        loader = torch.utils.data.DataLoader(
+            self._blocks, batch_size=None, num_workers=self.workers,
+            collate_fn=_identity, pin_memory=False)
+        for blocks in loader:
+            yield from blocks
+
+
+# ── the reader ───────────────────────────────────────────────────────────────
+
+class SlideReader:
+    """See the module docstring. One per slide per process; `Render` and its
+    `at(ds)` objectives share one, as do the rungs of a training bank."""
+
+    def __init__(self, slide: Union[SafeSlide, str, Path], *,
+                 resize: str = 'lanczos', workers: int = 0):
+        if resize not in RESIZE:
+            raise ValueError(f'resize must be one of {RESIZE}, got {resize!r}')
+        if isinstance(slide, (str, Path)):
+            slide = SafeSlide(str(slide))
+        if not isinstance(slide, SafeSlide):
+            raise TypeError(
+                'SlideReader needs a SafeSlide, not a bare openslide.OpenSlide: '
+                'it reads `base_mpp` and `read_region_rgb` off the handle, and a '
+                'plain handle turns a scanner hole into black. SafeSlide(path) '
+                'subclasses OpenSlide, so nothing else about the handle changes.')
+        self.slide = slide
+        self.path = getattr(slide, '_filename', None)
+        self.resize = resize
+        self.workers = int(workers)
+        self.base_mpp = float(slide.base_mpp)
+        self.level_downsamples = [float(d) for d in slide.level_downsamples]
+
+    # ── the level ──────────────────────────────────────────────────────────
+
+    def level_of(self, ds: float, level: Optional[int] = None) -> int:
+        """`level_for(ds)`, or `level` checked: a forced level must not be
+        coarser than `ds` -- that would be a blow-up, not a resample."""
+        if level is None:
+            return level_for(self.level_downsamples, ds)
+        n = len(self.level_downsamples)
+        if not 0 <= level < n:
+            raise ValueError(f'level {level}: this slide has levels 0..{n - 1}')
+        if self.level_downsamples[level] > float(ds) * (1.0 + LEVEL_REL_TOL):
+            raise ValueError(
+                f'level {level} is ds {self.level_downsamples[level]:.4g}, coarser '
+                f'than the ds {ds:.4g} asked for: it would be blown up, not '
+                f'resampled down')
+        return int(level)
+
+    def native(self, ds: float, level: Optional[int] = None) -> bool:
+        """Does `ds` come off its level with no resampling (within
+        `LEVEL_REL_TOL`)? A property of the slide's pyramid: on a 2x pyramid
+        every power of two is native, on a 4x one the odd ones are not, so a
+        resampling signature correlates with the rung -- the routing heads
+        split their accuracy on it."""
+        lds = self.level_downsamples[self.level_of(ds, level)]
+        return abs(lds - float(ds)) / float(ds) < LEVEL_REL_TOL
+
+    # ── one position ───────────────────────────────────────────────────────
+
+    def plan(self, x: int, y: int, spec: ReadSpec, ds: float, *,
+             level: Optional[int] = None) -> ReadPlan:
+        """What `read` would read, with no IO. (x, y) is the sensor
+        rectangle's level-0 top-left. A rotating spec reads the bounding
+        square (`square_out` output px), centred on the rectangle; otherwise
+        the rectangle grown by `margin_out` output px on every side."""
+        geo = FovGeometry.of(spec.sensor_w, spec.sensor_h, ds)
+        if spec.rotates:
+            rect = geo.read_rect(x, y, rotates=True)
+            out = (geo.square_out, geo.square_out)
+        else:
+            m = int(spec.margin_out)
+            rect = geo.read_rect(x, y, rotates=False, margin_out=m)
+            out = (spec.sensor_w + 2 * m, spec.sensor_h + 2 * m)
+        lv = self.level_of(ds, level)
+        lds = self.level_downsamples[lv]
+        return ReadPlan(rect=rect, level=lv,
+                        read_wh=(level_px(out[0], ds, lds), level_px(out[1], ds, lds)),
+                        out_wh=out)
+
+    def fits(self, rect: ReadRect) -> bool:
+        """Is this level-0 rectangle inside the canvas `read_region` addresses?"""
+        w, h = self.slide.dimensions
+        return rect.inside(0, 0, w, h)
+
+    def read(self, x: int, y: int, spec: ReadSpec, ds: float, *,
+             stack: str = 'F', level: Optional[int] = None) -> Optional[np.ndarray]:
+        """uint8 [H, W, 3], or None when the read runs off the slide.
+        `stack='R'` reads the same rectangle at ds 1 (level 0; a forced `level`
+        does not apply) and degrades it to `ds`."""
+        if stack not in STACKS:
+            raise ValueError(f'stack must be one of {STACKS}, got {stack!r}')
+        if stack == 'R':
+            if spec.sensor_w != spec.sensor_h:
+                raise ValueError(f"an 'R' read needs a square sensor, got "
+                                 f'{spec.sensor_w}x{spec.sensor_h}')
+            img = self.read(x, y, spec, 1.0)
+            return None if img is None else degrade_resolution(img, ds, img.shape[0])
+        p = self.plan(x, y, spec, ds, level=level)
+        if not self.fits(p.rect):
+            return None
+        return self._read(p)
+
+    def read_samples(self, samples, spec: ReadSpec) -> List[np.ndarray]:
+        """`read(meta.x, meta.y, spec, meta.ds, stack=meta.stack_kind)` for each
+        `SampleMeta` (or `Sample`) a TileSampler drew. A sampler only offers
+        positions whose read fits, so one off the slide is an error here, not
+        a tile to drop."""
+        out = []
+        for s in samples:
+            m = getattr(s, 'meta', s)
+            img = self.read(m.x, m.y, spec, m.ds, stack=m.stack_kind)
+            if img is None:
+                raise RuntimeError(
+                    f'{m.slide} ds {m.ds:g} ({m.x}, {m.y}): the read runs off the '
+                    f'slide, which the sampler should never have offered')
+            out.append(img)
+        return out
+
+    def _read(self, p: ReadPlan) -> np.ndarray:
+        """THE read: `read_region_rgb` (a scanner hole is the background colour,
+        not a black rectangle with a perfect corner) and the reader's filter."""
+        img = self.slide.read_region_rgb((p.rect.x0, p.rect.y0), p.level, p.read_wh)
+        return resample(img, p.out_wh[0], p.out_wh[1], self.resize)
+
+    # ── a region grid ──────────────────────────────────────────────────────
+
+    def read_grid(self, regions: Sequence, grids: Sequence, ds: float, *,
+                  tile: int, offset: bool = True, block_rows: int = 8,
+                  level: Optional[int] = None) -> GridRead:
+        """Every tile of the regions' `PatchGrid`s (`Store.region_grids`), in
+        blocks. A grid tile is `tile` LEVEL px, so `ds` must be its level's
+        own: a grid at a ds the pyramid does not have would need a resample
+        per tile, which is what a block read exists to avoid. `offset=False`
+        reads the main lattice only."""
+        if len(regions) != len(grids):
+            raise ValueError(f'{len(regions)} regions against {len(grids)} grids')
+        if block_rows < 1:
+            raise ValueError(f'block_rows must be >= 1, got {block_rows}')
+        lv = self.level_of(ds, level)
+        if not self.native(ds, lv):
+            raise ValueError(f'read_grid at ds {ds:g}: level {lv} is ds '
+                             f'{self.level_downsamples[lv]:g}; a grid is read at '
+                             f"a level's own ds")
+        if self.path is None:
+            raise ValueError('read_grid needs a slide opened from a path '
+                             '(each worker reopens it)')
+        return GridRead(_Blocks(self.path, regions, grids, ds, lv, tile,
+                                block_rows, offset), self.workers)

@@ -12,7 +12,7 @@ than a slide reader.
 
 WHAT WOULD RUN AND BE WRONG
 =============================
-1. A lattice step computed as `grid_step * ds`. It equals the right answer on
+1. A lattice step computed as `step_px * ds`. It equals the right answer on
    an 'F' rung and is 32x too coarse on an 'R' one at ds 32, where `ds` is a
    degradation factor and not a magnification. The rung comes back nearly
    empty and reads as "there was no tissue there".
@@ -61,12 +61,15 @@ setup_import_paths()
 import numpy as np                                               # noqa: E402
 
 from DsLadder import RungPlan                                    # noqa: E402
+import dataclasses                                               # noqa: E402
+from ReadGeometry import ReadSpec                              # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
                          allocate_targets, bucket_names, spill_order,
                          PlanSpec, RichnessConfig, Sample, SampleMeta,
                          SamplerConfig, TileSampler, assign_buckets,
                          resolution_plan, PRE_TILE_FACTOR, centre_crop,
-                         centre_margin, pre_tile_px)
+                         centre_margin, pre_tile_px, camera_plan, native_plans,
+                         score_background, FOV_CELL)
 from TissueMask import SlideMask, TissueMask                      # noqa: E402
 
 _RESULTS = []
@@ -207,9 +210,9 @@ def _plans(dss=(1.0, 2.0), tile=TILE, factor=1):
 
 
 def _cfg(**over):
-    base = dict(tile=TILE, n_per_rung=40, seed=0,
+    base = dict(n_per_rung=40, seed=0,
                 richness=_permissive(),
-                overlap=OverlapConfig(),          # 0 == the tile, disjoint
+                overlap=OverlapConfig(),          # step 1.0, disjoint
                 inherit=InheritConfig())
     base.update(over)
     return SamplerConfig(**base)
@@ -254,7 +257,7 @@ def t_the_lattice_step_is_output_pixels_and_not_ds():
     assert r1.n_candidates == r8.n_candidates, (
         f'R rungs at ds 1 and ds 8 hold the same footprint and must offer the '
         f'same lattice: {r1.n_candidates} vs {r8.n_candidates}. A step '
-        f'computed as grid_step*ds gives exactly this failure')
+        f'computed as step_px*ds gives exactly this failure')
     assert f8.n_candidates < r8.n_candidates, (
         f'the F rung at ds 8 has a footprint 8x wider and must offer FEWER '
         f'positions, not {f8.n_candidates} against {r8.n_candidates} -- if '
@@ -393,7 +396,7 @@ def t_the_reserve_is_derived_from_the_margin_and_not_asked_for():
 def t_a_disjoint_lattice_overlaps_nothing_and_the_random_arm_does():
     """The measurement the module claims. Not a tolerance -- a decoy.
 
-    The lattice at `grid_step == tile` cannot produce an overlapping pair; the
+    The lattice at `step == 1.0` cannot produce an overlapping pair; the
     sampler it replaced produced 202,420 of them over the real corpus. Both
     arms run the same gate and the same selection here, so the only difference
     is where the candidates came from.
@@ -414,21 +417,21 @@ def t_a_disjoint_lattice_overlaps_nothing_and_the_random_arm_does():
 
 
 def t_a_half_step_lattice_under_a_tight_bound_is_refused():
-    """grid_step 128 on a 256 tile means every neighbour overlaps 50 per cent.
-    Accepting that with max_overlap_ratio=0.3 would degenerate the lattice to
-    grid_step=256 while `sampler_id` still recorded 128."""
+    """step 0.5 means every neighbour overlaps 50 per cent. Accepting that with
+    max_overlap_ratio=0.3 would degenerate the lattice to the disjoint one
+    while `sampler_id` still recorded 0.5."""
     try:
-        OverlapConfig(grid_step=TILE // 2, max_overlap_ratio=0.3).check(TILE)
+        OverlapConfig(step=0.5, max_overlap_ratio=0.3)
     except ValueError as e:
         msg = str(e)
-        assert 'degenerate' in msg and str(TILE) in msg
+        assert 'degenerate' in msg and '50%' in msg
         return 'refused, with the arithmetic'
     raise AssertionError('a lattice that breaks its own bound was accepted')
 
 
 def t_the_overlapping_share_is_a_budget_and_binds():
     wsi, mask = _one_big_block()
-    cfg = _cfg(overlap=OverlapConfig(grid_step=TILE // 2,
+    cfg = _cfg(overlap=OverlapConfig(step=0.5,
                                      max_overlap_ratio=0.9,
                                      overlapping_share=0.10))
     s = TileSampler(wsi, mask, cfg).sample(_plans((1.0,)))
@@ -446,27 +449,25 @@ def t_every_jitter_offset_is_disjoint_and_off_lattice():
     numbers only at tile 256 and are four times the tile at 64. Its own
     docstring argued that the units matter and then picked one that holds for
     one size.
-    So the check runs at three tile sizes: a pixel constant passes at 256 and
-    fails at the others.
+    The config holds no tile size at all now -- every quantity is a fraction
+    of the footprint -- so a pixel constant has nowhere to live.
     """
     ok = OverlapConfig()
-    for tile in (64, 256, 1024):
-        ok.check(tile)
     for dx, dy in ok.jitter_offsets:
         assert max(abs(dx), abs(dy)) >= 1.0, (dx, dy)
     try:
-        OverlapConfig(jitter_offsets=((0.5, 1.0),)).check(TILE)
+        OverlapConfig(jitter_offsets=((0.5, 1.0),))
     except ValueError as e:
         assert 'lattice position' in str(e)
     else:
         raise AssertionError('an on-lattice offset was accepted')
     try:
-        OverlapConfig(jitter_offsets=((0.125, 0.125),)).check(TILE)
+        OverlapConfig(jitter_offsets=((0.125, 0.125),))
     except ValueError as e:
         assert 'overlaps its parent' in str(e)
     else:
         raise AssertionError('an offset that overlaps its parent was accepted')
-    return f'{len(ok.jitter_offsets)} offsets, three tile sizes'
+    return f'{len(ok.jitter_offsets)} offsets'
 
 
 def t_a_top_up_under_a_disjoint_lattice_is_refused():
@@ -480,25 +481,28 @@ def t_a_top_up_under_a_disjoint_lattice_is_refused():
     this refusal replaces.
     """
     try:
-        OverlapConfig(jitter_cap=0.2, max_overlap_ratio=0.0).check(TILE)
+        OverlapConfig(jitter_cap=0.2, max_overlap_ratio=0.0)
     except ValueError as e:
         assert 'largest' in str(e) and 'jitter_cap=0' in str(e)
     else:
         raise AssertionError('a dead top-up was accepted')
     # and the two coherent spellings both build
-    OverlapConfig(jitter_cap=0.0).check(TILE)
-    OverlapConfig(jitter_cap=0.2, max_overlap_ratio=0.9).check(TILE)
+    OverlapConfig(jitter_cap=0.0)
+    OverlapConfig(jitter_cap=0.2, max_overlap_ratio=0.9)
     return 'refused, and both coherent settings build'
 
 
-def t_grid_step_equal_to_the_tile_is_refused_as_a_synonym_of_zero():
-    """Two spellings of one lattice are two sampler_ids over one corpus."""
-    try:
-        OverlapConfig(grid_step=TILE).check(TILE)
-    except ValueError as e:
-        assert 'grid_step=0' in str(e)
-        return 'refused'
-    raise AssertionError('the synonym was accepted')
+def t_a_step_outside_zero_to_one_is_refused():
+    """The step is a fraction of the footprint: 1.0 is disjoint and the only
+    spelling of it, above 1 leaves gaps, 0 or below is no lattice."""
+    for bad in (0.0, -0.5, 1.5):
+        try:
+            OverlapConfig(step=bad, max_overlap_ratio=1.0)
+        except ValueError as e:
+            assert '(0, 1]' in str(e), str(e)
+        else:
+            raise AssertionError(f'step {bad} was accepted')
+    return 'refused 0, -0.5, 1.5'
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -823,7 +827,6 @@ def t_sampler_id_moves_with_every_axis():
     same = _cfg()
     assert base.sampler_id() == same.sampler_id(), 'the hash is not stable'
     moves = {
-        'tile':      _cfg(tile=TILE * 2),
         'n_per_rung': _cfg(n_per_rung=41),
         'seed':      _cfg(seed=1),
         'candidates': _cfg(candidates='random'),
@@ -838,7 +841,7 @@ def t_sampler_id_moves_with_every_axis():
                 caps=(0.20, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0))),
         'richness.floor_frame':
             _cfg(richness=RichnessConfig(floor_frame='taken')),
-        'overlap.grid_step': _cfg(overlap=OverlapConfig(grid_step=TILE // 2,
+        'overlap.step': _cfg(overlap=OverlapConfig(step=0.5,
                                                         max_overlap_ratio=1.0)),
         'overlap.max_overlap_ratio':
             _cfg(overlap=OverlapConfig(max_overlap_ratio=0.5)),
@@ -958,45 +961,18 @@ def t_a_sample_meta_survives_pickling():
     return 'pickled and back, no handle'
 
 
-def t_materialise_takes_the_reader_and_release_keeps_the_meta():
-    wsi, mask = _one_big_block()
-    s = TileSampler(wsi, mask, _cfg()).sample(_plans((1.0,)))
-    one = s[0]
-    assert one.image is None
-    one.materialise(wsi)
-    assert one.image is not None and one.image.shape == (TILE, TILE, 3)
-    # the fake reader encodes the request, so this says WHERE it read
-    assert int(one.image[0, 0, 0]) == one.meta.x % 256
-    before = one.meta
-    one.release()
-    assert one.image is None and one.meta is before
-    return f'read at ({one.meta.x}, {one.meta.y}), released'
-
-
-def t_an_R_sample_is_degraded_and_restored_to_the_tile_size():
+def t_a_sampler_holds_no_pixels():
+    """WHERE only: reading is SlideReader's (`read_samples`) since
+    2026-10-03, and the read of a sample against the old `materialise` is
+    `diag_read_exp.py` (566/566 identical) and test_slide_reader.py."""
     wsi, mask = _one_big_block()
     cfg = _cfg(inherit=InheritConfig(stack_kind='R'))
     s = TileSampler(wsi, mask, cfg).sample([resolution_plan(4.0, TILE)])
-    img = s[0].materialise(wsi).image
-    assert img.shape == (TILE, TILE, 3), (
-        f'an R tile came back {img.shape}; the whole point is that the output '
-        f'side is held so a fixed-input student can eat it')
-    return f'{img.shape} at ds 4'
-
-
-def t_images_refuses_rather_than_reading_for_you():
-    """A helper that quietly materialised would undo the streaming mode: the
-    point is that pixels are read once and dropped."""
-    wsi, mask = _one_big_block()
-    s = TileSampler(wsi, mask, _cfg()).sample(_plans((1.0,)))
-    try:
-        s.images()
-    except RuntimeError as e:
-        assert 'materialise' in str(e)
-        s.materialise(wsi)
-        assert len(s.images()) == len(s)
-        return 'refused, then served after materialise()'
-    raise AssertionError('images() read for us')
+    gone = [n for n in ('materialise', 'images', 'release')
+            if hasattr(s, n) or hasattr(s[0], n)]
+    assert not gone and not hasattr(s[0], 'image'), gone
+    assert s[0].meta.stack_kind == 'R' and s[0].meta.level == 0
+    return "an 'R' sample is a level-0 meta and nothing else"
 
 
 def t_save_and_load_round_trip_every_axis():
@@ -1004,7 +980,7 @@ def t_save_and_load_round_trip_every_axis():
     cfg = _cfg(inherit=InheritConfig(share=0.5))
     s = TileSampler(wsi, mask, cfg).sample(_plans((1.0, 2.0)))
     with tempfile.TemporaryDirectory() as tmp:
-        s.save(tmp, with_images=False)
+        s.save(tmp)
         back = TileSampler.load(tmp)
         assert len(back) == len(s)
         for a, b in zip(s, back):
@@ -1064,7 +1040,7 @@ def _lattice_positions(sampler, plan):
 
 
 def t_the_main_grid_is_exactly_patchgrids():
-    """`grid_step == tile` against `PatchGrid(overlap=False)`.
+    """`step == 1.0` against `PatchGrid(overlap=False)`.
 
     Set equality, both ways. This is the check that would let `_lattice` be
     deleted in favour of the one implementation -- and it is the reason to run
@@ -1095,7 +1071,7 @@ def t_the_half_step_lattice_is_a_different_definition_from_overlap_true():
                                   so `len(main) - 1` of them. That is right for
                                   a QUERY image, where the overlap patch exists
                                   to cover the seam between two main patches.
-        grid_step = tile // 2     every half position that FITS. That is right
+        step = 0.5                every half position that FITS. That is right
                                   for a SAMPLER, where a legal position is a
                                   candidate whether or not it has a neighbour.
 
@@ -1106,7 +1082,7 @@ def t_the_half_step_lattice_is_a_different_definition_from_overlap_true():
     that there is only one.
     """
     wsi, mask = _one_big_block()
-    cfg = _cfg(overlap=OverlapConfig(grid_step=TILE // 2,
+    cfg = _cfg(overlap=OverlapConfig(step=0.5,
                                      max_overlap_ratio=1.0,
                                      overlapping_share=1.0))
     s = TileSampler(wsi, mask, cfg)
@@ -1202,7 +1178,7 @@ class _FakePlan:
     def key(self):
         return 'ladder-1-2'
 
-    def plans_for(self, wsi, tile):
+    def plans_for(self, wsi):
         return _plans((1.0, 2.0))
 
 
@@ -1299,15 +1275,21 @@ def t_load_restores_the_rung_reports():
 
 
 def t_plan_spec_keys_and_refusals():
-    assert PlanSpec('ladder', (4, 1, 2)).key() == 'ladder-1-2-4'
-    assert PlanSpec('native').key() == 'native'
-    for bad in (dict(kind='ladder'), dict(kind='other', rungs=(1,))):
+    cam = ReadSpec(TILE, TILE)
+    assert PlanSpec('ladder', (4, 1, 2), cam).key() == f'ladder-1-2-4-cam{TILE}x{TILE}'
+    assert PlanSpec('native', camera=cam).key() == f'native-cam{TILE}x{TILE}'
+    rot = ReadSpec(TILE, TILE, rotates=True)
+    assert PlanSpec('native', camera=rot).key() == f'native-cam{TILE}x{TILE}-rot'
+    assert '_' not in PlanSpec('ladder', (1, 2), rot).key(), \
+        "a plan key holds no '_': cache directories split on it"
+    for bad in (dict(kind='ladder', camera=cam), dict(kind='other', rungs=(1,), camera=cam),
+                dict(kind='native')):
         try:
             PlanSpec(**bad)
         except ValueError:
             continue
         raise AssertionError(f'{bad} was accepted')
-    return 'sorted key, empty ladder and unknown kind refused'
+    return 'sorted key with the camera, empty ladder, unknown kind, no camera refused'
 
 
 # ── pre-tile geometry ─────────────────────────────────────────────────────
@@ -1370,6 +1352,284 @@ def t_an_odd_margin_and_a_non_square_pre_tile_are_refused():
     return 'both refused'
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  fov -- a RECTANGULAR camera (1440 x 1024), placed by the square of its long
+#  side. This was `query_sim/source/fov_placer.FovSampler` until 2026-10-03;
+#  the rectangle is now a property of the camera (`ReadSpec`) and the same
+#  sampler places it. Every load-bearing check scores against a DECOY -- the
+#  square, the overlap-permitting config, the other seed.
+# ══════════════════════════════════════════════════════════════════════════════
+
+FOV = (1440, 1024)          # the real photographs' frame, output px
+
+
+def _fov_make(arr, ds=MASK_DS):
+    rows, cols = arr.shape
+    wsi = _Slide(int(cols * ds), int(rows * ds))
+    span = (int(cols * ds), int(rows * ds))
+    return wsi, TissueMask(wsi, SlideMask(arr, (0, 0), span, float(ds)))
+
+
+def _fov_cfg(n=16, richness=None, overlap=None, seed=0):
+    return SamplerConfig(n_per_rung=n, seed=seed,
+                         richness=richness or _permissive(),
+                         overlap=overlap or OverlapConfig())
+
+
+def _fov_plan(wsi, rotates=False, sensor=FOV):
+    return camera_plan(wsi.level_downsamples, ReadSpec(*sensor, rotates=rotates),
+                       ds=1.0, level=0)
+
+
+def _fov_strip():
+    """One block 1500 x 1100 level-0 px: holds a 1440 x 1024 FoV and NOT the
+    1440 x 1440 square around it."""
+    arr = np.zeros((500, 600), dtype=bool)
+    arr[100:375, 100:475] = True                  # l0: x [400,1900) y [400,1500)
+    return _fov_make(arr)
+
+
+def _fov_two_blocks():
+    """Two 7200 px blocks side by side. A is solid (background 0); B is tissue
+    with square holes, 10 of every 16 mask px, background (10/16)^2 = 0.39 --
+    bucket bg30_50 -- and still ONE connected region."""
+    arr = np.zeros((2000, 4200), dtype=bool)
+    arr[100:1900, 100:1900] = True
+    arr[100:1900, 2100:3900] = True
+    r = np.arange(1800)[:, None] % 16
+    c = np.arange(1800)[None, :] % 16
+    block = arr[100:1900, 2100:3900]
+    block[(r < 10) & (c < 10)] = False
+    arr[100:1900, 2100:3900] = block
+    return _fov_make(arr)
+
+
+FOV_A = (400, 400, 7600, 7600)          # l0 x0, y0, x1, y1
+FOV_B = (8400, 400, 15600, 7600)
+
+
+def _fov_inside(rect, box):
+    x, y, w, h = rect
+    return x >= box[0] and y >= box[1] and x + w <= box[2] and y + h <= box[3]
+
+
+def _fov_quota():
+    """Half from the solid block (bg00_15), half from the holed one (bg30_50)."""
+    return RichnessConfig(floors=(0.4, 0, 0.4, 0, 0, 0, 0),
+                          caps=(0.6, 0, 0.6, 0, 0, 0, 0))
+
+
+def t_fov_sampler_config_has_no_size_and_the_camera_is_in_the_key():
+    """The sampler decides WHERE; how big is the camera's. So SamplerConfig has
+    no size field, one config serves a tile and a FoV, and the camera reaches
+    the cache address through PlanSpec.key()."""
+    names = {f.name for f in dataclasses.fields(SamplerConfig)}
+    assert 'tile' not in names and 'fov_sizes' not in names, sorted(names)
+    a = PlanSpec('native', camera=ReadSpec(1440, 1024))
+    b = PlanSpec('native', camera=ReadSpec(1024, 1440))
+    sq = PlanSpec('native', camera=ReadSpec(1440, 1440))
+    assert len({a.key(), b.key(), sq.key()}) == 3, (a.key(), b.key(), sq.key())
+    return f'{a.key()} / {b.key()} / {sq.key()}'
+
+
+def t_fov_a_region_that_holds_the_rectangle_but_not_the_square():
+    wsi, mask = _fov_strip()
+    fov = TileSampler(wsi, mask, _fov_cfg(n=4)).sample([_fov_plan(wsi)])
+    assert len(fov) >= 1, 'no FoV placed in a region that holds one'
+    for s in fov:
+        assert _fov_inside(s.meta.fov_rect, (400, 400, 1900, 1500)), (
+            f'FoV {s.meta.fov_rect} sticks out of the region')
+    # THE DECOY: the same slide, a 1440 SQUARE camera, which the region is too
+    # short to hold. If it also found positions, the above passed by accident.
+    square = TileSampler(wsi, mask, _fov_cfg(n=4)).sample(
+        [_fov_plan(wsi, sensor=(1440, 1440))])
+    assert len(square) == 0, 'the square fits -- the fixture proves nothing'
+    return f'FoV {len(fov)} placed, square {len(square)}'
+
+
+def t_fov_a_region_shorter_than_the_rectangle_is_refused():
+    arr = np.zeros((500, 600), dtype=bool)
+    arr[100:350, 100:475] = True                  # 1000 px tall, FoV needs 1024
+    wsi, mask = _fov_make(arr)
+    fov = TileSampler(wsi, mask, _fov_cfg(n=4)).sample([_fov_plan(wsi)])
+    assert len(fov) == 0, f'{len(fov)} FoV placed in a region 24 px too short'
+    return 'refused'
+
+
+def _fov_bg(sampler, plan, x, y):
+    return float(sampler._fov_background(np.array([[x, y]]), plan)[0])
+
+
+def t_fov_rectangle_score_is_the_rectangles_and_not_the_squares():
+    wsi, mask = _fov_strip()
+    plan = _fov_plan(wsi)
+    sampler = TileSampler(wsi, mask, _fov_cfg(n=1))
+    # footprint origin (400, 192): the FoV is (400, 400) .. (1840, 1424), wholly
+    # on the block, while the square (192 .. 1632 in y) is 24% off it
+    rect = _fov_bg(sampler, plan, 400, 192)
+    square_plan = [p for p in native_plans(wsi, 1440) if p.level == 0][0]
+    square = float(score_background(mask, np.array([[400, 192]]), square_plan)[0])
+    assert rect < 0.02, f'a FoV wholly on tissue scored {rect:.3f} background'
+    assert square > 0.15, (f'the decoy scored {square:.3f}: this fixture does not '
+                           f'separate the rectangle from its square')
+    return f'rectangle {rect:.3f}, square {square:.3f}'
+
+
+def t_fov_rectangle_score_matches_the_exact_fraction():
+    """Tissue over the left 848 px of the FoV. The grid averages 5 cells of
+    FOV_CELL and reads 3/5 tissue = 0.400 background; the exact fraction from
+    the mask array is 592/1440 = 0.411. That gap IS the approximation."""
+    arr = np.zeros((500, 600), dtype=bool)
+    arr[100:375, 100:312] = True                  # x [400,1248) y [400,1500)
+    wsi, mask = _fov_make(arr)
+    plan = _fov_plan(wsi)
+    got = _fov_bg(TileSampler(wsi, mask, _fov_cfg(n=1)), plan, 400, 192)
+    fw, fh = plan.fov_w_l0, plan.fov_h_l0
+    x0, y0 = 400 // int(MASK_DS), 400 // int(MASK_DS)
+    exact = 1.0 - float(arr[y0:y0 + fh // int(MASK_DS),
+                            x0:x0 + fw // int(MASK_DS)].mean())
+    assert abs(got - exact) < 0.02, f'grid estimate {got:.3f} against exact {exact:.3f}'
+    assert FOV_CELL == 256, 'the cell the arithmetic above assumes changed'
+    return f'grid {got:.3f}, exact {exact:.3f}'
+
+
+def t_fov_buckets_follow_the_config():
+    wsi, mask = _fov_two_blocks()
+    fov = TileSampler(wsi, mask, _fov_cfg(n=16, richness=_fov_quota())).sample(
+        [_fov_plan(wsi)])
+    report = fov.reports[1.0]
+    assert report.n_taken == 16, f'took {report.n_taken}/16'
+    got = report.per_bucket
+    assert got['bg00_15'] == 8 and got['bg30_50'] == 8, got
+    others = {k: v for k, v in got.items() if k not in ('bg00_15', 'bg30_50')}
+    assert not any(others.values()), f'a zero-cap bucket received tiles: {others}'
+    return f'{got["bg00_15"]} / {got["bg30_50"]}'
+
+
+def t_fov_the_recorded_bucket_is_what_the_mask_says():
+    wsi, mask = _fov_two_blocks()
+    cfg = _fov_cfg(n=16, richness=_fov_quota())
+    plan = _fov_plan(wsi)
+    fov = TileSampler(wsi, mask, cfg).sample([plan])
+    names = cfg.richness.names
+    for s in fov:
+        m = s.meta
+        score = _fov_bg(fov, plan, m.x, m.y)
+        bucket = names[int(assign_buckets(np.array([score]), cfg.richness.edges)[0])]
+        assert bucket == m.bucket, (f'({m.x}, {m.y}) recorded {m.bucket}, the mask '
+                                    f'says {bucket} at {score:.3f}')
+        assert abs(score - m.score) < 1e-6, 'recorded score is not the score'
+    solid = [s for s in fov if s.meta.bucket == 'bg00_15']
+    assert all(_fov_inside(s.meta.fov_rect, FOV_A) for s in solid), (
+        'a solid-bucket FoV is not in the solid block')
+    return f'{len(fov)} FoV re-scored'
+
+
+def t_fov_the_same_seed_repeats_and_another_does_not():
+    wsi, mask = _fov_two_blocks()
+
+    def positions(seed):
+        cfg = _fov_cfg(n=16, richness=_fov_quota(), seed=seed)
+        return [(s.meta.x, s.meta.y)
+                for s in TileSampler(wsi, mask, cfg).sample([_fov_plan(wsi)])]
+
+    assert positions(0) == positions(0), 'the same seed drew different FoVs'
+    assert positions(0) != positions(1), 'the seed changes nothing'
+    return 'seed 0 twice identical; seed 1 differs'
+
+
+def t_fov_is_centred_in_its_footprint_and_in_a_block():
+    wsi, mask = _fov_two_blocks()
+    fov = TileSampler(wsi, mask, _fov_cfg(n=16, richness=_fov_quota())).sample(
+        [_fov_plan(wsi)])
+    for s in fov:
+        x0, y0, w, h = s.meta.fov_rect
+        cx, cy = s.meta.centre_l0
+        assert abs(cx - (x0 + w / 2)) <= 1 and abs(cy - (y0 + h / 2)) <= 1, (
+            f'centre {(cx, cy)} is not the FoV centre {(x0 + w / 2, y0 + h / 2)}')
+        assert _fov_inside((x0, y0, w, h), FOV_A) or _fov_inside((x0, y0, w, h), FOV_B)
+    return f'{len(fov)} FoV'
+
+
+def t_fov_a_rotating_camera_keeps_its_bounding_square_on_the_slide():
+    """Tissue touching the left edge. A camera that does not rotate may stand
+    with its FoV at x = 0; one that rotates reads ceil(hypot(1440, 1024)) =
+    1767, 163 px beyond the footprint on the left, so its FoV cannot go nearer."""
+    arr = np.zeros((500, 600), dtype=bool)
+    arr[100:375, 0:475] = True                    # l0: x [0,1900) y [400,1500)
+    wsi, mask = _fov_make(arr)
+    still = TileSampler(wsi, mask, _fov_cfg(n=4)).sample([_fov_plan(wsi)])
+    assert len(still) >= 1 and min(s.meta.fov_rect[0] for s in still) == 0, (
+        'the fixture does not put a non-rotating FoV against the edge, so the '
+        'rotating case below would pass without any reserve')
+    plan = _fov_plan(wsi, rotates=True)
+    turn = TileSampler(wsi, mask, _fov_cfg(n=4)).sample([plan])
+    assert len(turn) >= 1, 'a rotating camera found no position'
+    sx1, sy1 = int(600 * MASK_DS), int(500 * MASK_DS)
+    for s in turn:
+        rx, ry = s.meta.reserve_origin_l0
+        side = s.meta.reserve
+        assert rx >= 0 and ry >= 0 and rx + side <= sx1 and ry + side <= sy1, (
+            f'the reserve square {(rx, ry, side)} leaves the scanned area')
+    nearest = min(s.meta.fov_rect[0] for s in turn)
+    assert nearest >= 163, f'a rotating camera stood {nearest} px from the edge'
+    return f'still x0 = 0, rotating x0 >= {nearest} (reserve {plan.reserve:g})'
+
+
+def _fov_max_overlap(sampler):
+    rects = [s.meta.fov_rect for s in sampler]
+    worst = 0
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            a, b = rects[i], rects[j]
+            dx = min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0])
+            dy = min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1])
+            worst = max(worst, max(0, dx) * max(0, dy))
+    return worst
+
+
+def t_fov_disjoint_config_gives_disjoint_fovs_and_a_permissive_one_does_not():
+    wsi, mask = _fov_two_blocks()
+    fov = TileSampler(wsi, mask, _fov_cfg(n=40)).sample([_fov_plan(wsi)])
+    assert _fov_max_overlap(fov) == 0, 'two FoVs share area under the disjoint bound'
+    # THE DECOY: a half-step lattice, overlap allowed
+    loose = _fov_cfg(n=40, overlap=OverlapConfig(
+        step=0.5, max_overlap_ratio=0.6, overlapping_share=1.0))
+    fov2 = TileSampler(wsi, mask, loose).sample([_fov_plan(wsi)])
+    assert _fov_max_overlap(fov2) > 0, 'the permissive config produced no overlap'
+    return f'disjoint 0; permissive {_fov_max_overlap(fov2):,} px2'
+
+
+def t_fov_what_is_not_supported_is_refused():
+    """A rectangular FoV is placed by its proxy square; inheritance, the random
+    arm and a pixel scorer are not written for it, and say so at sample()."""
+    wsi, mask = _fov_strip()
+    plan = _fov_plan(wsi)
+
+    def refused(cfg):
+        try:
+            TileSampler(wsi, mask, cfg).sample([plan])
+        except ValueError:
+            return True
+        return False
+
+    assert refused(SamplerConfig(
+        n_per_rung=4, inherit=InheritConfig(stack_kind='F', share=0.3,
+                                            source_rung=1.0))), 'inheritance accepted'
+    assert refused(SamplerConfig(n_per_rung=4, candidates='random')), \
+        "the 'random' arm accepted"
+    assert refused(SamplerConfig(n_per_rung=4,
+                                 richness=RichnessConfig(scorer='entropy'))), \
+        'a pixel scorer accepted'
+    for bad in ((1440, 0), (0, 1024)):
+        try:
+            ReadSpec(*bad)
+        except ValueError:
+            continue
+        raise AssertionError(f'sensor {bad} accepted')
+    return 'three refusals at sample(), two at ReadSpec'
+
+
 _SECTIONS = {
     'pretile':  ['t_centre_crop_finds_the_planted_block',
                  't_an_off_by_one_crop_is_detectably_wrong',
@@ -1385,7 +1645,7 @@ _SECTIONS = {
                  't_the_overlapping_share_is_a_budget_and_binds',
                  't_every_jitter_offset_is_disjoint_and_off_lattice',
                  't_a_top_up_under_a_disjoint_lattice_is_refused',
-                 't_grid_step_equal_to_the_tile_is_refused_as_a_synonym_of_zero'],
+                 't_a_step_outside_zero_to_one_is_refused'],
     'richness': ['t_buckets_cut_where_the_edges_say',
                  't_targets_split_the_remainder_over_the_askers_only',
                  't_caps_must_be_able_to_reach_a_full_rung',
@@ -1407,9 +1667,7 @@ _SECTIONS = {
                     't_the_half_step_lattice_is_a_different_definition_from_overlap_true',
                     't_neither_generator_places_a_partial_tile'],
     'carry':    ['t_a_sample_meta_survives_pickling',
-                 't_materialise_takes_the_reader_and_release_keeps_the_meta',
-                 't_an_R_sample_is_degraded_and_restored_to_the_tile_size',
-                 't_images_refuses_rather_than_reading_for_you',
+                 't_a_sampler_holds_no_pixels',
                  't_save_and_load_round_trip_every_axis',
                  't_load_refuses_a_config_that_is_not_the_one_it_was_cut_with',
                  't_a_plain_openslide_handle_is_refused'],
@@ -1419,6 +1677,18 @@ _SECTIONS = {
                  't_a_hit_for_a_different_slide_with_the_same_stem_is_refused',
                  't_load_restores_the_rung_reports',
                  't_plan_spec_keys_and_refusals'],
+    'fov':      ['t_fov_sampler_config_has_no_size_and_the_camera_is_in_the_key',
+                 't_fov_a_region_that_holds_the_rectangle_but_not_the_square',
+                 't_fov_a_region_shorter_than_the_rectangle_is_refused',
+                 't_fov_rectangle_score_is_the_rectangles_and_not_the_squares',
+                 't_fov_rectangle_score_matches_the_exact_fraction',
+                 't_fov_buckets_follow_the_config',
+                 't_fov_the_recorded_bucket_is_what_the_mask_says',
+                 't_fov_the_same_seed_repeats_and_another_does_not',
+                 't_fov_is_centred_in_its_footprint_and_in_a_block',
+                 't_fov_a_rotating_camera_keeps_its_bounding_square_on_the_slide',
+                 't_fov_disjoint_config_gives_disjoint_fovs_and_a_permissive_one_does_not',
+                 't_fov_what_is_not_supported_is_refused'],
 }
 
 

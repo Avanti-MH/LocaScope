@@ -26,7 +26,7 @@ For each (slide, level):
                     pure geometry, so nothing large is read: an unsegmented region at
                     L0 is 18.7 Gpx and reading it whole once cost 3h43m.
 
-    query set       whole FoVs photographed by query_sim's Camera, then cut into
+    query set       whole FoVs photographed by query_sim's Render, then cut into
                     5x4 tiles. Going through a FoV rather than augmenting each
                     tile is not fussiness: vignette, field mask and lens
                     distortion are all defined relative to the image they are
@@ -35,7 +35,7 @@ For each (slide, level):
                     which is exactly what ring pooling measures, and would decide
                     the comparison on an artefact.
 
-    the answer      computed, not searched: Camera.output_tile_origins inverts the
+    the answer      computed, not searched: Render.output_tile_origins inverts the
                     capture to a level-0 coordinate, and the nearest tile in each
                     of the two grids is an answer. Both are recorded separately,
                     since which one wins is the measurable half of "is the
@@ -80,7 +80,8 @@ from TileSampler import (OverlapConfig, SamplerConfig, TileSampler,  # noqa: E40
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import (encoder_config, encoder_names,          # noqa: E402
                              pool_slots, pooling_kinds)
-from camera import Camera                                           # noqa: E402
+from camera import Render                                           # noqa: E402
+from SlideReader import SlideReader                                 # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 
 TILE = 256
@@ -159,19 +160,21 @@ MIN_VALID = 0.95
 ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
 
 
-def reference_config(k: int, seed: int, tile: int = TILE) -> SamplerConfig:
+def reference_config(k: int, seed: int) -> SamplerConfig:
     """The draw every level's reference pool is cut by -- before the per-level
     size. `n_per_rung` is `k`, the L0 size; each level takes
     `min(grid, max(k / ds**2, k_floor))`, and that rule is part of the store's
     address through `plan_label`."""
-    return SamplerConfig(tile=tile, n_per_rung=k, seed=seed,
+    return SamplerConfig(n_per_rung=k, seed=seed,
                          richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig())
 
 
 def plan_label(k_floor: int) -> str:
-    """The rung plan -- one native rung per pyramid level -- and the per-level
-    sizing floor, which changes which tiles a coarse level holds."""
-    return f'native-floor{k_floor}'
+    """The rung plan -- one native rung per pyramid level -- the per-level
+    sizing floor, which changes which tiles a coarse level holds, and the
+    camera: the tile size is no longer in `sampler_id`, so it is named here."""
+    from ReadGeometry import ReadSpec                             # noqa: PLC0415
+    return f'native-floor{k_floor}-{ReadSpec(TILE, TILE).key()}'
 
 
 def dump_one(wsi_path: str, level: int, out_root: Path, *,
@@ -200,8 +203,8 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
         angle_jitter_deg=0.0, scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
         stage_shift_max=0,
     )
-    cam = Camera(slide, cfg=cfg, mask=mask, seed=seed)
-    per_fov = (cam.qfw.output_h // TILE) * (cam.qfw.output_w // TILE)
+    cam = Render(SlideReader(slide), cfg=cfg, seed=seed)
+    per_fov = (cam.output_h // TILE) * (cam.output_w // TILE)
     n_fov = max(1, math.ceil(n_query / (per_fov * len(rots))))
 
     rng = np.random.default_rng(seed)
@@ -212,10 +215,10 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
         tries += 1
         ri = int(rng.integers(0, len(mask.tissue_regions)))
         reg = mask.tissue_regions[ri]
-        if reg.w < cam.qfw.rect_w_l0 * 2 or reg.h < cam.qfw.rect_h_l0 * 2:
+        if reg.w < cam.rect_w_l0 * 2 or reg.h < cam.rect_h_l0 * 2:
             continue
-        x = int(rng.integers(reg.x, reg.x + reg.w - cam.qfw.rect_w_l0))
-        y = int(rng.integers(reg.y, reg.y + reg.h - cam.qfw.rect_h_l0))
+        x = int(rng.integers(reg.x, reg.x + reg.w - cam.rect_w_l0))
+        y = int(rng.integers(reg.y, reg.y + reg.h - cam.rect_h_l0))
         shot = [cam.capture_with_gt(x, y, rotation=r) for r in rots]
         if any(im is None for im, _ in shot):
             continue

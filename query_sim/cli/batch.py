@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Batch synthesise N FOVs from a WSI, with per-FOV ground truth CSV.
 
-Position sampling uses TissueMask (region-first, same pattern as
-TileSampler); crop shape is QueryFromWSI (wh_ratio + MPixels + query_mpp).
+Positions are drawn by `TileSampler` (richness buckets, overlap) for the
+camera's own spec -- footprint, FoV rectangle, reserve; the sensor shape is `camera.sensor_size` (wh_ratio + MPixels +
+query_mpp).
 
 Usage:
     python query_sim/cli/batch.py <wsi_path> \\
         [--n 300] [--wh-ratio 4:3] [--MPixels 12] [--mpp 0.25] [--seed 0]
-        [--tissue-ratio 0.3] [--seg hest] [--mask-cache-job <job>]
+        [--richness default|open] [--seg hest] [--mask-cache-job <job>]
         [--scale-min 0.9 --scale-max 1.15] [--no-distortion]
         [--no-geometric] [--no-photometric]
 
@@ -28,7 +29,8 @@ sys.path.insert(0, os.path.dirname(_HERE))   # parent = query_sim/
 
 from cli       import job_result_dir        # noqa: E402
 from config    import DomainGapConfig       # noqa: E402
-from generator import generate              # noqa: E402
+from generator import (RICHNESS_PRESETS, generate,       # noqa: E402
+                       sampler_cfg_for)
 
 import Cache                                                         # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
@@ -39,18 +41,16 @@ def main():
     ap.add_argument('wsi_path', help='WSI file (.svs / .ndpi / ...)')
     ap.add_argument('--n',        type=int,   default=300, help='Number of FOVs to generate')
 
-    # ── QueryFromWSI shape (the microscope-photo spec) ────────────────────────
+    # ── sensor shape (the microscope-photo spec, camera.sensor_size) ──────────
     ap.add_argument('--wh-ratio', default='4:3',    help='Output aspect ratio, e.g. 4:3')
     ap.add_argument('--MPixels',  type=float, default=12,   help='Total pixel budget (megapixels)')
     ap.add_argument('--mpp',      type=float, default=0.25, help='Target um/px of the output FOV')
 
     # ── Sampling / tissue mask ────────────────────────────────────────────────
-    ap.add_argument('--tissue-ratio', type=float, default=0.3,
-                    help='Min mask fraction inside a candidate crop (default 0.3)')
-    ap.add_argument('--region-protrusion', type=float, default=0.5,
-                    help='Fraction of bounding-square padding allowed to spill '
-                         'past a tissue region edge (0=strict, 1=only FoV rect '
-                         'must fit). Default 0.5.')
+    ap.add_argument('--richness', choices=sorted(RICHNESS_PRESETS), default='default',
+                    help="which FoVs: 'default' is mostly tissue-dense with a "
+                         "share of edges; 'open' is any FoV up to 85%% "
+                         "background, first come (generator.RICHNESS_PRESETS)")
     add_mask_args(ap)
     ap.add_argument('--mask-cache-job', default=None,
                     help='whose mask cache: result/cache/<this>_mask/. '
@@ -107,8 +107,7 @@ def main():
             n            = args.n,
             cfg          = cfg,
             seed         = args.seed,
-            tissue_ratio = args.tissue_ratio,
-            region_protrusion_ratio = args.region_protrusion,
+            sampler_cfg  = sampler_cfg_for(args.n, args.seed, args.richness),
             masks        = masks,
         )
 

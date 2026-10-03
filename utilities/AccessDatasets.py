@@ -46,14 +46,33 @@ the next version of that same rename cost.
 mistypes a name and gets back some OTHER slide's path silently analyses the
 wrong tissue; the error lists every name each registered dataset currently
 holds, so the typo is obvious.
+
+A RECORDED SPLIT IS A DATASET TOO. `<dataset>#<split>` -- `bracs/test#val`,
+`ki67_with_photo#test` -- names the slides one recorded split of a dataset holds,
+and `list_names()` / `locate()` take it wherever they take a dataset id:
+
+    list_names(dataset='bracs/test#val')              # the val slides
+    locate(name, dataset='bracs/test#val')            # KeyError if it is not in val
+    list_names(dataset='bracs/test#val', split_job='OtherJob')
+
+The split is READ from `result/cache/<split_job>_split/<dataset>/wsi_split.csv`
+(`split,wsi_name`; `split_job` defaults to `SPLIT_JOB`), never written here:
+`utilities/cli/build_cache/make_split.py` is the one writer, and a missing file
+is a refusal that names it. `dataset_ids()` lists the real datasets only.
 """
 
 from __future__ import annotations
 
+import csv
 import glob
 import os
+import random
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from functools import lru_cache
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+from Cache import cache_root
 
 _BRACS_TEST_ROOT = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test'
 _BRACS_TRAIN_ROOT = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/train'
@@ -225,7 +244,82 @@ _DATASETS: List[_Dataset] = [
 ]
 
 
-def locate(name: str, *, dataset: Optional[str] = None, **kwargs) -> WsiEntry:
+#: The job whose recorded split `<dataset>#<split>` reads by default. The one
+#: writer, `make_split.py`, writes under this name unless told otherwise, and
+#: `WsiSplit.SPLIT_JOB` is this same value.
+SPLIT_JOB = 'MakeSplit'
+
+#: `<dataset>#<split>`: the separator, and the sets a split can hold.
+SPLIT_SEP = '#'
+SPLITS = ('train', 'val', 'test')
+
+
+def split_file(dataset_id: str, split_job: Optional[str] = None) -> Path:
+    """`result/cache/<split_job>_split/<dataset>/wsi_split.csv`: where one
+    dataset's recorded split lives. The only place that path is spelled."""
+    return (cache_root(split_job or SPLIT_JOB, 'split')
+            / dataset_id.replace('/', '_') / 'wsi_split.csv')
+
+
+def parse_dataset_id(dataset_id: str) -> Tuple[str, Optional[str]]:
+    """`'bracs/test#val'` -> `('bracs/test', 'val')`; `'bracs/test'` ->
+    `('bracs/test', None)`. A set that is not train / val / test is an error
+    here, not an empty list a caller could take for an empty set."""
+    base, sep, split = dataset_id.partition(SPLIT_SEP)
+    if not sep:
+        return dataset_id, None
+    if split not in SPLITS:
+        raise KeyError(f'{dataset_id!r}: {split!r} is not a split set; after '
+                       f'{SPLIT_SEP!r} put one of {list(SPLITS)}')
+    return base, split
+
+
+@lru_cache(maxsize=None)
+def _read_split(path: str, mtime_ns: int) -> Dict[str, Tuple[str, ...]]:
+    """`{set: names}` in file order. Keyed on the modification time as well, so
+    a rewritten file is read again and an unchanged one is read once."""
+    out: Dict[str, List[str]] = {}
+    with open(path, newline='') as handle:
+        for row in csv.DictReader(handle):
+            out.setdefault(row['split'], []).append(row['wsi_name'])
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def _split_names(base: str, split: str, split_job: Optional[str]) -> List[str]:
+    path = split_file(base, split_job)
+    if not path.exists():
+        raise FileNotFoundError(
+            f'{path} does not exist. The split of {base!r} is written once, by '
+            f'utilities/cli/build_cache/make_split.py -- run it first, so every '
+            f'package scores on the same held-out slides')
+    by_split = _read_split(str(path), path.stat().st_mtime_ns)
+    if split not in by_split:
+        raise KeyError(f'{base}{SPLIT_SEP}{split}: the split recorded at {path} '
+                       f'holds {sorted(by_split)} only')
+    return list(by_split[split])
+
+
+def pick_wsi_names(names: Sequence[str], max_wsi: Optional[int], seed: int
+                   ) -> List[str]:
+    '''`max_wsi` of `names`, chosen AT RANDOM (seeded), returned in the order
+    `names` had. `None`, or a cap at or above `len(names)`, returns every name
+    unchanged -- so a cap of "all of them" changes nothing, not even the order.
+
+    Random and not the first N: a dataset's names are sorted, and the first N
+    of a sorted list are one contiguous run of ids -- for BRACS one stretch of
+    slides whose stain and pathology mix nobody has checked. The same
+    (names, cap, seed) always picks the same slides, so a rerun, the
+    supply-only pass and the real run agree.
+    '''
+    names = list(names)
+    if max_wsi is None or max_wsi >= len(names):
+        return names
+    keep = set(random.Random(seed).sample(range(len(names)), int(max_wsi)))
+    return [n for i, n in enumerate(names) if i in keep]
+
+
+def locate(name: str, *, dataset: Optional[str] = None,
+           split_job: Optional[str] = None, **kwargs) -> WsiEntry:
     """The resolved entry for `name`. Raises `KeyError` naming every name
     each registered dataset currently holds if `name` resolves in NONE of
     them -- there is no fuzzy match, because a wrong guess here means every
@@ -246,7 +340,16 @@ def locate(name: str, *, dataset: Optional[str] = None, **kwargs) -> WsiEntry:
     `group_type`, say), meaningless without knowing which dataset's
     convention they belong to; passing any without `dataset=` raises rather
     than being silently ignored or guessed at.
+
+    `dataset` may be a recorded split, `<id>#<split>`: the slide is resolved by
+    the real dataset and must be in that split, else `KeyError` -- a test slide
+    asked for under `#val` is a mistake, not a path to hand back. `split_job`
+    picks whose split file is read (default `SPLIT_JOB`); giving it without a
+    `#` in `dataset` is an error, not something silently ignored.
     """
+    if split_job is not None and (dataset is None or SPLIT_SEP not in dataset):
+        raise ValueError('split_job= only means something with dataset='
+                         '<id>#<split>')
     if kwargs and dataset is None:
         raise ValueError(
             f'kwargs {list(kwargs)} were given without dataset= -- they are '
@@ -254,10 +357,14 @@ def locate(name: str, *, dataset: Optional[str] = None, **kwargs) -> WsiEntry:
             f'without knowing which dataset they belong to')
 
     if dataset is not None:
-        chosen = [d for d in _DATASETS if d.id == dataset]
+        base, split = parse_dataset_id(dataset)
+        chosen = [d for d in _DATASETS if d.id == base]
         if not chosen:
             raise KeyError(f'{dataset!r} is not a registered dataset id. '
                            f'Known dataset ids: {dataset_ids()}')
+        if split is not None and name not in _split_names(base, split, split_job):
+            raise KeyError(f'{name!r} is not in {dataset!r}; it is either in '
+                           f'another split of {base!r} or not in {base!r}')
         entry = chosen[0].locate_fn(name, **kwargs)
         if entry is None:
             raise KeyError(f'{name!r} is not found in dataset {dataset!r}.')
@@ -278,13 +385,15 @@ def locate(name: str, *, dataset: Optional[str] = None, **kwargs) -> WsiEntry:
 
 def dataset_ids() -> List[str]:
     """Every registered dataset `id`, in registration order -- what
-    `locate(name, dataset=...)` picks by.
+    `locate(name, dataset=...)` picks by. The real datasets only: a recorded
+    split is `<id>#<split>` and is not listed.
     """
     return [d.id for d in _DATASETS]
 
 
 def list_names(*, stain: Optional[str] = None, dataset: Optional[str] = None,
-              n: Optional[int] = None) -> List[str]:
+              n: Optional[int] = None, split_job: Optional[str] = None
+              ) -> List[str]:
     """Every name currently found across every registered dataset,
     optionally narrowed to one `stain` and/or one `dataset` id, optionally
     capped at the first `n` (dataset registration order, then each dataset's
@@ -299,14 +408,28 @@ def list_names(*, stain: Optional[str] = None, dataset: Optional[str] = None,
     dataset=...)`, rather than silently returning an empty list a caller
     could mistake for "this dataset really is empty".
 
+    `dataset='<id>#<split>'` gives the slides that recorded split holds, in the
+    order the file has them (`split_job=` picks whose file, default
+    `SPLIT_JOB`); a stain that is not that dataset's gives an empty list.
+
     A FRESH SCAN EVERY CALL, ON PURPOSE: this is the one function whose
     whole job is "what is actually there right now", not a lookup in a
     static table -- a name this returns is guaranteed findable by `locate`
     at the same moment (modulo a concurrent transfer).
     """
-    if dataset is not None and dataset not in dataset_ids():
-        raise KeyError(f'{dataset!r} is not a registered dataset id. '
-                       f'Known dataset ids: {dataset_ids()}')
+    if split_job is not None and (dataset is None or SPLIT_SEP not in dataset):
+        raise ValueError('split_job= only means something with dataset='
+                         '<id>#<split>')
+    if dataset is not None:
+        base, split = parse_dataset_id(dataset)
+        if base not in dataset_ids():
+            raise KeyError(f'{dataset!r} is not a registered dataset id. '
+                           f'Known dataset ids: {dataset_ids()}')
+        if split is not None:
+            entry = next(d for d in _DATASETS if d.id == base)
+            names = ([] if stain is not None and entry.stain != stain
+                     else _split_names(base, split, split_job))
+            return names if n is None else names[:n]
     names: List[str] = []
     for entry in _DATASETS:
         if stain is not None and entry.stain != stain:

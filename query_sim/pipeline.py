@@ -106,7 +106,7 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
         # Which noise, not how much: a shot's noise is img.shape worth of
         # values, so it cannot be recorded the way every other parameter here
         # is. The seed can, and it comes off the same `rng` as everything else
-        # -- which is what puts the noise under `Camera(seed=)`/`capture(rng=)`
+        # -- which is what puts the noise under `Render(seed=)`/`capture(rng=)`
         # instead of under the process-global numpy state it used until
         # 2026-09-16. Nothing is expected to READ this back (see
         # training/MppRoutingHead/spec.md on recording for reproducibility
@@ -149,7 +149,7 @@ SENSOR_MARGIN = 64
 def _centre_crop(img: np.ndarray, width: int, height: int) -> np.ndarray:
     """Centre-crop to (width, height); a no-op when the frame is already that
     size or smaller. Every crop in this file is centred, which is what keeps
-    `Camera.output_to_level0` a pure rotate-and-scale about the FoV centre."""
+    `Render.output_to_level0` a pure rotate-and-scale about the FoV centre."""
     h, w = img.shape[:2]
     if w <= width and h <= height:
         return img

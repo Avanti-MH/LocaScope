@@ -5,8 +5,8 @@ Usage:
     python query_sim/cli/demo.py <wsi_path> [--x X] [--y Y] [--mpp MPP] [--MPixels M]
 
 Outputs (in result/<SLURM_JOB_NAME or QuerySimDemo>/):
-    query_image.png             raw crop (QueryFromWSI.crop)
-    augmentation_effects.png    each augment individually + Camera.capture
+    query_image.png             raw read (SlideReader.read)
+    augmentation_effects.png    each augment individually + Render.capture
 """
 
 from __future__ import annotations
@@ -24,8 +24,10 @@ sys.path.insert(0, os.path.dirname(_HERE))   # parent = query_sim/
 
 from cli              import job_result_dir                                      # noqa: E402
 from config           import DomainGapConfig                                     # noqa: E402
-from camera           import Camera                                              # noqa: E402
-from source.wsi_query import QueryFromWSI                                        # noqa: E402
+from camera           import Render                                              # noqa: E402
+from ReadGeometry     import ReadSpec                                            # noqa: E402
+from SlideReader      import SlideReader                                         # noqa: E402
+from PIL              import Image                                               # noqa: E402
 from augment.color    import apply_color, apply_color_temp, apply_brightness_contrast, apply_jpeg  # noqa: E402
 from augment.field    import apply_vignette, apply_stage_shift                                     # noqa: E402
 from augment.lens     import apply_distortion, apply_defocus, apply_chromatic                      # noqa: E402
@@ -34,13 +36,13 @@ from augment.noise    import apply_noise                                        
 
 
 def _print_capture_params(cfg, params: dict):
-    """Pretty-print the sampled augment values for the Camera.capture panel
+    """Pretty-print the sampled augment values for the Render.capture panel
     alongside the cfg range each was drawn from."""
     if params is None:
-        print('\nCamera.capture params: <capture returned None>')
+        print('\nRender.capture params: <capture returned None>')
         return
     rot_actual = params['rot_deg'] + params['angle_jitter']
-    print('\nCamera.capture params (this shot | cfg range):')
+    print('\nRender.capture params (this shot | cfg range):')
     print(f'  rot_deg       = {params["rot_deg"]:>5}    '
           f'| choices={cfg.rotation_choices}')
     print(f'  angle_jitter  = {params["angle_jitter"]:+.3f} deg  '
@@ -80,28 +82,26 @@ def main():
     ap.add_argument('--x',        type=int,   default=0)
     ap.add_argument('--y',        type=int,   default=0)
     ap.add_argument('--rotation', type=float, default=None,
-                    help='Force rotation (deg) on the Camera.capture panel; '
+                    help='Force rotation (deg) on the Render.capture panel; '
                          'None = cfg-driven random from (0/90/180/270) + jitter')
     ap.add_argument('--seed',     type=int,   default=0)
     args = ap.parse_args()
 
     out_dir = job_result_dir('QuerySimDemo')
 
-    # ── 1. Raw crop via QFW (the "ideal microscope") ─────────────────────────
-    qfw = QueryFromWSI(args.wsi_path,
-                       wh_ratio=args.wh_ratio, MPixels=args.MPixels, mpp=args.mpp)
-    pil_img = qfw.crop(args.x, args.y)
-    if pil_img is None:
-        sys.exit(f'Error: crop at ({args.x}, {args.y}) is out of WSI bounds '
-                 f'(rect {qfw.rect_w_l0}x{qfw.rect_h_l0}, wsi {qfw.wsi.dimensions}).')
-
-    img = np.array(pil_img)
-    pil_img.save(os.path.join(out_dir, 'query_image.png'))
+    # ── 1. Raw read (the "ideal microscope") ─────────────────────────────────
+    reader = SlideReader(args.wsi_path)
+    cfg = DomainGapConfig(wh_ratio=args.wh_ratio, MPixels=args.MPixels, query_mpp=args.mpp)
+    cam = Render(reader, cfg=cfg, seed=args.seed)          # the same handle
+    img = reader.read(args.x, args.y,
+                      ReadSpec(cam.output_w, cam.output_h), cam.ds)
+    if img is None:
+        sys.exit(f'Error: read at ({args.x}, {args.y}) is out of WSI bounds '
+                 f'(rect {cam.rect_w_l0}x{cam.rect_h_l0}, wsi {reader.slide.dimensions}).')
+    Image.fromarray(img).save(os.path.join(out_dir, 'query_image.png'))
     print(f'Saved  {os.path.join(out_dir, "query_image.png")}')
 
-    # ── 2. Full "microscope photograph" via Camera (raw crop + augment) ──────
-    cfg = DomainGapConfig(wh_ratio=args.wh_ratio, MPixels=args.MPixels, query_mpp=args.mpp)
-    cam = Camera(qfw.wsi, cfg=cfg, seed=args.seed)   # reuse the same openslide handle
+    # ── 2. Full "microscope photograph" via Render (read + augment) ──────────
     chained, params = cam.capture_with_gt(args.x, args.y, rotation=args.rotation)
     _print_capture_params(cfg, params)
 
@@ -120,7 +120,7 @@ def main():
         ('brightness_contrast',   apply_brightness_contrast(img.copy(), 0.1, 0.1)),
         ('noise',                 apply_noise(img.copy())),
         ('jpeg',                  apply_jpeg(img.copy())),
-        ('Camera.capture',        chained),
+        ('Render.capture',        chained),
     ]
 
     N_COLS = 5
@@ -130,7 +130,7 @@ def main():
 
     for ax, (title, result_img) in zip(axes, panels):
         ax.imshow(result_img)
-        is_chained = (title == 'Camera.capture')
+        is_chained = (title == 'Render.capture')
         ax.set_title(
             title, fontsize=11,
             fontweight='bold' if is_chained else 'normal',

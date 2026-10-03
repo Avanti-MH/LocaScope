@@ -15,7 +15,7 @@ def apply_noise(img, sigma=4.0, seed=None):
     noise and do not care which (`cli/demo.py`'s effect panel). Every caller
     that needs a reproducible shot passes a seed: `pipeline._apply_params`
     passes `p['noise_seed']`, which `_sample_params` drew from the caller's
-    own rng -- so `Camera(seed=...)` and `Camera.capture(rng=...)` both reach
+    own rng -- so `Render(seed=...)` and `Render.capture(rng=...)` both reach
     the noise, which they could not while this function read `np.random`
     directly.
     """

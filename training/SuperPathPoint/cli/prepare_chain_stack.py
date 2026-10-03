@@ -135,7 +135,7 @@ def _extract_own(axis: str, corpus: PreTileCorpus, wsi_path: str, args,
     mutable accumulator the caller owns, as `failures` is. `main()`'s summary
     CSV is the one reader.
     """
-    cfg = recipe_config(AXIS_RECIPE[axis], args.tile)
+    cfg = recipe_config(AXIS_RECIPE[axis])
     if cfg.sampler_id() != corpus.sampler_id:
         raise RuntimeError(
             f'{axis}: --{axis.lower()}-corpus names sampler {corpus.sampler_id}, '
@@ -146,7 +146,7 @@ def _extract_own(axis: str, corpus: PreTileCorpus, wsi_path: str, args,
     failures = []
     with SafeSlide(wsi_path) as wsi:
         new_rows = extract_pretiles._extract_slide(
-            wsi, masks, cfg, corpus, axis_rungs(axis, args),
+            wsi, masks, cfg, corpus, axis_rungs(axis, args), tile=args.tile,
             n=cfg.n_per_rung, overwrite=False, failures=failures)
     if rows is not None:
         rows.extend(new_rows)

@@ -20,7 +20,7 @@ For one grid point (x, y):
                     position production's `_window_xy(..., use_overlap=True)`
                     puts nearest to this main point
     2. the QUERY moves. For every (dx, dy) in [0, 128] x [0, 128] stepping by
-       --step, Camera photographs a fresh FoV whose top-left is (x+dx, y+dy),
+       --step, the camera photographs a fresh FoV whose top-left is (x+dx, y+dy),
        and its patches are scored against those same two fixed windows.
 
 So the score is production's own window score -- `SlidingWindowSimilarity` at
@@ -121,7 +121,8 @@ from TissueMask import TissueRegion                                  # noqa: E40
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
 from GigaPathSlidingWinSim import SlidingWindowSimilarity           # noqa: E402
-from camera import Camera                                           # noqa: E402
+from camera import Render                                           # noqa: E402
+from SlideReader import SlideReader                                 # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 from _paths import encoder_tag, job_result_dir                      # noqa: E402
 
@@ -254,7 +255,7 @@ def pick_points(mask, level, ds, camera, n_points, white_max, rng):
     if not len(candidates):
         return []
 
-    footprint_w, footprint_h = camera.qfw.rect_w_l0, camera.qfw.rect_h_l0
+    footprint_w, footprint_h = camera.rect_w_l0, camera.rect_h_l0
     margin_l0 = MARGIN_TILES * TILE * ds
     usable = []
     for index in candidates:
@@ -521,7 +522,7 @@ def analyse_slide(wsi_path, args, encoders, masks, rng) -> list:
                 angle_jitter_deg=0.0, scale_range=(1.0, 1.0),
                 query_mpp_jitter=0.0, stage_shift_max=0,
                 photometric=args.domain_gap)
-            camera = Camera(slide, cfg=config, mask=mask, seed=args.seed)
+            camera = Render(SlideReader(slide), cfg=config, seed=args.seed)
 
             points = pick_points(mask, level, ds, camera, args.points,
                                  args.white_max, rng)
@@ -530,7 +531,7 @@ def analyse_slide(wsi_path, args, encoders, masks, rng) -> list:
                       f'-- skipped', flush=True)
                 continue
             print(f'  L{level}  mpp={level_mpp:.4f}  {len(points)} points  '
-                  f'FoV {camera.qfw.output_w}x{camera.qfw.output_h}', flush=True)
+                  f'FoV {camera.output_w}x{camera.output_h}', flush=True)
 
             for point_id, (x, y, white) in enumerate(points):
                 rows = scan_point(slide, camera, encoders, x, y, level, ds,

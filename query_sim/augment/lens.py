@@ -4,8 +4,8 @@ import numpy as np
 from functools import lru_cache
 
 #: Route the public functions through the `_fast` bodies. The `_legacy` bodies
-#: stay next to them so test_augment_equivalence.py can measure the two against
-#: real Camera output rather than against a claim. Flip to False to fall back.
+#: stay next to them so test_camera.py (augment section) can measure the two against
+#: real camera (Render) output rather than against a claim. Flip to False to fall back.
 USE_FAST = True
 
 #: Distinct (h, w) held by the distortion grid cache. Each entry is three

@@ -94,7 +94,7 @@ def _gt_footprint_wh(row: dict, base_mpp: float) -> tuple:
 def _gt_center(row: dict, base_mpp: float) -> tuple:
     """(cx, cy) @ level-0 of the shot's centre.
 
-    The rect QueryFromWSI read is fov_width x fov_height at the NOMINAL mpp,
+    The rect the camera read is fov_width x fov_height at the NOMINAL mpp,
     and both the rotation and the final centre-crop are centred on it, so its
     centre is the shot's centre whatever the orientation or the scale. That
     invariance is why every position metric here is centre-based.

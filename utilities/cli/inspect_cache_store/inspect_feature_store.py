@@ -18,7 +18,7 @@ question in the experiment is unanswerable, every pooling scores the same zero,
 and the report reads "no pooling improves recall" -- a finding, not a bug.
 
 The coordinate mapping that produces them has already been wrong once (the
-inverse rotation's sign, caught by test_camera_output_to_level0), so this is a
+inverse rotation's sign, caught by test_camera), so this is a
 demonstrated failure path rather than a hypothetical one.
 
 Three things are checked, all from the stores alone -- no WSI, no model:

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The three real encoders, asked the same questions.
 
-    python utilities/test_modules/test_encoders.py                  # all three
-    python utilities/test_modules/test_encoders.py --encoder uni2
-    python utilities/test_modules/test_encoders.py --no-dual-load    # skip the 4.5 GB
+    python utilities/test_modules/AiNNModelTest/test_encoders.py                  # all three
+    python utilities/test_modules/AiNNModelTest/test_encoders.py --encoder uni2
+    python utilities/test_modules/AiNNModelTest/test_encoders.py --no-dual-load    # skip the 4.5 GB
 
 test_tile_encoder checks the TEMPLATE against fake models, which is what makes
 it a second. This file checks the implementations against the weights they
@@ -54,7 +54,7 @@ os.environ.setdefault(
 # in utilities/ rather than beside this file. That directory goes on sys.path
 # here, because setup_import_paths -- which puts the rest there -- is inside it.
 sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
+    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
 import torch                                                     # noqa: E402
 import torch.nn.functional as F                                  # noqa: E402
@@ -64,6 +64,7 @@ from _paths import setup_import_paths                            # noqa: E402
 setup_import_paths()
 
 from ConfigIdentity import weights_id                            # noqa: E402
+from Features import check_layer_tokens                          # noqa: E402
 from TileEncoderFunc import (admissible_poolings, encoder_config,  # noqa: E402
                              encoder_names, pool_slots, pooling_kinds)
 
@@ -389,6 +390,50 @@ def t_spatial_is_the_tokens_laid_out(enc, name, spec):
     return f'{tuple(smap.shape)}  max|d| {same:.3e}  transposed decoy {decoy:.3e}'
 
 
+def t_layer_tokens_gate_passes_and_catches(enc, name, spec):
+    """`Features.check_layer_tokens` -- the gate MppRoutingHead runs on the first
+    batch of any run with a mix_ head -- passes on the real `layer_tokens`, and
+    FAILS on the two wrong versions it exists to catch, each of which returns the
+    right shape:
+
+      norm      the intermediates without the final norm (norm=False)
+      prefix    patches first and prefix after, the order reversed
+
+    A gate that also passed those would be checking nothing."""
+    patches = torch.from_numpy(np.stack(_tiles()))
+    (same, decoy), ok = check_layer_tokens(enc, patches)
+    assert ok, f'real layer_tokens refused: last {same:.6f}, decoy {decoy:.6f}'
+
+    real = enc.layer_tokens
+    trunk = getattr(enc.model, 'module', enc.model)
+
+    def wrong(norm, prefix_first):
+        def layer_tokens(images, indices):
+            def forward(batch):
+                got = trunk.forward_intermediates(
+                    batch, indices=[int(i) for i in indices], norm=norm,
+                    output_fmt='NLC', return_prefix_tokens=True,
+                    intermediates_only=True)
+                return torch.stack([torch.cat([pre, pat] if prefix_first
+                                              else [pat, pre], dim=1)
+                                    for pat, pre in got], dim=1)
+            return enc._run(images, None, forward=forward)
+        return layer_tokens
+
+    caught = []
+    try:
+        for label, norm, prefix_first in (('norm=False', False, True),
+                                          ('prefix last', True, False)):
+            enc.layer_tokens = wrong(norm, prefix_first)
+            (w_same, _), w_ok = check_layer_tokens(enc, patches)
+            assert not w_ok, f'{label} passed the gate (cos {w_same:.6f})'
+            caught.append(f'{label} cos {w_same:.4f}')
+    finally:
+        enc.layer_tokens = real
+    return (f'real: last {same:.6f} vs block before {decoy:.6f}; refused '
+            + ', '.join(caught))
+
+
 def t_an_inadmissible_pooling_is_refused(enc, name, spec):
     """A dropped arm is dropped for one of two reasons, and they differ.
 
@@ -572,6 +617,7 @@ _MODEL_CHECKS = (
     ('features() is the cls slot',      t_features_are_the_cls_slot),
     ('pooled matches pool_slots',       t_pooled_matches_pool_slots),
     ('spatial() is tokens() laid out',  t_spatial_is_the_tokens_laid_out),
+    ('layer-token gate passes and catches', t_layer_tokens_gate_passes_and_catches),
     ('an inadmissible pooling raises',  t_an_inadmissible_pooling_is_refused),
 )
 

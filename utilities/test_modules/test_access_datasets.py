@@ -26,8 +26,12 @@ are reachable, but says nothing if they are empty).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import csv
 import os
 import sys
+import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -280,6 +284,197 @@ def t_every_name_from_list_names_resolves_and_exists():
     return f'{len(names)} names, {n_related} related files, all exist'
 
 
+# ── 5. a recorded split as a dataset: `<id>#<split>` ─────────────────────────
+#
+# The split file is made up (real slide names, written to a temporary file) and
+# `AD.split_file` is pointed at it, so nothing here reads or writes a real
+# `result/cache/*_split/`.
+
+@contextlib.contextmanager
+def _split_file_of(rows, dataset='ki67_with_photo'):
+    """Write `rows` (`(split, name)`) as a `wsi_split.csv` and make
+    `AD.split_file` return it for `dataset` (any other id: a missing file)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'wsi_split.csv'
+        with open(path, 'w', newline='') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(('split', 'wsi_name'))
+            writer.writerows(rows)
+        real = AD.split_file
+        AD.split_file = lambda d, job=None: (path if d == dataset
+                                             else Path(tmp) / 'absent' / d)
+        try:
+            yield path
+        finally:
+            AD.split_file = real
+
+
+def _ki67(k):
+    names = AD.list_names(dataset='ki67_with_photo')
+    if len(names) < k:
+        raise AssertionError(f'ki67_with_photo has {len(names)} names, need {k}')
+    return names[:k]
+
+
+def _rows(val, test, train=()):
+    return ([('val', n) for n in val] + [('test', n) for n in test]
+            + [('train', n) for n in train])
+
+
+def t_split_id_lists_the_recorded_names_in_file_order():
+    names = _ki67(6)
+    val, test = [names[4], names[0], names[2]], [names[5], names[1]]
+    with _split_file_of(_rows(val, test)):
+        assert AD.list_names(dataset='ki67_with_photo#val') == val
+        assert AD.list_names(dataset='ki67_with_photo#test') == test
+        assert AD.list_names(dataset='ki67_with_photo#val', n=2) == val[:2]
+        assert AD.list_names(dataset='ki67_with_photo#val', n=99) == val
+    return 'val and test, in file order, capped by n'
+
+
+def t_split_id_locate_accepts_a_member_and_refuses_anything_else():
+    names = _ki67(4)
+    with _split_file_of(_rows(names[:2], names[2:])):
+        got = AD.locate(names[0], dataset='ki67_with_photo#val')
+        assert got.path == AD.locate(names[0]).path, 'a member resolves to its own path'
+        for wrong in (names[2], names[3]):
+            try:
+                AD.locate(wrong, dataset='ki67_with_photo#val')
+            except KeyError as exc:
+                assert 'another split' in str(exc), exc
+            else:
+                raise AssertionError(f'{wrong!r} is a test slide; #val took it')
+    return 'a member resolves, a test slide under #val is a KeyError'
+
+
+def t_split_id_unknown_set_and_unknown_dataset_raise():
+    names = _ki67(2)
+    with _split_file_of(_rows(names[:1], names[1:])):
+        for bad in ('ki67_with_photo#dev', 'ki67_with_photo#'):
+            try:
+                AD.list_names(dataset=bad)
+            except KeyError:
+                pass
+            else:
+                raise AssertionError(f'{bad!r} did not raise')
+        try:
+            AD.list_names(dataset='no_such_dataset#val')
+        except KeyError:
+            pass
+        else:
+            raise AssertionError('an unregistered base id did not raise')
+
+
+def t_split_id_missing_file_names_the_writer():
+    with _split_file_of([], dataset='some_other_dataset'):
+        try:
+            AD.list_names(dataset='ki67_with_photo#val')
+        except FileNotFoundError as exc:
+            assert 'make_split.py' in str(exc), exc
+        else:
+            raise AssertionError('a missing split file did not raise')
+
+
+def t_split_id_absent_set_lists_what_the_file_holds():
+    names = _ki67(3)
+    with _split_file_of(_rows(names[:1], names[1:])):
+        try:
+            AD.list_names(dataset='ki67_with_photo#train')
+        except KeyError as exc:
+            assert "'val'" in str(exc) and "'test'" in str(exc), exc
+        else:
+            raise AssertionError('#train of a file with no train rows did not raise')
+
+
+def t_split_id_train_rows_leave_val_and_test_as_they_were():
+    names = _ki67(6)
+    val, test, train = names[:2], names[2:4], names[4:]
+    with _split_file_of(_rows(val, test)):
+        old = (AD.list_names(dataset='ki67_with_photo#val'),
+               AD.list_names(dataset='ki67_with_photo#test'))
+    with _split_file_of(_rows(val, test, train)):
+        new = (AD.list_names(dataset='ki67_with_photo#val'),
+               AD.list_names(dataset='ki67_with_photo#test'))
+        assert AD.list_names(dataset='ki67_with_photo#train') == train
+    assert old == new == (val, test)
+
+
+def t_split_job_without_a_hash_is_an_error_not_ignored():
+    for call in (lambda: AD.list_names(dataset='ki67_with_photo', split_job='X'),
+                 lambda: AD.list_names(split_job='X'),
+                 lambda: AD.locate(_ki67(1)[0], dataset='ki67_with_photo',
+                                   split_job='X')):
+        try:
+            call()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('split_job= with no #split was accepted')
+
+
+def t_split_file_is_read_again_after_it_is_rewritten():
+    names = _ki67(4)
+    with _split_file_of(_rows(names[:1], names[1:])) as path:
+        first = AD.list_names(dataset='ki67_with_photo#val')
+        with open(path, 'w', newline='') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(('split', 'wsi_name'))
+            writer.writerows(_rows(names[:2], names[2:]))
+        stamp = path.stat().st_mtime + 5
+        os.utime(path, (stamp, stamp))
+        second = AD.list_names(dataset='ki67_with_photo#val')
+    assert first == names[:1] and second == names[:2], (first, second)
+
+
+def t_split_id_stain_that_is_not_the_datasets_gives_nothing():
+    names = _ki67(2)
+    with _split_file_of(_rows(names[:1], names[1:])):
+        assert AD.list_names(dataset='ki67_with_photo#val', stain='HE') == []
+        assert AD.list_names(dataset='ki67_with_photo#val', stain='Ki67') == names[:1]
+
+
+def t_wsi_split_reads_the_same_file_the_same_way():
+    """The writer's reader (`WsiSplit.read_sets`) and the dataset id agree on one
+    file -- and `WsiSplit.split_path` is `AD.split_file`, not a second copy of the
+    path."""
+    import WsiSplit                                            # noqa: PLC0415
+    names = _ki67(6)
+    val, test, train = names[:2], names[2:4], names[4:]
+    with _split_file_of(_rows(val, test, train)) as path:
+        assert WsiSplit.split_path('AnyJob', 'ki67_with_photo') == path
+        sets = WsiSplit.read_sets(path)
+        assert sets == {'val': val, 'test': test, 'train': train}, sets
+        assert (AD.list_names(dataset='ki67_with_photo#val'),
+                AD.list_names(dataset='ki67_with_photo#test'),
+                AD.list_names(dataset='ki67_with_photo#train')) == \
+            (sets['val'], sets['test'], sets['train'])
+    assert WsiSplit.SPLIT_JOB == AD.SPLIT_JOB
+
+
+# ── 6. pick_wsi_names ────────────────────────────────────────────────────────
+
+def t_pick_wsi_names_is_seeded_ordered_and_capped():
+    names = [f'w{i:03d}' for i in range(100)]
+    a = AD.pick_wsi_names(names, 10, seed=42)
+    assert len(a) == 10 and len(set(a)) == 10
+    assert a == AD.pick_wsi_names(names, 10, seed=42), 'same seed, different slides'
+    assert a != AD.pick_wsi_names(names, 10, seed=43), 'the seed does nothing'
+    assert a == sorted(a, key=names.index), 'the order the names had is kept'
+    assert set(a) <= set(names)
+
+
+def t_pick_wsi_names_a_cap_of_all_changes_nothing():
+    names = [f'w{i}' for i in range(20)]
+    for cap in (20, 21, 999, None):
+        assert AD.pick_wsi_names(names, cap, seed=1) == names, cap
+
+
+def t_pick_wsi_names_is_the_one_datasets_py_uses():
+    """`Datasets.py` used to define its own; the two must be the one function."""
+    import training.MppRoutingHead.Datasets as D               # noqa: PLC0415
+    assert D.pick_wsi_names is AD.pick_wsi_names
+
+
 _SECTIONS = {
     'datasets': ['t_list_names_has_no_duplicates_across_datasets',
                 't_stains_covers_every_dataset',
@@ -298,6 +493,19 @@ _SECTIONS = {
     'list':     ['t_list_names_stain_filter_agrees_with_locate_for_every_name',
                 't_list_names_n_caps_but_never_raises_past_the_end'],
     'disk':     ['t_every_name_from_list_names_resolves_and_exists'],
+    'split':    ['t_split_id_lists_the_recorded_names_in_file_order',
+                't_split_id_locate_accepts_a_member_and_refuses_anything_else',
+                't_split_id_unknown_set_and_unknown_dataset_raise',
+                't_split_id_missing_file_names_the_writer',
+                't_split_id_absent_set_lists_what_the_file_holds',
+                't_split_id_train_rows_leave_val_and_test_as_they_were',
+                't_split_job_without_a_hash_is_an_error_not_ignored',
+                't_split_file_is_read_again_after_it_is_rewritten',
+                't_split_id_stain_that_is_not_the_datasets_gives_nothing',
+                't_wsi_split_reads_the_same_file_the_same_way'],
+    'pick':     ['t_pick_wsi_names_is_seeded_ordered_and_capped',
+                't_pick_wsi_names_a_cap_of_all_changes_nothing',
+                't_pick_wsi_names_is_the_one_datasets_py_uses'],
 }
 
 

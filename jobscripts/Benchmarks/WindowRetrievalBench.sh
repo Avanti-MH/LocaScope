@@ -6,7 +6,7 @@
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # one card: encode + HEST segmentation
 #SBATCH --cpus-per-task=8                 # openslide reads + the CPU transform
-#SBATCH --mem=256G                        # a level-0 region is read whole
+#SBATCH --mem=600G                        # this partition's ceiling; the reference streams a tile row at a time
 #SBATCH --ntasks-per-node=1               # Tasks per node
 #SBATCH -o /work/u26130998/log/%x          # STDOUT, named by --job-name
 #SBATCH -e /work/u26130998/log/%x          # STDERR
@@ -80,7 +80,7 @@ MODE="${MODE:-smoke}"
 # Resolved once. The bench puts this name in the CSV's filename AND in every
 # row, so the echo lines at the bottom have to spell the same default the ARGS
 # line does -- two places that must agree is one place too many.
-ENCODER="${ENCODER:-gigapath}"
+ENCODER="${ENCODER:-uni2}"
 
 # Which exit of the model. Empty for encoders with one, which is gigapath and
 # uni2. CONCH has two and needs HEAD=trunk to run here AT ALL: its default is
@@ -97,19 +97,80 @@ ENCODER="${ENCODER:-gigapath}"
 HEAD="${HEAD:-}"
 TAG="$ENCODER${HEAD:+_$HEAD}"
 
+# ---------------- what a run uses ---------------------------------------------
+#
+# The values are in bench_window_retrieval.py's CONFIG block, right after its
+# imports: which datasets and how many slides, the FoV sampler (the richness
+# buckets and their caps, overlap, how many FoVs per (slide, level)), the camera,
+# the tissue mask, the encoder, the arms. Edit them there.
+#
+# Nothing below sets one of them unless you name it, so the CONFIG block is what
+# runs. An environment variable, when set, becomes the matching flag and wins:
+#
+#   DATASETS  N_WSI  MAX_DS  SEED  N_FOV  RICHNESS  ROTATION  SCALE_MIN  SCALE_MAX
+#   ARMS  SEG  MASK_CACHE_JOB  SPLIT_CACHE_JOB  BATCH_SIZE
+#
+# and EXTRA_ARGS takes ANY flag of the bench, which is how a single field is
+# changed from sbatch -- every field of the sampler, camera and encoder configs
+# has one (`--richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...):
+#
+#   EXTRA_ARGS="--richness-caps 0.15 0.25 0.6 0 0 0 0 --camera-noise-sigma 0" \
+#       sbatch jobscripts/Benchmarks/WindowRetrievalBench.sh
+#
+# DATASETS names pools the way AccessDatasets does: a real dataset (the whole
+# pool) or a recorded split of one, `<id>#<split>`. Quote a value that holds a `#`:
+# DATASETS="bracs/test#val ki67_with_photo#val".
+#
+# ROTATION / SCALE_MIN / SCALE_MAX: anything but 0 and 1 is scored against an
+# UPRIGHT reference window, so recall falls for a reason unrelated to pooling; the
+# entry exists to look at that fall.
+
+# ---------------- which arms, and where the masks come from -----------------
+#
+# ARMS: which poolings to compare, each on its own lattices. No suffix is the
+# full grid (main + the grid offset by half a tile); `-M` (capital) is main tiles
+# only, e.g. ARMS="cls cls_avg-M rings3-M". A run whose arms are all `-M` never
+# encodes an offset tile. `cls` on the full grid is the baseline. Empty: every
+# pooling on the full grid.
+#
+# Nothing of a slide's tile features is kept: the reference is streamed one tile
+# row at a time and scored as it goes, so memory does not grow with the slide.
+#
+# The masks are read from MASK_CACHE_JOB's cache; unset, THIS job's own.
+
+# --encoder is always passed: it names the output directory (TAG) above, so the
+# script and the bench have to agree on it.
+COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
+[ -n "${DATASETS:-}" ]  && COMMON="$COMMON --datasets $DATASETS"
+[ -n "${SEED:-}" ]      && COMMON="$COMMON --seed $SEED"
+[ -n "${ROTATION:-}" ]  && COMMON="$COMMON --rotation $ROTATION"
+[ -n "${SCALE_MIN:-}" ] && COMMON="$COMMON --scale-min $SCALE_MIN"
+[ -n "${SCALE_MAX:-}" ] && COMMON="$COMMON --scale-max $SCALE_MAX"
+[ -n "${RICHNESS:-}" ]  && COMMON="$COMMON --richness $RICHNESS"
+[ -n "${N_FOV:-}" ]     && COMMON="$COMMON --n-fov $N_FOV"
+[ -n "${BATCH_SIZE:-}" ] && COMMON="$COMMON --batch-size $BATCH_SIZE"
+# READ_WORKERS: reference-grid readers per shard (default: the shard's cpu share
+# minus one -- CpuBudget). BLOCK_ROWS: tile rows per read (default 8).
+[ -n "${READ_WORKERS:-}" ] && COMMON="$COMMON --read-workers $READ_WORKERS"
+[ -n "${BLOCK_ROWS:-}" ] && COMMON="$COMMON --block-rows $BLOCK_ROWS"
+[ "${GATES_ONLY:-0}" = "1" ] && COMMON="$COMMON --gates-only"   # the seconds-long checks, then stop
+[ -n "${ARMS:-}" ] && COMMON="$COMMON --arms $ARMS"
+[ -n "${SEG:-}" ] && COMMON="$COMMON --seg $SEG"
+[ -n "${MASK_CACHE_JOB:-}" ] && COMMON="$COMMON --mask-cache-job $MASK_CACHE_JOB"
+[ -n "${SPLIT_CACHE_JOB:-}" ] && COMMON="$COMMON --split-cache-job $SPLIT_CACHE_JOB"
+[ -n "${EXTRA_ARGS:-}" ] && COMMON="$COMMON $EXTRA_ARGS"
+
 if [ "$MODE" = "smoke" ]; then
-  BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-  KI67=/work/u26130998/datasets/Ki67_with_photo
-  SLIDES=(
-    "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"
-    "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"
-  )
-  ARGS="--slides ${SLIDES[*]} --levels 1 2 --n-fov ${N_FOV:-25}"
-  ARGS="$ARGS --encoder $ENCODER${HEAD:+ --head $HEAD}"
+  # One slide per dataset, the two finest levels the pyramid has, five FoVs:
+  # walks every code path in minutes. It names its own numbers; anything else
+  # still comes from CONFIG.
+  ARGS="$COMMON --n-wsi 1 --max-ds 4"
+  [ -z "${N_FOV:-}" ] && ARGS="$ARGS --n-fov 5"
   OUT="$RESULT_ROOT/WindowRetrievalBench/smoke"
 else
-  ARGS="--levels ${LEVELS:-0 1 2} --n-fov ${N_FOV:-100} --batch-size ${BATCH_SIZE:-2048}"
-  ARGS="$ARGS --encoder $ENCODER${HEAD:+ --head $HEAD}"
+  ARGS="$COMMON"
+  [ -n "${N_WSI:-}" ] && ARGS="$ARGS --n-wsi $N_WSI"
+  [ -n "${MAX_DS:-}" ] && ARGS="$ARGS --max-ds $MAX_DS"
   OUT="$RESULT_ROOT/WindowRetrievalBench"
 fi
 
@@ -117,13 +178,65 @@ echo "======== mode=$MODE  encoder=$TAG ========"
 echo "out : $OUT/$TAG/window_retrieval.csv"
 echo ""
 
-python utilities/bench_modules/bench_window_retrieval.py \
-  $ARGS \
-  --out "$OUT"
+BENCH=utilities/bench_modules/bench_window_retrieval.py
+
+# MODE=report re-tabulates the finished CSV and stops: no model, no slide read,
+# no GPU. The log of this job gets the tables. Ask for a small job, since the
+# #SBATCH lines above are for the full run:
+#
+#     MODE=report sbatch --job-name=WindowRetrievalReport --gpus-per-node=0 \
+#         --cpus-per-task=2 --mem=32G --time=00:30:00 <this script>
+#
+# PER_SLIDE=1 adds the one-slide-across-levels tables.
+if [ "$MODE" = "report" ]; then
+  python $BENCH --report-only ${PER_SLIDE:+--per-slide} "$OUT/$TAG/window_retrieval.csv"
+  exit $?
+fi
+
+# SHARDS=2 runs two processes, one per card, each taking every other slide. They
+# write into the SAME parts directory (a slide belongs to one shard, so no file is
+# written twice) and neither assembles the CSV: a third, model-free call does, once
+# both are done. Ask for the cards on the command line -- the #SBATCH lines above
+# are for one:
+#
+#     SHARDS=2 sbatch --gpus-per-node=2 --cpus-per-task=16 <this script>
+#
+# Each shard's stdout goes to its own file, <log>.shard<i>; this file gets the
+# summary and the tables.
+SHARDS="${SHARDS:-1}"
+if [ "$SHARDS" -le 1 ]; then
+  python $BENCH $ARGS --out "$OUT/$TAG"
+  status=$?
+else
+  LOG="/work/u26130998/log/${SLURM_JOB_NAME:-WindowRetrievalBench}"
+  CARDS=$(nvidia-smi -L | wc -l)
+  if [ "$CARDS" -lt "$SHARDS" ]; then
+    echo "SHARDS=$SHARDS but this job sees $CARDS card(s): ask for them with"
+    echo "  sbatch --gpus-per-node=$SHARDS ..."
+    exit 2
+  fi
+  pids=()
+  for ((i = 0; i < SHARDS; i++)); do
+    CUDA_VISIBLE_DEVICES=$i python $BENCH $ARGS --out "$OUT/$TAG" \
+        --shard "$i/$SHARDS" > "$LOG.shard$i" 2>&1 &
+    pids+=($!)
+    echo "shard $i/$SHARDS: pid $! on card $i, log $LOG.shard$i"
+  done
+  status=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+  done
+  echo "all shards finished (exit $status); assembling"
+  python $BENCH $ARGS --out "$OUT/$TAG" --assemble || status=1
+fi
 
 echo ""
-echo "======== done ========"
+echo "======== done (exit $status) ========"
 echo "  $OUT/$TAG/window_retrieval.csv"
+echo ""
+echo "  Each finished (slide, level) is saved as its own file under"
+echo "  $OUT/$TAG/parts-<id>/. If the job is killed, submit the SAME command"
+echo "  again: finished ones are skipped. The CSV above is assembled from them."
 echo ""
 echo "  Read the gates FIRST -- a failure there means no number below is worth"
 echo "  reading. Then truth_pctile per (slide, level): 0.5 = broken mapping."
@@ -143,3 +256,4 @@ echo ""
 echo "  One encoder per report. Feeding two CSVs at once is refused: every"
 echo "  table averages over rows, so the merge would print one comparison"
 echo "  where there are two."
+exit $status

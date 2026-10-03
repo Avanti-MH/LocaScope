@@ -175,10 +175,10 @@ class LocaScopePipeline:
         cfg = KnnEstMppConfig(
             encoder=self.encoder_name, mask_cfg=self.mask_cfg,
             sampler_cfg=SamplerConfig(
-                tile=self.tile_size, n_per_rung=self.knn_samples,
+                n_per_rung=self.knn_samples,
                 seed=self.knn_seed, richness=REFERENCE_BANK_RICHNESS,
                 overlap=OverlapConfig()),
-            k=self.knn_k)
+            k=self.knn_k, tile_size=self.tile_size)
         self.estimator = KnnEstMpp(cfg, device=self.device)
         self.encoder = self.estimator.encoder
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit test for the TileEncoderFunc template.
 
-    python utilities/test_modules/test_tile_encoder.py
+    python utilities/test_modules/AiNNModelTest/test_tile_encoder.py
 
 No GPU. About a second, and one 5 MB download the first time -- vit_tiny, for
 the last section only; everything else runs on fakes. Three fake models stand
@@ -52,7 +52,7 @@ os.environ.setdefault(
                               '/work/u26130998/model_weights'))
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
+_ROOT = _HERE.parent.parent.parent      # this file sits one directory deeper
 for _d in ('aiNNModel', 'utilities'):
     p = str(_ROOT / _d)
     if p not in sys.path:
@@ -61,6 +61,7 @@ for _d in ('aiNNModel', 'utilities'):
 import numpy as np                                          # noqa: E402
 import torch                                                # noqa: E402
 import torch.nn.functional as F                             # noqa: E402
+from PIL import Image                                       # noqa: E402
 
 from ConfigIdentity import ModelConfig                      # noqa: E402
 from TileEncoderFunc import (ModelOutputSpec, TileEncoder,       # noqa: E402
@@ -940,6 +941,69 @@ def t_identity_moves_only_where_it_should():
     assert grey == ['transform.preprocess=grey'], grey
 
 
+# ── the transform on a uint8 batch (build_tensor) against PIL (build) ────────
+
+def _textured(n, side, seed=0):
+    """Tiles with structure at every scale (a resize has something to get
+    wrong), uint8 [n, side, side, 3]."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:side, 0:side].astype(np.float32)
+    out = []
+    for _ in range(n):
+        f = rng.uniform(0.02, 0.3, 3)
+        base = np.stack([127 + 100 * np.sin(xx * f[k] + yy * f[(k + 1) % 3])
+                         for k in range(3)], -1)
+        out.append(np.clip(base + rng.normal(0, 12, base.shape), 0, 255).astype(np.uint8))
+    return np.stack(out)
+
+
+def _both(tf, tiles):
+    pil = torch.stack([tf.build()(Image.fromarray(t)) for t in tiles])
+    gpu = tf.build_tensor()(torch.from_numpy(tiles))
+    return pil, gpu
+
+
+def t_tensor_transform_equals_pil_when_no_resize():
+    """Every encoder here reads 256 px tiles at scale_size 256 (gigapath, uni2,
+    convnext): the resize is a no-op and the crop exact, so the batch path must
+    give PIL's numbers to the bit -- with and without the grey preprocess."""
+    batch = _textured(6, 256)
+    for tf in (TransformConfig(scale_size=256, crop_size=224, interpolation='bicubic'),
+               TransformConfig(scale_size=256, crop_size=224, preprocess='grey')):
+        pil, gpu = _both(tf, batch)
+        assert pil.shape == gpu.shape, (pil.shape, gpu.shape)
+        diff = float((pil - gpu).abs().max())
+        assert diff == 0.0, f'{tf.preprocess}: max |diff| {diff}'
+        # the LAYOUT too: equal values in a channels-last tensor still change
+        # what an fp16 convolution computes (test_gigapath_equivalence)
+        assert gpu.is_contiguous(), f'{tf.preprocess}: not contiguous'
+
+
+def t_tensor_transform_is_close_to_pil_when_it_resizes():
+    """CONCH resizes 256 -> 448 bicubic. Not bit-equal (float resize against
+    PIL's own); required to be far closer than the decoy, the same tiles one
+    pixel shifted, which is what a wrong offset or a wrong interpolation
+    would look like."""
+    batch = _textured(6, 256, seed=1)
+    tf = TransformConfig(scale_size=448, crop_size=448, interpolation='bicubic')
+    pil, gpu = _both(tf, batch)
+    real = float((pil - gpu).abs().mean())
+    decoy = float((pil - torch.roll(pil, 1, dims=-1)).abs().mean())
+    assert real * 20 < decoy, f'mean |diff| {real:.4f} against a 1 px decoy {decoy:.4f}'
+    return f'mean |diff| {real:.4f}, decoy {decoy:.4f}'
+
+
+def t_run_takes_a_list_or_a_uint8_batch_alike():
+    """One interface: the same tiles as a list of arrays, a list of PIL images
+    and one uint8 tensor give the same features."""
+    encoder = enc('vector', pooling='identity')
+    batch = _textured(5, 16, seed=2)
+    a = encoder.features(list(batch))
+    b = encoder.features([Image.fromarray(t) for t in batch])
+    c = encoder.features(torch.from_numpy(batch))
+    assert torch.equal(a, b) and torch.equal(a, c)
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -966,6 +1030,11 @@ def main() -> int:
     check('shares the loaded model',          t_variant_shares_the_model)
     check('dtype lands on ModelConfig',       t_variant_rewrites_dtype_on_the_nested_config)
     check('refuses what would rebuild',       t_variant_refuses_what_rebuilds)
+
+    print('transform on a uint8 batch')
+    check('equals PIL when nothing is resized', t_tensor_transform_equals_pil_when_no_resize)
+    check('close to PIL when it resizes',     t_tensor_transform_is_close_to_pil_when_it_resizes)
+    check('a list or a batch, alike',         t_run_takes_a_list_or_a_uint8_batch_alike)
 
     print('ModelOutputSpec')
     check('refuses impossible shapes',        t_output_spec_refuses_nonsense)

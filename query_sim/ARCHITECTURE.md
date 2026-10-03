@@ -6,6 +6,8 @@
 > `log/TODO.log`。`camera.py`（M4.1 的 Camera 抽象）也是這份文件寫完之後才加的,
 > 不在下面的目錄結構裡。保留原文是因為被推翻的路線本身是負面結果,不是要重寫
 > 成看起來從一開始就對；要看現在實際長什麼樣,直接看 `query_sim/` 底下的檔案。
+> 2026-10-03 起 `source/`（`QueryFromWSI`）已刪除:讀取是 `utilities/SlideReader`,
+> `camera.py` 的 Camera 改名 `Render` 只負責效果和 GT,見專案根目錄的 `ARCHITECTURE.md`。
 
 整合 `query_sim/`（現有模組化 augmentation）與 `synth_fov_generator.py`（批量 + GT）為一個
 統一 package，同時保留兩者最強的部份：

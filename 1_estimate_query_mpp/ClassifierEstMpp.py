@@ -88,9 +88,16 @@ class ClassifierEstMppConfig(IdentifiedConfig):
     `'convnext_v2'`, ...); `classifier` is `Heads.py`'s registered name
     (`'linear'`, `'mlp'`, `'arcface'`) -- see `Heads.classifier_class`'s own
     docstring for why a registered name and not `type(...).__name__`.
-    `reduction` (`'fixed'`/`'attn'`) is the OTHER axis `common.Head.Head`
-    composes a classifier with, and is not itself a registry -- there are
-    only the two values, and neither is ever instantiated by name.
+    `reduction` (`common.Head.REDUCTIONS`: `'fixed'`/`'attn'`/`'clsattn'`) is
+    the OTHER axis `common.Head.Head` composes a classifier with, and is not
+    itself a registry -- none of its values is ever instantiated by name.
+
+    Which encoder blocks a head mixes (`HeadConfig.encoder_layers`) is NOT a
+    field here. It travels inside the checkpoint's `head_cfg`, the head is
+    rebuilt from it, and `encode_raw` is asked for exactly those blocks -- so a
+    config cannot disagree with it, and `weights_id` already tells two
+    checkpoints apart. A field would also add `encoder_layers=()` to the
+    identity of every config built before it, moving all their ids.
 
     All four (plus `tile_size`) are explicit fields rather than left for
     whoever opens `weights` to notice, for two reasons: a caller comparing
@@ -241,7 +248,8 @@ class ClassifierEstMpp(IdentifiedBuild):
                            else 0)
         self._encode_batch = encode_batch
         self._raw_of = (
-            (lambda p: encode_raw(self.encoder, p, self._encode_batch, self.device))
+            (lambda p: encode_raw(self.encoder, p, self._encode_batch, self.device,
+                                  layers=self.head.layers))
             if frozen else (lambda p: trunk_raw(self.encoder, p, self.device)))
 
         self.wsi = None

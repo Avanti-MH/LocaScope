@@ -1,6 +1,6 @@
 """Per-FOV ground-truth record (one row per synthetic FOV in gt.csv).
 
-Shape fields follow QueryFromWSI's spec (wh_ratio + MPixels + query_mpp), so
+Shape fields follow the camera's sensor spec (wh_ratio + MPixels + query_mpp), so
 one row is enough to reproduce the exact crop from the same WSI + coordinates.
 """
 
@@ -11,12 +11,12 @@ from dataclasses import dataclass
 class FOVRecord:
     filename: str
     wsi_path: str          # full path to the source WSI file
-    level:    int          # source Camera's WSI pyramid level (0 for single-cam runs)
+    level:    int          # source camera's WSI pyramid level (0 for single-cam runs)
 
-    # QueryFromWSI spec (the microscope-photo shape + scale)
+    # sensor spec (the microscope-photo shape + scale)
     wh_ratio:      str     # e.g. '4:3'
     MPixels:       float   # total pixel budget
-    query_mpp:     float   # cfg.query_mpp (nominal, Camera-level target)
+    query_mpp:     float   # cfg.query_mpp (nominal, camera-level target)
     nominal_mpp:   float   # alias of query_mpp for clarity
     effective_mpp: float   # query_mpp / scale for THIS shot (post-jitter GT)
     fov_width:     int     # QFW-derived output pixel width

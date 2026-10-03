@@ -72,6 +72,17 @@ def _to_pil(img) -> Image.Image:
     return img if isinstance(img, Image.Image) else Image.fromarray(img)
 
 
+def _as_uint8_rgb(img) -> np.ndarray:
+    """One tile as `[H, W, 3]` uint8, whatever it arrived as: an array already
+    in that shape is used as it is, anything else goes through PIL to RGB."""
+    if isinstance(img, torch.Tensor):
+        img = img.cpu().numpy()
+    if (isinstance(img, np.ndarray) and img.dtype == np.uint8 and img.ndim == 3
+            and img.shape[2] == 3):
+        return img
+    return np.asarray(_to_pil(img).convert('RGB'))
+
+
 # ── what a model produces ─────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -469,6 +480,57 @@ class TransformConfig(IdentifiedConfig):
         ]
         return transforms.Compose(steps)
 
+    def build_tensor(self) -> Callable[[torch.Tensor], torch.Tensor]:
+        """The same pipeline for a uint8 BATCH `[N, H, W, 3]`, run wherever the
+        batch is -- on the card, in one call, instead of PIL tile by tile. This
+        is the one `TileEncoder._run` uses; `build()` stays as the reference it
+        is tested against (`test_tile_encoder`).
+
+        Step for step what `build()` does to a PIL image:
+
+            Resize      skipped when the short side already IS scale_size --
+                        PIL returns a copy then, so both are exact. Otherwise
+                        float resize with antialias, rounded back to the 0..255
+                        grid PIL's uint8 output sits on. NOT bit-equal to PIL
+                        there; the test measures by how much.
+            CenterCrop  the same torchvision function, so the same offsets
+            Grayscale   PIL's own integer luminance, (19595 R + 38470 G +
+                        7471 B + 2^15) >> 16, replicated to three channels
+            ToTensor    / 255 on the uint8 values, as ToTensor does
+            Normalize   the same torchvision function
+
+        Every encoder here reads 256 px tiles with scale_size 256 (gigapath,
+        uni2, convnext), so the resize is the skipped one and the result is
+        what `build()` gives. CONCH resizes 256 -> 448, which is the case the
+        rounding note is about."""
+        from torchvision.transforms import functional as TF       # noqa: PLC0415
+        self.build()                     # the same refusals, raised the same way
+        interp = _INTERPOLATION[self.interpolation]
+        scale, crop, grey = self.scale_size, self.crop_size, self.preprocess == 'grey'
+        mean, std = list(self.mean), list(self.std)
+
+        def apply(batch: torch.Tensor) -> torch.Tensor:
+            if batch.dtype != torch.uint8 or batch.ndim != 4 or batch.shape[-1] != 3:
+                raise ValueError(f'expected uint8 [N, H, W, 3], got {batch.dtype} '
+                                 f'{tuple(batch.shape)}')
+            x = batch.permute(0, 3, 1, 2)
+            if min(x.shape[-2:]) != scale:
+                x = TF.resize(x.float(), scale, interpolation=interp, antialias=True)
+                x = x.round_().clamp_(0, 255).to(torch.uint8)
+            x = TF.center_crop(x, [crop, crop])
+            if grey:
+                r, g, b = x.int().unbind(1)
+                lum = ((r * 19595 + g * 38470 + b * 7471 + 32768) >> 16).to(torch.uint8)
+                x = lum.unsqueeze(1).expand(-1, 3, -1, -1)
+            # .contiguous() as ToTensor does. The VALUES are the same either
+            # way, but the permute above leaves a channels-last layout, and
+            # under fp16 cuDNN picks another convolution algorithm for it:
+            # GigaPath's tokens moved by 5e-2 against the PIL path
+            # (test_gigapath_equivalence, 2026-10-03) until this was added.
+            x = x.contiguous().float().div_(255.0)
+            return TF.normalize(x, mean=mean, std=std)
+        return apply
+
 
 @dataclass(frozen=True)
 class TileEncoderConfig(IdentifiedConfig):
@@ -740,22 +802,53 @@ class TileEncoder(IdentifiedBuild):
         reduce=lambda t: t and owns that decision. The choice can only be made
         HERE -- by the time _run returns, torch.cat has already built the whole
         thing wherever it was going to live.
+
+        `images` is a list (PIL images or `[H, W, 3]` arrays) or a uint8 batch
+        `[N, H, W, 3]` -- one interface, one preprocessing. Either is moved to
+        the device as uint8 and transformed there (`TransformConfig.
+        build_tensor`). The PIL transform this used to run tile by tile cost a
+        process its CPU exactly where DataLoader workers needed it: 8 workers
+        rendering beside it turned 10.6 s of encode into 33 s
+        (`diag_render_reads.py`, combined train, 2026-10-03).
         """
         forward = forward or self.model
         dtype = self.cfg.model.torch_dtype()
         ctx = (torch.autocast(device_type=self.device.type, dtype=dtype)
                if dtype is not torch.float32 else nullcontext())
+        prep = self._tensor_transform()
         out = []
         for start in range(0, len(images), self.cfg.batch_size):
-            batch = torch.stack([
-                self._transform(_to_pil(img))
-                for img in images[start:start + self.cfg.batch_size]
-            ]).to(self.device)
+            batch = prep(self._uint8_batch(images[start:start + self.cfg.batch_size]))
             with ctx:
                 raw = forward(batch)
             raw = raw.float()
             out.append(raw.cpu() if reduce is None else reduce(raw))
         return torch.cat(out, dim=0)
+
+    def _uint8_batch(self, chunk) -> torch.Tensor:
+        """`[B, H, W, 3]` uint8 on the device, from a uint8 tensor slice or a
+        list of tiles. Tiles of different sizes cannot share a batch; that is
+        refused rather than padded."""
+        if isinstance(chunk, torch.Tensor):
+            batch = chunk
+        else:
+            arrays = [_as_uint8_rgb(img) for img in chunk]
+            shapes = {a.shape for a in arrays}
+            if len(shapes) > 1:
+                raise ValueError(f'tiles of different shapes in one batch: '
+                                 f'{sorted(shapes)}')
+            batch = torch.from_numpy(np.stack(arrays))
+        return batch.to(self.device, non_blocking=True)
+
+    def _tensor_transform(self) -> Callable[[torch.Tensor], torch.Tensor]:
+        """`cfg.transform.build_tensor()`, built once per transform. Keyed on
+        the transform itself because `variant` copies this object's __dict__:
+        a clone with a new transform must not reuse the old one's function."""
+        held = self.__dict__.get('_tensor_tf')
+        if held is None or held[0] != self.cfg.transform:
+            held = (self.cfg.transform, self.cfg.transform.build_tensor())
+            self.__dict__['_tensor_tf'] = held
+        return held[1]
 
     @property
     def feature_pooling(self) -> str:
@@ -936,7 +1029,12 @@ class TileEncoder(IdentifiedBuild):
         return self._run(images, lambda t: self.vector_from(t).cpu())
 
     def tokens(self, images, reduce: Optional[Callable] = None) -> torch.Tensor:
-        """[N, T, D] fp32, NOT normalised, NO head. Token models only.
+        """[N, T, D] fp32, not L2-normalised, NO head. Token models only.
+
+        It does carry the model's FINAL NORM: forward_features ends with
+        self.norm(x) (see _vit_spatial_forward). "Normalised" alone named two
+        operations here, the final LayerNorm and an L2 unit length, and this
+        exit has the first and not the second.
 
         The trunk's own output: self.model is always the trunk, so nothing here
         has been through cfg.head or cfg.pooling. That is what this exit is for.
@@ -964,6 +1062,43 @@ class TileEncoder(IdentifiedBuild):
         """
         self._require_grid('spatial()')
         return self._run(images, reduce, forward=self._spatial_forward)
+
+    @property
+    def depth(self) -> int:
+        """How many transformer blocks the trunk has: what a fraction in
+        `Heads.resolve_encoder_layers` is a fraction of. Token models only."""
+        self._require('tokens', 'depth')
+        m = getattr(self.model, 'module', self.model)
+        blocks = getattr(m, 'blocks', None)
+        if blocks is None:
+            raise TypeError(f'{type(self).__name__}: the trunk has no `blocks`, '
+                            f'so it has no block index to name')
+        return len(blocks)
+
+    def layer_tokens(self, images, indices,
+                     reduce: Optional[Callable] = None) -> torch.Tensor:
+        """[N, K, T, D] fp32: the LAYER TOKENS of each block in `indices`
+        (absolute, 0-based), in that order -- the block's output with the
+        model's final norm applied, prefix tokens first, the same layout and the
+        same norm tokens() has. So the last block here IS tokens().
+
+        One forward pass for all K: forward_intermediates collects the blocks
+        it is asked for and no others (indices=None would keep every block,
+        40 copies on a ViT-g). The host holds K times what tokens() holds, which
+        is why encode_raw chunks it. `reduce` as in tokens(): `lambda t: t`
+        keeps the result on the device."""
+        self._require('tokens', 'layer_tokens()')
+        indices = [int(i) for i in indices]
+
+        def forward(batch):
+            m = getattr(self.model, 'module', self.model)
+            got = m.forward_intermediates(batch, indices=indices, norm=True,
+                                          output_fmt='NLC',
+                                          return_prefix_tokens=True,
+                                          intermediates_only=True)
+            return torch.stack([torch.cat([prefix, patches], dim=1)
+                                for patches, prefix in got], dim=1)
+        return self._run(images, reduce, forward=forward)
 
     def features_with_grad(self, batch: torch.Tensor,
                            exit_name: str = 'spatial') -> torch.Tensor:
@@ -1268,6 +1403,21 @@ def encoder_config(name: str, **over) -> 'TileEncoderConfig':
     importlib.import_module(module)
     return config_from(name, **over)
 
+
+
+def add_encoder_args(ap, base: 'TileEncoderConfig') -> None:
+    """One `--encoder-*` flag per field of an encoder's config, nested ones
+    included: `--encoder-batch-size`, `--encoder-model-dtype`,
+    `--encoder-transform-...`. A flag not given leaves the field at what `base`
+    holds (see `ConfigArgs`)."""
+    from ConfigArgs import add_config_args                         # noqa: PLC0415
+    add_config_args(ap, base, 'encoder')
+
+
+def encoder_cfg_from_args(args, base: 'TileEncoderConfig') -> 'TileEncoderConfig':
+    """`base` with every `--encoder-*` flag that was given applied."""
+    from ConfigArgs import config_from_args                        # noqa: PLC0415
+    return config_from_args(args, base, 'encoder')
 
 def admissible_poolings(cfg, wanted) -> tuple:
     """(kept, dropped) out of `wanted`, by what this config admits.

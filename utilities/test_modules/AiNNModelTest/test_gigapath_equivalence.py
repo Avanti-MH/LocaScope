@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GigaPath's current path against the free functions it replaced.
 
-    python utilities/test_modules/test_gigapath_equivalence.py
+    python utilities/test_modules/AiNNModelTest/test_gigapath_equivalence.py
 
 Loads GigaPath. There is no cheap half any more and no --with-model flag:
 every check here needs the real weights, because what is under test is that
@@ -45,7 +45,7 @@ os.environ.setdefault(
                               '/work/u26130998/model_weights'))
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
+_ROOT = _HERE.parent.parent.parent      # this file sits one directory deeper
 for _d in ('aiNNModel', 'utilities'):
     p = str(_ROOT / _d)
     if p not in sys.path:

@@ -4,8 +4,8 @@ import numpy as np
 from functools import lru_cache
 
 #: Route the public functions through the `_fast` bodies. The `_legacy` bodies
-#: stay next to them so test_augment_equivalence.py can measure the two against
-#: real Camera output rather than against a claim. Flip to False to fall back.
+#: stay next to them so test_camera.py (augment section) can measure the two against
+#: real camera (Render) output rather than against a claim. Flip to False to fall back.
 USE_FAST = True
 
 #: Compute the vignette gain in float32 instead of float64. This is the ONE
@@ -14,7 +14,7 @@ USE_FAST = True
 #: puts at 199.9999999 becomes 200 against 199. float32's relative error is
 #: ~1e-7, which at 255 is ~2.5e-5, so a pixel flips when the exact product
 #: lands that close to an integer -- of order 1e-4 of them.
-#: Off by default; test_augment_equivalence.py measures the real rate.
+#: Off by default; test_camera.py (augment section) measures the real rate.
 VIGNETTE_FLOAT32 = False
 
 #: How many distinct (h, w) the vignette falloff cache holds. Each entry is

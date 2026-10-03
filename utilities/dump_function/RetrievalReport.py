@@ -187,19 +187,130 @@ def pct(value: float) -> str:
     return '   -' if not np.isfinite(value) else f'{value * 100:3.0f}%'
 
 
-def print_paired(rows: list, title: str, arms: Sequence[str], baseline: str,
-                 emit: Callable[[str], None] = print) -> None:
+def grid_table(headers: Sequence[str], rows: Sequence[Sequence], *,
+               aligns: Optional[str] = None, rule_after: Sequence[int] = (),
+               emit: Callable[[str], None] = print) -> None:
+    """A table with grid lines, every column as wide as its widest cell.
+
+        +-----+------+
+        | arm | wins |
+        +-----+------+
+        | a   |    4 |
+        +-----+------+
+
+    `aligns` is one letter per column, `l` or `r`; the default is the first
+    column left and the rest right, which is a label and then numbers. A rule is
+    drawn under the header and at the top and bottom, and after each row index in
+    `rule_after` (a group boundary). Cells are strings, or anything `str` makes
+    one of; widths come from the cells, so a longer name moves nothing else.
+    """
+    cells = [[str(c) for c in row] for row in rows]
+    n = len(headers)
+    aligns = aligns or 'l' + 'r' * (n - 1)
+    widths = [max([len(str(headers[i]))] + [len(row[i]) for row in cells])
+              for i in range(n)]
+    rule = '+' + '+'.join('-' * (w + 2) for w in widths) + '+'
+
+    def line(values) -> str:
+        return '| ' + ' | '.join(
+            str(v).ljust(w) if a == 'l' else str(v).rjust(w)
+            for v, w, a in zip(values, widths, aligns)) + ' |'
+
+    emit(rule)
+    emit(line(headers))
+    emit(rule)
+    last = len(cells) - 1
+    for i, row in enumerate(cells):
+        emit(line(row))
+        if i in rule_after and i != last:
+            emit(rule)
+    emit(rule)
+
+
+#: Two downsamples within this ratio are the same scale. A pyramid steps by 2x at
+#: the least, so 5% never merges two levels, and it takes in the rounding a
+#: non-integer pyramid carries (4.000022, 4.02) as one scale.
+DS_SAME = 1.05
+
+
+def group_levels(rows: list) -> Dict[object, list]:
+    """Rows grouped by the scale they were measured at: `ds` values within
+    `DS_SAME` of each other are one group, keyed by the group's median ds. Rows
+    with no `ds` fall back to the level index.
+
+    A level index is not a scale -- level 1 is ds 4 on a 4x pyramid and ds 2 on a
+    2x one -- so grouping by it pools queries whose pools and difficulty have
+    nothing in common."""
+    has_ds = [r for r in rows if r.get('ds') not in (None, '')]
+    if len(has_ds) != len(rows):
+        out: Dict[object, list] = {}
+        for row in rows:
+            out.setdefault(row['level'], []).append(row)
+        return dict(sorted(out.items()))
+    groups: list = []          # [(first ds of the group, [rows])]
+    for row in sorted(rows, key=lambda r: float(r['ds'])):
+        d = float(row['ds'])
+        if groups and d <= groups[-1][0] * DS_SAME:
+            groups[-1][1].append(row)
+        else:
+            groups.append((d, [row]))
+    out = {}
+    for _, members in groups:
+        ds_sorted = sorted(float(r['ds']) for r in members)
+        out[float(f'{ds_sorted[len(ds_sorted) // 2]:.4g}')] = members
+    return out
+
+
+def print_level_heading(rows: list, level: object,
+                        emit: Callable[[str], None] = print,
+                        extras: Sequence[tuple] = ()) -> None:
+    """`ds 4 -- 2 slides, 10 queries per arm` and one row per slide
+    with how many queries it has and how many candidate windows it holds.
+
+    `extras` are `(header, row key)` pairs for more candidate counts a bench
+    stores (`pool_offset`, `pool_all`); a column appears only if some row has
+    that value, and a slide with none shows `-`."""
+    by_slide = group_by(rows, ['slide'])
+    has_ds = bool(rows) and rows[0].get('ds') not in (None, '')
+    ds_text = f' (ds {float(level):.4g})' if has_ds else ''
+    columns = [('main windows', 'pool')] + [
+        (h, k) for h, k in extras
+        if any(r.get(k) not in (None, '') for r in rows)]
+    body, total = [], 0
+    for (slide,), subset in sorted(by_slide.items()):
+        queries = len({r['fov_id'] for r in subset})
+        total += queries
+        counts = []
+        for _, key in columns:
+            value = next((r[key] for r in subset if r.get(key) not in (None, '')),
+                         None)
+            counts.append('-' if value is None else f'{int(value):,}')
+        body.append([slide, queries] + counts)
+    title = f'ds {float(level):.4g}' if has_ds else f'Level {level}'
+    emit(f'\n{title} -- {len(by_slide)} '
+         f'slide{"" if len(by_slide) == 1 else "s"}, {total} queries per arm')
+    grid_table(['slide', 'queries'] + [h for h, _ in columns], body, emit=emit)
+
+
+def print_paired(rows: list, title: Optional[str], arms: Sequence[str],
+                 baseline: str, emit: Callable[[str], None] = print) -> None:
     """The block that is identical at every aggregation level.
 
     `emit` is print by default and a list's append when the caller is building
     a report file. Both benches print the same table; only one of them also
-    keeps it.
+    keeps it. A `title` of None prints none, for a caller that has already
+    put a heading of its own above it.
+
+    wins / losses / ties are the paired comparison against the baseline on the
+    same query; `decided` is wins + losses.
     """
-    emit(f'\n{title}   n={len(rows) // max(1, len(arms))} per arm')
-    fractions = ''.join(f'{frac_label(f):>7}' for f in K_FRACTIONS)
-    emit(f'{"arm":<20}{"W":>5}{"L":>5}{"T":>5}{"n_cmp":>7}{"win%":>7}'
-         f'{"Q1":>7}{"med":>7}{"Q3":>7}{fractions}')
-    emit('-' * (62 + 7 * len(K_FRACTIONS)))
+    if title is not None:
+        emit(f'\n{title}   n={len(rows) // max(1, len(arms))} per arm')
+    else:
+        emit('')
+    headers = (['arm', 'wins', 'losses', 'ties', 'decided', 'win%', 'Q1', 'med',
+                'Q3'] + [frac_label(f) for f in K_FRACTIONS])
+    body = []
     by_arm = group_by(rows, ['arm'])
     for arm in arms:
         subset = by_arm.get((arm,))
@@ -208,35 +319,33 @@ def print_paired(rows: list, title: str, arms: Sequence[str], baseline: str,
         s = paired_stats(subset)
         # Same f-string on both sides of the dict, so a column cannot be read
         # from a key paired_stats never wrote.
-        tops = ''.join(f'{pct(s[f"top{f}"]):>7}' for f in K_FRACTIONS)
+        tops = [pct(s[f'top{f}']).strip() for f in K_FRACTIONS]
         if arm == baseline:
-            emit(f'{arm + "  (base)":<20}{"-":>5}{"-":>5}{"-":>5}{"-":>7}'
-                 f'{"-":>7}{"-":>7}{"-":>7}{"-":>7}{tops}')
+            body.append([arm + ' (base)'] + ['-'] * 8 + tops)
         else:
-            emit(f'{arm:<20}{s["W"]:>5}{s["L"]:>5}{s["T"]:>5}{s["n_cmp"]:>7}'
-                 f'{pct(s["win_pct"]):>7}'
-                 f'{s["ratio_q1"]:>7.2f}{s["ratio_med"]:>7.2f}'
-                 f'{s["ratio_q3"]:>7.2f}{tops}')
+            body.append([arm, s['W'], s['L'], s['T'], s['n_cmp'],
+                         pct(s['win_pct']).strip(), f'{s["ratio_q1"]:.2f}',
+                         f'{s["ratio_med"]:.2f}', f'{s["ratio_q3"]:.2f}'] + tops)
+    grid_table(headers, body, emit=emit)
 
 
 def print_fixed_k(rows: list, arms: Sequence[str], baseline: str,
                   emit: Callable[[str], None] = print) -> None:
     """Fixed candidate budgets. Only where pool sizes are comparable."""
-    emit(f'\n  fixed k -- truth@k')
-    emit(f'  {"arm":<20}' + ''.join(f'{f"k={k}":>8}' for k in K_FIXED))
+    emit('\nfixed k -- truth@k')
+    body = []
     by_arm = group_by(rows, ['arm'])
     for arm in arms:
         subset = by_arm.get((arm,))
         if not subset:
             continue
         s = absolute_stats(subset)
-        emit(f'  {arm:<20}' + ''.join(f'{pct(s[f"truth@{k}"]):>8}'
-                                      for k in K_FIXED))
+        body.append([arm] + [pct(s[f'truth@{k}']).strip() for k in K_FIXED])
     base = by_arm.get((baseline,))
     if base:
         s = absolute_stats(base)
-        emit(f'  {"gap@k (base)":<20}'
-             + ''.join(f'{pct(s[f"gap@{k}"]):>8}' for k in K_FIXED))
+        body.append(['gap@k (base)'] + [pct(s[f'gap@{k}']).strip() for k in K_FIXED])
+    grid_table(['arm'] + [f'k={k}' for k in K_FIXED], body, emit=emit)
 
 
 def print_pool_header(slide: str, level: int, pool: int, base_rows: list,
@@ -255,7 +364,7 @@ def print_pool_header(slide: str, level: int, pool: int, base_rows: list,
 
 
 def report(rows: list, arms: Sequence[str], baseline: str, *,
-           per_slide: bool = False,
+           per_slide: bool = False, level_extras: Sequence[tuple] = (),
            emit: Callable[[str], None] = print) -> None:
     """單片單層 -> 同層跨片 -> 單片跨層 -> 全部, in that order.
 
@@ -273,9 +382,9 @@ def report(rows: list, arms: Sequence[str], baseline: str, *,
         print_fixed_k(subset, arms, baseline, emit=emit)
 
     emit(f'\n{"=" * 90}\n同層跨片 -- PRIMARY\n{"=" * 90}')
-    for (level,), subset in sorted(group_by(rows, ['level']).items()):
-        print_paired(subset, f'L{level}  ({len(group_by(subset, ["slide"]))} slides)',
-                     arms, baseline, emit=emit)
+    for level, subset in group_levels(rows).items():
+        print_level_heading(subset, level, emit=emit, extras=level_extras)
+        print_paired(subset, None, arms, baseline, emit=emit)
         print_fixed_k(subset, arms, baseline, emit=emit)
 
     if per_slide:

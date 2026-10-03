@@ -6,7 +6,7 @@ inserted a test directory into sys.path to reach it -- nine CLI entry points
 did -- or derived the rule again. query_sim/cli/__init__.py derived it again,
 and said so: keep the two in step. They did not stay in step, and the proof was
 inside that same package: three of its four files used the local copy while
-diag_camera_skip.py inserted utilities/test_modules to import this one.
+diag_camera_skip.py (retired 2026-09-30) inserted utilities/test_modules to import this one.
 
 It sits in utilities/ because that is the library layer every package already
 depends on -- utilities/cli, query_sim/cli, test_modules and bench_modules all

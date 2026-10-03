@@ -11,7 +11,7 @@ RE-EXPORTED, not redefined. This file used to carry its own copy of the rule,
 on the argument that a CLI depending on a helper under utilities/test_modules
 would be the wrong direction. The direction was the real problem; the copy was
 not the fix. It ended with two definitions inside ONE package -- batch, demo
-and multi_batch imported the local one while diag_camera_skip inserted
+and multi_batch imported the local one while diag_camera_skip (retired 2026-09-30) inserted
 utilities/test_modules into sys.path to import the other -- which is what
 `keep the two in step` means once nothing enforces it.
 

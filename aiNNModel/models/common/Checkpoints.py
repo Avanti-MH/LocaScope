@@ -23,7 +23,7 @@ from Heads import HeadConfig, classifier_class, classifier_name     # noqa: E402
 
 
 def weight_filename(encoder_name: str, frozen: bool, head_name: str,
-                    tag: str, loss: str = 'bal') -> str:
+                    tag: str, loss: str = 'bal', read_tag: str = '') -> str:
     '''`<encoder>_<frozen|finetuned>_<head>_<last|best|best_unweighted>.pt`,
     with a `_<loss>` segment before the tag when `loss` is not `'bal'`
     (2026-09-22).
@@ -80,13 +80,19 @@ def weight_filename(encoder_name: str, frozen: bool, head_name: str,
     -- it only names the file. The formula lives in whichever training
     package's own `val_report` calls it, currently `MppRoutingHead/
     cli/train.py`'s.)
+
+    `read_tag` (2026-10-02) is the training read mode
+    (`MppRoutingHead.Datasets.RenderConfig.read_tag`), one more segment after
+    the loss, and for the same reason absent at its default: `''` is how
+    every file before it existed was trained, so their names do not move.
     '''
     if tag not in ('last', 'best', 'best_unweighted'):
         raise ValueError(
             f"tag must be 'last', 'best' or 'best_unweighted', got {tag!r}")
     kind = 'frozen' if frozen else 'finetuned'
     loss_seg = '' if loss == 'bal' else f'{loss}_'
-    return f'{encoder_name}_{kind}_{head_name}_{loss_seg}{tag}.pt'
+    read_seg = f'{read_tag}_' if read_tag else ''
+    return f'{encoder_name}_{kind}_{head_name}_{loss_seg}{read_seg}{tag}.pt'
 
 
 def save_checkpoint(path, *, head: Head, encoder, encoder_name: str,

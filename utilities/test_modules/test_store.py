@@ -3,10 +3,15 @@
 pre-tile rungs.
 
     python utilities/test_modules/test_store.py
+    python utilities/test_modules/test_store.py --with-model [--only-model]
 
-No slide, no model, no GPU: every store lives in a temporary directory, the
-encoder and the container are stand-ins, and the features are ramps whose value
-says where they came from.
+The unit tests need no slide, no model, no GPU: every store lives in a
+temporary directory, the encoder and the container are stand-ins, and the
+features are ramps whose value says where they came from.
+
+`--with-model` adds one measurement that does need them (see `run_precision`):
+how far a pooling computed live is from the same pooling taken from a stored
+raw output. It prints a distribution and fails only on a value fp16 cannot hold.
 
 WHAT THIS DEFENDS
 -----------------
@@ -20,10 +25,16 @@ WHAT THIS DEFENDS
                   the one error the address cannot catch alone
     pre-tiles     a rung is a dataset only once its index is written, and a
                   finished one is never appended to
+    raw           the model's own output stored whole -- prefix slots and cells,
+                  in the model's order -- and told apart from the reduced
+                  'tokens'; the dtype the tensor has is the dtype it keeps; a
+                  chunked read is the whole read, cut up; several poolings of
+                  one slide sit side by side and neither overwrites the other
 """
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import os
 import sys
@@ -44,9 +55,9 @@ import torch                                                     # noqa: E402
 
 from PatchingLib import FeaturesMap, WsiFeaturesMap              # noqa: E402
 from Store import (FeatureMapCache, FeatureStore as FS,          # noqa: E402
-                   PreTileCorpus, PreTileStore, StoreMismatch,
-                   from_store_tensors, geometry_mismatch, region_grids,
-                   to_store_tensors)
+                   PooledFeatures, PreTileCorpus, PreTileStore, StoreMismatch,
+                   from_store_tensors, geometry_mismatch, raw_layout,
+                   region_grids, to_store_tensors)
 from TissueMask import TissueRegion                              # noqa: E402
 
 _RESULTS = []
@@ -160,7 +171,7 @@ def t_save_refuses_what_would_load_wrong():
     with tempfile.TemporaryDirectory() as root:
         m = a_meta()
         t = tensors_for(m)
-        rejects(lambda: FS.save(root, meta=m, **dict(t, features=t['features'].float())), 'fp16')
+        rejects(lambda: FS.save(root, meta=m, **dict(t, features=t['features'].double())), 'fp16')
         rejects(lambda: FS.save(root, meta=a_meta(slots=('cls',)), **t), 'slot names')
         rejects(lambda: FS.save(root, meta=a_meta(dim=9), **t), 'meta.dim')
         rejects(lambda: FS.save(root, meta=m, **dict(t, x=t['x'].long())), 'int32')
@@ -176,7 +187,7 @@ def t_save_refuses_what_would_load_wrong():
         FS.save(root, meta=g, **t, **cols)
         rejects(lambda: FS.save(root, meta=dataclasses.replace(g, n_available=5), **t, **cols),
                 'n_available')
-    return 'dtype, slots, dim, coverage, collisions, a partial grid'
+    return 'dtype (fp64), slots, dim, coverage, collisions, a partial grid'
 
 
 def t_a_tokens_store_says_where_its_cells_sat():
@@ -447,18 +458,376 @@ def t_unfinished_is_refused_and_overwrite_needs_saying():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  raw outputs, dtype, chunked reads, several poolings
+# ══════════════════════════════════════════════════════════════════════════════
+
+def a_raw_meta(**over) -> FS.Meta:
+    """3 prefix slots (cls + 2 registers) and a 2x2 cell grid: 7 slots."""
+    base = dict(pooling='raw', slots=('cls', 'r0', 'r1', 'p0', 'p1', 'p2', 'p3'),
+                slot_layout=raw_layout(3, (2, 2)), feat_hw=(2, 2), num_prefix=3)
+    base.update(over)
+    return a_meta(**base)
+
+
+def slot_ramp(meta: FS.Meta, dtype=torch.float16) -> dict:
+    """features[:, k, :] == k, so a slot in the wrong place prints as itself."""
+    n, k = meta.n_tiles, len(meta.slots)
+    f = torch.arange(k, dtype=torch.float32).reshape(1, k, 1).expand(n, k, meta.dim)
+    return tensors_for(meta, features=f.to(dtype).contiguous())
+
+
+def t_a_raw_store_keeps_every_slot_in_the_models_order():
+    with tempfile.TemporaryDirectory() as root:
+        m = a_raw_meta()
+        path = FS.save(root, meta=m, **slot_ramp(m))
+        got, meta = FS.load(path)
+        assert meta.slots == m.slots and meta.slot_layout == 'raw:3+2x2', meta
+        assert got['features'].shape == (4, 7, 8)
+        assert [int(got['features'][0, k, 0]) for k in range(7)] == list(range(7)), (
+            'a slot moved: registers and cells are in the model\'s order')
+        assert path.name == 'ds4.00003_raw.safetensors', path.name
+        # the three values written by three lines have to agree
+        t = slot_ramp(m)
+        rejects(lambda: FS.save(root, meta=a_raw_meta(slot_layout=raw_layout(1, (2, 2))), **t),
+                'imply')
+        rejects(lambda: FS.save(root, meta=a_raw_meta(feat_hw=None), **t), 'feat_hw')
+        rejects(lambda: FS.save(root, meta=a_raw_meta(slot_layout='none'), **t), 'raw store says')
+        rejects(lambda: FS.save(root, meta=a_meta(slot_layout=raw_layout(3, (2, 2))),
+                                **tensors_for(a_meta())), 'raw store says')
+        six = a_raw_meta(slots=('cls', 'r0', 'r1', 'p0', 'p1', 'p2'))
+        rejects(lambda: FS.save(root, meta=six, **slot_ramp(six)), 'has 7 slots, got 6')
+    return '7 slots in order; layout, feat_hw, prefix and count must agree'
+
+
+def t_the_dtype_a_tensor_has_is_the_dtype_it_keeps():
+    with tempfile.TemporaryDirectory() as root:
+        m = a_meta()
+        t16 = tensors_for(m)
+        f32 = (torch.arange(4 * 2 * 8, dtype=torch.float32).reshape(4, 2, 8) / 3.0)
+        p16 = FS.save(root, meta=m, **t16)
+        assert FS.load(p16)[0]['features'].dtype == torch.float16
+        p32 = FS.save(root, meta=a_meta(pooling='cls_std'),
+                      **dict(t16, features=f32))
+        back = FS.load(p32)[0]['features']
+        assert back.dtype == torch.float32 and torch.equal(back, f32), (
+            'an fp32 store was rounded on its way to disk')
+        assert f32.half().float().sub(f32).abs().max() > 0, (
+            'the values are fp16-exact, so this proved nothing about fp32')
+        # nothing about the dtype is in the metadata, so files written before
+        # this existed read as they did
+        assert set(m.to_strings()) == {f.name for f in dataclasses.fields(m)}
+        assert not any('dtype' in k for k in m.to_strings())
+    return 'fp16 stays fp16; fp32 comes back bit-exact and differs from its fp16 rounding'
+
+
+def t_a_chunked_read_is_the_whole_read_cut_up():
+    with tempfile.TemporaryDirectory() as root:
+        m = a_meta(n_tiles=10)
+        path = FS.save(root, meta=m, **tensors_for(m))
+        whole = FS.load(path)[0]['features']
+        assert FS.n_rows(path) == 10
+        for rows in (1, 3, 4, 10, 100):
+            got = list(FS.iter_chunks(path, rows=rows))
+            assert [a for a, _ in got] == list(range(0, 10, rows)), rows
+            assert torch.equal(torch.cat([c for _, c in got]), whole), rows
+        assert torch.equal(torch.cat([c for _, c in FS.iter_chunks(path, key='x', rows=4)]),
+                           FS.load(path)[0]['x'])
+        rejects(lambda: list(FS.iter_chunks(path, rows=0)), 'positive')
+        rejects(lambda: list(FS.iter_chunks(path, require={'encoder_id': 'other'})),
+                'encoder_id')
+    return 'rows 1, 3, 4, 10, 100 all give the same tensor; uneven tail included'
+
+
+def _pooled_for(container=None, spec=(14, 14), prefix=1, dim=DIM):
+    """cls and raw of the whole slide, sized from the grid."""
+    n = a_wfm().n_patches()
+    cells = spec[0] * spec[1] + prefix
+    raw = (torch.arange(n * cells * dim, dtype=torch.float32)
+           .reshape(n, cells, dim) / 7.0).half()
+    cls = raw[:, :1].clone()
+    return {'cls': PooledFeatures(cls, ('cls',), 'none'),
+            'raw': PooledFeatures(raw, tuple(f's{i}' for i in range(cells)),
+                                  raw_layout(prefix, spec))}, n
+
+
+def t_several_poolings_of_one_slide_sit_side_by_side():
+    pooled, n = _pooled_for()
+    with tempfile.TemporaryDirectory() as root:
+        cache = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
+                                verbose=False)
+        paths = cache.save_pooled(_container(), pooled)
+        assert set(paths) == {'cls', 'raw'} and paths['cls'] != paths['raw']
+        assert paths['raw'].name == 'ds4_raw.safetensors', paths['raw'].name
+        assert paths['raw'].parent == paths['cls'].parent, 'not in one key directory'
+        assert cache.check(_container(), 'raw').slot_layout == 'raw:1+14x14'
+        got, meta = cache.load_pooled(_container(), 'raw')
+        assert torch.equal(got['features'], pooled['raw'].features)
+        assert meta.pooling == 'raw' and meta.n_tiles == n
+        chunks = cache.iter_pooled(_container(), 'raw', rows=7)
+        assert torch.equal(torch.cat([c for _, c in chunks]), pooled['raw'].features)
+        got_cls, _ = cache.load_pooled(_container(), 'cls')
+        assert torch.equal(got_cls['features'], pooled['cls'].features), (
+            'writing raw overwrote cls')
+        # the one-vector API reads what save_pooled wrote for the same pooling
+        assert cache.load(_container()).n_patches() == n
+        # the checks every read makes
+        assert cache.check(_container(REGIONS[:2]), 'raw') is None, 'narrowed regions served'
+        other = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder('enc99999'),
+                                _Recipe(), verbose=False)
+        assert other.check(_container(), 'raw') is None, 'another encoder was served'
+        assert cache.check(_container(), 'rings3') is None, 'a pooling nobody wrote'
+        assert cache.iter_pooled(_container(), 'rings3') is None
+        ro = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
+                             mode='r', verbose=False)
+        assert ro.save_pooled(_container(), pooled) == {}, "mode='r' wrote"
+        bad = PooledFeatures(pooled['cls'].features[:-1], ('cls',), 'none')
+        rejects(lambda: cache.save_pooled(_container(), {'cls': bad}), 'grid')
+    return 'cls and raw coexist; encoder, regions and pooling are checked'
+
+
+def t_an_fp32_encoder_writes_fp32_and_anything_else_writes_fp16():
+    def encoder_at(dtype):
+        e = _Encoder()
+        e.cfg = SimpleNamespace(model=SimpleNamespace(torch_dtype=lambda: dtype))
+        return e
+
+    seen = {}
+    for name, enc in (('fp32', encoder_at(torch.float32)),
+                      ('fp16', encoder_at(torch.float16)),
+                      ('unsaid', _Encoder())):
+        with tempfile.TemporaryDirectory() as root:
+            cache = FeatureMapCache(root, '/data/g/SLIDE_A.svs', enc, _Recipe(),
+                                    verbose=False)
+            path = cache.save(a_wfm())
+            seen[name] = FS.load(path)[0]['features'].dtype
+            assert cache.load(_container()) is not None, name
+    assert seen == {'fp32': torch.float32, 'fp16': torch.float16,
+                    'unsaid': torch.float16}, seen
+    return 'fp32 encoder -> fp32; fp16 and an encoder that does not say -> fp16'
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  --with-model: live against cached, on real tiles
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# A pooling computed live comes from the encoder's fp32 output. The same pooling
+# taken from a stored raw output comes from that output rounded to the storage
+# dtype -- through the REAL Store: FeatureStore.save, then load. This measures
+# how far apart the two land, per pooling, against two yardsticks:
+#
+#     G_store   live  vs  cached-from-raw      what the file costs
+#     G_direct  live  vs  the arm stored at fp16 itself (normalised, then cast)
+#     G_run     live  vs  the SAME tiles encoded a second time
+#
+# G_run is the floor. A GPU does not promise the same bits twice, so a gap no
+# larger than G_run is not a difference at all. Gaps are 1 - cos over every
+# (tile, slot) pair; the tail matters more than the median, because a rank flip
+# is a tail event.
+#
+# It also reports the largest |value| by token type (cls, registers, patches)
+# against fp16's 65504 -- registers are where large activations live -- and
+# FAILS only if the cast to fp16 produced an inf or a nan, which no threshold
+# could excuse. Everything else is printed for a human: no distribution has been
+# seen yet, so nothing is asserted about it.
+
+POOL_ARMS = ('cls', 'cls_avg', 'cls_std', 'rings3', 'grid2x2')
+
+
+def _sample_tiles(slide, mask, level, n, rng, tile=256):
+    """`n` tissue tiles of a slide at `level`, random places inside its regions,
+    background under half. Fewer come back if the slide has no room."""
+    ds = float(slide.level_downsamples[level])
+    side = int(tile * ds)
+    regions = [r for r in mask.tissue_regions if r.w > side and r.h > side]
+    if not regions:
+        return []
+    xy = []
+    for _ in range(20 * n):
+        r = regions[int(rng.integers(len(regions)))]
+        xy.append((int(r.x + rng.integers(0, r.w - side)),
+                   int(r.y + rng.integers(0, r.h - side))))
+    xy = np.array(xy, dtype=np.int64)
+    keep = xy[np.asarray(mask.white_fractions(xy, level, tile)) < 0.5][:n]
+    return [np.asarray(slide.read_region_rgb((int(x), int(y)), level, (tile, tile)))
+            for x, y in keep]
+
+
+def _gap(a: torch.Tensor, b: torch.Tensor) -> np.ndarray:
+    """1 - cos over every (tile, slot); both are unit slots."""
+    return (1.0 - (a.float() * b.float()).sum(-1)).clamp_min(0.0).flatten().numpy()
+
+
+def _row(name, comparison, gap):
+    q = np.percentile(gap, [50, 95, 99]) if len(gap) else [float('nan')] * 3
+    return dict(group=name, comparison=comparison, n=len(gap), median=float(q[0]),
+                p95=float(q[1]), p99=float(q[2]),
+                max=float(gap.max()) if len(gap) else float('nan'))
+
+
+def run_precision(args) -> int:
+    import csv
+    from AccessDatasets import locate
+    from SafeSlide import SafeSlide
+    from TileEncoderFunc import admissible_poolings, encoder_config, pooling_kinds
+    import Cache
+    from TissueMaskConfig import MASK_RECIPES, MaskMaker
+    from _paths import job_result_dir
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size).with_model(dtype='fp16')
+    arms, dropped = admissible_poolings(cfg, POOL_ARMS)
+    encoder = cfg.build(device)
+    spec = encoder.model_spec
+    print(f'encoder {args.encoder} on {device}: T={spec.n_tokens()} D={spec.dim} '
+          f'prefix={spec.num_prefix} cells={spec.feat_hw}   arms {list(arms)}'
+          + (f'  (cannot do {dropped})' if dropped else ''))
+    p = int(spec.num_prefix)
+    slots = (('cls',) + tuple(f'r{k}' for k in range(p - 1)) if p else ()) + tuple(
+        f'p{k:03d}' for k in range(spec.feat_hw[0] * spec.feat_hw[1]))
+
+    rng = np.random.default_rng(args.seed)
+    rows, ranges, bad_values = [], [], 0
+    pooled = {a: {'store': [], 'direct': [], 'run': []} for a in arms}
+    # The mask is read from a cache when there is one: a hit builds no
+    # segmenter and reads no pixels. `--mask-cache-job` names whose cache.
+    masks_root = Cache.cache_root(
+        args.mask_cache_job or Cache.job_name('StoreTest'), 'mask')
+    print(f'masks: --seg {args.seg}, cache {masks_root}')
+    with MaskMaker(MASK_RECIPES[args.seg], masks_root, device) as masks:
+        for name in args.slides:
+            slide = SafeSlide(locate(name).path)
+            mask, hit = masks.mask(slide)
+            print(f'  {name}: mask {"from the cache" if hit else "segmented now"}')
+            for level in args.levels:
+                if level >= slide.level_count:
+                    continue
+                tiles = _sample_tiles(slide, mask, level, args.tiles, rng)
+                tag = f'{name} L{level}'
+                if not tiles:
+                    print(f'  {tag}: no tissue tile fits -- skipped')
+                    continue
+                raw = encoder.tokens(tiles)                       # [N, T, D] fp32
+                again = encoder.tokens(tiles)                     # the floor
+                half = raw.to(torch.float16)
+                bad = int((~torch.isfinite(half)).sum())
+                bad_values += bad
+                for kind, sl in (('cls', slice(0, 1)),
+                                 ('registers', slice(1, p)),
+                                 ('patches', slice(p, None))):
+                    part = raw[:, sl].abs()
+                    if part.numel():
+                        ranges.append(dict(group=tag, token=kind,
+                                           max_abs=float(part.max()),
+                                           over_60000=int((part > 60000).sum())))
+                # through the real Store, exactly as a cache would keep it
+                with tempfile.TemporaryDirectory() as root:
+                    meta = FS.Meta(
+                        wsi_stem=name, wsi_path='', level=level, ds=1.0, mpp=0.0,
+                        base_mpp=0.0, tile_size=256, overlap=False, pooling='raw',
+                        slots=slots, slot_layout=raw_layout(p, spec.feat_hw),
+                        dim=int(spec.dim), feat_hw=tuple(spec.feat_hw), num_prefix=p,
+                        encoder_id=encoder.identity_id(), seg_id='precision',
+                        region_id='precision', coverage='sample',
+                        n_available=len(tiles), n_tiles=len(tiles),
+                        sampler_id='precision', plan='precision', sample_seed=0)
+                    # two tensors, not one passed twice: safetensors refuses
+                    # tensors that share memory
+                    path = FS.save(root, meta=meta, features=half,
+                                   x=torch.zeros(len(tiles), dtype=torch.int32),
+                                   y=torch.zeros(len(tiles), dtype=torch.int32))
+                    stored = FS.load(path)[0]['features']
+                    chunked = torch.cat([c for _, c in FS.iter_chunks(path, rows=97)])
+                    assert torch.equal(stored, chunked), 'chunked read differs on real data'
+                stored = stored.float()
+                for a in arms:
+                    live = pooling_kinds(raw, a, spec)
+                    g_store = _gap(live, pooling_kinds(stored, a, spec))
+                    g_direct = _gap(live, live.to(torch.float16).float())
+                    g_run = _gap(live, pooling_kinds(again, a, spec))
+                    pooled[a]['store'].append(g_store)
+                    pooled[a]['direct'].append(g_direct)
+                    pooled[a]['run'].append(g_run)
+                    for cmp_name, g in (('store', g_store), ('direct', g_direct),
+                                        ('run', g_run)):
+                        rows.append(_row(f'{tag} {a}', cmp_name, g))
+                print(f'  {tag}: {len(tiles)} tiles, non-finite after fp16: {bad}',
+                      flush=True)
+            slide.close()
+
+    print('\n1 - cos to the live pooling, every (tile, slot); smaller is closer')
+    print(f'{"arm":<10}{"vs":<8}{"n":>8}{"median":>12}{"p95":>12}{"p99":>12}{"max":>12}')
+    for a in arms:
+        for cmp_name, label in (('run', 'G_run'), ('direct', 'G_direct'),
+                                ('store', 'G_store')):
+            g = np.concatenate(pooled[a][cmp_name]) if pooled[a][cmp_name] else np.zeros(0)
+            r = _row(a, cmp_name, g)
+            print(f'{a:<10}{label:<8}{r["n"]:>8}{r["median"]:>12.2e}{r["p95"]:>12.2e}'
+                  f'{r["p99"]:>12.2e}{r["max"]:>12.2e}')
+            rows.append(dict(r, group=f'ALL {a}'))
+        print()
+    print('largest |value| in the raw output, by token type (fp16 holds 65504)')
+    worst = {}
+    for r in ranges:
+        w = worst.setdefault(r['token'], dict(max_abs=0.0, over=0))
+        w['max_abs'] = max(w['max_abs'], r['max_abs'])
+        w['over'] += r['over_60000']
+    for kind, w in worst.items():
+        print(f'  {kind:<10}max {w["max_abs"]:>10.1f}   values above 60000: {w["over"]}')
+
+    out = job_result_dir('StoreTest')
+    path = os.path.join(out, f'precision_{args.encoder}.csv')
+    with open(path, 'w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]) if rows else ['group'])
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f'\n  {path}')
+    if bad_values:
+        print(f'\nFAIL: {bad_values} value(s) are not finite once cast to fp16 -- '
+              f'a raw store at fp16 cannot hold this encoder\'s output')
+        return 1
+    print('\nno inf or nan after the cast. Read G_store against G_run: a gap no '
+          'larger than the floor is not a difference.')
+    return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 
 _TESTS = [t for n, t in sorted(globals().items()) if n.startswith('t_')]
 
 
 def main() -> int:
-    for fn in _TESTS:
-        check(fn.__name__[2:].replace('_', ' '), fn)
-    failed = [n for n, e in _RESULTS if e is not None]
-    print(f'\n{len(_RESULTS) - len(failed)}/{len(_RESULTS)} passed')
-    if failed:
-        print('failed: ' + ', '.join(failed))
-    return 1 if failed else 0
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--with-model', action='store_true',
+                    help='also measure live against cached on real tiles')
+    ap.add_argument('--only-model', action='store_true',
+                    help='skip the unit tests (implies --with-model)')
+    ap.add_argument('--slides', nargs='+', default=['BRACS_1411', 'S1104233,G7E,110208'],
+                    help='slide NAMES, resolved by AccessDatasets. The defaults '
+                         'have a hest mask in result/cache/MppRoutingHead_mask')
+    ap.add_argument('--seg', default='hest', help='mask recipe (MASK_RECIPES)')
+    ap.add_argument('--mask-cache-job', default=None,
+                    help='whose mask cache to read and fill: result/cache/<this>_'
+                         'mask/. Default: this job (StoreTest)')
+    ap.add_argument('--encoder', default='uni2')
+    ap.add_argument('--levels', type=int, nargs='+', default=[0, 1, 2])
+    ap.add_argument('--tiles', type=int, default=200, help='tiles per (slide, level)')
+    ap.add_argument('--batch-size', type=int, default=64)
+    ap.add_argument('--seed', type=int, default=0)
+    args = ap.parse_args()
+
+    status = 0
+    if not args.only_model:
+        for fn in _TESTS:
+            check(fn.__name__[2:].replace('_', ' '), fn)
+        failed = [n for n, e in _RESULTS if e is not None]
+        print(f'\n{len(_RESULTS) - len(failed)}/{len(_RESULTS)} passed')
+        if failed:
+            print('failed: ' + ', '.join(failed))
+        status = 1 if failed else 0
+    if args.with_model or args.only_model:
+        print('\n======== live against cached ========')
+        status = max(status, run_precision(args))
+    return status
 
 
 if __name__ == '__main__':

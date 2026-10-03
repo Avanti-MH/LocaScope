@@ -2,12 +2,12 @@
 """Per-slide, per-rung: is this WSI's own pyramid NATIVE at each rung, and
 how much does `base_mpp` itself vary across a dataset -- both without
 rendering anything (no GPU, no Camera, no encoder), just the level-choice
-arithmetic `QueryFromWSI.__init__` already does.
+arithmetic `SlideReader.level_of` / `native` already do.
 
 Moved here 2026-09-18 from `training/MppRoutingHead/datasets/
 diagnose_native_split.py`, which was written as a one-off to answer why
 bracs/test's val split showed n_native=220 against n_resampled=870 -- see
-`training/MppRoutingHead/spec.md`'s "QueryFromWSI.reads_natively was too
+`training/MppRoutingHead/spec.md`'s "QueryFromWSI.reads_natively (now Render.reads_natively) was too
 strict" for that story. Its own docstring said "kept... in case the same
 question comes up again", and it has: the native-rung question and "how
 much does base_mpp vary WSI to WSI" (2026-09-18, generalizing to any WSI
@@ -20,7 +20,7 @@ diagnostic in this directory through -- see `WsiSelection.py`'s own
 docstring for the "which WSIs" half of that shape.
 
 Read-only, cheap: opens each WSI once for its pyramid metadata (`base_mpp`,
-`level_downsamples`) plus `QueryFromWSI`'s own level-choice arithmetic --
+`level_downsamples`) plus `SlideReader`'s own level-choice arithmetic --
 no pixel reads.
 
 Usage:
@@ -44,7 +44,7 @@ import _paths                                                       # noqa: E402
 _paths.setup_import_paths()
 
 from DsLadder import DEFAULT_RUNGS                                   # noqa: E402
-from QueryFromWSI import QueryFromWSI                                 # noqa: E402
+from SlideReader import SlideReader                                   # noqa: E402
 from SafeSlide import SafeSlide                                      # noqa: E402
 from WsiSelection import resolve_wsi_paths                            # noqa: E402
 
@@ -77,20 +77,19 @@ class WsiScaleCheck:
             # flips a rung's native flag between slides whose ds prints
             # identically at 2 decimals (the original bug this tool found).
             dss = [float(d) for d in wsi.level_downsamples]
+            reader = SlideReader(wsi)
             if not self.quiet:
                 print(f'{entry["wsi_name"]:28s} base_mpp={wsi.base_mpp!r}')
                 print(f'    levels(ds)={dss!r}')
             native = {}
             for rung in DEFAULT_RUNGS:
-                mpp = wsi.base_mpp * rung
-                qfw = QueryFromWSI(wsi, wh_ratio='1:1',
-                                   MPixels=(256 ** 2) / 1e6, mpp=mpp)
-                is_native = qfw.reads_natively
+                level = reader.level_of(rung)
+                is_native = reader.native(rung)
                 native[rung] = is_native
                 if not self.quiet:
-                    chosen_ds = dss[qfw.chosen_level]
+                    chosen_ds = dss[level]
                     diff = abs(chosen_ds - rung) / chosen_ds
-                    print(f'    rung {rung:>5g}  chosen_level={qfw.chosen_level}  '
+                    print(f'    rung {rung:>5g}  chosen_level={level}  '
                          f'chosen_ds={chosen_ds!r}  diff={diff:.6f}  '
                          f'native={is_native}')
             row['native'] = native

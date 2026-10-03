@@ -7,10 +7,41 @@ Outputs (in result/<SLURM_JOB_NAME or ProbeTileYield>/):
     tile_yield.png
     tile_yield_definitions.csv
     tile_yield.csv            one row per cell of the grid
+    feature_map_size.csv      --feature-map on|only: one row per (slide, tile, level)
 
 spec.md 12 step 3b. NO MODEL and no encoding -- it reads the masks the store
 already holds and runs the same rejection sampling the extraction will, so the
 only cost is mask arithmetic.
+
+THE FEATURE-MAP REPORT  (--feature-map on | only)
+-------------------------------------------------
+A different question on the same slides and the same masks: not how many tiles a
+SAMPLER can draw, but how large the WHOLE-SLIDE feature map is -- what
+`FeatureMapCache` stores, one row of features per tile of the grid. For every
+pyramid level the slide really has (up to the coarsest --ds):
+
+    tiles      the whole grid, four ways:
+                   no mask, main       one region, the scanned rectangle
+                   no mask, overlap    ... plus the grid offset by half a tile
+                   mask,    main       the recipe's regions that hold a tile
+                   mask,    overlap     ... plus the offset grid
+               counted by `region_grids`, the same geometry the container builds
+               with, so no pixel is read.
+    tissue     the mask grid split again by what is IN each tile: a tile has
+               tissue when its background fraction (`white_fractions`, the
+               score the sampler's richness buckets use) is below --bg-max
+               (0.95: more than 5% of the tile is tissue; the production
+               sampler stops earlier, at 0.85), else it
+               is empty. Reported for main and for main + offset, so
+               tissue + empty is exactly the mask tile count. A region is a
+               bounding box, and a bounding box holds glass.
+    GB         tiles x (slots x dim x bytes + 18) per thing kept: `raw` (the
+               model's own output, all slots), `cls`, and the five reduced
+               poolings. The 18 is the x, y, region and grid_rc columns.
+
+`--feature-map only` skips the sampler cells (minutes) and answers in seconds.
+The bytes per tile need the encoder's `model_spec`, so the encoder is built on
+the CPU; `--encoder` / `--head` / `--fp32` say which and at what width.
 
 WHAT THIS DECIDES
 -----------------
@@ -92,7 +123,8 @@ from _paths import job_result_dir, setup_import_paths          # noqa: E402
 setup_import_paths()
 
 from Cache import cache_root, find, read_meta, wsi_stem_of      # noqa: E402
-from TissueMaskConfig import MASK_RECIPES                        # noqa: E402
+from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
+from Store import region_grids                                   # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from TileSampler import (PRE_TILE_FACTOR, OverlapConfig,      # noqa: E402
                          SamplerConfig, TileSampler)
@@ -134,6 +166,38 @@ DEFINITIONS = [
 ]
 
 
+#: `feature_map_size.csv`. Same rule: rewritten every run.
+GRID_DEFINITIONS = [
+    ('level', 'the pyramid level, from the slide itself'),
+    ('ds', "that level's own downsample"),
+    ('tile_size', 'output px of one tile'),
+    ('regions_<mask>', 'regions that can hold one tile at this level'),
+    ('tiles_nomask_main', 'main grid over the scanned rectangle'),
+    ('tiles_nomask_overlap', 'main + the grid offset by half a tile: what '
+     'FeatureMapCache stores with overlap=True'),
+    ('tiles_mask_main', 'main grid over the mask\'s regions'),
+    ('tiles_mask_overlap', 'main + offset grid over the mask\'s regions'),
+    ('tiles_mask_{main,overlap}_{tissue,empty}',
+     'the two above split by the tile\'s own background fraction: tissue when '
+     'it is below bg_max, empty otherwise. tissue + empty == the mask tile count'),
+    ('bg_max', 'the threshold used for that split'),
+    ('gb_mask_{main,overlap}_tissue_<what>',
+     'GB to store <what> for ONLY the tiles with tissue in that grid. The '
+     'feature-map cache stores the whole grid today, so this is what a '
+     'tissue-only cache would need, not what is written'),
+    ('gb_<mask>_<grid>_<what>', 'GB to store <what> for that grid: raw is the '
+     "model's own output (all slots), 5_arms is cls+cls_avg+cls_std+rings3+"
+     'grid2x2 as five files. Each tile also carries 18 bytes of x, y, region '
+     'and grid_rc'),
+]
+
+#: bytes of x (int32), y (int32), region (int16) and grid_rc (2 x int32) per tile
+INDEX_BYTES = 18
+
+#: the reduced poolings the window bench compares, and `tokens`' cousin `raw`
+POOLING_NAMES = ('cls', 'cls_avg', 'cls_std', 'rings3', 'grid2x2')
+
+
 class TileYieldProbe:
     """`run(entries)` is the shape every diagnostic in this directory shares
     (see `WsiSelection.py`) -- but this tool ALSO needs a prebuilt mask per
@@ -145,9 +209,13 @@ class TileYieldProbe:
     def __init__(self, seg: str = 'uni2_pca',
                 mask_cache_job: str = DEFAULT_MASK_CACHE_JOB,
                 tile_sizes=(256, 512, 1024), ds_values=DEFAULT_RUNGS,
-                n: int = 500, candidates: str = 'lattice', grid_step: int = 0,
+                n: int = 500, candidates: str = 'lattice', step: float = 1.0,
                 max_overlap: float = 0.0, overlapping_share: float = 0.0,
-                max_tries: int = 2500, seed: int = 0, out_dir=None):
+                max_tries: int = 2500, seed: int = 0, out_dir=None,
+                feature_map: str = 'off', encoder: str = 'uni2',
+                head: str = '', value_bytes: int = 2, bg_max: float = 0.95):
+        if feature_map not in ('off', 'on', 'only'):
+            raise ValueError(f"feature_map must be off, on or only, got {feature_map!r}")
         self.mask_cfg = MASK_RECIPES[seg]
         self.mask_root = cache_root(mask_cache_job, 'mask')
         self.seg_dir = self.mask_root / self.mask_cfg.seg_id()
@@ -155,13 +223,210 @@ class TileYieldProbe:
         self.ds_values = list(ds_values)
         self.n = n
         self.candidates = candidates
-        self.grid_step = grid_step
+        self.step = step
         self.max_overlap = max_overlap
         self.overlapping_share = overlapping_share
         self.max_tries = max_tries
         self.seed = seed
         self.out_dir = out_dir or job_result_dir('ProbeTileYield')
         os.makedirs(self.out_dir, exist_ok=True)
+        self.feature_map = feature_map
+        self.encoder = encoder
+        self.head = head
+        self.value_bytes = int(value_bytes)
+        self.bg_max = float(bg_max)
+        self._per_tile = None          # {what: bytes per tile}, built on first use
+        self.grid_rows = []
+
+    def per_tile_bytes(self) -> dict:
+        """`{what: bytes per tile}` for `raw`, each reduced pooling and their
+        sum. Read off the encoder's `model_spec`, so the encoder is built -- on
+        the CPU, once."""
+        if self._per_tile is None:
+            import torch                                            # noqa: PLC0415
+            from TileEncoderFunc import (admissible_poolings,    # noqa: PLC0415
+                                         encoder_config, pool_slots)
+            over = {'head': self.head} if self.head else {}
+            cfg = encoder_config(self.encoder, **over)
+            spec = cfg.build(torch.device('cpu')).model_spec
+            kept, dropped = admissible_poolings(cfg, POOLING_NAMES)
+            width = spec.dim * self.value_bytes
+            per = {'raw': spec.n_tokens() * width + INDEX_BYTES}
+            for name in kept:
+                per[name] = len(pool_slots(name, spec)[0]) * width + INDEX_BYTES
+            per['5_arms'] = sum(per[n] for n in kept)
+            self._per_tile = per
+            print(f'  feature map: {self.encoder}  dim {spec.dim}  '
+                  f'{spec.n_tokens()} slots in raw  {self.value_bytes} B/value  '
+                  + '  '.join(f'{k} {v / 1e3:.1f} KB/tile' for k, v in per.items())
+                  + (f'  (cannot do {dropped})' if dropped else ''), flush=True)
+        return self._per_tile
+
+    def _grid_cell(self, wsi, masks: dict, tile_size: int, level: int) -> dict:
+        """One (tile_size, level): how big the whole-slide feature map is,
+        four ways. `masks` is `{'nomask': TissueMask, 'mask': TissueMask|None}`;
+        a missing one leaves its columns empty rather than zero."""
+        ds = float(wsi.level_downsamples[level])
+        row = {'wsi_stem': wsi_stem_of(wsi), 'tile_size': tile_size,
+               'level': level, 'ds': ds, 'footprint_l0': int(tile_size * ds)}
+        per = self.per_tile_bytes()
+        for label, trm in masks.items():
+            regions = (trm.patchable(tile_size * ds).tissue_regions
+                       if trm is not None else None)
+            row[f'regions_{label}'] = len(regions) if regions is not None else ''
+            for overlap in (False, True):
+                grid = 'overlap' if overlap else 'main'
+                n = ('' if regions is None else int(sum(len(g) for g in region_grids(
+                    regions, ds=ds, level=level, tile_size=tile_size,
+                    overlap=overlap))))
+                row[f'tiles_{label}_{grid}'] = n
+                for what, nbytes in per.items():
+                    row[f'gb_{label}_{grid}_{what}'] = (
+                        '' if n == '' else round(n * nbytes / 1e9, 4))
+        row['bg_max'] = self.bg_max
+        row.update(self._tissue_split(masks.get('mask'), tile_size, ds, level))
+        # What keeping ONLY the tiles that have tissue would cost. Not something
+        # FeatureMapCache can do today -- it insists on the whole grid -- but it
+        # is the number that says whether relaxing that is worth it.
+        for grid in ('main', 'overlap'):
+            n = row[f'tiles_mask_{grid}_tissue']
+            for what, nbytes in per.items():
+                row[f'gb_mask_{grid}_tissue_{what}'] = (
+                    '' if n == '' else round(n * nbytes / 1e9, 4))
+        return row
+
+    def _tissue_split(self, trm, tile_size: int, ds: float, level: int) -> dict:
+        """The mask grid, split by what is inside each tile.
+
+        Every tile of the grid the feature map would cover -- main, and the
+        offset grid -- gets the background fraction of its own footprint from the
+        mask (`white_fractions`, level-0 top-left and the tile in level pixels,
+        which is how the sampler scores a candidate). Below `bg_max` it has
+        tissue. The offset tiles are `overlap_patch_infos`, so main + offset is
+        exactly the `overlap=True` grid and tissue + empty adds up to it."""
+        keys = ('main_tissue', 'main_empty', 'overlap_tissue', 'overlap_empty')
+        if trm is None:
+            return {f'tiles_mask_{k}': '' for k in keys}
+        regions = trm.patchable(tile_size * ds).tissue_regions
+        grids = region_grids(regions, ds=ds, level=level, tile_size=tile_size,
+                             overlap=True)
+        counts = dict.fromkeys(keys, 0)
+        for kind, infos in (('main', lambda g: g.main_patch_infos),
+                            ('offset', lambda g: g.overlap_patch_infos)):
+            for grid in grids:
+                pts = infos(grid)
+                if not pts:
+                    continue
+                xy = np.array([(p.x * ds, p.y * ds) for p in pts], dtype=np.int64)
+                background = np.asarray(trm.white_fractions(xy, level, tile_size))
+                has = int((background < self.bg_max).sum())
+                empty = len(pts) - has
+                if kind == 'main':
+                    counts['main_tissue'] += has
+                    counts['main_empty'] += empty
+                counts['overlap_tissue'] += has
+                counts['overlap_empty'] += empty
+        return {f'tiles_mask_{k}': v for k, v in counts.items()}
+
+    def _grid_rows_for(self, wsi, trm, entry) -> None:
+        """Every native level of this slide, every --tile-size."""
+        none_mask = MaskMaker(MASK_RECIPES['none']).mask(wsi)[0]
+        masks = {'nomask': none_mask, 'mask': trm}
+        top = max(self.ds_values)
+        levels = [lv for lv, d in enumerate(wsi.level_downsamples)
+                  if float(d) <= top * (1 + 1e-3)]
+        # One aligned table per slide. The tile counts are `len` of the PatchGrid
+        # `region_grids` builds (PatchingLib.PatchGrid.from_size, geometry only);
+        # the GB columns are the OVERLAP grid, which is what FeatureMapCache
+        # stores with overlap=True. The tissue columns split the mask grid.
+        self.per_tile_bytes()          # prints its own line: before the table, not in it
+        cw, tw, gw, sep, dw = 10, 10, 11, ' | ', 8
+        g1, g2, g3 = 2 * cw + 1, 4 * tw + 3, 3 * gw + 2
+        print(f'    + = with tissue, - = without: a tile has tissue when its '
+              f'background fraction is below {self.bg_max:g}.  '
+              f'all = main + the grid offset by half a tile (what FeatureMapCache '
+              f'stores), so all is about twice main')
+        print(f'    {"tile":>4} {"L":>2} {"ds":>{dw}}{sep}{"no-mask tiles".center(g1)}'
+              f'{sep}{"mask tiles".center(g1)}{sep}'
+              f'{"mask tiles, by what is in them".center(g2)}{sep}'
+              f'{"raw GB (all = main + offset)".center(g3)}')
+        print(f'    {"":>4} {"":>2} {"":>{dw}}{sep}{"main":>{cw}} {"all":>{cw}}'
+              f'{sep}{"main":>{cw}} {"all":>{cw}}{sep}'
+              f'{"main +":>{tw}} {"main -":>{tw}} {"all +":>{tw}} '
+              f'{"all -":>{tw}}{sep}{"no-mask":>{gw}} {"mask":>{gw}} '
+              f'{"tissue only":>{gw}}')
+        print('    ' + '-' * 4 + ' ' + '-' * 2 + ' ' + '-' * dw + '-+-' + '-' * g1
+              + '-+-' + '-' * g1 + '-+-' + '-' * g2 + '-+-' + '-' * g3)
+
+        def count(v, w=cw):
+            return f'{v:>{w},}' if v != '' else f'{"-":>{w}}'
+
+        def gigs(v):
+            return f'{v:>{gw}.2f}' if v != '' else f'{"-":>{gw}}'
+
+        for tile_size in self.tile_sizes:
+            for level in levels:
+                row = self._grid_cell(wsi, masks, tile_size, level)
+                row['dataset'] = entry.get('dataset')
+                self.grid_rows.append(row)
+                print(f"    {tile_size:>4d} {level:>2d} {row['ds']:>{dw}.6g}{sep}"
+                      f"{count(row['tiles_nomask_main'])} "
+                      f"{count(row['tiles_nomask_overlap'])}{sep}"
+                      f"{count(row['tiles_mask_main'])} "
+                      f"{count(row['tiles_mask_overlap'])}{sep}"
+                      f"{count(row['tiles_mask_main_tissue'], tw)} "
+                      f"{count(row['tiles_mask_main_empty'], tw)} "
+                      f"{count(row['tiles_mask_overlap_tissue'], tw)} "
+                      f"{count(row['tiles_mask_overlap_empty'], tw)}{sep}"
+                      f"{gigs(row['gb_nomask_overlap_raw'])} "
+                      f"{gigs(row['gb_mask_overlap_raw'])} "
+                      f"{gigs(row['gb_mask_overlap_tissue_raw'])}", flush=True)
+
+    def _write_grid(self) -> None:
+        if not self.grid_rows:
+            return
+        path = os.path.join(self.out_dir, 'feature_map_size.csv')
+        keys = list(dict.fromkeys(k for r in self.grid_rows for k in r))
+        with open(path, 'w', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=keys, restval='')
+            writer.writeheader()
+            writer.writerows(self.grid_rows)
+        with open(os.path.join(self.out_dir, 'feature_map_size_definitions.csv'),
+                  'w', newline='') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(('column', 'meaning'))
+            writer.writerows(GRID_DEFINITIONS)
+        print(f'\nSaved {path}   ({len(self.grid_rows)} rows)')
+        # Totals: what keeping ONE thing for EVERY probed slide costs, per tile
+        # size and grid. `raw` and `5_arms` are the two ways to keep everything.
+        per = self.per_tile_bytes()
+        for tile_size in self.tile_sizes:
+            rows = [r for r in self.grid_rows if r['tile_size'] == tile_size]
+            if not rows:
+                continue
+            tiles = ('tiles_nomask_main', 'tiles_nomask_overlap', 'tiles_mask_main',
+                     'tiles_mask_overlap', 'tiles_mask_main_tissue',
+                     'tiles_mask_main_empty', 'tiles_mask_overlap_tissue',
+                     'tiles_mask_overlap_empty')
+            print(f'\ntile {tile_size}: total tiles over '
+                  f'{len({r["wsi_stem"] for r in rows})} slides, every level')
+            for name in tiles:
+                total = sum(r[name] for r in rows if r.get(name, '') != '')
+                print(f'  {name:<28}{total:>14,}')
+            print(f'\ntile {tile_size}: total over {len({r["wsi_stem"] for r in rows})} '
+                  f'slides, every level  (GB)')
+            print(f'  {"":<26}' + ''.join(f'{w:>12}' for w in per))
+            for name, prefix in (('nomask main', 'gb_nomask_main'),
+                                 ('nomask overlap', 'gb_nomask_overlap'),
+                                 ('mask main', 'gb_mask_main'),
+                                 ('mask overlap', 'gb_mask_overlap'),
+                                 ('mask main, tissue only', 'gb_mask_main_tissue'),
+                                 ('mask overlap, tissue only', 'gb_mask_overlap_tissue')):
+                sums = []
+                for what in per:
+                    col = f'{prefix}_{what}'
+                    sums.append(sum(r[col] for r in rows if r.get(col, '') != ''))
+                print(f'  {name:<26}' + ''.join(f'{v:>12,.1f}' for v in sums))
 
     def default_entries(self) -> list:
         """Every WSI the mask store already holds -- this tool's own
@@ -196,10 +461,10 @@ class TileYieldProbe:
         # cut with 'random', so a re-run at 'lattice' is a DIFFERENT
         # measurement, not a correction of that one.
         cfg = SamplerConfig(
-            tile=plan.tile_size, n_per_rung=self.n, seed=self.seed,
+            n_per_rung=self.n, seed=self.seed,
             candidates=self.candidates,
             max_tries_per_tile=max(1, self.max_tries // max(self.n, 1)),
-            overlap=OverlapConfig(grid_step=self.grid_step,
+            overlap=OverlapConfig(step=self.step,
                                   max_overlap_ratio=self.max_overlap,
                                   overlapping_share=self.overlapping_share))
         sampler = TileSampler(wsi, trm, cfg)
@@ -261,22 +526,34 @@ class TileYieldProbe:
         with a printed message if the mask store has nothing for it."""
         stem = wsi_stem_of(entry['path'])
         folder = self.seg_dir / stem
-        if not (folder / 'mask_meta.json').exists():
+        have_mask = (folder / 'mask_meta.json').exists()
+        if not have_mask:
             print(f'    no mask under {folder}', flush=True)
-            return []
-        meta = read_meta(folder / 'mask_meta.json')
-        slide_mask = SlideMask.load(folder / 'mask.safetensors')
-        print(f'    mask {meta["rows"]}x{meta["cols"]} at ds {meta["mask_ds"]:.0f}, '
-              f'tissue {meta["fraction"]:.1%}   ({self.mask_cfg.seg_id()})',
-              flush=True)
+            if self.feature_map == 'off':
+                return []
+            print('    (the feature-map report still gives the no-mask columns)',
+                  flush=True)
+        slide_mask = None
+        if have_mask:
+            meta = read_meta(folder / 'mask_meta.json')
+            slide_mask = SlideMask.load(folder / 'mask.safetensors')
+            print(f'    mask {meta["rows"]}x{meta["cols"]} at ds {meta["mask_ds"]:.0f}, '
+                  f'tissue {meta["fraction"]:.1%}   ({self.mask_cfg.seg_id()})',
+                  flush=True)
 
         rows = []
         with SafeSlide(entry['path']) as wsi:
             # The recipe's regions -- exactly what a sampler is handed; the
             # per-rung `patchable` step is the sampler's own and part of what
             # is being probed.
-            trm = self.mask_cfg.regions(wsi, slide_mask)
-            print(f'    {len(trm.tissue_regions)} tissue regions', flush=True)
+            trm = (self.mask_cfg.regions(wsi, slide_mask)
+                   if slide_mask is not None else None)
+            if trm is not None:
+                print(f'    {len(trm.tissue_regions)} tissue regions', flush=True)
+            if self.feature_map != 'off':
+                self._grid_rows_for(wsi, trm, entry)
+            if self.feature_map == 'only' or trm is None:
+                return rows
             for tile_size in self.tile_sizes:
                 line = []
                 for rung in self.ds_values:
@@ -296,8 +573,10 @@ class TileYieldProbe:
             print(f'\n[{index}/{len(entries)}] {entry["wsi_name"]}', flush=True)
             rows += self.run_one(entry)
 
+        self._write_grid()
         if not rows:
-            print('nothing probed')
+            if not self.grid_rows:
+                print('nothing probed')
             return rows
 
         summary = os.path.join(self.out_dir, 'tile_yield.csv')
@@ -447,8 +726,8 @@ def main():
                     choices=('lattice', 'random'),
                     help="'random' is the sampler this replaced, kept as the "
                          'control arm.')
-    ap.add_argument('--grid-step', type=int, default=0,
-                    help='lattice step in OUTPUT px. 0 means the tile, i.e. '
+    ap.add_argument('--step', type=float, default=1.0,
+                    help='lattice step as a fraction of the tile; 1.0 is '
                          'disjoint')
     ap.add_argument('--max-overlap', type=float, default=0.0,
                     help='largest area fraction any two tiles of a rung may '
@@ -460,6 +739,22 @@ def main():
                     help='rejection budget per cell')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--out', default=None)
+    ap.add_argument('--feature-map', choices=('off', 'on', 'only'), default='off',
+                    help='also report how big the WHOLE-SLIDE feature map is at '
+                         'every level -- tiles and GB, with and without the mask, '
+                         'with and without the overlap grid. `only` skips the '
+                         'sampler cells and takes seconds')
+    ap.add_argument('--encoder', default='uni2',
+                    help='--feature-map: whose tokens; read off its model_spec '
+                         '(built on the CPU)')
+    ap.add_argument('--head', default='', help='--feature-map: the encoder head')
+    ap.add_argument('--fp32', action='store_true',
+                    help='--feature-map: 4 bytes per value instead of 2')
+    ap.add_argument('--bg-max', type=float, default=0.95,
+                    help='--feature-map: a tile has tissue when its background '
+                         'fraction is below this. 0.95 = more than 5%% of the tile '
+                         'is tissue. (The production sampler admits up to 0.85; '
+                         'pass 0.85 to count what it could draw.)')
     args = ap.parse_args()
 
     if args.tissue_ratio is not None:
@@ -481,9 +776,11 @@ def main():
         seg=args.seg, mask_cache_job=args.mask_cache_job,
         tile_sizes=args.tile_sizes,
         ds_values=args.ds_values, n=args.n, candidates=args.candidates,
-        grid_step=args.grid_step, max_overlap=args.max_overlap,
+        step=args.step, max_overlap=args.max_overlap,
         overlapping_share=args.overlapping_share, max_tries=args.max_tries,
-        seed=args.seed, out_dir=out_dir)
+        seed=args.seed, out_dir=out_dir, feature_map=args.feature_map,
+        encoder=args.encoder, head=args.head,
+        value_bytes=4 if args.fp32 else 2, bg_max=args.bg_max)
 
     if entries is None:
         entries = prober.default_entries()
@@ -494,7 +791,7 @@ def main():
         print(f'{len(entries)} slides from the mask store', flush=True)
 
     rows = prober.run(entries)
-    return 0 if rows else 1
+    return 0 if (rows or prober.grid_rows) else 1
 
 
 if __name__ == '__main__':

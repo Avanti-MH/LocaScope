@@ -55,44 +55,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
-#: Same slack, same reason as `SafeSlide.py:80-83`: pyramid downsamples are
-#: derived from rounded level dimensions, so a "4x" level reports 4.00003 as
-#: readily as 4.0, and an exact comparison lands a level away over a part in
-#: 1e5. Not imported from SafeSlide because importing it would pull in openslide
-#: for one float.
-LEVEL_REL_TOL = 1e-3
+# The rule and its slack live in ReadGeometry since 2026-10-03, where the
+# Camera asks the same question: one level rule for every read in the project.
+# `finer_level_for_downsample` is the name this module and SuperPathPoint have
+# always used for it, so it stays as that name.
+from ReadGeometry import LEVEL_REL_TOL, level_px                 # noqa: F401
+from ReadGeometry import level_for as finer_level_for_downsample
 
 #: spec.md 6.5. ds 32 is the coarsest rung with measured evidence that tiles
 #: exist at it (Ki67 level 5 and BRACS level 3 both sampled 100/100 at tile 256);
 #: ds 64 measured 0/100 after 500 tries. The probe of spec.md 12 step 3b is what
 #: turns that into per-slide counts.
 DEFAULT_RUNGS: Tuple[float, ...] = (1., 2., 4., 8., 16., 32.)
-
-
-def finer_level_for_downsample(level_downsamples: Sequence[float],
-                               downsample: float) -> int:
-    """Coarsest level whose native downsample is at most `downsample`.
-
-    The level to READ so that the target can be reached by shrinking. Rounds
-    DOWN in downsample, which is the opposite of
-    `SafeSlide.coarser_level_for_downsample` -- see the module docstring for why
-    both exist.
-
-    Raises when the request is finer than level 0, because the only way to
-    satisfy it would be to upsample and the caller almost certainly meant
-    something else.
-    """
-    if downsample <= 0:
-        raise ValueError(f'downsample must be positive, got {downsample}')
-    downsamples = [float(d) for d in level_downsamples]
-    threshold = float(downsample) * (1.0 + LEVEL_REL_TOL)
-    candidates = [i for i, d in enumerate(downsamples) if d <= threshold]
-    if not candidates:
-        raise ValueError(
-            f'ds {downsample} is finer than level 0 (ds {downsamples[0]:.6g}); '
-            f'reaching it would mean upsampling, which this ladder refuses. '
-            f'Available: {[round(d, 4) for d in downsamples]}')
-    return max(candidates)
 
 
 @dataclass(frozen=True)
@@ -126,6 +100,19 @@ class RungPlan:
     #: In `TileSampler`'s identity, because a survival number that does not say
     #: which stack it measured is not a number anyone can use.
     stack_kind:   str = 'F'
+
+    #: The camera's FoV in level-0 px when it is NOT the footprint square: a
+    #: rectangular sensor (1440x1024) is placed by the square of its long side
+    #: and the rectangle sits centred in it. 0 means the footprint itself --
+    #: every square camera. Set by `ReadGeometry.ReadSpec.place` through
+    #: `TileSampler.with_camera`, never by hand.
+    fov_w_l0:     int = 0
+    fov_h_l0:     int = 0
+
+    @property
+    def is_rect(self) -> bool:
+        """A rectangular FoV inside a square footprint."""
+        return bool(self.fov_w_l0 and self.fov_h_l0)
 
     @property
     def reserve(self) -> float:
@@ -192,7 +179,7 @@ class DsLadder:
             level = finer_level_for_downsample(downsamples, rung)
             level_ds = downsamples[level]
             shrink = float(rung) / level_ds
-            read_size = int(round(tile_size * shrink))
+            read_size = level_px(tile_size, rung, level_ds)
             plans.append(RungPlan(
                 rung_ds=float(rung), level=level, level_ds=level_ds,
                 shrink=shrink, tile_size=int(tile_size), read_size=read_size,

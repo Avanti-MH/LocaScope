@@ -8,7 +8,7 @@ trigger is the tissue under the crop, not the slide or the resolution.
 
 This runs no GigaPath and no retrieval. Synthetic cases read their WSI
 counterpart straight from the recorded ground-truth position via
-QueryFromWSI, so the query image and the WSI crop are the exact pair SIFT
+SlideReader, so the query image and the WSI crop are the exact pair SIFT
 would have been handed.
 
 Usage:
@@ -53,7 +53,9 @@ sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'query_sim'))
 from _paths import job_result_dir                                   # noqa: E402
 
-from source.wsi_query import QueryFromWSI            # noqa: E402
+from camera import sensor_size                       # noqa: E402
+from ReadGeometry import ReadSpec                    # noqa: E402
+from SlideReader import SlideReader                  # noqa: E402
 
 BFMATCHER_LIMIT = 1 << 18       # 262144, the cv2 assertion this study is about
 
@@ -105,13 +107,11 @@ def load_gt_cases(gt_csv: str, images_dir: str, names: List[str]) -> List[Case]:
 
         # The WSI counterpart: same shape spec, read at the recorded position.
         # This is the un-augmented content SIFT was asked to match against.
-        qfw = QueryFromWSI(r['wsi_path'],
-                           wh_ratio=r['wh_ratio'],
-                           MPixels=float(r['MPixels']),
-                           mpp=float(r['query_mpp']))
-        pil = qfw.crop(int(r['gt_x']), int(r['gt_y']))
-        crop = np.array(pil) if pil is not None else None
-        qfw.wsi.close()
+        reader = SlideReader(r['wsi_path'])
+        crop = reader.read(int(r['gt_x']), int(r['gt_y']),
+                           ReadSpec(*sensor_size(r['wh_ratio'], float(r['MPixels']))),
+                           float(r['query_mpp']) / reader.base_mpp)
+        reader.slide.close()
 
         cases.append(Case(
             name=os.path.splitext(name)[0],

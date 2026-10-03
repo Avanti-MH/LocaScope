@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=8                 # openslide reads + the CPU transform
 #SBATCH --mem=128G                        # per-tile reads, never a whole region
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o /work/u26130998/log/OffGridScore_%a          # STDOUT, one file per slide
-#SBATCH -e /work/u26130998/log/OffGridScore_%a          # STDERR
+#SBATCH -o /work/u26130998/log/%x_%a          # STDOUT, one file per slide
+#SBATCH -e /work/u26130998/log/%x_%a          # STDERR
 
 # ---------------- Load modules ----------------
 ml purge

@@ -48,8 +48,8 @@ import numpy as np                                           # noqa: E402
 
 from Store import (PreTileCorpus, PreTileMeta, PreTileRecord,  # noqa: E402
                    PreTileStore)
-from TileSampler import (PRE_TILE_FACTOR, degrade_resolution,  # noqa: E402
-                         pre_tile_px)
+from TileSampler import PRE_TILE_FACTOR, pre_tile_px          # noqa: E402
+from SlideReader import degrade_resolution                     # noqa: E402
 from PatchingLib import PatchInfo                             # noqa: E402
 from SurvivalAnalysis import ChainStack                    # noqa: E402
 FStack, RStack, CStack = ChainStack.FStack, ChainStack.RStack, ChainStack.CStack

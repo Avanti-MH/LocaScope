@@ -584,7 +584,7 @@ tau(d_fine, d_coarse) = max(tau_floor_um / mpp_0, alpha * d_coarse)
 的必須**逐點完全一致**。
 
 這個斷言不花錢，而且它抓的是座標換算錯誤——「圖看起來很正常、數字全錯」的那一類，
-正是 `test_camera_output_to_level0` 找到真 bug 的那一類（第 14 節）。
+正是 `test_camera` 找到真 bug 的那一類（第 14 節）。
 
 ### 3.3 Stage C — 解析度語意頭（`SemanticPoints/`）
 
@@ -2097,7 +2097,7 @@ CLAUDE.md 的規則：在任何以小時或數十 GB 計的執行之前，先寫
 | `test_homography` | `warp_points(H_inv) . warp_points(H)` = identity 到 1e-6；影像 warp 與點 warp 一致（單一亮點的 argmax 落在點 warp 說的位置）；cv2 路徑與 `grid_sample` 路徑一致 | (x,y)/(row,col) 互換、正負號錯。在 0 和 180 度看不出來，90 和 270 度致命——`Camera.output_to_level0` 就是被這個咬過的，而且是靠對誘餌評分才抓到 |
 | `test_homographic_adaptation` | 塞一個只回固定點的假 detector：aggregate 的峰值在那個點、`counts` 等於 valid mask 蓋到它的 homography 數；且贏過「位移一個 cell」的誘餌 | aggregate 的座標系反了（用 H 而不是 H_inv warp 回來）。結果會是一張看起來合理但整體偏移的機率圖 |
 | `test_detector_decoder` | depth-to-space 來回：已知 argmax 的 cell 張量，解碼後最大值落在對應像素；dustbin 是被丟掉而不是被算進去 | 通道排列錯（`(cell,cell)` 的 row-major/col-major），keypoint 會轉置 |
-| `test_mpp_stack` | 同中心兩階 tile，細的降採樣後與粗的算正規化互相關 > 0.9，且贏過位移一 tile 的誘餌 | co-registration 的中心算錯。這是 `test_camera_output_to_level0` 在 Stage B 的對應物，那個測試找到過真 bug |
+| `test_mpp_stack` | 同中心兩階 tile，細的降採樣後與粗的算正規化互相關 > 0.9，且贏過位移一 tile 的誘餌 | co-registration 的中心算錯。這是 `test_camera` 在 Stage B 的對應物，那個測試找到過真 bug |
 | `test_keypoint_label_store` | 存讀來回；`require=` 對不上時拒絕；`n_kp` 與 `kp_xy` 的 padding 一致 | 兩個設定的 label 互相覆蓋。照 `test_store` |
 | `test_ds_ladder` | 每個 rung 挑到的 level 的 ds ≤ 目標；在 4x 與 2x 兩種金字塔上各驗一次 | 挑到偏粗的一側 -> 靜靜地上採樣。這正是不能重用 `coarser_level_for_downsample` 的原因 |
 | `test_tile_sampler --only pretile`、`test_store` | 中心裁切取回植入的方塊，而偏 ±1 格的裁切取不回（誘餌）；PNG 來回逐位元相同（雜訊圖，連 RGB 順序一起驗）；遮罩、抽樣、plan、倍率各自改動都會換位址；沒寫完 index 的 rung 讀不到 | 裁切偏一格 -> 每張圖對每個 label 都偏一像素，訓練照樣收斂，模型只是「差一點」。這條是擋在 3c 那 32 GB 前面的秒級斷言 |

@@ -89,6 +89,8 @@ from SafeSlide import SafeSlide                                     # noqa: E402
 from PatchingLib import WsiTissuesContainer                          # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileSampler import OverlapConfig, SamplerConfig, TileSampler, native_plans  # noqa: E402
+from ReadGeometry import ReadSpec                                                # noqa: E402
+from SlideReader import SlideReader                                             # noqa: E402
 from GigaPathFunc import GigaPathEncoderConfig                        # noqa: E402
 from TileEncoderFunc import TransformConfig                          # noqa: E402
 from KnnEstMpp import REFERENCE_BANK_RICHNESS                        # noqa: E402
@@ -161,12 +163,13 @@ def sample_wsi(wsi_path, per_wsi, masks, tile_size, seed):
 
     # One rung per PYRAMID level: this bench compares the SAME tiles across
     # encoder configs, so the magnifications are the slide's own.
-    cfg = SamplerConfig(tile=tile_size, n_per_rung=per_level, seed=seed,
+    cfg = SamplerConfig(n_per_rung=per_level, seed=seed,
                         richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig())
     sampler = TileSampler(wsi, mask, cfg)
     sampler.sample(native_plans(wsi, tile_size))
     sampler.summary()
-    images = sampler.materialise(wsi).images()
+    images = SlideReader(wsi, resize='area').read_samples(
+        sampler, ReadSpec(tile_size, tile_size))
     wsi.close()
     return images
 

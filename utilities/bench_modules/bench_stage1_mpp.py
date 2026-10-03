@@ -47,16 +47,17 @@ from KnnEstMpp import (KnnEstMpp, KnnEstMppConfig,                  # noqa: E402
 from ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
 from StageInterface import EstMppResult                             # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
-from AccessDatasets import locate                                    # noqa: E402
+from AccessDatasets import list_names, locate                        # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
-    add_cache_args, open_caches)
-from WsiSplit import SPLIT_JOB, read_split, split_path              # noqa: E402
+    add_cache_args, open_caches, read_label_of)
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
 from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
                          SamplerConfig, TileSampler)
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
-from QueryFromWSI import QueryFromWSI                                # noqa: E402
+from camera import sensor_size                                       # noqa: E402
+from SlideReader import SlideReader                                 # noqa: E402
+from ReadGeometry import ReadSpec                                 # noqa: E402
 from simulate_microscope_photo import simulate_microscope_photo       # noqa: E402
 
 JOB_NAME = 'Stage1MppBench'
@@ -115,7 +116,7 @@ def _overlap_cfg(enabled: bool) -> OverlapConfig:
     own docstring: "under a disjoint lattice the top-up is provably dead...
     it means something as soon as overlap is allowed." Raising
     `max_overlap_ratio`/`overlapping_share`/`jitter_cap` is what makes that
-    existing top-up mechanism reachable, without changing `grid_step` (the
+    existing top-up mechanism reachable, without changing `step` (the
     main lattice stays disjoint; only the shortfall gets topped up).
     """
     if not enabled:
@@ -145,7 +146,7 @@ def _method_specs(args) -> list:
     specs = []
     for name in args.knn_encoder:
         specs.append(dict(kind='knn', encoder=name, classifier='',
-                          reduction='', loss='', weights='', weights_path=None,
+                          reduction='', loss='', read_level='', weights='', weights_path=None,
                           needs_mask=True))
     for weights in args.classifier_weights:
         try:
@@ -181,6 +182,11 @@ def _method_specs(args) -> list:
             kind='classifier', encoder=ckpt['encoder'],
             classifier=ckpt['head_name'], reduction=ckpt['reduction'],
             loss=ckpt.get('args', {}).get('loss', 'bal'),
+            # how the head was TRAINED (2026-10-02), the same gap one level
+            # further: a pyramid- and a resampled-trained head of one loss
+            # would share a label. `read_label_of` reads `pyramid` off a
+            # checkpoint saved before the read mode existed.
+            read_level=read_label_of(ckpt.get('args')),
             weights=os.path.basename(weights), weights_path=weights,
             needs_mask=False))
     if not specs:
@@ -197,11 +203,11 @@ def _instantiate(spec: dict, args, device):
     if spec['kind'] == 'knn':
         cfg = KnnEstMppConfig(
             encoder=spec['encoder'],
-            sampler_cfg=SamplerConfig(tile=args.tile, n_per_rung=args.knn_samples,
+            sampler_cfg=SamplerConfig(n_per_rung=args.knn_samples,
                                       seed=args.seed,
                                       richness=REFERENCE_BANK_RICHNESS,
                                       overlap=_overlap_cfg(args.overlap)),
-            k=args.knn_k)
+            k=args.knn_k, tile_size=args.tile)
         return KnnEstMpp(cfg, device)
     cfg = ClassifierEstMppConfig.from_checkpoint(spec['weights_path'])
     return ClassifierEstMpp(cfg, device)
@@ -262,8 +268,8 @@ def run_stage1_compare(args, out_dir: Path) -> int:
         # (--split-cache-job, default MakeSplit) -- the same file the
         # checkpoints were selected on, so this bench never scores on a slide
         # a checkpoint saw in val.
-        test_names = read_split(split_path(args.split_cache_job or SPLIT_JOB,
-                                           dataset_id))[1]
+        test_names = list_names(dataset=f'{dataset_id}#test',
+                                split_job=args.split_cache_job)
         slides_by_dataset[dataset_id] = test_names[:args.n_wsi]
         print(f'{dataset_id}: {len(slides_by_dataset[dataset_id])} slide(s) '
              f'from the recorded test split '
@@ -279,11 +285,17 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     # released before any method is built.
     print(f'\n======== segmenting ({args.seg}) + sampling every slide once ========')
     caches = open_caches(args, JOB_NAME, device)
-    sampler_cfg = SamplerConfig(tile=args.tile, n_per_rung=args.n_per_rung,
+    sampler_cfg = SamplerConfig(n_per_rung=args.n_per_rung,
                                 seed=args.seed, richness=RichnessConfig(),
                                 overlap=_overlap_cfg(args.overlap))
-    plan = (PlanSpec('native') if args.native_only
-            else PlanSpec('ladder', tuple(DEFAULT_RUNGS)))
+    # The positions are placed for the camera that photographs them: this
+    # bench's query FoV (--ratio, --mpixels), cropped without rotation --
+    # `simulate_microscope_photo` turns the crop itself. Placing a 256 px tile
+    # and then reading a 1440 px FoV there, as it did before 2026-10-03, put
+    # the photographed rectangle partly outside the tissue the sampler scored.
+    camera = ReadSpec(*sensor_size(args.ratio, args.mpixels))
+    plan = (PlanSpec('native', camera=camera) if args.native_only
+            else PlanSpec('ladder', tuple(DEFAULT_RUNGS), camera=camera))
     slide_cache = {}
     for dataset_id, names in slides_by_dataset.items():
         for wsi_name in names:
@@ -297,8 +309,10 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             # `RungPlan.shrink` says which rungs are native (1.0) -- read off
             # this slide's own plans rather than re-derived.
             native_by_rung = {float(p.rung_ds): float(p.shrink) == 1.0
-                              for p in plan.plans_for(wsi, args.tile)}
-            positions = [dict(x=int(s.meta.x), y=int(s.meta.y),
+                              for p in plan.plans_for(wsi)}
+            # x, y are the FoV's own top-left (`fov_rect`): what is cropped,
+            # centred in the footprint the sampler placed
+            positions = [dict(x=int(s.meta.fov_rect[0]), y=int(s.meta.fov_rect[1]),
                               rung=float(s.meta.ds),
                               native=native_by_rung.get(float(s.meta.ds), False))
                          for s in sampler]
@@ -327,6 +341,10 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                 entry = locate(wsi_name, dataset=dataset_id)
                 mask, positions = slide_cache[(dataset_id, wsi_name)]
                 wsi = SafeSlide(entry.path)
+                # the photo, straight off the slide (lanczos, as the
+                # microscope simulation always read), then the domain gap
+                reader = SlideReader(wsi)
+                photo = ReadSpec(*sensor_size(args.ratio, args.mpixels))
 
                 if spec['needs_mask']:
                     estimator.build(wsi, mask=mask)
@@ -346,9 +364,7 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                     # value for mpp_error_relative.
                     rung = min(DEFAULT_RUNGS,
                               key=lambda r: abs(np.log(gt_ds) - np.log(r)))
-                    qwsi = QueryFromWSI(entry.path, MPixels=args.mpixels,
-                                        wh_ratio=args.ratio, mpp=gt_mpp)
-                    image = qwsi.crop(pos['x'], pos['y'])
+                    image = reader.read(pos['x'], pos['y'], photo, gt_ds)
                     if image is None:
                         continue
                     query = simulate_microscope_photo(image)
@@ -362,6 +378,7 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                         gt_mpp=gt_mpp, gt_ds=gt_ds,
                         encoder=spec['encoder'], classifier=spec['classifier'],
                         reduction=spec['reduction'], loss=spec['loss'],
+                        read_level=spec['read_level'],
                         weights=spec['weights'],
                         estimated_ds=result.estimated_ds,
                         estimated_mpp=result.estimated_mpp,
@@ -399,14 +416,11 @@ def main() -> int:
                              "CLAUDE.md's real-photo spec (1440x1024), not "
                              "query_sim's 4:3/12MP default")
     parser.add_argument('--ratio', default='45:32',
-                        help='query W:H ratio, passed to '
-                             'QueryFromWSI. Defaulted explicitly rather than '
-                             "left off -- an omitted wh_ratio silently falls "
-                             "back to QueryFromWSI's own 4:3 default instead "
-                             "of CLAUDE.md's real-photo spec, which is "
-                             "exactly the bug run_sampler_routing's own "
-                             "QueryFromWSI call above still has (flagged, "
-                             "not fixed, 2026-09-16)")
+                        help='query W:H ratio (camera.sensor_size). Defaulted '
+                             "explicitly to CLAUDE.md's real-photo spec; "
+                             "bench_mpp_feature_decomposition's run_sampler_"
+                             "routing still reads 4:3 (flagged, not fixed, "
+                             "2026-09-16)")
     parser.add_argument('--datasets', nargs='+',
                         default=['bracs/test', 'ki67_with_photo'],
                         help='which datasets to draw slides '

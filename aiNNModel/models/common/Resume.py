@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import os
 import random
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
@@ -106,6 +107,26 @@ class ResumeFile:
     @property
     def enabled(self) -> bool:
         return self.path is not None
+
+    def wandb_run_id(self, continuing: bool) -> Optional[str]:
+        """The wandb run this model's curves belong to, kept next to the resume
+        file (`<name>_resume.wandb_id`) so the file that says "epoch 12 is done"
+        also says which curves are those of epochs 1..12.
+
+        `continuing` is whether `load` found a state. Then the stored id comes
+        back, and wandb appends to that run. Otherwise -- from scratch, or a
+        resume file from before ids were kept -- a new id is written over any old
+        one. None when there is no resume dir: nothing to continue, so a new run
+        each time."""
+        if not self.enabled:
+            return None
+        id_file = self.path.with_suffix('.wandb_id')
+        if continuing and id_file.exists():
+            return id_file.read_text().strip()
+        run_id = uuid.uuid4().hex[:8]
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        id_file.write_text(run_id)
+        return run_id
 
     def load(self, identity: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         '''The saved state, or None to start fresh (disabled, or no file yet).

@@ -77,10 +77,10 @@ def measure(spec: dict, args, device) -> dict:
     if spec['kind'] == 'knn':
         cfg = KnnEstMppConfig(
             encoder=spec['encoder'],
-            sampler_cfg=SamplerConfig(tile=args.tile, n_per_rung=args.knn_samples,
+            sampler_cfg=SamplerConfig(n_per_rung=args.knn_samples,
                                       richness=REFERENCE_BANK_RICHNESS,
                                       overlap=OverlapConfig()),
-            k=args.knn_k)
+            k=args.knn_k, tile_size=args.tile)
         est = KnnEstMpp(cfg, device)
         modules = (est.encoder.model,)
         tile = args.tile

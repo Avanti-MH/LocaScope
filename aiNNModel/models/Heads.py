@@ -108,6 +108,53 @@ class HeadConfig:
     mlp_residual: bool = False
     mlp_dropout: float = 0.1
 
+    #: Which encoder blocks' layer tokens the head mixes, as ABSOLUTE 0-based
+    #: block indices -- already resolved by `resolve_encoder_layers`, never
+    #: the fractions a registry writes. `()` (the default) is the encoder's
+    #: own last-layer `tokens()`, which is what every head trained before this
+    #: field existed read, so `HeadConfig(**ckpt['head_cfg'])` on such a
+    #: checkpoint rebuilds the same module.
+    encoder_layers: tuple = ()
+
+
+def resolve_encoder_layers(spec, depth: int) -> tuple:
+    '''`encoder_layers` as a registry writes it -> absolute 0-based block
+    indices, sorted.
+
+    An INT is absolute and 0-based, negatives counted from the end, as timm's
+    `indices` (`-1` and `depth - 1` are the same last block). A FLOAT is
+    relative, in (0, 1]: block `round(r * depth) - 1`, at least 0, so `1.0` is
+    the last block and `0.25` of 24 is block 5. `1` and `1.0` are different
+    blocks on purpose.
+
+    A list or tuple only: a bare int reads as timm/DINOv2's "the last n
+    blocks", which is not what an int means here. Refused too: a bool, an index
+    outside the model, and two entries that land on one block.'''
+    if isinstance(spec, (int, float)) or not isinstance(spec, (list, tuple)):
+        raise ValueError(
+            f'encoder_layers {spec!r}: give a list or tuple of block indices '
+            f'(int, 0-based) or depth fractions (float in (0, 1])')
+    out = []
+    for item in spec:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ValueError(f'encoder_layers entry {item!r}: int or float only')
+        if isinstance(item, int):
+            if not -depth <= item < depth:
+                raise ValueError(
+                    f'encoder_layers entry {item}: the encoder has {depth} '
+                    f'blocks, so an absolute index is in {-depth}..{depth - 1}')
+            out.append(item % depth)
+        else:
+            if not 0.0 < item <= 1.0:
+                raise ValueError(
+                    f'encoder_layers entry {item}: a fraction is in (0, 1]')
+            out.append(max(0, round(item * depth) - 1))
+    if len(set(out)) != len(out):
+        raise ValueError(
+            f'encoder_layers {tuple(spec)} lands on blocks {out} of {depth}: '
+            f'two entries name one block')
+    return tuple(sorted(out))
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  Linear

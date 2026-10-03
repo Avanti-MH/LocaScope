@@ -2,12 +2,13 @@
 them as objects that know what they are.
 
     cfg = SamplerConfig(
-        tile=256, n_per_rung=500,
+        n_per_rung=500,
         richness=RichnessConfig(scorer='background'),
-        overlap=OverlapConfig(grid_step=256, max_overlap_ratio=0.0),
+        overlap=OverlapConfig(step=1.0, max_overlap_ratio=0.0),
         inherit=InheritConfig(stack_kind='F', share=0.4, source_rung=1.0),
     )
-    sampler = TileSampler(wsi, mask, cfg).sample(rungs)
+    camera  = ReadSpec(256, 256)                   # ReadGeometry: how big, what is read
+    sampler = TileSampler(wsi, mask, cfg).sample(PlanSpec("ladder", rungs, camera).plans_for(wsi))
 
     sampler.where(bucket='bg70_85')     # richness  -> a filtered container
     sampler.neighbours_of(12)           # overlap   -> indices that overlap it
@@ -39,9 +40,9 @@ two different corpora write the same filename.
                saying why. A cap of zero on the top buckets is that gate,
                stated once. See `RichnessConfig` for the 475/500 episode.
     overlap    how much two tiles of the SAME rung may share. Candidates come
-               off a lattice whose step is a config field, so grid_step=128
-               against tile=256 is a deliberate 50 per cent lattice and
-               grid_step=256 is a disjoint one. Two further bounds: how much
+               off a lattice whose step is a config field, a fraction of the
+               footprint: step=0.5 is a deliberate 50 per cent lattice and
+               step=1.0 a disjoint one. Two further bounds: how much
                any pair may overlap, and what share of the set may overlap at
                all.
     inherit    a set of level-0 centres present at EVERY rung, so the same
@@ -184,18 +185,19 @@ four-rung chain returned as if it were six reads as "the keypoint died at
 ds 16" when it means "ds 16 never sampled it", and those two are the whole of
 Stage B's conclusion.
 
-A Sample CARRIES COORDINATES, NEVER A HANDLE
-==============================================
+A Sample CARRIES COORDINATES, NEVER A HANDLE, NEVER PIXELS
+============================================================
 An openslide handle cannot be pickled, so a `Sample` holding one kills a
-DataLoader the moment `num_workers > 0`. `SampleMeta` is therefore plain data
-and `materialise(reader)` takes the reader as an argument: the Dataset opens
-one handle per worker and hands it in. That constraint is what makes the
-streaming mode usable at all, and it is why `Sample.image` is optional rather
-than there being two classes.
+DataLoader the moment `num_workers > 0`. `SampleMeta` is therefore plain data.
 
-    resident   materialise() every sample, then decide whether to persist
-    streaming  materialise -> read the meta -> release; only metadata is
-               carried from end to end
+THE PIXELS ARE THE READER'S (2026-10-03). This module decides WHERE; how big
+a read is (`ReadSpec`) and the read itself (`SlideReader`) are not its.
+`Sample.materialise` read the pixels here until then, with its own level px
+and its own filter, while the camera read the same positions with another of
+each -- so the two never agreed on what "the tile at (x, y)" was. Now
+`SlideReader(wsi, resize='area').read_samples(sampler, ReadSpec(tile, tile))`
+reads them, with the handle the caller owns: a Dataset opens one per worker
+and builds its reader on it.
 
 COST
 =====
@@ -207,11 +209,10 @@ second thing to keep in step with them.
 
 PERSISTENCE
 ============
-`save(with_images=False)` writes the metadata table alone. `save(with_images=
-True)` writes `Store.PreTileStore`'s format -- PNG per record,
-`index.csv`, `meta.json` -- rather than inventing a second one. The axis
-columns join `index.csv`; `stack_kind` and the config belong to the batch and
-go in `meta.json`.
+`save()` writes the metadata table: `index.csv` and `meta.json`, the layout
+`Store.PreTileStore` uses, whose PNGs `extract_pretiles` writes through a
+camera. The axis columns join `index.csv`; `stack_kind` and the config belong
+to the batch and go in `meta.json`.
 
 WHAT REPLACED WHAT
 ====================
@@ -288,29 +289,89 @@ class PlanSpec:
     of the plan that is known up front: it names a cache directory (`key`) and
     turns into the slide's own plans on a miss (`plans_for`).
 
-        PlanSpec('ladder', (1, 2, 4, 8, 16, 32))   DsLadder's fixed rungs
-        PlanSpec('native')                         the slide's own levels
+        PlanSpec('ladder', (1, 2, 4, 8, 16, 32), camera)   DsLadder's rungs
+        PlanSpec('native', camera=camera)                  the slide's own levels
+
+    WHICH RUNGS × WHICH CAMERA. The rungs say at what scales; the camera
+    (`ReadGeometry.ReadSpec`) says how big a footprint is and what is read
+    around it, so the sampler never decides either. The tile size is the
+    camera's sensor; the reserve is what the camera reads beyond its
+    footprint, computed by `ReadSpec.place` from the numbers the camera
+    itself will use. The routing heads' tile camera rotates, and before the
+    reserve came from it they lost 1.3% of bracs positions off the slide.
+
+    Both halves are in `key`, so a draw made for one camera is never read back
+    for another.
     """
     kind: str = 'ladder'
     rungs: Tuple[float, ...] = ()
+    camera: object = None                  # ReadGeometry.ReadSpec
 
     def __post_init__(self):
+        from ReadGeometry import ReadSpec                         # noqa: PLC0415
         if self.kind not in ('ladder', 'native'):
             raise ValueError(f"kind must be 'ladder' or 'native', got {self.kind!r}")
         if self.kind == 'ladder' and not self.rungs:
             raise ValueError('a ladder PlanSpec needs rungs')
+        if self.camera is None:
+            raise ValueError('a PlanSpec needs the camera it places for -- '
+                             'ReadGeometry.ReadSpec(256, 256) is a plain tile')
+        if not isinstance(self.camera, ReadSpec):
+            raise TypeError(f'camera must be a ReadGeometry.ReadSpec, got '
+                            f'{type(self.camera).__name__}')
         object.__setattr__(self, 'rungs',
                            tuple(sorted(float(r) for r in self.rungs)))
 
     def key(self) -> str:
         if self.kind == 'native':
-            return 'native'
-        return 'ladder-' + '-'.join(f'{r:g}' for r in self.rungs)
+            base = 'native'
+        else:
+            base = 'ladder-' + '-'.join(f'{r:g}' for r in self.rungs)
+        # '-', never '_': a cache directory is `<region_id>_<sampler_id>_<plan>`
+        # and `PreTileCorpus` splits it on the first two underscores
+        return f'{base}-{self.camera.key()}'
 
-    def plans_for(self, wsi, tile: int) -> List[RungPlan]:
+    def plans_for(self, wsi) -> List[RungPlan]:
+        tile = self.camera.long_side
         if self.kind == 'native':
-            return native_plans(wsi, tile)
-        return DsLadder(rungs=self.rungs).plan_for(wsi, tile)
+            plans = native_plans(wsi, tile)
+        else:
+            plans = DsLadder(rungs=self.rungs).plan_for(wsi, tile)
+        return [with_camera(p, self.camera) for p in plans]
+
+
+def with_camera(plan: RungPlan, camera) -> RungPlan:
+    """`plan` placed for `camera`: its tile size is the camera's footprint,
+    its FoV rectangle and its reserve come from `ReadSpec.place`.
+
+    'F' rungs only. On an 'R' rung `ds` degrades a level-0 read rather than
+    choosing a scale, so the camera's rectangle at `ds` is not what is read
+    there; an 'R' plan keeps the reserve it was built with
+    (`resolution_plan`)."""
+    if plan.stack_kind != 'F':
+        return plan
+    if plan.tile_size != camera.long_side:
+        raise ValueError(f'plan is a {plan.tile_size} px tile and the camera\'s '
+                         f'footprint is {camera.long_side} px')
+    fw, fh, reserve = camera.place(plan.footprint_l0, plan.rung_ds)
+    rect = not camera.square
+    return dataclasses.replace(plan, reserve_l0=float(reserve),
+                               fov_w_l0=fw if rect else 0,
+                               fov_h_l0=fh if rect else 0)
+
+
+def camera_plan(level_downsamples, camera, ds: float, level: int) -> RungPlan:
+    """The one 'F' rung a single camera shoots: footprint `long_side * ds`,
+    read at `level` (the camera's own choice), placed with `with_camera`.
+    What `generator.FovSupply` hands its sampler."""
+    from ReadGeometry import level_px                           # noqa: PLC0415
+    tile = camera.long_side
+    level_ds = float(level_downsamples[level])
+    plan = RungPlan(rung_ds=float(ds), level=int(level), level_ds=level_ds,
+                    shrink=float(ds) / level_ds, tile_size=tile,
+                    read_size=level_px(tile, ds, level_ds),
+                    footprint_l0=float(tile) * float(ds), stack_kind='F')
+    return with_camera(plan, camera)
 
 
 def _scanned_rect(mask) -> Tuple[int, int, int, int]:
@@ -345,7 +406,7 @@ def resolution_plan(ds: float, tile: int, factor: int = 1) -> RungPlan:
     and cannot build this one, because here `ds` is not a magnification to read
     at. It is how far the tile is degraded and restored, so `level` is 0 and
     `read_size` is `tile` at every rung, and the only thing that varies is the
-    resampling `Sample.materialise` applies afterwards.
+    degradation the reader applies afterwards (`SlideReader.read(stack='R')`).
 
     That asymmetry is why this is a separate constructor and not a flag on the
     ladder: a ladder that returned level 0 for every rung would be a ladder
@@ -359,7 +420,8 @@ def resolution_plan(ds: float, tile: int, factor: int = 1) -> RungPlan:
 
 # ── the pre-tile: the reserve, read back ─────────────────────────────────────
 #
-# A pre-tile is what `Sample.materialise(extent='reserve')` reads: the tile and
+# A pre-tile is what a tile camera reads with the pre-tile margin
+# (`SlideReader.read` with `ReadSpec(tile, tile, margin_out=centre_margin(...))`): the tile and
 # the context reserved around it, centred on it, so a homography of the tile
 # samples real tissue instead of a black wedge (SuperPathPoint spec.md 6.6).
 # These are the reserve's own arithmetic -- how big, how far in, and the crop
@@ -451,6 +513,11 @@ def score_entropy(mask, xy: np.ndarray, plan: RungPlan) -> np.ndarray:
     raise NotImplementedError(
         'score_entropy reads pixels and is not written yet')
 
+
+#: Side, in OUTPUT px, of the cells a rectangular FoV's background fraction is
+#: averaged over (`TileSampler._fov_background`). 256 is the tile the encoders
+#: see, so a cell is one tile of the FoV.
+FOV_CELL = 256
 
 #: Registered scorers. A name here is part of `sampler_id`, so adding one is
 #: additive and renaming one re-hashes every corpus cut with it.
@@ -714,30 +781,30 @@ class RichnessConfig:
 class OverlapConfig:
     """How much two tiles of the same rung may share.
 
-    THREE KNOBS, AND THEY CAN CONTRADICT EACH OTHER. `grid_step` sets the
-    lattice, which fixes the overlap between ADJACENT positions before any
-    bound is applied:
+    THREE KNOBS, AND THEY CAN CONTRADICT EACH OTHER. `step` sets the lattice,
+    which fixes the overlap between ADJACENT positions before any bound is
+    applied:
 
-        adjacent overlap along one axis = 1 - grid_step / tile
-        adjacent overlap on the diagonal = (1 - grid_step / tile) ** 2
+        adjacent overlap along one axis = 1 - step
+        adjacent overlap on the diagonal = (1 - step) ** 2
 
-    So `grid_step=128, tile=256` means every neighbour overlaps 50 per cent,
-    and setting `max_overlap_ratio=0.3` on top of it makes every adjacent pair
-    illegal -- the lattice silently degenerates to `grid_step=256` while the
-    identity still records 128. `check()` refuses that combination instead,
-    with the arithmetic in the message.
+    So `step=0.5` means every neighbour overlaps 50 per cent, and setting
+    `max_overlap_ratio=0.3` on top of it makes every adjacent pair illegal --
+    the lattice silently degenerates to the disjoint one while the identity
+    still records 0.5. `check()` refuses that combination instead, with the
+    arithmetic in the message.
+
+    Every quantity here is a FRACTION OF THE FOOTPRINT, so the sampler needs
+    no tile size: the footprint is the camera's (`PlanSpec.camera`), and the
+    same config means the same lattice for a 256 px tile and a 1440 px FoV.
     """
-    #: Lattice step in OUTPUT pixels -- the same units as `tile`. **0 means the
-    #: tile**, i.e. disjoint, and 0 is the ONLY spelling of that: writing the
-    #: tile size out is a second spelling of one lattice, and two spellings of
-    #: one thing are two `sampler_id`s over one corpus. `check()` refuses it,
-    #: the same way `TileEncoderConfig` collapses its head aliases at the door.
-    #:
-    #: `_lattice` converts to level-0 by `footprint_l0 / tile`, which is `ds` on
-    #: an 'F' rung and 1 on an 'R' one. As a LEVEL-0 constant the step would be
-    #: disjoint at ds 1 and 87 per cent overlapping at ds 8 -- the trap
-    #: `jitter_offsets` below records for its own values.
-    grid_step: int = 0
+    #: Lattice step as a fraction of the footprint's side. 1.0 is disjoint --
+    #: the default, and the only spelling of it. `_lattice` multiplies by the
+    #: rung's `footprint_l0`, so the step is the same fraction at every rung:
+    #: as a LEVEL-0 constant it would be disjoint at ds 1 and 87 per cent
+    #: overlapping at ds 8 -- the trap `jitter_offsets` below records for its
+    #: own values.
+    step: float = 1.0
 
     #: Largest area fraction any two tiles of a rung may share. 0.0 admits
     #: only positions that touch at most at the border.
@@ -766,7 +833,7 @@ class OverlapConfig:
     #: Largest share of a rung that may come from jitter rather than lattice.
     #:
     #: ZERO BY DEFAULT, because the default lattice is disjoint and under a
-    #: disjoint lattice the top-up is provably dead. `grid_step == tile` TILES
+    #: disjoint lattice the top-up is provably dead. `step == 1.0` TILES
     #: the plane, so every position that is not on the lattice overlaps two to
     #: four lattice tiles -- 75 per cent for four of the five offsets, 56 for
     #: the fifth -- and `max_overlap_ratio = 0` rejects all of them. The lattice
@@ -778,44 +845,36 @@ class OverlapConfig:
     #: bound at all.
     jitter_cap: float = 0.0
 
-    def step_for(self, tile: int) -> int:
-        """`grid_step`, with 0 meaning the tile. The one place that resolves it."""
-        return int(self.grid_step or tile)
+    def __post_init__(self):
+        self.check()
 
-    def check(self, tile: int) -> None:
+    def check(self) -> None:
         """Refuse a lattice whose own adjacency breaks the bound it is under."""
-        if self.grid_step == tile:
+        if not 0.0 < self.step <= 1.0:
             raise ValueError(
-                f'grid_step {tile} is the tile, and 0 already means that. Two '
-                f'spellings of one lattice are two sampler_ids over one '
-                f'corpus, so the synonym is refused at the door rather than '
-                f'collapsed silently -- write grid_step=0')
-        if self.grid_step < 0 or self.grid_step > tile:
-            raise ValueError(
-                f'grid_step {self.grid_step} must be 0 (the tile) or in '
-                f'1..{tile - 1}; a step larger than the tile leaves gaps the '
-                f'sampler cannot see into, which is a mask decision and not a '
-                f'lattice one')
-        step = self.step_for(tile)
-        along = 1.0 - step / float(tile)
+                f'step {self.step} must be in (0, 1]: a fraction of the '
+                f'footprint, 1.0 disjoint. A step larger than the footprint '
+                f'leaves gaps the sampler cannot see into, which is a mask '
+                f'decision and not a lattice one')
+        along = 1.0 - self.step
         if along > 0 and self.max_overlap_ratio < along:
             raise ValueError(
-                f'grid_step {step} on a {tile} px tile makes every adjacent '
-                f'pair overlap {along:.0%} along an axis, and '
-                f'max_overlap_ratio is {self.max_overlap_ratio:.0%}. Every '
-                f'adjacent position is therefore illegal and the lattice '
-                f'degenerates to the disjoint one -- while sampler_id still '
-                f'records {self.grid_step}. Set grid_step=0 and mean it, or '
-                f'raise max_overlap_ratio to at least {along:.2f}')
+                f'step {self.step} makes every adjacent pair overlap '
+                f'{along:.0%} along an axis, and max_overlap_ratio is '
+                f'{self.max_overlap_ratio:.0%}. Every adjacent position is '
+                f'therefore illegal and the lattice degenerates to the disjoint '
+                f'one -- while sampler_id still records {self.step}. Set '
+                f'step=1.0 and mean it, or raise max_overlap_ratio to at least '
+                f'{along:.2f}')
         if self.jitter_cap > 0 and self.max_overlap_ratio <= 0.0:
             raise ValueError(
                 f'jitter_cap is {self.jitter_cap:.0%} and max_overlap_ratio is '
-                f'0, and those cannot both hold. A lattice of step {step} on a '
-                f'{tile} px tile covers the plane, so every offer the top-up '
-                f'can make overlaps a lattice position by 56 to 75 per cent '
-                f'and is rejected -- the lattice is already the largest '
-                f'disjoint set there is. Set jitter_cap=0 and mean it, or '
-                f'raise max_overlap_ratio to at least 0.75')
+                f'0, and those cannot both hold. A lattice of step '
+                f'{self.step} covers the plane, so every offer the top-up can '
+                f'make overlaps a lattice position by 56 to 75 per cent and is '
+                f'rejected -- the lattice is already the largest disjoint set '
+                f'there is. Set jitter_cap=0 and mean it, or raise '
+                f'max_overlap_ratio to at least 0.75')
         for dx, dy in self.jitter_offsets:
             if max(abs(dx), abs(dy)) < 1.0:
                 raise ValueError(
@@ -900,8 +959,12 @@ class SamplerConfig:
     `cfg_hash` covers the encoder and the mask and nothing about sampling, so
     two runs with different quotas or a different seed produce the same
     filename. Two corpora, one name, and the reader gets whichever ran first.
+
+    NO TILE SIZE. How big a footprint is belongs to the camera
+    (`PlanSpec.camera`), and every quantity here is relative to the footprint.
+    It was a field until 2026-10-03, which let a sampler config and the camera
+    that rendered its positions disagree about the same number.
     """
-    tile: int = 256
     n_per_rung: int = 500
     seed: int = 0
 
@@ -932,7 +995,6 @@ class SamplerConfig:
             raise ValueError(
                 f"candidates must be 'lattice' or 'random', got "
                 f"{self.candidates!r}")
-        self.overlap.check(self.tile)
 
     def sampler_id(self) -> str:
         return hashlib.sha256(
@@ -958,9 +1020,9 @@ class SampleMeta:
 
     An openslide handle is not picklable, so a meta carrying one cannot cross
     into a DataLoader worker -- and the failure is a pickling error a long way
-    from the cause. Everything here survives `pickle`, `csv` and `json`, and
-    `Sample.materialise(reader)` is where a handle enters, from the caller who
-    owns it.
+    from the cause. Everything here survives `pickle`, `csv` and `json`; a
+    handle enters at the reader that reads it (`SlideReader.read_samples`), from the
+    caller who owns it.
     """
     slide: str
     ds: float
@@ -990,6 +1052,23 @@ class SampleMeta:
     origin: str = 'grid'            # 'grid' | 'jitter' | 'inherit'
     parent_x: int = -1              # a jittered tile's parent, else -1
     parent_y: int = -1
+
+    #: The camera's FoV when it is a rectangle inside the square footprint
+    #: (`RungPlan.fov_w_l0`); 0 for a square camera, whose FoV IS the footprint.
+    fov_w_l0: int = 0
+    fov_h_l0: int = 0
+
+    @property
+    def fov_rect(self) -> Tuple[int, int, int, int]:
+        """`(x0, y0, w, h)` level-0: what the camera photographs for this
+        sample. The footprint itself for a square camera; for a rectangular
+        one, the rectangle centred in the footprint -- the same offset
+        `ReadSpec.fov_offset` used when the reserve was computed."""
+        fp = int(self.footprint_l0)
+        if not (self.fov_w_l0 and self.fov_h_l0):
+            return self.x, self.y, fp, fp
+        return (self.x + (fp - self.fov_w_l0) // 2,
+                self.y + (fp - self.fov_h_l0) // 2, self.fov_w_l0, self.fov_h_l0)
 
     @property
     def centre_l0(self) -> Tuple[float, float]:
@@ -1047,97 +1126,20 @@ class SampleMeta:
         return float(dx * dy) / max(smaller, 1.0)
 
 
-def degrade_resolution(img, ds: float, out_side: Optional[int] = None):
-    """An 'R' rung's degradation: shrink by `ds`, grow back. THE ONE DEFINITION.
-
-    INTER_AREA down, INTER_LINEAR up. Area-averaging is the non-aliasing
-    downsample; coming back up with it would be a second box filter rather than
-    the interpolation a real coarser level would have gone through.
-
-    IT LIVES HERE AND NOT IN TWO PLACES ON PURPOSE. `Sample.materialise` applies
-    it when a sampler reads an 'R' tile, and Stage B applies it to derive an 'R'
-    stack from a chain's ds 1 tile without a second extraction -- the ds 1 tile
-    IS `tile` level-0 px read at level 0, which is exactly what an 'R' rung
-    starts from. Two spellings of this would make a survival number a statement
-    about which resampling filter each half used, and nothing would say so.
-    """
-    import cv2                                              # noqa: PLC0415
-
-    side = int(out_side or img.shape[0])
-    if float(ds) <= 1.0:
-        return (img if img.shape[0] == side else
-                cv2.resize(img, (side, side), interpolation=cv2.INTER_AREA))
-    small = max(1, int(round(side / float(ds))))
-    img = cv2.resize(img, (small, small), interpolation=cv2.INTER_AREA)
-    return cv2.resize(img, (side, side), interpolation=cv2.INTER_LINEAR)
 
 
 class Sample:
-    """One tile: its metadata always, its pixels only if asked for.
+    """One tile's place: its `SampleMeta`. No pixels -- a camera reads those
+    (`SlideReader.read_samples`); see the module docstring for why the read left."""
 
-    Not two classes and not two modes. Whether the image is resident is a
-    property of the instance, so the resident and streaming uses are the same
-    object used differently -- and there is no second code path to keep in step.
-    """
+    __slots__ = ('meta',)
 
-    __slots__ = ('meta', 'image')
-
-    def __init__(self, meta: SampleMeta, image: Optional[np.ndarray] = None):
+    def __init__(self, meta: SampleMeta):
         self.meta = meta
-        self.image = image
 
     def __repr__(self) -> str:
-        state = 'resident' if self.image is not None else 'meta only'
         return (f'Sample({self.meta.slide} ds{self.meta.ds:g} '
-                f'({self.meta.x}, {self.meta.y}) {self.meta.bucket}, {state})')
-
-    def materialise(self, reader, extent: str = 'tile') -> 'Sample':
-        """Read the pixels. `reader` is the caller's handle, never ours.
-
-        For an 'F' tile this is one read at the rung's level, resized to
-        `tile_size` when the level did not land exactly on the rung. For an
-        'R' tile it is a level-0 read, shrunk by `ds` and grown back -- the
-        degradation IS the rung, so it happens here rather than at sampling
-        time where nothing would record it.
-
-        `extent='reserve'` reads what was RESERVED around the tile instead of
-        the tile: the pre-tile corpus stores that, because a warp of a bare
-        tile is a third pure black and a black wedge is a straight
-        maximum-contrast edge with two right angles (spec.md 6.6). The tile is
-        then its centre crop. Reading it here rather than in the caller is what
-        keeps the read and the LATTICE honouring the same number -- a reserve
-        recomputed at the call site can disagree with the geometry that placed
-        the tile, and the read then runs off the region and gets clipped.
-        """
-        import cv2                                          # noqa: PLC0415
-
-        m = self.meta
-        if extent not in ('tile', 'reserve'):
-            raise ValueError(
-                f"extent must be 'tile' or 'reserve', got {extent!r}")
-        if extent == 'reserve':
-            scale = m.reserve / float(m.footprint_l0)
-            origin = m.reserve_origin_l0
-            side = int(round(m.read_size * scale))
-            out_side = int(round(m.tile_size * scale))
-        else:
-            origin, side, out_side = (m.x, m.y), m.read_size, m.tile_size
-        img = reader.read_region_rgb(origin, m.level, (side, side))
-        if m.stack_kind == 'R' and m.ds > 1.0:
-            img = degrade_resolution(img, m.ds, out_side)
-        elif img.shape[0] != out_side:
-            # INTER_AREA is the ladder's own downsampling filter. Anything else
-            # invents high-frequency texture, and a keypoint detector will
-            # learn to fire on it.
-            img = cv2.resize(img, (out_side, out_side),
-                             interpolation=cv2.INTER_AREA)
-        self.image = img
-        return self
-
-    def release(self) -> 'Sample':
-        """Drop the pixels, keep the metadata. The streaming half."""
-        self.image = None
-        return self
+                f'({self.meta.x}, {self.meta.y}) {self.meta.bucket})')
 
 
 # ── the sampler, which is also the container ─────────────────────────────────
@@ -1245,26 +1247,59 @@ class TileSampler:
         it demanded a region 24576 px wide, and BRACS_1228 came back with 21
         tiles of 500 while S1104233 came back with 0.
         """
+        if plan.is_rect:
+            # a region hosts a rectangular FoV if it holds the RECTANGLE;
+            # `patchable` takes one side and would ask for the long one twice
+            fw, fh = self._dims(plan)
+            return [r for r in self.mask.tissue_regions if r.w >= fw and r.h >= fh]
         return self.mask.patchable(int(plan.footprint_l0)).tissue_regions
+
+    @staticmethod
+    def _dims(plan: RungPlan) -> Tuple[int, int]:
+        """What must lie in tissue: the camera's FoV -- the footprint square,
+        or the rectangle a rectangular camera photographs."""
+        if plan.is_rect:
+            return int(plan.fov_w_l0), int(plan.fov_h_l0)
+        fp = int(plan.footprint_l0)
+        return fp, fp
+
+    @staticmethod
+    def _offset(plan: RungPlan) -> Tuple[int, int]:
+        """The FoV's top-left inside the footprint square: (0, 0) when they
+        are the same, centred for a rectangle (`SampleMeta.fov_rect`)."""
+        if not plan.is_rect:
+            return 0, 0
+        fp = int(plan.footprint_l0)
+        return (fp - int(plan.fov_w_l0)) // 2, (fp - int(plan.fov_h_l0)) // 2
+
+    def _meta(self, plan: RungPlan, x: int, y: int, **axes) -> SampleMeta:
+        """A sample of `plan` at (x, y). The one place a SampleMeta's geometry
+        is written, so the four ways a tile is placed cannot disagree on it."""
+        fp = int(plan.footprint_l0)
+        return SampleMeta(
+            slide=self.slide, ds=plan.rung_ds, level=plan.level, x=int(x), y=int(y),
+            tile_size=plan.tile_size, read_size=plan.read_size, footprint_l0=fp,
+            reserve_l0=fp + 2 * _margin_of(plan), stack_kind=plan.stack_kind,
+            fov_w_l0=int(plan.fov_w_l0), fov_h_l0=int(plan.fov_h_l0), **axes)
 
     def _lattice(self, plan: RungPlan) -> np.ndarray:
         """Level-0 top-left corners on the lattice, inside the regions.
 
-        The step is in LEVEL pixels and is converted here, which is the whole
-        reason `grid_step` is not a level-0 constant: as a level-0 number it
+        The step is a fraction of the footprint and is converted here, which
+        is the whole reason it is not a level-0 constant: as a level-0 number it
         would be a disjoint lattice at ds 1 and an 87 per cent overlapping one
         at ds 8. The retired `ReferenceSampler.JITTER_OFFSETS` recorded the same
         trap for its own offsets.
         """
-        # footprint_l0 / tile is level-0 px per OUTPUT px. It equals ds on an
-        # 'F' rung and 1 on an 'R' one, where ds degrades rather than
-        # magnifies -- using ds directly would space an R lattice 32x too far
-        # apart at ds 32 and the rung would come back nearly empty.
-        per_px = int(plan.footprint_l0) / max(self.cfg.tile, 1)
-        step = max(1, int(round(
-            self.cfg.overlap.step_for(self.cfg.tile) * per_px)))
-        pad = _margin_of(plan)
+        # A fraction of the footprint, so the same step at every rung and on
+        # either stack: the footprint grows with ds on an 'F' rung and is held
+        # on an 'R' one, and using ds directly would space an R lattice 32x
+        # too far apart at ds 32.
         fp = int(plan.footprint_l0)
+        step = max(1, int(round(self.cfg.overlap.step * fp)))
+        pad = _margin_of(plan)
+        fw, fh = self._dims(plan)
+        offx, offy = self._offset(plan)
         sx0, sy0, sx1, sy1 = _scanned_rect(self.mask)
         out = []
         for region in self._regions(plan):
@@ -1284,10 +1319,14 @@ class TileSampler:
             # the straight edge between tissue and that flat fill is exactly
             # what a corner detector fires on. One is data; the other is an
             # artefact of where the scanner stopped.
-            x0 = max(region.x, sx0 + pad)
-            y0 = max(region.y, sy0 + pad)
-            x1 = min(region.x + region.w - fp, sx1 - pad - fp)
-            y1 = min(region.y + region.h - fp, sy1 - pad - fp)
+            #
+            # "The tile" is the camera's FoV: the footprint square, or the
+            # rectangle centred in it (`_dims`, `_offset`), which is what a
+            # rectangular sensor actually photographs.
+            x0 = max(region.x - offx, sx0 + pad)
+            y0 = max(region.y - offy, sy0 + pad)
+            x1 = min(region.x + region.w - fw - offx, sx1 - pad - fp)
+            y1 = min(region.y + region.h - fh - offy, sy1 - pad - fp)
             if x1 < x0 or y1 < y0:
                 continue
             xs = np.arange(x0, x1 + 1, step, dtype=np.int64)
@@ -1383,8 +1422,37 @@ class TileSampler:
         """
         if not len(xy):
             return np.zeros(0, np.float32), np.zeros(0, np.int8)
-        score = SCORERS[self.cfg.richness.scorer](self.mask, xy, plan)
+        if plan.is_rect:
+            score = self._fov_background(xy, plan)
+        else:
+            score = SCORERS[self.cfg.richness.scorer](self.mask, xy, plan)
         return score, assign_buckets(score, self.cfg.richness.edges)
+
+    def _fov_background(self, xy: np.ndarray, plan: RungPlan) -> np.ndarray:
+        """Background fraction of a RECTANGULAR FoV at each footprint origin.
+
+        `white_fractions` answers for square cells, so the rectangle is covered
+        by a centred grid of `FOV_CELL`-output-px cells and their fractions
+        averaged. A 1440 px width is 5.6 cells, so the grid covers 1280 of it;
+        `test_tile_sampler` measures that against the exact fraction."""
+        xy = np.asarray(xy, dtype=np.int64).reshape(-1, 2)
+        fw, fh = self._dims(plan)
+        offx, offy = self._offset(plan)
+        per_px = float(plan.footprint_l0) / plan.tile_size
+        level_ds = float(plan.level_ds)
+        cell_lvl = max(1, int(round(FOV_CELL * per_px / level_ds)))
+        cell_l0 = cell_lvl * level_ds
+        n_cols = max(1, int(fw // cell_l0))
+        n_rows = max(1, int(fh // cell_l0))
+        margin_x = (fw - n_cols * cell_l0) / 2.0
+        margin_y = (fh - n_rows * cell_l0) / 2.0
+        gx, gy = np.meshgrid(offx + margin_x + np.arange(n_cols) * cell_l0,
+                             offy + margin_y + np.arange(n_rows) * cell_l0,
+                             indexing='xy')
+        grid = np.stack([gx.ravel(), gy.ravel()], axis=1)
+        origins = np.rint(xy[:, None, :] + grid[None, :, :]).astype(np.int64)
+        frac = self.mask.white_fractions(origins.reshape(-1, 2), plan.level, cell_lvl)
+        return np.asarray(frac, dtype=np.float32).reshape(len(xy), -1).mean(axis=1)
 
     def _admissible(self, bucket: np.ndarray) -> np.ndarray:
         """Positions whose bucket has a non-zero cap.
@@ -1540,13 +1608,9 @@ class TileSampler:
                 have[name] += 1
                 used.add(idx)
                 taken_xy.append([x, y])
-                out.append(SampleMeta(
-                    slide=self.slide, ds=plan.rung_ds, level=plan.level,
-                    x=x, y=y, tile_size=cfg.tile, read_size=plan.read_size,
-                    footprint_l0=fp, reserve_l0=fp + 2 * _margin_of(plan),
-                    bucket=name, score=float(score[idx]),
-                    overlap_max=ratio, inherit_id=-1,
-                    stack_kind=plan.stack_kind, origin='grid'))
+                out.append(self._meta(plan, x, y, bucket=name,
+                                      score=float(score[idx]), overlap_max=ratio,
+                                      inherit_id=-1, origin='grid'))
 
         fill_to(floor_n)                                          # pass 1
         report.n_below_floor = sum(max(0, floor_n[n] - have[n]) for n in names)
@@ -1588,10 +1652,10 @@ class TileSampler:
         none lands back on a lattice position -- which could not help, because
         the bucket was short precisely where the lattice ran out.
 
-        The displaced tile keeps its PARENT's bucket rather than being
-        rescored. Rescoring would need the mask again per offer, and the offer
-        is disjoint from the parent, so its own score is a different number
-        that no quota asked for.
+        The displaced tile is scored on its OWN position and records its own
+        bucket and score: it is disjoint from the parent, so the parent's
+        number is a claim about different pixels. The parent's bucket only
+        decides which quota the offer is drawn against.
         """
         ov = self.cfg.overlap
         cap = int(round(ov.jitter_cap * n_ask))
@@ -1619,7 +1683,7 @@ class TileSampler:
                 # the parent's bucket was a claim about different pixels. One
                 # `white_fractions` call on one position is the cost.
                 offer = np.array([[x, y]], dtype=np.int64)
-                _, ob = self._rate(offer, plan)
+                oscore, ob = self._rate(offer, plan)
                 if not bool(self._admissible(ob)[0]):
                     continue
                 if not self._reserve_fits(x, y, plan):
@@ -1629,13 +1693,10 @@ class TileSampler:
                     continue
                 want[parent.bucket] -= 1
                 taken_xy.append([x, y])
-                out.append(SampleMeta(
-                    slide=self.slide, ds=plan.rung_ds, level=plan.level, x=x, y=y,
-                    tile_size=self.cfg.tile, read_size=plan.read_size,
-                    footprint_l0=fp, reserve_l0=fp + 2 * _margin_of(plan), bucket=parent.bucket, score=parent.score,
-                    overlap_max=0.0, inherit_id=-1,
-                    stack_kind=plan.stack_kind, origin='jitter',
-                    parent_x=parent.x, parent_y=parent.y))
+                out.append(self._meta(
+                    plan, x, y, bucket=self.cfg.richness.names[int(ob[0])],
+                    score=float(oscore[0]), overlap_max=0.0, inherit_id=-1,
+                    origin='jitter', parent_x=parent.x, parent_y=parent.y))
                 added += 1
         return added
 
@@ -1738,13 +1799,9 @@ class TileSampler:
             if ratio > self.cfg.overlap.max_overlap_ratio:
                 report.n_inherit_breaching += 1
             taken.append([x, y])
-            out.append(SampleMeta(
-                slide=self.slide, ds=plan.rung_ds, level=plan.level, x=x, y=y,
-                tile_size=self.cfg.tile, read_size=plan.read_size,
-                footprint_l0=fp, reserve_l0=fp + 2 * _margin_of(plan),
-                bucket=names[bi], score=float(score[0]),
-                overlap_max=ratio, inherit_id=int(chain),
-                stack_kind=plan.stack_kind, origin='inherit'))
+            out.append(self._meta(plan, x, y, bucket=names[bi],
+                                  score=float(score[0]), overlap_max=ratio,
+                                  inherit_id=int(chain), origin='inherit'))
         report.n_inherited = len(out)
         return out
 
@@ -1791,6 +1848,24 @@ class TileSampler:
                 f"axis's name. Build the plans with DsLadder (which makes 'F') "
                 f"or resolution_plan (which makes 'R'), and set the config to "
                 f'match')
+        # A RECTANGULAR FoV is placed by the square of its long side, and three
+        # things built on that square are not written for a rectangle: an
+        # inheritance chain (one centre across rungs; a camera has one rung),
+        # the random control arm, and a scorer that reads pixels.
+        if any(q.is_rect for q in plans):
+            if cfg.inherit.share > 0.0:
+                raise ValueError(
+                    f'inherit.share is {cfg.inherit.share} with a rectangular '
+                    f'FoV: a camera serves one rung, and inheritance is one '
+                    f'centre at several')
+            if cfg.candidates != 'lattice':
+                raise ValueError(
+                    f"candidates must be 'lattice' for a rectangular FoV, got "
+                    f'{cfg.candidates!r}')
+            if cfg.richness.scorer != 'background':
+                raise ValueError(
+                    f"a rectangular FoV is scored by 'background' only, got "
+                    f'{cfg.richness.scorer!r}')
 
         self._truncated = set()
         centres = self._choose_centres(plans)               # phase 1
@@ -2005,44 +2080,6 @@ class TileSampler:
                     out.append((i, j, r))
         return out
 
-    # ── materialise / release ───────────────────────────────────────────────
-
-    def materialise(self, reader=None) -> 'TileSampler':
-        """Read every sample's pixels. The resident half.
-
-        `reader` defaults to this sampler's own handle, which is right for a
-        single process and wrong inside a DataLoader worker -- there the worker
-        opens its own and passes it, because an openslide handle does not
-        survive being pickled across the fork.
-        """
-        r = reader if reader is not None else self.wsi
-        for s in self.samples:
-            s.materialise(r)
-        return self
-
-    def release(self) -> 'TileSampler':
-        """Drop every image, keep every meta. The streaming half."""
-        for s in self.samples:
-            s.release()
-        return self
-
-    def images(self) -> List[np.ndarray]:
-        """Resident pixels, in order. Raises rather than reading silently.
-
-        A `read_all()` that quietly materialised would make the streaming mode
-        impossible to hold: the whole point is that pixels are read once and
-        dropped, and a helper that re-reads them turns a bounded loop into an
-        unbounded one without saying so.
-        """
-        missing = [i for i, s in enumerate(self.samples) if s.image is None]
-        if missing:
-            raise RuntimeError(
-                f'{len(missing)} of {len(self.samples)} samples hold no '
-                f'pixels; call materialise() first. This does not read for '
-                f'you, because a helper that did would silently undo the '
-                f'streaming mode')
-        return [s.image for s in self.samples]
-
     def drop_holes(self, reader=None, min_valid: float = 0.95
                    ) -> Dict[float, int]:
         """Discard tiles the scanner never photographed. READS PIXELS.
@@ -2094,47 +2131,33 @@ class TileSampler:
     COLUMNS = ('index', 'slide', 'ds', 'level', 'x', 'y', 'tile_size',
                'read_size', 'footprint_l0', 'reserve_l0', 'bucket', 'score',
                'overlap_max',
-               'inherit_id', 'stack_kind', 'origin', 'parent_x', 'parent_y')
+               'inherit_id', 'stack_kind', 'origin', 'parent_x', 'parent_y',
+               'fov_w_l0', 'fov_h_l0')
 
-    def save(self, folder: Union[str, Path], with_images: bool = False,
+    def save(self, folder: Union[str, Path],
              extra_meta: Optional[Dict[str, object]] = None) -> Path:
-        """`index.csv` + `meta.json`, and the PNGs when asked for.
+        """`index.csv` + `meta.json`: coordinates and metadata, with the
+        pixels read on demand by whoever loads it, through a camera.
 
-        The format is `Store.PreTileStore`'s, not a second one: an
-        `index.csv` beside a `meta.json` beside one PNG per record. What this
-        adds is the axis columns.
-
-        `with_images=False` is the streaming corpus -- coordinates and
-        metadata, with the pixels read on demand by whoever loads it. That is
-        what a Dataset wants, and it is why the two are one method with a flag
-        rather than two formats.
+        The layout is `Store.PreTileStore`'s, not a second one. What this adds
+        is the axis columns. (A `with_images` flag wrote PNGs here until
+        2026-10-03; pixels are a camera's, and `extract_pretiles` is the one
+        writer of them.)
         """
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
 
-        if with_images:
-            import cv2                                      # noqa: PLC0415
-            for i, s in enumerate(self.samples):
-                if s.image is None:
-                    s.materialise(self.wsi)
-                cv2.imwrite(str(folder / f'{i:06d}.png'),
-                            cv2.cvtColor(s.image, cv2.COLOR_RGB2BGR))
-
         with open(folder / 'index.csv', 'w', newline='') as handle:
             writer = csv.writer(handle)
-            writer.writerow(self.COLUMNS + (('file',) if with_images else ()))
+            writer.writerow(self.COLUMNS)
             for i, s in enumerate(self.samples):
                 m = s.meta
-                row = [i] + [getattr(m, c) for c in self.COLUMNS[1:]]
-                if with_images:
-                    row.append(f'{i:06d}.png')
-                writer.writerow(row)
+                writer.writerow([i] + [getattr(m, c) for c in self.COLUMNS[1:]])
 
         meta = {
             'sampler_id': self.cfg.sampler_id(),
             'slide': self.slide,
             'n_samples': len(self.samples),
-            'with_images': bool(with_images),
             'stack_kind': self.cfg.inherit.stack_kind,
             'config': _config_parts(self.cfg),
             'provenance': self.cfg.provenance(),
@@ -2153,8 +2176,8 @@ class TileSampler:
 
         `wsi=None` is legitimate and is the point of the streaming corpus -- a
         Dataset loads the table in the parent process, forks, and each worker
-        opens its own handle. So this cannot require one, and `materialise`
-        takes the reader as an argument for the same reason.
+        opens its own handle. So this cannot require one, and the camera that
+        reads a sample is built on the reader its caller owns.
         """
         folder = Path(folder)
         with open(folder / 'meta.json') as handle:
@@ -2174,7 +2197,9 @@ class TileSampler:
                     inherit_id=int(row['inherit_id']),
                     stack_kind=row['stack_kind'], origin=row['origin'],
                     parent_x=int(row['parent_x']),
-                    parent_y=int(row['parent_y'])))
+                    parent_y=int(row['parent_y']),
+                    fov_w_l0=int(row['fov_w_l0']),
+                    fov_h_l0=int(row['fov_h_l0'])))
 
         out = cls.__new__(cls)
         out.wsi, out.mask = wsi, mask
@@ -2222,7 +2247,7 @@ class TileSampler:
         and writes the draw atomically. Either way the sampler comes back in
         one state -- `wsi=None, mask=None` -- so a caller cannot tell which
         happened by what it holds, only by `cache_info`; a caller that wants
-        pixels passes its own reader to `materialise`.
+        pixels reads them through a camera on its own reader.
 
         `masks` is taken as an object and never imported: the mask recipes
         import every segmenter, and this module stays without them.
@@ -2249,7 +2274,7 @@ class TileSampler:
             with SafeSlide(str(wsi_path)) as wsi:
                 mask, mask_hit = masks.mask(wsi)
                 out = cls(wsi, mask, cfg, slide=slide)
-                out.sample(plan.plans_for(wsi, cfg.tile))
+                out.sample(plan.plans_for(wsi))
                 with atomic_dir(folder) as tmp:
                     out.save(tmp, extra_meta=dict(
                         source=source_key(wsi_path), wsi_path=str(wsi_path),
@@ -2349,3 +2374,62 @@ class TileSampler:
 
 
 # ── what the previous sampler's callers hit ──────────────────────────────────
+
+
+# ── command-line control of the configs above ────────────────────────────────
+#
+# Every field of these configs is a flag (`ConfigArgs`): `--richness-caps`,
+# `--overlap-grid-step`, `--inherit-share`, `--sampler-n-per-rung`. None has a
+# default of its own; a flag not given leaves the field at what `base` holds, so
+# the values a run uses are the ones written where its `base` is built. Each
+# `<config>_from_args` returns `base` itself when nothing was given.
+
+from ConfigArgs import add_config_args, config_from_args         # noqa: E402
+
+#: Fields of `SamplerConfig` that are configs with flags of their own.
+_SAMPLER_NESTED = ('richness', 'overlap', 'inherit')
+
+
+def add_richness_args(ap, base: 'RichnessConfig') -> None:
+    add_config_args(ap, base, 'richness')
+
+
+def richness_from_args(args, base: 'RichnessConfig') -> 'RichnessConfig':
+    return config_from_args(args, base, 'richness')
+
+
+def add_overlap_args(ap, base: 'OverlapConfig') -> None:
+    add_config_args(ap, base, 'overlap')
+
+
+def overlap_from_args(args, base: 'OverlapConfig') -> 'OverlapConfig':
+    return config_from_args(args, base, 'overlap')
+
+
+def add_inherit_args(ap, base: 'InheritConfig') -> None:
+    add_config_args(ap, base, 'inherit')
+
+
+def inherit_from_args(args, base: 'InheritConfig') -> 'InheritConfig':
+    return config_from_args(args, base, 'inherit')
+
+
+def add_sampler_args(ap, base: 'SamplerConfig', skip=()) -> None:
+    """The flags of the sampler and of the three configs it holds. `skip` names
+    fields of the SAMPLER itself that a caller ignores (a FoV sampler takes its
+    tile from the FoV, so `tile`), so no flag exists that changes nothing."""
+    add_richness_args(ap, base.richness)
+    add_overlap_args(ap, base.overlap)
+    add_inherit_args(ap, base.inherit)
+    add_config_args(ap, base, 'sampler', skip=(*_SAMPLER_NESTED, *skip))
+
+
+def sampler_from_args(args, base: 'SamplerConfig', skip=()) -> 'SamplerConfig':
+    """`base` with every `--sampler-*`, `--richness-*`, `--overlap-*` and
+    `--inherit-*` flag that was given applied, nested configs included."""
+    parts = {'richness': richness_from_args(args, base.richness),
+             'overlap': overlap_from_args(args, base.overlap),
+             'inherit': inherit_from_args(args, base.inherit)}
+    top = config_from_args(args, base, 'sampler', skip=(*_SAMPLER_NESTED, *skip))
+    changed = {k: v for k, v in parts.items() if v is not getattr(top, k)}
+    return dataclasses.replace(top, **changed) if changed else top

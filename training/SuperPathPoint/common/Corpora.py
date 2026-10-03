@@ -29,17 +29,27 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 from DsLadder import DEFAULT_RUNGS
+from ReadGeometry import ReadSpec
 from Store import PreTileCorpus
 from TileSampler import (PRE_TILE_FACTOR, InheritConfig, OverlapConfig,
-                         PlanSpec, RichnessConfig, SamplerConfig)
+                         PlanSpec, RichnessConfig, SamplerConfig, centre_margin)
 
 #: A flat rejection budget per cell; `sampler_config` divides it by n.
 MAX_TRIES = 2500
 
 
-def sampler_config(*, tile: int, n: int, seed: int = 0,
+def pretile_spec(tile: int, factor: int = PRE_TILE_FACTOR) -> ReadSpec:
+    """What a pre-tile extraction reads: a `tile` px tile and the context
+    around it out to `tile * factor`, not rotated. The sampler reserves that
+    read (`ReadSpec.place`), so the lattice never offers a position whose
+    pre-tile runs off the scanned area."""
+    return ReadSpec(int(tile), int(tile), rotates=False,
+                      margin_out=centre_margin(int(tile), int(factor)))
+
+
+def sampler_config(*, n: int, seed: int = 0,
                    candidates: str = 'lattice', max_tries: int = MAX_TRIES,
-                   grid_step: int = 0, max_overlap: float = 0.0,
+                   step: float = 1.0, max_overlap: float = 0.0,
                    overlapping_share: float = 0.0,
                    bucket_frame: str = 'per_rung', inherit_share: float = 0.0,
                    inherit_source_rung: Optional[float] = None) -> SamplerConfig:
@@ -56,10 +66,10 @@ def sampler_config(*, tile: int, n: int, seed: int = 0,
     occur here.
     """
     return SamplerConfig(
-        tile=int(tile), n_per_rung=int(n), seed=int(seed),
+        n_per_rung=int(n), seed=int(seed),
         candidates=candidates,
         max_tries_per_tile=max(1, int(max_tries) // max(int(n), 1)),
-        overlap=OverlapConfig(grid_step=int(grid_step),
+        overlap=OverlapConfig(step=float(step),
                               max_overlap_ratio=float(max_overlap),
                               overlapping_share=float(overlapping_share)),
         richness=RichnessConfig(bucket_frame=bucket_frame),
@@ -74,13 +84,13 @@ def sampler_config(*, tile: int, n: int, seed: int = 0,
 RECIPES = {
     'stageA': dict(n=100, inherit_share=0.0, inherit_source_rung=None,
                    bucket_frame='per_rung',
-                   grid_step=0, max_overlap=0.0, overlapping_share=0.0),
+                   step=1.0, max_overlap=0.0, overlapping_share=0.0),
     'stageB-fOwn': dict(n=200, inherit_share=1.0, inherit_source_rung=16.0,
                         bucket_frame='at_inherit',
-                        grid_step=128, max_overlap=0.5, overlapping_share=1.0),
+                        step=0.5, max_overlap=0.5, overlapping_share=1.0),
     'stageB-cOwn': dict(n=10, inherit_share=0.0, inherit_source_rung=None,
                         bucket_frame='per_rung',
-                        grid_step=0, max_overlap=0.0, overlapping_share=0.0),
+                        step=1.0, max_overlap=0.0, overlapping_share=0.0),
 }
 
 #: Which recipe is each survival axis's own corpus. R reads stageA and never
@@ -88,22 +98,25 @@ RECIPES = {
 AXIS_RECIPE = {'F': 'stageB-fOwn', 'R': 'stageA', 'C': 'stageB-cOwn'}
 
 
-def recipe_config(name: str, tile: int) -> SamplerConfig:
+def recipe_config(name: str) -> SamplerConfig:
     """`RECIPES[name]` as the SamplerConfig it samples with."""
     if name not in RECIPES:
         raise KeyError(f'no corpus recipe {name!r}; known: {sorted(RECIPES)}')
-    return sampler_config(tile=tile, **RECIPES[name])
+    return sampler_config(**RECIPES[name])
 
 
-def ladder(rungs: Optional[Sequence[float]] = None) -> PlanSpec:
-    """The rung plan an extraction was cut over. None = DsLadder's default,
-    which is what extract_pretiles cuts when no --rungs is given."""
-    return PlanSpec('ladder', tuple(rungs) if rungs else tuple(DEFAULT_RUNGS))
+def ladder(rungs: Optional[Sequence[float]], tile: int,
+           factor: int = PRE_TILE_FACTOR) -> PlanSpec:
+    """The rung plan an extraction was cut over, for the pre-tile camera. None
+    rungs = DsLadder's default, which is what extract_pretiles cuts when no
+    --rungs is given."""
+    return PlanSpec('ladder', tuple(rungs) if rungs else tuple(DEFAULT_RUNGS),
+                    camera=pretile_spec(tile, factor))
 
 
 def corpus_of(name: str, root, mask_cfg, *, tile: int,
               rungs: Optional[Sequence[float]] = None,
               factor: int = PRE_TILE_FACTOR) -> PreTileCorpus:
     """The directory recipe `name` lands in under `root`, cut over `rungs`."""
-    return PreTileCorpus.of(root, mask_cfg, recipe_config(name, tile),
-                            ladder(rungs), factor)
+    return PreTileCorpus.of(root, mask_cfg, recipe_config(name),
+                            ladder(rungs, tile, factor), factor)

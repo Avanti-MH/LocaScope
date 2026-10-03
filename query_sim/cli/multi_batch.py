@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
-"""Multi-WSI x per-pyramid-level batch: one Camera per (WSI, level).
+"""Multi-WSI x per-pyramid-level batch: one Render per (WSI, level).
 
-For each input WSI, opens it once, iterates pyramid levels, builds a Camera
+For each input WSI, opens it once, iterates pyramid levels, builds a Render (camera)
 with query_mpp = level's native mpp, and generates `--per-camera` shots into
 a single unified out_dir + gt.csv.
 
 The tissue mask is built ONCE per WSI, not once per level: the segmentation
-and the recipe's region prep depend only on the slide, and only `patchable`
-depends on the level. Each level takes a `patchable` view of the one base mask.
+and the recipe's region prep depend only on the slide. Each level's camera draws
+its FoV positions from that one mask (`generator.FovSupply`: richness buckets
+and overlap, through `TileSampler` placing the camera's spec), batch after batch
+with the next seed until --per-camera shots exist.
 
-Cameras whose mask ends up with zero usable regions after all filters
-(the recipe's filtered -> merged, then patchable) are skipped with a
-clear reason line. Use query_sim/cli/diag_camera_skip.py to visualise WHY a
-specific (wsi, level) got skipped.
+A (WSI, level) with no position at all -- no region can hold the FoV -- is
+skipped, and skips.csv carries what the sampler saw: per bucket, asked vs taken.
+(The figure `diag_camera_skip.py` drew explained the retired tissue-ratio
+sampler and went with it.) A level whose slide runs out of new positions
+before --per-camera repeats some, each pass with a fresh domain gap, and says so.
 
 Usage:
     python query_sim/cli/multi_batch.py <wsi1> [<wsi2> ...] \\
         [--per-camera 30] [--jitter 0.05] \\
         [--wh-ratio 4:3] [--MPixels 12] \\
-        [--tissue-ratio 0.3] [--region-protrusion 0.5] \\
+        [--richness default|open] \\
         [--seg hest] [--mask-ds 1.0] [--seg-chunk-px 4000000] \\
         [--seed 0] [--out DIR]
 
 Outputs (in result/<SLURM_JOB_NAME or MultiBatch>/):
     images/<wsi_tag>_L<lvl>_syn00000.png ...
     gt.csv        one row per shot (wsi, level, nominal_mpp, effective_mpp, gt_x, gt_y, ...)
-    skips.csv     one row per skipped Camera with reason
+    skips.csv     one row per skipped camera with reason (the sampler's
+                  per-bucket report when no FoV fits)
 
 Both csv files are appended as each camera finishes, not written at the end.
 A PNG whose gt row was never flushed carries no position, mpp or rotation, so
@@ -41,7 +45,7 @@ import os
 import sys
 import time
 from dataclasses import asdict
-from typing import List, Optional
+from typing import List
 
 import openslide
 from PIL import Image
@@ -61,9 +65,11 @@ from _memprobe          import mem_line                 # noqa: E402
 from cli       import job_result_dir                    # noqa: E402
 from config    import DomainGapConfig                   # noqa: E402
 from record    import FOVRecord                         # noqa: E402
-from camera    import Camera                            # noqa: E402
-from generator import base_mask as build_base_mask, camera_mask, _record_from_shot  # noqa: E402
-from cli.diag_camera_skip import diagnose_skip          # noqa: E402
+from camera    import Render                            # noqa: E402
+from SlideReader import SlideReader                     # noqa: E402
+from generator import (RICHNESS_PRESETS, FovSupply,           # noqa: E402
+                       base_mask as build_base_mask, _record_from_shot,
+                       sampler_cfg_for)
 
 import Cache                                                         # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
@@ -105,57 +111,39 @@ def _run_camera(
     level:          int,
     per_camera:     int,
     cfg:            DomainGapConfig,
-    tissue_ratio:   float,
-    region_prot:    float,
+    richness:       str,
     base_mask:      TissueMask,
     seed:           int,
     img_dir:        str,
-    diag_dir:       str,
 ) -> tuple:
-    """Build one Camera at this (wsi, level). Return (records, skip_reason).
+    """Build one Render at this (wsi, level). Return (records, skip_reason).
 
     `base_mask` is built once per WSI by the caller and SHARED across every
-    level. The camera gets a `patchable` view of it, so nothing done here can
-    reach the next level's mask.
+    level; the camera only reads it.
     """
-    cam = Camera(slide, cfg=cfg, seed=seed,
-                 tissue_ratio=tissue_ratio,
-                 region_protrusion_ratio=region_prot)
+    cam = Render(SlideReader(slide), cfg=cfg, seed=seed)
     print(f'\n[{wsi_tag} L{level}] mpp={cfg.query_mpp:.4f}  '
           f'rect_l0={cam.rect_w_l0}x{cam.rect_h_l0}  '
-          f'bounding_l0={cam.bounding_square_side_l0}  '
-          f'required_region_side_l0={cam.required_region_side_l0}',
-          flush=True)
+          f'bounding_l0={cam.bounding_square_side_l0}', flush=True)
 
-    cam.mask = camera_mask(cam, base_mask)
-    n_regions = len(cam.mask.tissue_regions)
-    print(f'  mask: tissue_frac={cam.mask.tissue_fraction()*100:.1f}%  '
-          f'usable_regions={n_regions}', flush=True)
-
-    if n_regions == 0:
-        reason = (f'patchable emptied the mask: no tissue region can host '
-                  f'required_region_side_l0={cam.required_region_side_l0} '
-                  f'(mask ds={base_mask.mask_ds_x:.1f}, tile too large for this level)')
+    supply = FovSupply(cam, base_mask, sampler_cfg_for(per_camera, seed, richness))
+    try:
+        sampler = supply.sampler                    # the draw happens here
+    except RuntimeError as exc:
+        # One line per row: skips.csv is read by people and by csv readers, and
+        # the sampler's report is the reason.
+        reason = ' | '.join(line.strip() for line in str(exc).splitlines()
+                            if line.strip())
         print(f'  SKIP: {reason}', flush=True)
-        # Bracketed by probes on purpose: _draw hands the whole main_mask to
-        # imshow, and at ds=1 that is a 6.6 Gpx bool per panel which matplotlib
-        # promotes to float to colour-map. It is the prime suspect for the
-        # ~25 GB that did not come back during the first run's level loop.
-        print(f'  {mem_line("before diag")}', flush=True)
-        diagnose_skip(
-            cam     = cam,
-            level   = level,
-            out_dir = diag_dir,
-            wsi_tag = wsi_tag,
-            verdict = 'SKIP: patchable emptied the mask',
-        )
-        print(f'  {mem_line("after diag")}', flush=True)
         return [], reason
+    print(next(iter(sampler.reports.values())).line(), flush=True)
 
     records: List[FOVRecord] = []
-    for shot in cam:
+    n_repeats = 0
+    for shot in supply:
         if len(records) >= per_camera:
             break
+        n_repeats += int(shot.pass_index > 0)
         idx = len(records)
         fname = f'{wsi_tag}_L{level}_syn{idx:05d}.png'
         Image.fromarray(shot.image).save(os.path.join(img_dir, fname))
@@ -166,39 +154,27 @@ def _run_camera(
         if len(records) % max(1, per_camera // 5) == 0 or len(records) == per_camera:
             print(f'  [saved] {len(records)}/{per_camera}  {fname}', flush=True)
 
-    if not records:
-        reason = (f'Camera iterator yielded nothing (all sampled positions '
-                  f'failed has_tissue check or bounding-square read went out-of-WSI)')
-        print(f'  SKIP: {reason}', flush=True)
-        print(f'  {mem_line("before diag")}', flush=True)
-        diagnose_skip(
-            cam     = cam,
-            level   = level,
-            out_dir = diag_dir,
-            wsi_tag = wsi_tag,
-            verdict = 'SKIP: Camera yielded nothing',
-        )
-        print(f'  {mem_line("after diag")}', flush=True)
-        return [], reason
-    if len(records) < per_camera:
-        # The camera gave up part-way: it produced usable shots, so this is not
-        # a skip and the rows belong in gt.csv, but per_camera silently became
-        # something smaller and that has to be visible in the log.
-        print(f'  [WARN] only {len(records)}/{per_camera} shots; the camera hit '
-              f'its consecutive-failure fuse after producing some', flush=True)
+    if n_repeats:
+        # Not a skip -- the rows belong in gt.csv -- but the slide ran out of
+        # new positions and per_camera was met by repeating some, and that has
+        # to be visible.
+        print(f'  [WARN] the slide ran out of new positions: {n_repeats} of '
+              f'{per_camera} shots repeat one with a fresh domain gap',
+              flush=True)
     return records, None
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Multi-WSI x per-level Camera batch.')
+    ap = argparse.ArgumentParser(description='Multi-WSI x per-level camera batch.')
     ap.add_argument('wsi_paths', nargs='+')
     ap.add_argument('--per-camera',       type=int,   default=30)
     ap.add_argument('--jitter',           type=float, default=0.05,
                     help='cfg.query_mpp_jitter fraction (0.05 = +/-5%%). 0 disables.')
     ap.add_argument('--wh-ratio',         default='4:3')
     ap.add_argument('--MPixels',          type=float, default=12.0)
-    ap.add_argument('--tissue-ratio',     type=float, default=0.3)
-    ap.add_argument('--region-protrusion',type=float, default=0.5)
+    ap.add_argument('--richness', choices=sorted(RICHNESS_PRESETS), default='default',
+                    help="which FoVs: 'default' mostly tissue-dense with a "
+                         "share of edges, 'open' any FoV up to 85%% background")
     # --seg and its overrides. The recipe's read is chunked by default, which
     # is what keeps --mask-ds 1.0 from costing 16 bytes per level-0 pixel.
     add_mask_args(ap)
@@ -218,9 +194,7 @@ def main():
 
     out_dir  = args.out or job_result_dir('MultiBatch')
     img_dir  = os.path.join(out_dir, 'images')
-    diag_dir = os.path.join(out_dir, 'diag')
     os.makedirs(img_dir,  exist_ok=True)
-    os.makedirs(diag_dir, exist_ok=True)
     # Under a job array every task shares out_dir, so the csv files get the task
     # id and are merged afterwards. Appending to one shared file would interleave
     # rows: a few hundred at a time is far past the size an O_APPEND write is
@@ -328,9 +302,9 @@ def main():
             recs, skip_reason = _run_camera(
                 slide=slide, wsi_path=wsi_path, wsi_tag=wsi_tag, level=lvl,
                 per_camera=args.per_camera, cfg=cfg,
-                tissue_ratio=args.tissue_ratio, region_prot=args.region_protrusion,
+                richness=args.richness,
                 base_mask=base_mask, seed=args.seed,
-                img_dir=img_dir, diag_dir=diag_dir,
+                img_dir=img_dir,
             )
             if skip_reason is not None:
                 _append_rows(skips_path, [{'wsi':    wsi_tag,
@@ -368,8 +342,6 @@ def main():
         print(f'\ngt.csv    -> {gt_path}  ({n_records} rows)', flush=True)
     if n_skips:
         print(f'skips.csv -> {skips_path}  ({n_skips} skipped cameras)', flush=True)
-        print(f'To visualise a skip: python query_sim/cli/diag_camera_skip.py '
-              f'<wsi_path> --level <lvl>', flush=True)
 
     masks.close()
     print(f'\n{mem_line("job end")}', flush=True)

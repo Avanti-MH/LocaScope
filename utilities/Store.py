@@ -34,6 +34,32 @@ did you mean" error all go, and what is left is small enough to share a file.
 WsiFeaturesMapStore is not a third store. It is the grid-coverage case of the
 feature store plus the conversion to and from `WsiFeaturesMap` -- which is what
 `FeatureMapCache` below is.
+
+WHAT A FILE MAY HOLD (added 2026-09-30)
+---------------------------------------
+One file is one (slide, ds, pooling), and a key directory holds as many
+poolings side by side as were asked for:
+
+    cls, cls_avg, rings3, grid2x2, ...   an encoder's REDUCED outputs, each
+                                         slot L2-normalised (pooling_kinds)
+    tokens                               cls + one slot per patch cell,
+                                         normalised, registers dropped
+    raw                                  the model's OWN output, nothing done
+                                         to it: [N, prefix + cells, D], every
+                                         slot in the model's order. The others
+                                         can be derived from it; it cannot be
+                                         derived from them.
+
+`raw` is not `tokens`. The encoder itself uses the word for both (its
+`tokens()` exit and `pooling_kinds`' 'tokens' mode), and a store labelled one
+thing while holding the other reads back without an error and scores worse. A
+raw store says `slot_layout='raw:<prefix>+<h>x<w>'`, and `feat_hw` and
+`num_prefix` in the metadata must agree with it.
+
+The storage dtype is the tensor's own: fp16 or fp32. It follows what the
+encoder ran at -- an fp16 encoder's outputs are already fp16-accurate, and an
+fp32 one is not made worse by the file. Nothing about it goes into the
+metadata, so a file written before this existed reads exactly as it did.
 """
 from __future__ import annotations
 
@@ -43,7 +69,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -102,6 +128,15 @@ _CORE = ('features', 'x', 'y', 'region', 'grid_rc')
 
 def _enc_float(v: float) -> str:
     return f'{v:.12g}'
+
+
+#: The pooling name of a model's unreduced output. See the module docstring.
+RAW = 'raw'
+
+
+def raw_layout(num_prefix: int, feat_hw: Tuple[int, int]) -> str:
+    """`slot_layout` of a raw store: how many prefix slots, then the cell grid."""
+    return f'raw:{int(num_prefix)}+{int(feat_hw[0])}x{int(feat_hw[1])}'
 
 
 def _enc_slots(v: Tuple[str, ...]) -> str:
@@ -319,6 +354,34 @@ class FeatureStore:
                 tensors[k] = f.get_tensor(k)
         return tensors, meta
 
+    @staticmethod
+    def n_rows(path, key: str = 'features') -> int:
+        """How many rows tensor `key` has -- from the header, nothing read."""
+        from safetensors import safe_open                         # noqa: PLC0415
+        with safe_open(str(path), framework='pt') as f:
+            return int(f.get_slice(key).get_shape()[0])
+
+    @classmethod
+    def iter_chunks(cls, path, *, key: str = 'features', rows: int = 8192,
+                    require: Optional[Dict[str, object]] = None
+                    ) -> Iterator[Tuple[int, object]]:
+        """`(start, tensor)` for `rows` consecutive rows at a time.
+
+        A raw store of one slide at level 0 is tens of GB, and `load` reads all
+        of it: this reads a slice, so the caller decides how much is resident.
+        Concatenating every chunk gives exactly what `load(path)[0][key]` does.
+        """
+        from safetensors import safe_open                         # noqa: PLC0415
+        if rows < 1:
+            raise ValueError(f'rows must be positive, got {rows}')
+        meta = cls.load_meta(path)
+        _require(meta, require, path)
+        with safe_open(str(path), framework='pt') as f:
+            piece = f.get_slice(key)
+            n = int(piece.get_shape()[0])
+            for start in range(0, n, rows):
+                yield start, piece[start:start + rows]
+
     @classmethod
     def has(cls, path, key: str) -> bool:
         from safetensors import safe_open                         # noqa: PLC0415
@@ -336,7 +399,8 @@ def _validate(features, x, y, region, grid_rc, meta: FeatureMeta, extra) -> None
     import torch                                                  # noqa: PLC0415
     _check(features.ndim == 3, f'features must be [N, n, D], got {tuple(features.shape)}')
     n_tiles, n_slots, dim = features.shape
-    _check(features.dtype == torch.float16, f'features must be fp16, got {features.dtype}')
+    _check(features.dtype in (torch.float16, torch.float32),
+           f'features must be fp16 or fp32, got {features.dtype}')
     _check(len(meta.slots) == n_slots,
            f'{len(meta.slots)} slot names for {n_slots} slots: {meta.slots}')
     _check(meta.dim == dim, f'meta.dim={meta.dim} but features have D={dim}')
@@ -379,6 +443,27 @@ def _validate(features, x, y, region, grid_rc, meta: FeatureMeta, extra) -> None
         want = int(meta.slot_layout[5:]) + n_summary
         _check(want == n_slots,
                f'slot_layout {meta.slot_layout!r} implies {want} slots, got {n_slots}')
+
+    # A raw store keeps EVERY slot the model produced, so its reader has to know
+    # which are prefix (cls, registers) and which are cells, and where each cell
+    # sat. Three values written by three lines -- the layout, feat_hw and
+    # num_prefix -- have to agree, and so does the slot count.
+    _check((meta.pooling == RAW) == meta.slot_layout.startswith('raw:'),
+           f"pooling={meta.pooling!r} with slot_layout={meta.slot_layout!r}: "
+           f"a raw store says pooling='raw' AND a 'raw:<prefix>+<h>x<w>' layout, "
+           f"and nothing else does")
+    if meta.pooling == RAW:
+        _check(meta.feat_hw is not None,
+               "pooling='raw' keeps one slot per cell, so feat_hw must say where")
+        want = raw_layout(meta.num_prefix, meta.feat_hw)
+        _check(meta.slot_layout == want,
+               f'feat_hw {meta.feat_hw} and num_prefix {meta.num_prefix} imply '
+               f'slot_layout {want!r}, got {meta.slot_layout!r}')
+        _check(n_slots == meta.num_prefix + meta.feat_hw[0] * meta.feat_hw[1],
+               f'a raw store of {meta.num_prefix} prefix + '
+               f'{meta.feat_hw[0]}x{meta.feat_hw[1]} cells has '
+               f'{meta.num_prefix + meta.feat_hw[0] * meta.feat_hw[1]} slots, '
+               f'got {n_slots}')
 
     # A tokens store keeps every cell, so its reader has to know where each
     # sat: slot k is at (k // W, k % W) and nothing else says what W is. The
@@ -446,10 +531,11 @@ def _columns(grids) -> dict:
             'grid_rc': torch.tensor(rc, dtype=torch.int32).reshape(-1, 2)}
 
 
-def to_store_tensors(wfm) -> dict:
+def to_store_tensors(wfm, dtype=None) -> dict:
     """The columns `FeatureStore.save` takes, from one slide's WsiFeaturesMap.
     features come out [N, 1, D]: this path carries one vector per tile, which
-    is whatever the encoder's features() reduced to."""
+    is whatever the encoder's features() reduced to. `dtype` is fp16 unless the
+    caller says fp32."""
     import torch                                                  # noqa: PLC0415
     parts = [m.features for m in wfm]
     features = torch.cat(parts, dim=0) if parts else torch.empty(0, 0)
@@ -457,7 +543,7 @@ def to_store_tensors(wfm) -> dict:
     if features.shape[0] != out['x'].numel():
         raise ValueError(f'{features.shape[0]} feature rows against '
                          f'{out["x"].numel()} grid positions')
-    out['features'] = features.unsqueeze(1).half()
+    out['features'] = features.unsqueeze(1).to(dtype or torch.float16)
     return out
 
 
@@ -511,6 +597,20 @@ def geometry_mismatch(tensors: dict, grids) -> List[str]:
     return bad
 
 
+class PooledFeatures(NamedTuple):
+    """One pooling of every tile of a slide, ready to store.
+
+    `features` is [N, n, D] in the order of the slide's grid (region by region,
+    row by row), fp16 or fp32; `slots` names the n entries and `slot_layout`
+    says how they permute under a 90-degree rotation -- both as the encoder's
+    `pooled_spec` / `tokens_spec` declare them. A raw output is one of these
+    with `slot_layout=raw_layout(...)`.
+    """
+    features: object
+    slots: Tuple[str, ...]
+    slot_layout: str
+
+
 class FeatureMapCache:
     """Cached WsiFeaturesMaps for one slide: the grid-coverage feature files.
 
@@ -553,12 +653,23 @@ class FeatureMapCache:
             for line in lines:
                 print(f'  [features] {line}', flush=True)
 
-    def path(self, container) -> Path:
+    def path(self, container, pooling: Optional[str] = None) -> Path:
         return (FeatureStore.key_dir(
             self.root, seg_id=self.seg_id, slide=self.wsi_stem,
             region_id=self.region_id,
             key=FeatureStore.grid_key(container.tile_size, container.overlap))
-            / f'{_ds_name(container.ds)}_{self.pooling}.safetensors')
+            / f'{_ds_name(container.ds)}_{pooling or self.pooling}.safetensors')
+
+    def _storage_dtype(self):
+        """What the encoder ran at, so the file is no coarser than the compute:
+        fp32 for an fp32 encoder, fp16 otherwise (and for anything that does not
+        say, which keeps every existing caller exactly as it was)."""
+        import torch                                              # noqa: PLC0415
+        model = getattr(getattr(self.encoder, 'cfg', None), 'model', None)
+        torch_dtype = getattr(model, 'torch_dtype', None)
+        if callable(torch_dtype) and torch_dtype() is torch.float32:
+            return torch.float32
+        return torch.float16
 
     def load(self, container):
         if 'r' not in self.mode:
@@ -611,9 +722,108 @@ class FeatureMapCache:
             encoder_id=self.encoder.identity_id(), seg_id=self.seg_id,
             region_id=self.region_id, coverage='grid',
             n_available=wfm.n_patches(), n_tiles=wfm.n_patches())
-        path = FeatureStore.save(self.root, meta=meta, **to_store_tensors(wfm))
+        path = FeatureStore.save(
+            self.root, meta=meta,
+            **to_store_tensors(wfm, dtype=self._storage_dtype()))
         self._say(f'wrote {path}  {wfm.n_patches():,} tiles')
         return path
+
+    # ── several poolings of one slide, side by side ─────────────────────────
+    #
+    # `load` / `save` above carry ONE vector per tile, whatever the encoder's
+    # `feature_pooling` is. These carry any pooling -- a reduced one with
+    # several slots, or the model's raw output -- each in its own file next to
+    # the others, under the same address rules and the same two checks (the
+    # encoder's identity, and the geometry against the mask in hand).
+
+    def _grid_columns(self, container) -> dict:
+        grids = region_grids(container.tissue_regions, ds=container.ds,
+                             level=container.level, tile_size=container.tile_size,
+                             overlap=container.overlap)
+        return _columns(grids)
+
+    def save_pooled(self, container, pooled: Dict[str, 'PooledFeatures']) -> Dict[str, Path]:
+        """Write each pooling of `pooled` as its own file. `{name: path}`.
+
+        The features are stored as given -- fp16 or fp32 -- so what runs at fp32
+        is not rounded on its way to disk. Refuses a pooling whose row count is
+        not the grid's: a store that covers half the slide reads as the slide."""
+        if 'w' not in self.mode:
+            return {}
+        base_mpp = float(getattr(self.encoder, 'base_mpp', 0.0)) or 0.0
+        columns = self._grid_columns(container)
+        n = int(columns['x'].numel())
+        out = {}
+        for name, item in pooled.items():
+            features = item.features
+            if features.shape[0] != n:
+                raise ValueError(
+                    f'{name}: {features.shape[0]} feature rows against {n} grid '
+                    f'positions')
+            meta = FeatureMeta(
+                wsi_stem=self.wsi_stem, wsi_path=self.wsi_path,
+                level=container.level, ds=float(container.ds),
+                mpp=base_mpp * container.ds, base_mpp=base_mpp,
+                tile_size=container.tile_size, overlap=container.overlap,
+                pooling=name, slots=tuple(item.slots),
+                slot_layout=item.slot_layout, dim=int(features.shape[2]),
+                feat_hw=self.encoder.model_spec.feat_hw,
+                num_prefix=self.encoder.model_spec.num_prefix,
+                encoder_id=self.encoder.identity_id(), seg_id=self.seg_id,
+                region_id=self.region_id, coverage='grid',
+                n_available=n, n_tiles=n)
+            out[name] = FeatureStore.save(self.root, meta=meta,
+                                          features=features, **columns)
+            self._say(f'wrote {out[name]}  {n:,} tiles, {name}')
+        return out
+
+    def check(self, container, pooling: str) -> Optional[FeatureMeta]:
+        """The stored metadata of one pooling if the file is the one wanted --
+        the right encoder, the right address, the geometry of THIS mask -- else
+        None, with the reason printed. Reads the header and the four small
+        grid columns, never the features."""
+        if 'r' not in self.mode:
+            return None
+        path = self.path(container, pooling)
+        if not path.exists():
+            self._say(f'no {pooling} store at {path}')
+            return None
+        want = {'wsi_stem': self.wsi_stem, 'level': container.level,
+                'ds': float(container.ds), 'encoder_id': self.encoder.identity_id(),
+                'seg_id': self.seg_id, 'region_id': self.region_id,
+                'coverage': 'grid', 'pooling': pooling}
+        meta = FeatureStore.load_meta(path)
+        differs = {k: (v, getattr(meta, k)) for k, v in want.items()
+                   if getattr(meta, k) != v}
+        if differs:
+            self._say(f'{path.name} does not match:',
+                      *[f'    {k}: store {g!r}, now {w!r}'
+                        for k, (w, g) in sorted(differs.items())])
+            return None
+        columns, _ = FeatureStore.load(path, keys=('x', 'y', 'region', 'grid_rc'))
+        bad = geometry_mismatch(columns, region_grids(
+            container.tissue_regions, ds=container.ds, level=container.level,
+            tile_size=container.tile_size, overlap=container.overlap))
+        if bad:
+            self._say(f'{path.name} has the right address and the wrong regions:',
+                      *[f'    {b}' for b in bad])
+            return None
+        return meta
+
+    def load_pooled(self, container, pooling: str):
+        """`(tensors, meta)` of one pooling, or None on a miss. Loads it all:
+        for a raw store of a big slide use `iter_pooled`."""
+        meta = self.check(container, pooling)
+        if meta is None:
+            return None
+        return FeatureStore.load(self.path(container, pooling))
+
+    def iter_pooled(self, container, pooling: str, rows: int = 8192):
+        """`(start, features)` in chunks of `rows` tiles after the same checks,
+        or None on a miss. What is resident is one chunk at a time."""
+        if self.check(container, pooling) is None:
+            return None
+        return FeatureStore.iter_chunks(self.path(container, pooling), rows=rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

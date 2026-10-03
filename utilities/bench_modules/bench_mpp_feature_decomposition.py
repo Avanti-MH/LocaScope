@@ -113,7 +113,9 @@ from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig,                 # noqa: E402
                          SamplerConfig, TileSampler)
 from DsLadder import DEFAULT_RUNGS, DsLadder                        # noqa: E402
-from QueryFromWSI import QueryFromWSI                                # noqa: E402
+from camera import sensor_size                                       # noqa: E402
+from ReadGeometry import ReadSpec                                    # noqa: E402
+from SlideReader import SlideReader                                 # noqa: E402
 from simulate_microscope_photo import simulate_microscope_photo       # noqa: E402
 
 
@@ -1344,7 +1346,7 @@ def sample_reference_and_query_positions(wsi, mask, tile_size, rungs,
     never share a position -- a query whose twin is in the reference bank is
     found by identity, not by scale. Reference tiles are read straight off this
     sampler (real grid pixels); query POSITIONS only are read off it, then
-    rendered through `QueryFromWSI` + `simulate_microscope_photo` instead --
+    rendered through `SlideReader.read` + `simulate_microscope_photo` instead --
     see `run_sampler_routing` -- so reference and query differ by more than
     which grid cell they happened to land on.
     """
@@ -1352,7 +1354,7 @@ def sample_reference_and_query_positions(wsi, mask, tile_size, rungs,
     plans = ladder.plan_for(wsi, tile_size)
     n_per_rung = n_ref_per_rung + n_query_per_rung
     max_tries = max(1, 2500 // max(n_per_rung, 1))     # 5x n, extract_pretiles.py's own ratio
-    cfg = SamplerConfig(tile=tile_size, n_per_rung=n_per_rung, seed=seed,
+    cfg = SamplerConfig(n_per_rung=n_per_rung, seed=seed,
                         max_tries_per_tile=max_tries,
                         richness=RichnessConfig(), overlap=OverlapConfig())
     sampler = TileSampler(wsi, mask, cfg)
@@ -1448,16 +1450,17 @@ def run_sampler_routing(args, out_dir: Path) -> int:
          f'split per rung', flush=True)
 
     # ── reference: real grid pixels, encoded directly ──────────────────────
-    all_images = sampler.materialise(wsi).images()
     ref_indices = np.flatnonzero(ref_mask)
-    ref_images = [all_images[i] for i in ref_indices]
+    samples = list(sampler)
+    ref_images = SlideReader(wsi, resize='area').read_samples(
+        [samples[i] for i in ref_indices], ReadSpec(args.tile, args.tile))
     ref_features = encoder(ref_images)
     ref_ds = ds_of[ref_indices]
     ref_mpp = wsi.base_mpp * ref_ds
     level_mpp_values = np.array(sorted({float(m) for m in ref_mpp}))
 
     # ── query: SAME positions, rendered as a photo would be, not read as a
-    #    plain grid tile -- QueryFromWSI + simulate_microscope_photo is the
+    #    plain grid tile -- SlideReader.read + simulate_microscope_photo is the
     #    exact pair test_gigapath_knn_esti_mpp.py's own load_query() uses.
     #    MPixels=1.475 matches CLAUDE.md's own real-photo spec (1440x1024,
     #    45:32) -- the query is sized like the real pipeline's photos, not
@@ -1479,18 +1482,18 @@ def run_sampler_routing(args, out_dir: Path) -> int:
     query_indices = np.flatnonzero(query_mask)
     query_patch_feats: list[torch.Tensor] = []   # [M_i, D] per surviving query
     query_ds = []
+    photo_reader = SlideReader(wsi)                   # lanczos: the photo's filter
+    photo_spec = ReadSpec(*sensor_size('4:3', args.mpixels))
     for i in query_indices:
         meta = sampler[i].meta
         ds = float(meta.ds)
-        gt_mpp = wsi.base_mpp * ds
-        qwsi = QueryFromWSI(entry.path, MPixels=args.mpixels, mpp=gt_mpp)
-        image = qwsi.crop(int(meta.x), int(meta.y))
+        image = photo_reader.read(int(meta.x), int(meta.y), photo_spec, ds)
         if image is None:
             continue
         # simulate_microscope_photo returns an ndarray (its own docstring:
         # "backward-compat entry point"); QueryPatchContainer takes either,
         # but wrapped as PIL so this stays the same type the reference side
-        # reads (sampler.materialise(wsi).images()).
+        # reads (SlideReader.read_samples).
         photo = Image.fromarray(simulate_microscope_photo(image))
         qc = QueryPatchContainer(photo)
         qc.extract_all(args.tile, overlap=True)
@@ -1604,7 +1607,7 @@ def main() -> int:
     parser.add_argument('--sampler-query-per-rung', type=int, default=20,
                         help='sampler_routing: held-out query positions per '
                              'rung, DISJOINT from the reference draw -- '
-                             'rendered as a photo (QueryFromWSI + '
+                             'rendered as a photo (SlideReader.read + '
                              'simulate_microscope_photo), not read as a '
                              'plain grid tile')
     parser.add_argument('--mpixels', type=float, default=1.475,

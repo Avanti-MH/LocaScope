@@ -59,15 +59,17 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 import torch.utils.data                                             # noqa: E402
 
-from AccessDatasets import locate, list_names                        # noqa: E402
+from AccessDatasets import locate, list_names, pick_wsi_names        # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from Cache import cache_root, job_name                               # noqa: E402
 from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
                          SamplerConfig, TileSampler)
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
+from ReadGeometry import LEVEL_REL_TOL                              # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
 from WsiSplit import SPLIT_JOB                                       # noqa: E402
-from camera import Camera                                            # noqa: E402
+from camera import Render, render_spec                               # noqa: E402
+from SlideReader import SlideReader                                  # noqa: E402
 from config import DomainGapConfig                                   # noqa: E402
 
 
@@ -84,8 +86,8 @@ NUM_CLASSES = len(RUNGS)
 #: single fact everything below depends on:
 #:
 #:     TileSampler   footprint_l0 = tile_size * rung     (DsLadder.plan)
-#:     Camera        rect_w_l0    = output_w * query_mpp / base_mpp
-#:                                = tile_size * rung     (query_mpp = base*rung)
+#:     Render        rect_w_l0    = output_w * ds
+#:                                = tile_size * rung     (Render(..., ds=rung))
 #:
 #: Rendering CLAUDE.md's real-photo frame (1440x1024, 45:32, 1.475 MPixels)
 #: and cutting it up instead makes the two windows disagree by 5.6x: the
@@ -206,11 +208,26 @@ CAMERA_GEOMETRY_ONLY = DomainGapConfig(
 RICHNESS = RichnessConfig(caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0))
 # OVERLAP = OverlapConfig()
 OVERLAP = OverlapConfig(
-    grid_step=128,
+    step=0.5,                       # half a footprint: was grid_step=128 on 256
     max_overlap_ratio=0.5,
     overlapping_share=1.0,
     jitter_cap= 0.25,
 )
+
+def routing_camera(tile_size: int):
+    """The `ReadSpec` every manifest row is rendered with: a tile-sized
+    sensor under the routing heads' camera. `CAMERA_FULL` and
+    `CAMERA_GEOMETRY_ONLY` (the `native` support style) both rotate, so they
+    read the same square and one spec covers both -- checked, so a template
+    that stopped rotating could not leave the manifest reserving the wrong
+    read."""
+    full = render_spec(CAMERA_FULL, (tile_size, tile_size))
+    native = render_spec(CAMERA_GEOMETRY_ONLY, (tile_size, tile_size))
+    if full != native:
+        raise RuntimeError(f'the two camera templates read differently ({full} '
+                           f'vs {native}); a manifest serves both, so they must not')
+    return full
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  manifest -- position identity only, no pixels, no Camera
@@ -289,23 +306,14 @@ def open_caches(args, job: str, device) -> Caches:
         split_job=args.split_cache_job or SPLIT_JOB)
 
 
-def pick_wsi_names(names: Sequence[str], max_wsi: Optional[int], seed: int
-                   ) -> List[str]:
-    '''`max_wsi` of `names`, chosen AT RANDOM (seeded), returned in the order
-    `names` had. `None`, or a cap at or above `len(names)`, returns every name
-    unchanged -- so a cap of "all of them" changes nothing, not even the order.
-
-    Random and not the first N: a dataset's names are sorted, and the first N
-    of a sorted list are one contiguous run of ids -- for BRACS one stretch of
-    slides whose stain and pathology mix nobody has checked. The same
-    (names, cap, seed) always picks the same slides, so a rerun, the
-    supply-only pass and the real run agree.
-    '''
-    names = list(names)
-    if max_wsi is None or max_wsi >= len(names):
-        return names
-    keep = set(random.Random(seed).sample(range(len(names)), int(max_wsi)))
-    return [n for i, n in enumerate(names) if i in keep]
+def cache_jobs(args, job: str, caches: Caches) -> dict:
+    """The three `--*-cache-job` flags as `open_caches` RESOLVED them. An unset
+    flag is None in `vars(args)`, which names no cache and is nothing to filter a
+    wandb config on; this is the job it actually read."""
+    made_by = job_name(job)
+    return dict(mask_cache_job=args.mask_cache_job or made_by,
+                sampler_cache_job=args.sampler_cache_job or made_by,
+                split_cache_job=caches.split_job)
 
 
 def build_manifest(dataset_id: str, *, masks, sampler_root,
@@ -342,9 +350,12 @@ def build_manifest(dataset_id: str, *, masks, sampler_root,
     rows: List[ManifestRow] = []
     names = list(wsi_names) if wsi_names is not None else list_names(dataset=dataset_id)
     names = pick_wsi_names(names, max_wsi, seed)
-    cfg = SamplerConfig(tile=tile_size, n_per_rung=n_per_rung, seed=seed,
+    cfg = SamplerConfig(n_per_rung=n_per_rung, seed=seed,
                         richness=RICHNESS, overlap=OVERLAP)
-    plan = PlanSpec('ladder', tuple(rungs))
+    # The camera that renders every row: its footprint is the tile, and the
+    # sampler reserves exactly what it reads, so no position is offered that
+    # the Camera cannot read.
+    plan = PlanSpec('ladder', tuple(rungs), camera=routing_camera(tile_size))
     for name in names:
         sampler = TileSampler.cached(
             locate(name, dataset=dataset_id).path, cfg, plan, sampler_root,
@@ -400,6 +411,10 @@ def class_weights(rows: List[ManifestRow], device) -> torch.Tensor:
 #  rendering: one ManifestRow -> (patches, label), the ONE place this happens
 # ══════════════════════════════════════════════════════════════════════════
 
+READ_LEVELS = ('pyramid', 'resampled', 'mixed')
+RESAMPLE_FROM = ('finer', 'l0')
+
+
 @dataclass(frozen=True)
 class RenderConfig:
     '''What every render needs besides the row itself -- one object threaded
@@ -441,9 +456,91 @@ class RenderConfig:
     tile_size: int = 256
     stage_shift_max: int = 0
 
+    #: WHICH PYRAMID LEVEL A TRAINING TILE IS READ FROM. See spec.md's 詞彙
+    #: (read_level, resample_from, max_resample_factor, resampled_share) and
+    #: `choose_read_level`.
+    #:
+    #:     pyramid    the nearest-level rule `QueryFromWSI` has always used: a
+    #:                rung with a native level reads it, one without (BRACS's
+    #:                2 and 8) reads the next finer level and resamples
+    #:     resampled  every rung that has a finer level reads one of them,
+    #:                chosen uniformly, and resamples down
+    #:     mixed      `resampled` for a share of the tiles, `pyramid` otherwise
+    #:
+    #: Training only: val and test keep `pyramid`, so every score stays
+    #: comparable with the ones before this existed.
+    #:
+    #: THESE FOUR DEFAULTS ARE FROZEN. A run at all four defaults gets no
+    #: `read_tag`, no file-name segment and no resume-identity key -- which is
+    #: what lets every weight, resume file and CSV row written before these
+    #: fields existed stand for `pyramid`. Change a default and those all start
+    #: to stand for something they were not trained with (the same reason
+    #: `Checkpoints.weight_filename` gives `bal` no segment).
+    read_level: str = 'pyramid'
+    #: `finer`: any level finer than the rung's. `l0`: level 0 only.
+    resample_from: str = 'finer'
+    #: The largest rung / level-downsample a candidate level may need, or None.
+    #: A cost bound: the read side is `tile * factor`, 8192 px at 32.
+    max_resample_factor: Optional[float] = None
+    #: `mixed` only: the share of tiles read `resampled`.
+    resampled_share: float = 0.5
+
+    def __post_init__(self):
+        if self.read_level not in READ_LEVELS:
+            raise ValueError(f'read_level {self.read_level!r}: one of {READ_LEVELS}')
+        if self.resample_from not in RESAMPLE_FROM:
+            raise ValueError(f'resample_from {self.resample_from!r}: one of '
+                             f'{RESAMPLE_FROM}')
+        if self.max_resample_factor is not None:
+            if self.max_resample_factor <= 1:
+                raise ValueError(f'max_resample_factor {self.max_resample_factor}: '
+                                 f'a resampled read is at least 2x, so the bound '
+                                 f'must be above 1')
+            if self.resample_from == 'l0':
+                raise ValueError('max_resample_factor with resample_from l0: l0 '
+                                 'names the level, so a bound on it either '
+                                 'changes nothing or removes the only candidate')
+        if not 0.0 < self.resampled_share <= 1.0:
+            raise ValueError(f'resampled_share {self.resampled_share}: in (0, 1]')
+        # A setting that does nothing in this mode would still reach the run's
+        # arguments and its resume identity, so a pyramid run would stop
+        # matching its own resume file. Refused instead of ignored.
+        defaults = RenderConfig.__dataclass_fields__
+        idle = []
+        if self.read_level == 'pyramid':
+            idle = ['resample_from', 'max_resample_factor', 'resampled_share']
+        elif self.read_level == 'resampled':
+            idle = ['resampled_share']
+        changed = [f for f in idle if getattr(self, f) != defaults[f].default]
+        if changed:
+            raise ValueError(f'read_level {self.read_level} does not use '
+                             f'{", ".join(changed)}; leave them at their defaults')
+
+    @property
+    def read_tag(self) -> str:
+        """The read mode as one string, for every name it has to keep apart:
+        weight and resume file names, the wandb run, the `read_level` CSV
+        column, the evaluation label. Empty at the defaults (see above).
+
+            resampled-finer        mixed-l0
+            resampled-finer-x8     mixed-finer-p0.3"""
+        if self.read_level == 'pyramid':
+            return ''
+        tag = f'{self.read_level}-{self.resample_from}'
+        if self.max_resample_factor is not None:
+            tag += f'-x{self.max_resample_factor:g}'
+        if self.read_level == 'mixed' and self.resampled_share != 0.5:
+            tag += f'-p{self.resampled_share:g}'
+        return tag
+
+    @property
+    def read_label(self) -> str:
+        """`read_tag`, or `pyramid` where the tag is empty: the CSV value."""
+        return self.read_tag or 'pyramid'
+
     @property
     def mpixels(self) -> float:
-        '''What `DomainGapConfig.MPixels` has to be for `QueryFromWSI` to
+        '''What `DomainGapConfig.MPixels` has to be for `camera.sensor_size` to
         arrive back at `tile_size`: it computes `output_w = int(sqrt(MPixels *
         1e6 / (w_r * h_r)) * w_r)`, which at 1:1 is `int(sqrt(MPixels*1e6))`.
         Derived rather than typed so the two cannot drift; `CameraBank`
@@ -453,9 +550,9 @@ class RenderConfig:
 
 
 class CameraBank:
-    '''Lazily-built `{(dataset, wsi_name, rung): Camera}` cache, one `SafeSlide`
-    handle opened per WSI (not per rung -- the six rungs of one WSI share it;
-    `Camera` accepts an already-open handle and does not reopen). Built fresh
+    '''Lazily-built `{(dataset, wsi_name, rung, ...): Render}` cache, one
+    `SlideReader` per WSI (not per rung -- the six rungs of one WSI share its
+    handle; a `Render` takes the reader and does not reopen). Built fresh
     inside whichever process first uses it -- a `RoutingHeadDataset` under
     `DataLoader(num_workers>0)` gets one `CameraBank` PER WORKER this way,
     never one shared across a fork/spawn boundary (an `openslide` handle is
@@ -463,29 +560,33 @@ class CameraBank:
     eval"). Never evicts -- see spec.md's "Handle count": the caller bounds
     how many WSIs one bank ever sees by bounding `rows`, not by eviction here.
 
-    `query_mpp` is baked into a `Camera` at construction (`DomainGapConfig.
-    query_mpp` -> `QueryFromWSI(..., mpp=query_mpp)`, fixed for that Camera's
-    lifetime) -- so a Camera is keyed by rung as well as WSI, not just WSI:
-    one WSI's six rungs are six different microscopes, in `Camera`'s own
-    terms.
+    The magnification is baked into a `Render` at construction (`ds=rung`,
+    fixed for its lifetime; `Render.at` is the same thing cached on it) -- so
+    a camera is keyed by rung as well as WSI, not just WSI: one WSI's six
+    rungs are six different objectives.
     '''
 
     def __init__(self, cfg: RenderConfig):
         self.cfg = cfg
-        self._wsi: Dict[Tuple[str, str], SafeSlide] = {}
-        self._camera: Dict[Tuple[str, str, float, bool], Camera] = {}
+        self._reader: Dict[Tuple[str, str], SlideReader] = {}
+        self._camera: Dict[tuple, Render] = {}
+
+    def reader_for(self, dataset_id: str, wsi_name: str) -> SlideReader:
+        """The WSI's one `SlideReader` in this process."""
+        key = (dataset_id, wsi_name)
+        reader = self._reader.get(key)
+        if reader is None:
+            entry = locate(wsi_name, dataset=dataset_id)
+            reader = self._reader[key] = SlideReader(SafeSlide(entry.path))
+        return reader
 
     def _wsi_for(self, dataset_id: str, wsi_name: str) -> SafeSlide:
-        key = (dataset_id, wsi_name)
-        wsi = self._wsi.get(key)
-        if wsi is None:
-            entry = locate(wsi_name, dataset=dataset_id)
-            wsi = SafeSlide(entry.path)
-            self._wsi[key] = wsi
-        return wsi
+        """The handle `choose_read_level` reads the pyramid off."""
+        return self.reader_for(dataset_id, wsi_name).slide
 
     def camera_for(self, dataset_id: str, wsi_name: str, rung: float, *,
-                   native: bool = False) -> Camera:
+                   native: bool = False,
+                   read_level: Optional[int] = None) -> Render:
         '''`native=False` (default): `CAMERA_FULL` -- simulates a real
         photograph, every rotation/scale/colour/vignette/distortion channel
         active. `native=True`: `CAMERA_GEOMETRY_ONLY` -- only rotation, every
@@ -516,31 +617,78 @@ class CameraBank:
         centre of the frame has none at all. A probability is what models
         both kinds -- widening the strength range only ever models the
         first, more weakly.
+
+        `read_level` (None: `level_for`) is part of the key for the same
+        reason `native` is: a camera's level is fixed when it is built, so a
+        rung read from three different levels is three cameras.
         '''
-        key = (dataset_id, wsi_name, rung, native)
+        key = (dataset_id, wsi_name, rung, native, read_level)
         cam = self._camera.get(key)
         if cam is None:
-            wsi = self._wsi_for(dataset_id, wsi_name)
+            reader = self.reader_for(dataset_id, wsi_name)
             template = CAMERA_GEOMETRY_ONLY if native else CAMERA_FULL
             gap_cfg = replace(template, wh_ratio=TILE_WH_RATIO,
                              MPixels=self.cfg.mpixels,
-                             query_mpp=wsi.base_mpp * rung,
+                             query_mpp=reader.base_mpp * rung,
                              stage_shift_max=self.cfg.stage_shift_max)
             # seed=None (the default): determinism, where wanted, is handled
             # per-call via capture(..., rng=...) in render_row -- a fixed
-            # Camera-level seed here would apply to every caller alike and
+            # camera-level seed here would apply to every caller alike and
             # give neither train nor eval what it actually needs.
-            cam = Camera(wsi, cfg=gap_cfg)
-            got = (cam.qfw.output_w, cam.qfw.output_h)
+            # ds=rung, not query_mpp alone: the camera would divide the mpp
+            # by base_mpp again to get the rung back.
+            cam = Render(reader, gap_cfg, ds=rung, read_level=read_level)
+            got = (cam.output_w, cam.output_h)
             if got != (self.cfg.tile_size, self.cfg.tile_size):
                 raise RuntimeError(
                     f'sensor is {got[0]}x{got[1]}, not '
                     f'{self.cfg.tile_size}x{self.cfg.tile_size}: '
                     f'RenderConfig.mpixels did not round-trip through '
-                    f'QueryFromWSI. Everything downstream assumes the camera, '
+                    f'sensor_size. Everything downstream assumes the camera, '
                     f'the sampler window and the encoder input are one number')
             self._camera[key] = cam
         return cam
+
+
+def read_label_of(run_args: Dict) -> str:
+    '''A checkpoint's training read mode as the `read_level` column writes it,
+    from the `args` it saved. A checkpoint saved before the read mode existed
+    has none of the four keys, and reads `pyramid`, which is what it was
+    trained with.'''
+    run_args = run_args or {}
+    return RenderConfig(
+        read_level=run_args.get('read_level', 'pyramid'),
+        resample_from=run_args.get('resample_from', 'finer'),
+        max_resample_factor=run_args.get('max_resample_factor'),
+        resampled_share=run_args.get('resampled_share', 0.5)).read_label
+
+
+def choose_read_level(wsi, rung: float, cfg: RenderConfig,
+                      rng) -> Optional[int]:
+    '''The pyramid level one tile is read from under `cfg`'s read mode, or
+    None for the nearest-level rule.
+
+    `pyramid` returns None WITHOUT TOUCHING `rng`. Drawing first and ignoring
+    the draw would shift every later draw by one, and a default run would no
+    longer render the photos it rendered before the read modes existed.
+
+    The candidates are the levels FINER than the rung -- past the slack
+    `ReadGeometry.level_for` allows before it calls a level native -- and, under
+    `l0`, level 0 alone; `max_resample_factor` drops the ones that would need
+    more than that much downsampling. One is drawn uniformly. A rung with no
+    finer level (rung 1 is level 0) keeps the rule.'''
+    if cfg.read_level == 'pyramid':
+        return None
+    if cfg.read_level == 'mixed' and rng.random() >= cfg.resampled_share:
+        return None
+    ds = wsi.level_downsamples
+    finer = [lv for lv, d in enumerate(ds) if d * (1.0 + LEVEL_REL_TOL) < rung]
+    if cfg.resample_from == 'l0':
+        finer = [lv for lv in finer if lv == 0]
+    if cfg.max_resample_factor is not None:
+        finer = [lv for lv in finer
+                 if rung / ds[lv] <= cfg.max_resample_factor * (1 + 1e-6)]
+    return rng.choice(finer) if finer else None
 
 
 def _eval_seed(row: ManifestRow) -> int:
@@ -583,7 +731,7 @@ def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
     positions near a region edge fail. `collate_routing_batch` drops them, and
     the training loop's per-rung `trained on` line is where the total shows up.
 
-    The third element is `QueryFromWSI.reads_natively`: whether this rung came
+    The third element is `Render.reads_natively`: whether this rung came
     off a pyramid level at the requested mpp, or off a finer level that was
     then LANCZOS-resampled down. Carried per example rather than derived later,
     because it is a property of (slide pyramid, rung) and the camera is the only
@@ -596,14 +744,24 @@ def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
     Reached only through `RoutingHeadDataset.__getitem__`, for every split --
     the first draft of this file wrote this logic out twice, once for training
     and once for building a cached eval corpus; this is the one copy.
+
+    `cfg`'s read mode picks the level (`choose_read_level`), from the same
+    generator the capture draws from; with no `rng`, training draws the level
+    from the worker's `random`, which DataLoader seeds per worker. At the
+    default `pyramid` nothing is drawn, so the capture is what it always was.
     '''
-    cam = bank.camera_for(row.dataset, row.wsi_name, row.rung, native=native)
     if deterministic:
         rng = random.Random(_eval_seed(row))
+    level = None
+    if cfg.read_level != 'pyramid':
+        level = choose_read_level(bank._wsi_for(row.dataset, row.wsi_name),
+                                  row.rung, cfg, rng or random)
+    cam = bank.camera_for(row.dataset, row.wsi_name, row.rung, native=native,
+                          read_level=level)
     patch = cam.capture(row.x, row.y, rng=rng)
     if patch is None:
         return None
-    return patch, row.label, bool(cam.qfw.reads_natively)
+    return patch, row.label, bool(cam.reads_natively)
 
 
 # ══════════════════════════════════════════════════════════════════════════

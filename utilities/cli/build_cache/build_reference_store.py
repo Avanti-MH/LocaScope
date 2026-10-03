@@ -70,10 +70,14 @@ from _paths import encoder_tag, job_result_dir                      # noqa: E402
 ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
 
 
-def plan_label(levels) -> str:
-    """The rung plan: every native level, or the ones asked for. Part of the
-    draw's address, because an inherited chain spans exactly these rungs."""
-    return 'native' if levels is None else 'native-L' + '-'.join(map(str, sorted(levels)))
+def plan_label(levels, tile: int) -> str:
+    """The rung plan: every native level, or the ones asked for, for a plain
+    `tile` px camera. Part of the draw's address, because an inherited chain
+    spans exactly these rungs -- and the tile size is the camera's, no longer
+    the sampler's, so it is named here or two tile sizes would share one."""
+    from ReadGeometry import ReadSpec                             # noqa: PLC0415
+    base = 'native' if levels is None else 'native-L' + '-'.join(map(str, sorted(levels)))
+    return f'{base}-{ReadSpec(int(tile), int(tile)).key()}'
 
 
 def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
@@ -93,7 +97,7 @@ def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
             print('  no region survived the filters -- skipped', flush=True)
             return thin
 
-        rungs = [p for p in native_plans(slide, cfg.tile)
+        rungs = [p for p in native_plans(slide, args.tile)
                  if args.levels is None or p.level in args.levels]
         sampler = TileSampler(slide, mask, cfg, slide=stem)
         if args.dry_run:
@@ -138,7 +142,7 @@ def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
             meta = FS.Meta(
                 wsi_stem=stem, wsi_path=str(wsi_path), level=rung.level,
                 ds=float(rung.rung_ds), mpp=base_mpp * rung.rung_ds,
-                base_mpp=base_mpp, tile_size=cfg.tile, overlap=False,
+                base_mpp=base_mpp, tile_size=args.tile, overlap=False,
                 pooling=args.pooling, slots=tuple(fs.slots),
                 slot_layout=fs.slot_layout, dim=spec['dim'],
                 feat_hw=tuple(spec['feat_hw']), num_prefix=spec['num_prefix'],
@@ -215,10 +219,10 @@ def main() -> int:
     ap.add_argument('--device', default='cuda')
     args = ap.parse_args()
 
-    cfg = SamplerConfig(tile=args.tile, n_per_rung=args.n_target, seed=args.seed,
+    cfg = SamplerConfig(n_per_rung=args.n_target, seed=args.seed,
                         richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig(),
                         inherit=InheritConfig(stack_kind='F', share=args.inherit_share))
-    plan = plan_label(args.levels)
+    plan = plan_label(args.levels, args.tile)
     enc_tag = encoder_tag(args.encoder, args.head)
     out_root = Path(args.out) if args.out else (
         Cache.cache_root(args.features_cache_job or Cache.job_name('RefStore'),

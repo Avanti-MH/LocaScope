@@ -50,9 +50,11 @@ from _paths import setup_import_paths
 setup_import_paths()
 
 from PatchingLib import QueryPatchContainer                          # noqa: E402
-from QueryFromWSI import QueryFromWSI                                # noqa: E402
+from camera import sensor_size                                      # noqa: E402
+from SlideReader import SlideReader                                 # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names             # noqa: E402
 from TileSampler import OverlapConfig, SamplerConfig                  # noqa: E402
+from ReadGeometry import ReadSpec                                   # noqa: E402
 from TissueMaskConfig import add_mask_args, mask_cfg_from_args        # noqa: E402
 from KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
 from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot          # noqa: E402
@@ -85,20 +87,20 @@ def parse_stages(text: str) -> Tuple[int, ...]:
 # ── steps shared by every --stages combination ────────────────────────────────
 
 def crop_query(args):
-    qfwsi = QueryFromWSI(args.wsi, wh_ratio=args.ratio, MPixels=args.mpixels,
-                         mpp=args.mpp)
-    query_pil = qfwsi.crop(args.x, args.y)
-    if query_pil is None:
-        sys.exit('[FAIL] QueryFromWSI.crop returned None')
-    query_np = np.array(query_pil)
+    reader = SlideReader(args.wsi)
+    query_np = reader.read(args.x, args.y,
+                           ReadSpec(*sensor_size(args.ratio, args.mpixels)),
+                           args.mpp / reader.base_mpp)
+    if query_np is None:
+        sys.exit('[FAIL] SlideReader.read returned None (off the slide)')
     qc = QueryPatchContainer(query_np)
     qc.extract_all(args.tile, overlap=args.overlap)
     if qc.grid.grid_rows == 0 or qc.grid.grid_cols == 0:
         sys.exit('[FAIL] query too small for even one patch -- use a larger '
                  '--mpixels or a smaller --tile')
-    print(f'  query {query_pil.width}x{query_pil.height}  '
+    print(f'  query {query_np.shape[1]}x{query_np.shape[0]}  '
          f'patches={qc.grid.grid_rows}x{qc.grid.grid_cols}')
-    return qfwsi.wsi, query_np, qc
+    return reader.slide, query_np, qc
 
 
 def load_encoder(args, device):
@@ -113,10 +115,10 @@ def run_stage1(wsi, mask, query_qc, args, device) -> Tuple[float, object]:
     for why that sharing is the caller's job, not a guarantee of the class)."""
     cfg = KnnEstMppConfig(
         encoder=args.encoder, mask_cfg=mask_cfg_from_args(args),
-        sampler_cfg=SamplerConfig(tile=args.tile, n_per_rung=args.samples,
+        sampler_cfg=SamplerConfig(n_per_rung=args.samples,
                                   seed=args.seed, richness=REFERENCE_BANK_RICHNESS,
                                   overlap=OverlapConfig()),
-        k=args.k)
+        k=args.k, tile_size=args.tile)
     est = KnnEstMpp(cfg, device=device).build(wsi, mask=mask)
     result = est.estimate(query_qc)
     err_pct = abs(result.estimated_mpp - args.mpp) / args.mpp * 100

@@ -22,7 +22,7 @@ own docstring for the contrasting case, and why its `build(wsi)` is cheap.
 
 PROCEDURE (`estimate`)
 -----------------------
-1. Cut `query` into `cfg.sampler_cfg.tile` patches -- main patches only,
+1. Cut `query` into `cfg.tile_size` patches -- main patches only,
    `overlap=True` for coverage, unchanged from before.
 2. Encode every patch with the SAME encoder the reference bank was built
    from.
@@ -70,6 +70,8 @@ from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: 
                          TileSampler, native_plans)
 
 from StageInterface import EstMppResult                                 # noqa: E402
+from ReadGeometry import ReadSpec                                        # noqa: E402
+from SlideReader import SlideReader                                     # noqa: E402
 
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -117,14 +119,15 @@ class KnnEstMppConfig(IdentifiedConfig):
     `MASK_RECIPES['hest']`, named rather than the bare dataclass: `seg` has
     no default any more, because the old one was hsv without saying so.
 
-    `sampler_cfg` is `TileSampler.SamplerConfig` -- tile size, n per rung,
-    seed, richness caps/floors, overlap: everything that decides which tiles
-    the vote runs against, already hashed by its own `sampler_id()`. The
-    query side reads its tile size from here too (`sampler_cfg.tile`), not a
-    second field of its own -- reference tiles and query patches have to be
-    cut to the SAME size for the vote to compare like with like, and one
-    field that could disagree with a second is exactly the failure mode this
-    avoids.
+    `sampler_cfg` is `TileSampler.SamplerConfig` -- n per rung, seed,
+    richness caps/floors, overlap: everything that decides WHERE the
+    reference tiles are, already hashed by its own `sampler_id()`.
+
+    `tile_size` is the ONE size both sides are cut to: the reference bank's
+    camera (a plain `tile_size` px tile) and the query's patches. Reference
+    tiles and query patches have to be the same size for the vote to compare
+    like with like, and one field that could disagree with a second is
+    exactly the failure mode this avoids.
 
     Every field is identity -- a different mask or sampling recipe changes
     which tiles the vote sees -- so `NOT_IDENTITY` stays empty.
@@ -133,6 +136,7 @@ class KnnEstMppConfig(IdentifiedConfig):
     mask_cfg: TissueMaskConfig = field(default_factory=lambda: MASK_RECIPES['hest'])
     sampler_cfg: SamplerConfig = field(default_factory=_default_sampler_cfg)
     k: int = 5
+    tile_size: int = 256
 
 
 # ── result ───────────────────────────────────────────────────────────────────
@@ -254,14 +258,18 @@ class KnnEstMpp(IdentifiedBuild):
         if self.mask is None:
             self.mask = self.cfg.mask_cfg.build(self.wsi, self.device)
         self.sampler = TileSampler(self.wsi, self.mask, self.cfg.sampler_cfg)
-        self.sampler.sample(native_plans(self.wsi, self.cfg.sampler_cfg.tile))
+        self.sampler.sample(native_plans(self.wsi, self.cfg.tile_size))
         return self.sampler
 
     def _build_ref_features(self) -> torch.Tensor:
         '''Encode all sampled tiles; build the KnnClassifier.'''
         if self.sampler is None:
             self._build_samples()
-        images = self.sampler.materialise(self.wsi).images()
+        # Straight off the slide through SlideReader: the level rule, level px
+        # and filter every other read in the project uses. Native plans need
+        # no resampling; 'area' is the ladder's filter where one would.
+        images = SlideReader(self.wsi, resize='area').read_samples(
+            self.sampler, ReadSpec(self.cfg.tile_size, self.cfg.tile_size))
         self.ref_feats = self.encoder(images)               # [N, D]
         # mpp is derived here rather than carried on the tile. It was a copy
         # of `base_mpp * level_downsample` stored at sampling time, and a
@@ -291,7 +299,7 @@ class KnnEstMpp(IdentifiedBuild):
         if isinstance(query, (Image.Image, np.ndarray)):
             query = QueryPatchContainer(query)
         if query.grid is None:
-            query.extract_all(self.cfg.sampler_cfg.tile, overlap=overlap)
+            query.extract_all(self.cfg.tile_size, overlap=overlap)
         self.qc = query
         self.qfm = self.qc.to_features(self.encoder)
         self.query_feats = torch.stack(list(self.qfm.iter_main_features()))  # [M, D]

@@ -4,24 +4,79 @@
 '''
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Dict, Sequence
+
 import torch
 
 
+@dataclass
+class LayerTokens:
+    """What `encode_raw` returns when a head asked for encoder layers: the last
+    block's tokens (`last`, exactly what `encode_raw` returns otherwise) and the
+    requested blocks' layer tokens by absolute 0-based index. `Head` reads
+    `last` for the CLS and for a single-layer reduction, `layers` for a mix."""
+    last: torch.Tensor                     # [N, T, D]
+    layers: Dict[int, torch.Tensor]        # block -> [N, T, D]
+
+
 def encode_raw(encoder, patches: torch.Tensor, batch_size: int,
-               device) -> torch.Tensor:
+               device, layers: Sequence[int] = ()):
     '''FROZEN route. `patches` uint8 `[N, tile, tile, 3]` -> the encoder's
     UN-REDUCED exit, `[N, L, D]`: `tokens()` for a ViT, `spatial()` reshaped
-    for a CNN. Chunked, because `TileEncoder._run` is `@torch.no_grad()` and
-    returns to CPU -- there is no graph to keep alive, so chunking genuinely
-    bounds memory here (unlike `trunk_raw`, see there).'''
+    for a CNN, ON `device` -- the tokens are produced there and stay there.
+    Chunked, because `TileEncoder._run` is `@torch.no_grad()` -- there is no
+    graph to keep alive, so chunking bounds the forward's activations (unlike
+    `trunk_raw`, see there); the result is the batch the caller already chose.
+
+    `layers` (absolute 0-based blocks, the union every head in the call needs)
+    returns a `LayerTokens` instead, from ONE forward per chunk; empty -- the
+    default, and every caller before it existed -- returns the tensor as
+    before.'''
     kind = encoder.model_spec.kind
-    images = [p.numpy() for p in patches]
+    keep = lambda t: t                                        # noqa: E731
+    # The uint8 batch goes to the encoder as it is (one transform, on the
+    # card) and what comes back never leaves it: `keep` stops `_run`'s default
+    # `.cpu()`, which used to move every token to the host and `.to(device)`
+    # moved them straight back.
+    if layers:
+        if kind != 'tokens':
+            raise TypeError(f'encoder layers need a token model; this one is '
+                            f'{kind!r}')
+        last = encoder.depth - 1
+        want = sorted(set(int(i) for i in layers) | {last})
+        stacked = torch.cat([encoder.layer_tokens(patches[s:s + batch_size], want,
+                                                  reduce=keep)
+                             for s in range(0, len(patches), batch_size)]).to(device)
+        by_block = {b: stacked[:, k] for k, b in enumerate(want)}
+        return LayerTokens(last=by_block[last], layers=by_block)
     out = []
-    for start in range(0, len(images), batch_size):
-        batch = images[start:start + batch_size]
-        out.append(encoder.tokens(batch) if kind == 'tokens'
-                   else encoder.spatial(batch).flatten(2).transpose(1, 2))
+    for start in range(0, len(patches), batch_size):
+        batch = patches[start:start + batch_size]
+        out.append(encoder.tokens(batch, reduce=keep) if kind == 'tokens'
+                   else encoder.spatial(batch, reduce=keep).flatten(2).transpose(1, 2))
     return torch.cat(out).to(device)
+
+
+def check_layer_tokens(encoder, patches: torch.Tensor, n: int = 4) -> tuple:
+    """`((cos to tokens(), cos to the decoy), ok)` on `n` patches: the last
+    block of `layer_tokens` against `tokens()`, which it claims to equal, and
+    the block before the last against `tokens()`, which it must not.
+
+    Two paths through the same trunk (`forward_intermediates` against the
+    plain forward) that only agree if the prefix order and the final norm are
+    what `layer_tokens` says. A wrong one does not raise: a mix_ head trains on
+    whatever it is handed and reports a number. The decoy is what makes
+    agreement mean something -- a neighbouring block is close too, so the gate
+    is a margin over it, not a threshold."""
+    images = [p.numpy() for p in patches[:n]]
+    last = encoder.depth - 1
+    plain = encoder.tokens(images)
+    both = encoder.layer_tokens(images, [last - 1, last])
+    cos = lambda a, b: float(torch.nn.functional.cosine_similarity(  # noqa: E731
+        a.flatten(0, 1), b.flatten(0, 1), dim=-1).min())
+    same, decoy = cos(both[:, 1], plain), cos(both[:, 0], plain)
+    return (same, decoy), same > 0.999 and decoy < same - 0.01
 
 
 def normalise_patches(encoder, patches: torch.Tensor, device) -> torch.Tensor:

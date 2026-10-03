@@ -45,10 +45,11 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
         sys.path.insert(0, _p)
 
 from Store import PreTileStore                               # noqa: E402
-from TileSampler import centre_crop, degrade_resolution      # noqa: E402
+from TileSampler import centre_crop                          # noqa: E402
 from PatchingLib import PatchGrid, PatchInfo                  # noqa: E402
-from DsLadder import DsLadder                                 # noqa: E402
 from _paths import RESULT_DIR                                 # noqa: E402
+from ReadGeometry import ReadSpec                             # noqa: E402
+from SlideReader import SlideReader, degrade_resolution       # noqa: E402
 
 #: Local on-disk cache for tiles that do NOT come from a tracked `TileSampler`
 #: extraction -- `CStack`'s descendant reads. NOT `PreTileStore`: `PreTileMeta`
@@ -133,23 +134,22 @@ def _read_wsi_tile(wsi, x: int, y: int, ds: float, tile: int, *,
     (`_cache_put`) -- the only IO this project has for a tile whose position
     was not chosen by a `TileSampler` run.
 
-    SAME READ+RESIZE `Sample.materialise` USES, NOT A SECOND SPELLING
-    =====================================================================
-    A one-rung `DsLadder` resolves which pyramid LEVEL to read `ds` at and
-    what `read_size` that level needs (`TileSampler.py:1066`'s
-    `reader.read_region_rgb` + `cv2.INTER_AREA` resize) -- reusing it here
-    rather than re-deriving the level/shrink arithmetic is what keeps a
-    'C' descendant tile and an 'F' tile at the same `ds` reading the pyramid
-    the same way.
+    THE SAME READ EVERY PRE-TILE GOT, NOT A SECOND SPELLING
+    =========================================================
+    `SlideReader(wsi, resize='area').read` of a plain tile at `ds`: the level
+    rule, the level px and the filter `extract_pretiles` read the pre-tiles
+    with -- which is what keeps a 'C' descendant tile and an 'F' tile at the
+    same `ds` reading the pyramid the same way.
     """
     cached = _cache_get(cache_root, wsi_stem, x, y, ds, tile)
     if cached is not None:
         return cached
-    plan = DsLadder(rungs=(float(ds),)).plan_for(wsi, tile)[0]
-    image = wsi.read_region_rgb((int(x), int(y)), plan.level,
-                                 (plan.read_size, plan.read_size))
-    if image.shape[0] != tile:
-        image = cv2.resize(image, (tile, tile), interpolation=cv2.INTER_AREA)
+    image = SlideReader(wsi, resize='area').read(int(x), int(y),
+                                                 ReadSpec(int(tile), int(tile)),
+                                                 float(ds))
+    if image is None:
+        raise ValueError(f'{wsi_stem} ds {ds:g} ({x}, {y}): a {tile} px tile '
+                         f'there runs off the slide')
     _cache_put(cache_root, wsi_stem, x, y, ds, tile, image)
     return image
 
@@ -386,7 +386,7 @@ class RStack:
     quantity the analysis is about. Deriving 'R' from the chain makes the
     centres identical by construction.
 
-    `degrade_resolution` lives in `TileSampler` and is called from both places
+    `degrade_resolution` lives in `SlideReader` and is called from both places
     for the same reason: two spellings of the shrink-and-grow would make a
     survival number a statement about which resampling filter each half used.
 

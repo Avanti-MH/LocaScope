@@ -14,7 +14,7 @@ from typing import Tuple
 
 @dataclass
 class DomainGapConfig:
-    # ── Source (query crop shape, consumed by QueryFromWSI) ───────────────────
+    # ── Source (sensor shape, camera.sensor_size) ─────────────────────────────
     wh_ratio: str = '4:3'
     MPixels: float = 12.0
     query_mpp: float = 0.25

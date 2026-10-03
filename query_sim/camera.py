@@ -1,225 +1,264 @@
-"""Camera — an imperfect microscope on top of a WSI.
+"""Render — an imperfect microscope's rendering of a WSI.
 
-    QueryFromWSI  = the slide under an ideal objective (raw crop)
-    Camera        = the slide seen through THIS microscope (crop + augment)
+    SlideReader = the slide under an ideal objective (raw read)
+    Render      = the slide seen through THIS microscope (read + domain gap)
 
-Different `cfg` = different camera (vignette strength, colour temp, distortion,
-noise floor ...). Different `seed` = different random exposures.
+Different `cfg` = different microscope (vignette strength, colour temp,
+distortion, noise floor ...). Different `seed` = different random exposures.
+The instance is called `camera` everywhere it is used.
 
-    cam = Camera(wsi_or_path, cfg=DomainGapConfig(), mask=mask, seed=42)
+    reader = SlideReader(wsi)
+    camera = Render(reader, cfg=DomainGapConfig(), seed=42)
 
-    # Explicit position (demo / benchmark)
-    img         = cam.capture(x, y)              # np.ndarray | None
-    img, params = cam.capture_with_gt(x, y)      # (np.ndarray, dict) | (None, None)
+    img         = camera.capture(x, y)            # np.ndarray | None
+    img, params = camera.capture_with_gt(x, y)    # (np.ndarray, dict) | (None, None)
+    camera.spec                                   # ReadSpec: what a sampler
+                                                  # needs to place this camera
+    camera.at(4.0)                                # the same microscope through
+                                                  # another objective (ds 4)
 
-    # Random exposures via mask region-first sampling
-    for shot in cam:                             # infinite iterator (caller breaks)
-        shot.image, shot.gt_x, shot.gt_y, shot.params
+A Render decides what a FoV LOOKS like: the domain gap, its reproducibility,
+and the ground truth that inverts its geometry (`output_to_level0`). It reads
+nothing itself -- the pixels come from its `SlideReader`, at its spec -- and
+knows no mask. WHERE the FoVs are is `generator.FovSupply(camera, mask, ...)`.
+A read with no effects is not a renderer's job: `reader.read(...)` (reference
+tiles, pre-tiles, support tiles; `tile_spec`).
+
+MAGNIFICATION IS A DOWNSAMPLE. A Render is built at `ds` (relative to the
+slide's own level 0) or, failing that, at `cfg.query_mpp / base_mpp`, and is
+at that one magnification for life -- `rect_w_l0`, `spec` and
+`output_to_level0` all depend on it. Another magnification is another
+objective on the same microscope: `camera.at(ds)`, which shares the reader
+and the config and is cached, so asking twice is one Render.
+
+HISTORY. This was `Camera` until 2026-10-03, which read through
+`QueryFromWSI` and `Render.py`; the reading is `SlideReader`'s now, and
+`diag_read_exp.py` checked every flow pixel-identical before the move.
 """
 
 from __future__ import annotations
 
+import hashlib
+import math
 import os
 import random
 import sys
-from dataclasses import dataclass
-from typing import Iterator, Optional, Tuple, Union
+from dataclasses import dataclass, replace
+from typing import Dict, Optional, Tuple
 
 import numpy as np
-import openslide
 
-# utilities/ so TissueMask is importable when Camera is used alone
+# utilities/ so ReadGeometry and SlideReader import when this is used alone
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _UTILITIES = os.path.abspath(os.path.join(_HERE, '..', 'utilities'))
 if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 
-from TissueMask import TissueMask   # noqa: E402
+from config      import DomainGapConfig                   # noqa: E402
+from pipeline    import simulate_with_gt, SENSOR_MARGIN   # noqa: E402
+from ReadGeometry import FovGeometry, ReadSpec           # noqa: E402
+from SafeSlide   import SafeSlide                        # noqa: E402
+from SlideReader import SlideReader                      # noqa: E402
 
-from config           import DomainGapConfig      # noqa: E402
-from pipeline         import simulate_with_gt, SENSOR_MARGIN   # noqa: E402
-from source.wsi_query import QueryFromWSI         # noqa: E402
+
+def sensor_size(wh_ratio: str, MPixels: float) -> Tuple[int, int]:
+    """`(output_w, output_h)` in px for an aspect ratio and a pixel count --
+    the sensor a Render produces. One definition, so a sampler placing for a
+    camera and the camera agree on its size."""
+    w_r, h_r = (int(v) for v in wh_ratio.split(':'))
+    factor = (MPixels * 1e6 / (w_r * h_r)) ** 0.5
+    return int(factor * w_r), int(factor * h_r)
+
+
+def rotates_for(cfg: DomainGapConfig, rotation: Optional[float] = None) -> bool:
+    """Will an exposure under `cfg` turn the slide at all? Decided before the
+    read, from what is fixed: an explicit `rotation`, else every angle the cfg
+    could draw. Any jitter means the angle is unknown, so the answer is yes.
+    Conservative on purpose: saying "no" when the shot does rotate would crop
+    content away; saying "yes" when it does not only costs the wider read."""
+    if cfg.angle_jitter_deg:
+        return True
+    if rotation is not None:
+        return float(rotation) % 360.0 != 0.0
+    return any(float(a) % 360.0 != 0.0 for a in cfg.rotation_choices)
+
+
+def render_spec(cfg: DomainGapConfig, sensor: Tuple[int, int]) -> ReadSpec:
+    """The `ReadSpec` a renderer with this domain gap and this sensor reads:
+    what a sampler needs to place it, before any slide is open."""
+    return ReadSpec(int(sensor[0]), int(sensor[1]), rotates=rotates_for(cfg),
+                    margin_out=SENSOR_MARGIN)
+
+
+def tile_spec(tile: int, margin_out: int = 0) -> ReadSpec:
+    """A plain `tile x tile` read, straight off the slide: reference tiles,
+    support tiles, and with `margin_out` a pre-tile around its tile."""
+    return ReadSpec(int(tile), int(tile), rotates=False, margin_out=int(margin_out))
 
 
 @dataclass
 class CameraShot:
     image:  np.ndarray   # uint8 RGB, augmented
-    gt_x:   int          # level-0 top-left of the raw crop
+    gt_x:   int          # level-0 top-left of the FoV rectangle
     gt_y:   int
     params: dict         # augment values used for THIS shot
+    # Filled only by `generator.FovSupply`, which knows where the FoV came
+    # from; None for a shot built from a bare position.
+    bucket:         Optional[str]   = None   # richness bucket, e.g. 'bg30_50'
+    fov_background: Optional[float] = None   # the FoV's background fraction
+    origin:         Optional[str]   = None   # 'grid' | 'jitter'
+    overlap_max:    Optional[float] = None   # largest overlap with another FoV
+    draw_index:     Optional[int]   = None   # which sampler draw placed it
+    pass_index:     Optional[int]   = None   # 0 = first time this FoV is shown,
+                                             # k = its k-th repeat (fresh gap)
 
 
-class Camera:
-    def __init__(
-        self,
-        wsi_or_path:  Union[str, openslide.OpenSlide],
-        cfg:          Optional[DomainGapConfig]   = None,
-        mask:         Optional[TissueMask] = None,
-        seed:         Optional[int]                = None,
-        tissue_ratio: float                        = 0.3,
-        region_protrusion_ratio: float             = 0.5,
-        max_pos_tries: int                        = 20,
-        max_consecutive_fail: int                 = 50,
-    ):
+class Render:
+    def __init__(self, reader: SlideReader,
+                 cfg: Optional[DomainGapConfig] = None, *,
+                 ds: Optional[float] = None, seed: Optional[int] = None,
+                 read_level: Optional[int] = None):
         """
-        `region_protrusion_ratio` (0.0 - 1.0): how far the bounding square is
-        allowed to protrude past the tissue region on each side, as a fraction
-        of the bounding-square padding (padding = (square - rect) / 2).
-          0.0 = the whole bounding square must lie inside the region (strict)
-          0.5 = up to half the padding may spill into non-tissue / blank glass
-          1.0 = only the FoV rect itself needs to be inside the region
-        Non-rotation captures (0/90/180/270 are lossless) don't sample from the
-        padding at all, so protrusion is free in that mode. Non-90-degree
-        rotations pull from padding — protruded corners may show non-tissue.
+        `reader` is the slide's `SlideReader`; its filter is the camera's
+        ('lanczos' for a microscope). `seed` seeds the sequential draw of
+        `capture` when no per-call `rng` is given.
 
-        `max_consecutive_fail`: stop iterating after this many rejected draws
-        in a row. Counted since the last successful shot, and reset by every
-        yield, so it measures "stuck", not "slow". 0 disables the fuse and
-        restores the old unbounded loop. See __iter__ for why this exists.
+        `ds` is the magnification (downsample from level 0); None takes it
+        from `cfg.query_mpp`. Given, it wins, and the config the augment chain
+        sees is told the matching mpp so `effective_mpp` is recorded right.
+
+        `read_level` forces the pyramid level the read comes from
+        (`SlideReader.level_of` checks it is not coarser than ds); None keeps
+        `level_for`. Like `ds` it is a constructor argument and not a
+        `DomainGapConfig` field on purpose: that config is hashed into run and
+        corpus identities, and a new field would move every one of them.
         """
-        if not 0.0 <= region_protrusion_ratio <= 1.0:
-            raise ValueError(f'region_protrusion_ratio must be in [0, 1]; got {region_protrusion_ratio}')
-
-        self.cfg = cfg or DomainGapConfig()
-        self.qfw = QueryFromWSI(
-            wsi_or_path,
-            wh_ratio = self.cfg.wh_ratio,
-            MPixels  = self.cfg.MPixels,
-            mpp      = self.cfg.query_mpp,
-        )
-        self.mask = mask
-        self.tissue_ratio            = tissue_ratio
-        self.region_protrusion_ratio = region_protrusion_ratio
-        self.max_pos_tries           = max_pos_tries
-        self.max_consecutive_fail    = int(max_consecutive_fail)
-
-        # Bounding-square padding in level-0 (used for _sample_position + mask
-        # fit-check so the square read never falls off the WSI or region).
-        self._pad_x_l0 = (self.qfw.bounding_square_side_l0 - self.qfw.rect_w_l0) // 2
-        self._pad_y_l0 = (self.qfw.bounding_square_side_l0 - self.qfw.rect_h_l0) // 2
-
-        # Padding that must remain INSIDE the region (relaxed by protrusion_ratio).
-        # The rest may spill past the region edge into (usually non-tissue) space.
-        self._req_pad_x_l0 = int(self._pad_x_l0 * (1 - region_protrusion_ratio))
-        self._req_pad_y_l0 = int(self._pad_y_l0 * (1 - region_protrusion_ratio))
-
+        if not isinstance(reader, SlideReader):
+            raise TypeError(f'Render takes a SlideReader, got {type(reader).__name__}'
+                            f' (SlideReader(wsi) wraps a SafeSlide or a path)')
+        cfg = cfg or DomainGapConfig()
+        self.reader = reader
+        self.output_w, self.output_h = sensor_size(cfg.wh_ratio, cfg.MPixels)
+        if ds is None:
+            self.ds = float(cfg.query_mpp) / reader.base_mpp
+            self.cfg = cfg
+        else:
+            self.ds = float(ds)
+            self.cfg = replace(cfg, query_mpp=self.ds * reader.base_mpp)
+        self.read_level = read_level
+        self.level = reader.level_of(self.ds, read_level)
+        self.geometry = FovGeometry.of(self.output_w, self.output_h, self.ds)
+        self._seed = seed
+        # Every objective of this microscope, by ds -- shared by all of them,
+        # so `a.at(4).at(1)` is `a` and nothing is built twice.
+        self._objectives: Dict[float, 'Render'] = {self.ds: self}
         self._py_rng = random.Random(seed)
-        self._np_rng = np.random.default_rng(seed)
-        # There used to be an `np.random.seed(seed)` here, for "augment fns
-        # still using np.random.*". There are none left as of 2026-09-16:
-        # `apply_stage_shift` now takes the offsets `_sample_params` drew off
-        # `_py_rng`, and `apply_noise` takes a seed drawn the same way, so the
-        # whole augment chain is downstream of this object's own generators.
-        #
-        # Removing it matters beyond tidiness. That line made a CONSTRUCTOR
-        # mutate process-global state, so the last Camera built decided the
-        # noise of every other one, and a caller that built several (a bank of
-        # one Camera per rung, say) or forked DataLoader workers got neither
-        # reproducibility nor independence. It also silently re-seeded numpy
-        # for every other library in the process.
+        # There used to be an `np.random.seed(seed)` in the constructor, for
+        # augment fns using np.random.*. There are none left (2026-09-16): the
+        # whole augment chain draws off this object's own generators. That
+        # line made a CONSTRUCTOR mutate process-global state, so the last one
+        # built decided the noise of every other, and forked DataLoader
+        # workers got neither reproducibility nor independence.
 
-    # ── Attribute forwards to QFW ────────────────────────────────────────────
-    @property
-    def wsi(self) -> openslide.OpenSlide:
-        return self.qfw.wsi
+    # ── what it is ─────────────────────────────────────────────────────────
 
     @property
-    def output_w(self) -> int:
-        return self.qfw.output_w
+    def spec(self) -> ReadSpec:
+        """What a sampler needs to place this camera: its sensor, whether it
+        rotates, the sensor margin it reads when it does not."""
+        return ReadSpec(self.output_w, self.output_h,
+                        rotates=rotates_for(self.cfg), margin_out=SENSOR_MARGIN)
 
     @property
-    def output_h(self) -> int:
-        return self.qfw.output_h
+    def wsi(self) -> SafeSlide:
+        return self.reader.slide
+
+    @property
+    def base_mpp(self) -> float:
+        return self.reader.base_mpp
 
     @property
     def rect_w_l0(self) -> int:
-        return self.qfw.rect_w_l0
+        return self.geometry.rect_w_l0
 
     @property
     def rect_h_l0(self) -> int:
-        return self.qfw.rect_h_l0
+        return self.geometry.rect_h_l0
 
     @property
     def bounding_square_side_l0(self) -> int:
-        return self.qfw.bounding_square_side_l0
+        return self.geometry.square_l0
 
     @property
-    def required_region_side_l0(self) -> int:
-        """Minimum side length a tissue region must have to be a valid host.
+    def reads_natively(self) -> bool:
+        """Does this magnification come off its level with no resampling?
+        (`SlideReader.native`; the routing heads split accuracy on it.)"""
+        return self.reader.native(self.ds, self.read_level)
 
-        = rect_side + 2 * required_padding, i.e. FoV + as much padding as we
-        insist must stay inside the region. Used by `generator.camera_mask`
-        as the side a region must reach (`TissueMask.patchable`).
-        """
-        req_w = self.qfw.rect_w_l0 + 2 * self._req_pad_x_l0
-        req_h = self.qfw.rect_h_l0 + 2 * self._req_pad_y_l0
-        return max(req_w, req_h)
+    def at(self, ds: float) -> 'Render':
+        """This microscope through another objective: the same reader, config
+        and filter at downsample `ds`. Cached -- the same ds is the same
+        Render, from whichever objective it is asked.
 
-    # ── Explicit-position capture ────────────────────────────────────────────
-    # `rotation` optional override: caller decides angle for a single shot; the
-    # cfg-driven rotation still governs `__iter__` (random exposures).
-    def capture(
-        self, x: int, y: int, rotation: Optional[float] = None,
-        rng: Optional[random.Random] = None,
-    ) -> Optional[np.ndarray]:
-        img, _ = self.capture_with_gt(x, y, rotation=rotation, rng=rng)
+        Each objective has its own generator, seeded from this microscope's
+        seed and the ds (None stays None), so what one objective shoots does
+        not depend on what another shot first. A forced `read_level` is not
+        carried over: it names a level for one magnification."""
+        ds = float(ds)
+        cam = self._objectives.get(ds)
+        if cam is None:
+            seed = (None if self._seed is None else int(hashlib.sha256(
+                f'{self._seed}|{ds!r}'.encode()).hexdigest()[:8], 16))
+            cam = Render(self.reader, self.cfg, ds=ds, seed=seed)
+            cam._seed = self._seed
+            cam._objectives = self._objectives
+            self._objectives[ds] = cam
+        return cam
+
+    # ── the exposure ───────────────────────────────────────────────────────
+    # `rotation` optional override: caller decides angle for a single shot;
+    # without it the cfg draws one.
+
+    def capture(self, x: int, y: int, rotation: Optional[float] = None,
+                rng: Optional[random.Random] = None, stack: str = 'F'
+                ) -> Optional[np.ndarray]:
+        img, _ = self.capture_with_gt(x, y, rotation=rotation, rng=rng, stack=stack)
         return img
 
-    def _rotates(self, rotation: Optional[float]) -> bool:
-        """Will this exposure turn the slide at all?
+    def capture_with_gt(self, x: int, y: int, rotation: Optional[float] = None,
+                        rng: Optional[random.Random] = None, stack: str = 'F'
+                        ) -> Tuple[Optional[np.ndarray], Optional[dict]]:
+        """The read at (x, y) -- the FoV rectangle's level-0 top-left -- then
+        the domain gap, cropped to the sensor. `(None, None)` off the slide.
 
-        Decided BEFORE the read, so it cannot look at the sampled `rot_deg` --
-        `_sample_params` has not run yet, and moving it earlier would only
-        replace one ordering question with another. It answers from what is
-        already fixed: an explicit `rotation` argument if there is one,
-        otherwise every angle the cfg could draw. Any jitter at all means the
-        angle is unknown, so the answer is yes.
+        Whether the read is the bounding square is decided BEFORE it, from
+        what is fixed (`rotates_for`): headroom for rotating about the FoV
+        centre, 2.12x the rectangle's area. A shot that does not rotate reads
+        the rectangle and the sensor margin only -- the margin is real:
+        defocus, chromatic shift and distortion read a neighbourhood.
 
-        Conservative on purpose. Saying "no" when the shot does rotate would
-        crop content away; saying "yes" when it does not only costs the wider
-        read, which is what every shot paid before.
-        """
-        if self.cfg.angle_jitter_deg:
-            return True
-        if rotation is not None:
-            return float(rotation) % 360.0 != 0.0
-        return any(float(a) % 360.0 != 0.0 for a in self.cfg.rotation_choices)
+        `rng`, if given, is used INSTEAD of this camera's own generator for
+        this one call. For a caller that needs the SAME (x, y) to always render
+        the SAME photo regardless of call order (`training/MppRoutingHead/
+        spec.md`, "Camera: train vs eval"): pass `rng=random.Random(derived
+        from the sample's own identity)` instead of building a fresh Render.
 
-    def capture_with_gt(
-        self, x: int, y: int, rotation: Optional[float] = None,
-        rng: Optional[random.Random] = None,
-    ) -> Tuple[Optional[np.ndarray], Optional[dict]]:
-        """`rng`, if given, is used INSTEAD of `self._py_rng` for this one
-        call's augmentation draw -- `self._py_rng`'s own sequence (and every
-        existing caller, none of which passes `rng`) is untouched.
-
-        Exists for a caller that needs the SAME (x, y) to always render the
-        SAME augmented photo regardless of call order -- `self._py_rng`
-        advances with every capture, so two calls on one `Camera` never repeat
-        a draw by construction, which is right for building a corpus and
-        wrong for reproducibly re-scoring one (`training/MppRoutingHead/
-        spec.md`'s "Camera: train vs eval"): pass
-        `rng=random.Random(derived_from_this_samples_own_identity)` there
-        instead of constructing a fresh `Camera` (and reopening the WSI) per
-        sample.
-        """
-        # The bounding square is headroom for rotating about the FoV centre --
-        # side = the rect's diagonal, so 2.12x its area. A shot that does not
-        # rotate needs none of it: the rect plus the sensor margin is the whole
-        # input, and both the read and every op before the crop shrink by that
-        # factor. bench_offgrid_score pins rotation at 0 for all 1089
-        # displacements of a grid point, so this is its entire input volume.
-        if self._rotates(rotation):
-            raw = self.qfw.crop_bounding_square(x, y)
-        else:
-            raw = self.qfw.crop_padded(x, y, margin=SENSOR_MARGIN)
+        `stack='R'` reads the ds 1 field and degrades it to this ds
+        (`SlideReader.read`)."""
+        spec = ReadSpec(self.output_w, self.output_h,
+                        rotates=rotates_for(self.cfg, rotation),
+                        margin_out=SENSOR_MARGIN)
+        raw = self.reader.read(x, y, spec, self.ds, stack=stack,
+                               level=self.read_level)
         if raw is None:
             return None, None
-        arr, params = simulate_with_gt(
-            raw, cfg=self.cfg, rng=rng or self._py_rng, rotation=rotation,
-            output_wh=(self.qfw.output_w, self.qfw.output_h),
-        )
-        return arr, params
+        # The centre crop to the sensor happens inside `pipeline._apply_params`,
+        # straight after the scene geometry: the vignette's falloff and the
+        # lens distortion's normalisation are measured against the frame they
+        # are handed, and that has to be the sensor, not the bounding square.
+        return simulate_with_gt(raw, cfg=self.cfg, rng=rng or self._py_rng,
+                                rotation=rotation,
+                                output_wh=(self.output_w, self.output_h))
 
     # ── Where did this output pixel come from? ───────────────────────────────
 
@@ -242,186 +281,44 @@ class Camera:
             (du,dv)= (u,v) - output centre     offset in the ROTATED frame
             source = C + (s / scale) * R(-rot) . (du, dv)
 
-        Exact for rot in {0, 90, 180, 270}, which is what this experiment uses;
-        `angle_jitter`, lens distortion and the mechanical STAGE SHIFT are NOT
-        inverted here, so a caller that leaves them on gets a position off by
-        their magnitude rather than an error.
-
-        The stage shift is not inverted ON PURPOSE, unlike the other two,
-        which are simply unimplemented: it models the jitter a real operator
-        cannot see, so a localiser is meant to eat it as irreducible error
-        rather than undo it. `params` records `stage_shift_dx/dy` anyway --
-        recorded so the same seed reproduces the same shot, not so anyone can
-        correct a coordinate with it. It went unlisted here until 2026-09-16,
-        which read as an exhaustive list that happened to omit one: a caller
-        who zeroed `angle_jitter_deg` and the distortion range would have
-        concluded this returns an exact answer while `stage_shift_max` was
-        still at its default 3. test_camera_output_to_level0.py pins the whole thing against
-        pixels rather than against this derivation -- the sign convention of
-        `R(-rot)` is the part most likely to be wrong, and a sign error is
-        invisible at 0 and 180.
+        Exact for rot in {0, 90, 180, 270}; `angle_jitter`, lens distortion
+        and the mechanical STAGE SHIFT are NOT inverted, so a caller that
+        leaves them on gets a position off by their magnitude rather than an
+        error. The stage shift is not inverted ON PURPOSE: it models the
+        jitter a real operator cannot see, so a localiser is meant to eat it
+        as irreducible error. `params` records it so the same seed reproduces
+        the same shot, not so anyone can correct a coordinate with it.
+        test_camera.py (section `map`) pins the whole thing against pixels
+        rather than against this derivation -- a sign error in R is invisible
+        at 0 and 180.
         """
-        import math
-
-        q = self.qfw
-        cx = float(x) + q.rect_w_l0 / 2.0
-        cy = float(y) + q.rect_h_l0 / 2.0
-        s = (q.rect_w_l0 / float(q.output_w)) / float(scale)
-
-        du = float(u) - q.output_w / 2.0
-        dv = float(v) - q.output_h / 2.0
-
+        cx = float(x) + self.rect_w_l0 / 2.0
+        cy = float(y) + self.rect_h_l0 / 2.0
+        s = (self.rect_w_l0 / float(self.output_w)) / float(scale)
+        du = float(u) - self.output_w / 2.0
+        dv = float(v) - self.output_h / 2.0
         th = math.radians(float(rot_deg))
         cos_t, sin_t = math.cos(th), math.sin(th)
         # R(+rot), not R(-rot), even though this inverts the augment's rotation.
         # apply_rotation calls positive angles counter-clockwise per cv2, but
         # image y points DOWN, so inverting in that frame flips one sign back and
-        # the two cancel. Determined by test_camera_output_to_level0.py, not by
-        # reading cv2's docs: the first version used R(-rot) and lost to the
-        # point-reflected candidate 40/40 times at 90 and 270 degrees (MAD 5.2 vs
-        # 47.5) while passing 0 and 180, where the two forms coincide.
+        # the two cancel. Determined by test_camera.py (section `map`): the first
+        # version used R(-rot) and lost to the point-reflected candidate 40/40
+        # times at 90 and 270 degrees while passing 0 and 180.
         du_s = cos_t * du - sin_t * dv
         dv_s = sin_t * du + cos_t * dv
-
         return cx + s * du_s, cy + s * dv_s
 
-    def output_tile_origins(
-        self, x: int, y: int, tile_size: int,
-        rot_deg: float = 0.0, scale: float = 1.0,
-    ):
+    def output_tile_origins(self, x: int, y: int, tile_size: int,
+                            rot_deg: float = 0.0, scale: float = 1.0):
         """Every whole `tile_size` tile of one shot, with its level-0 centre.
-
-        Yields (row, col, u, v, cx_l0, cy_l0) where (u, v) is the tile's
-        top-left in output pixels. Partial tiles at the right/bottom edge are
-        skipped: a 1440x1024 output at 256 gives a clean 5x4.
-        """
-        q = self.qfw
-        for r in range(q.output_h // tile_size):
-            for c in range(q.output_w // tile_size):
+        Yields (row, col, u, v, cx_l0, cy_l0), (u, v) the tile's top-left in
+        output px. Partial tiles at the right/bottom edge are skipped: a
+        1440x1024 output at 256 gives a clean 5x4."""
+        for r in range(self.output_h // tile_size):
+            for c in range(self.output_w // tile_size):
                 u, v = c * tile_size, r * tile_size
                 cx, cy = self.output_to_level0(
                     x, y, u + tile_size / 2.0, v + tile_size / 2.0,
                     rot_deg=rot_deg, scale=scale)
                 yield r, c, u, v, cx, cy
-
-    # The centre crop used to live here and run after the whole augment chain.
-    # It now happens inside `pipeline._apply_params`, straight after the scene
-    # geometry, because the ops that follow measure their geometry against the
-    # frame they are handed -- the vignette's falloff and the lens distortion's
-    # normalisation were both being taken from the oversized bounding square
-    # rather than from the sensor. Camera passes the sensor size as `output_wh`
-    # and receives an image already cropped to it.
-    #
-    # Every crop involved is still centred on the FoV centre, so
-    # `output_to_level0` below is unaffected.
-
-    # ── Random-exposure iterator (requires mask) ─────────────────────────────
-    def __iter__(self) -> Iterator[CameraShot]:
-        """Yield shots forever, unless sampling gets stuck.
-
-        The two rejection tests here can both be unsatisfiable rather than
-        merely unlucky, and the loop used to have no way to say so. On a coarse
-        level the FoV rect grows with the level (4x per level on a 4x pyramid),
-        until a level-0 window of 23042x16385 is asked to be tissue_ratio
-        tissue on a slide that is 16 percent tissue overall -- no position can
-        pass, and one BRACS camera spun for hours before the job was killed.
-        The caller's own skip path could not fire either: it tests `not
-        records` AFTER the for loop, and the for loop only ends by break, which
-        needs a success. Both exits were shut at once.
-
-        So the fuse RETURNS rather than raises: a return ends the generator,
-        the caller's for loop finishes normally, and its existing `if not
-        records` branch writes skips.csv and draws the diagnosis figure with no
-        change on that side.
-
-        The counters reset on every yield, so this measures being stuck, not
-        being slow -- a camera that is producing shots can run as long as it
-        likes. They are kept separate because they fail for unrelated reasons:
-        pos_fail is about tissue content, crop_fail is about the bounding
-        square hitting the WSI edge, and the reason has to say which.
-        """
-        if self.mask is None:
-            raise RuntimeError(
-                'Camera.__iter__ needs a mask. Set cam.mask = generator.camera_mask('
-                'cam, generator.base_mask(cam.wsi, masks)) before iterating.'
-            )
-        if not self.mask.tissue_regions:
-            raise RuntimeError(
-                f'Mask has no usable tissue regions for a {self.rect_w_l0}x{self.rect_h_l0} '
-                f'level-0 rect. Reduce MPixels/mpp, or check mask prep.'
-            )
-
-        pos_fail = 0
-        crop_fail = 0
-        WARN_EVERY = 20   # every N failed retries between yields, print a warn
-        while True:
-            pos = self._sample_position()
-            if pos is None:
-                pos_fail += 1
-                if pos_fail % WARN_EVERY == 0:
-                    print(f'  [Camera warn] _sample_position None x{pos_fail} '
-                          f'(no (x,y) passing region+has_tissue in {self.max_pos_tries} tries)',
-                          flush=True)
-                if self.max_consecutive_fail and pos_fail >= self.max_consecutive_fail:
-                    print(f'  [Camera] GIVE UP after {pos_fail} consecutive position '
-                          f'failures: no (x,y) in {len(self.mask.tissue_regions)} region(s) '
-                          f'reaches tissue_ratio={self.tissue_ratio} with a '
-                          f'{self.qfw.rect_w_l0}x{self.qfw.rect_h_l0} level-0 rect',
-                          flush=True)
-                    return
-                continue
-            x, y = pos
-            # Same rule as capture_with_gt: the square is only read when the
-            # exposure rotates. `_sample_position` still reserves the square's
-            # padding either way, which merely rejects a few positions that the
-            # narrower read could have used -- conservative, never wrong.
-            if self._rotates(None):
-                raw = self.qfw.crop_bounding_square(x, y)
-            else:
-                raw = self.qfw.crop_padded(x, y, margin=SENSOR_MARGIN)
-            if raw is None:
-                crop_fail += 1
-                if crop_fail % WARN_EVERY == 0:
-                    print(f'  [Camera warn] read out-of-WSI x{crop_fail} '
-                          f'(FoV read hitting WSI edge at last sampled (x,y))',
-                          flush=True)
-                if self.max_consecutive_fail and crop_fail >= self.max_consecutive_fail:
-                    print(f'  [Camera] GIVE UP after {crop_fail} consecutive out-of-WSI '
-                          f'crops: every accepted (x,y) puts a '
-                          f'{self.qfw.bounding_square_side_l0}px bounding square off the '
-                          f'WSI edge', flush=True)
-                    return
-                continue
-            arr, params = simulate_with_gt(
-                raw, cfg=self.cfg, rng=self._py_rng,
-                output_wh=(self.qfw.output_w, self.qfw.output_h))
-            pos_fail = 0
-            crop_fail = 0
-            yield CameraShot(
-                image  = arr,
-                gt_x   = x,
-                gt_y   = y,
-                params = params,
-            )
-
-    # ── Region-first sampling (same pattern as TileSampler._sample_level) ────
-    # (x, y) is the ORIGINAL FoV top-left; sampling leaves
-    # (1 - region_protrusion_ratio) of the bounding-square padding on every side
-    # inside the region so the square read still fits mostly within tissue.
-    # The FoV rect itself is still gated by has_tissue_l0.
-    def _sample_position(self) -> Optional[Tuple[int, int]]:
-        rw, rh = self.qfw.rect_w_l0, self.qfw.rect_h_l0
-        rpx, rpy = self._req_pad_x_l0, self._req_pad_y_l0
-        for _ in range(self.max_pos_tries):
-            region = self._np_rng.choice(self.mask.tissue_regions)
-            lo_x = region.x + rpx
-            hi_x = region.x + region.w - rw - rpx + 1
-            lo_y = region.y + rpy
-            hi_y = region.y + region.h - rh - rpy + 1
-            if hi_x <= lo_x or hi_y <= lo_y:
-                continue   # region too tight even under the relaxed check
-            x = int(self._np_rng.integers(lo_x, hi_x))
-            y = int(self._np_rng.integers(lo_y, hi_y))
-            if self.mask.has_tissue_l0(x, y, rw, rh, self.tissue_ratio):
-                return x, y
-        return None

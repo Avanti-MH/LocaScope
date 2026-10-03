@@ -90,12 +90,13 @@ from Cache import find, read_meta, wsi_stem_of                    # noqa: E402
 from SafeSlide import SafeSlide                                    # noqa: E402
 from TileSampler import (RichnessConfig,                            # noqa: E402
                          SamplerConfig, TileSampler, pre_tile_px)
+from SlideReader import SlideReader                                # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker              # noqa: E402
 
 from DsLadder import DEFAULT_RUNGS, DsLadder                      # noqa: E402
 from Store import (PreTileCorpus, PreTileMeta, PreTileRecord,     # noqa: E402
                    PreTileStore, StoreMismatch)
-from common.Corpora import ladder, sampler_config                 # noqa: E402
+from common.Corpora import ladder, pretile_spec, sampler_config   # noqa: E402
 
 
 def main():
@@ -160,12 +161,10 @@ def main():
                          'control arm. It produced 202,420 overlapping pairs '
                          'over the 2026-08-26 corpus and 69.2 per cent of '
                          'tiles touching another')
-    ap.add_argument('--grid-step', type=int, default=0,
-                    help='lattice step in OUTPUT px. 0 means the tile, i.e. '
-                         'disjoint, and 0 is the only spelling of that -- '
-                         'writing the tile size out is refused, because two '
-                         'spellings of one lattice are two sampler_ids over '
-                         'one corpus. Half the tile is a deliberate 50 per '
+    ap.add_argument('--step', type=float, default=1.0,
+                    help='lattice step as a fraction of the tile. 1.0 is '
+                         'disjoint, and the only spelling of that. 0.5 is a '
+                         'deliberate 50 per '
                          'cent lattice and needs --max-overlap raised to match')
     ap.add_argument('--max-overlap', type=float, default=0.0,
                     help='largest area fraction any two tiles of a rung may '
@@ -201,8 +200,8 @@ def main():
     # knob is slide-independent, so the directory this run writes is fixed
     # here and printed -- the key a reader passes to find it again.
     cfg = sampler_config(
-        tile=args.tile, n=args.n, seed=args.seed, candidates=args.candidates,
-        max_tries=args.max_tries, grid_step=args.grid_step,
+        n=args.n, seed=args.seed, candidates=args.candidates,
+        max_tries=args.max_tries, step=args.step,
         max_overlap=args.max_overlap,
         overlapping_share=args.overlapping_share,
         bucket_frame=args.bucket_frame,
@@ -210,7 +209,8 @@ def main():
         inherit_source_rung=args.inherit_source_rung)
     mask_cfg = MASK_RECIPES[args.seg]
     corpus = PreTileCorpus.of(pretile_root(args), mask_cfg, cfg,
-                              ladder(args.rungs), args.pre_tile_factor)
+                              ladder(args.rungs, args.tile, args.pre_tile_factor),
+                              args.pre_tile_factor)
     seg_dir = mask_root(args) / mask_cfg.seg_id()
     print(f'masks  {seg_dir}\ntiles  {corpus.root}\ncorpus {corpus.key}',
           flush=True)
@@ -259,7 +259,7 @@ def main():
             print(f'\n[{index}/{len(paths)}] {stem}', flush=True)
             with SafeSlide(wsi_path) as wsi:
                 rows += _extract_slide(
-                    wsi, masks, cfg, corpus, args.rungs, n=args.n,
+                    wsi, masks, cfg, corpus, args.rungs, tile=args.tile, n=args.n,
                     overwrite=args.overwrite, failures=failures)
 
     summary = os.path.join(out_dir, 'extract_pretiles.csv')
@@ -313,7 +313,10 @@ def _plans_for(wsi, *, tile: int, pre_tile_factor: int, rungs):
     pre_px = pre_tile_px(tile, pre_tile_factor)
     rungs = sorted(float(d) for d in rungs)
     dsl = DsLadder(rungs=tuple(rungs))
-    tiles = dsl.plan(wsi.level_downsamples, tile)
+    # The tile plans come from the pre-tile CAMERA, so the reserve is what it
+    # reads (`ReadSpec.place`) rather than a footprint times the factor
+    # computed here a second time.
+    tiles = ladder(rungs, tile, pre_tile_factor).plans_for(wsi)
     pres = dsl.plan(wsi.level_downsamples, pre_px)
 
     plans, pre_plans = [], {}
@@ -330,15 +333,13 @@ def _plans_for(wsi, *, tile: int, pre_tile_factor: int, rungs):
         # repaired afterwards: a lattice that reserves it never offers a
         # position whose pre-tile runs off the region, and `clip_px` stops
         # being a repair for something the geometry could have refused.
-        plans.append(dataclasses.replace(
-            plan_tile,
-            reserve_l0=plan_tile.footprint_l0 * pre_tile_factor))
+        plans.append(plan_tile)
         pre_plans[float(plan_tile.rung_ds)] = plan_pre
     return plans, pre_plans, pre_px
 
 
 def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
-                   corpus: PreTileCorpus, rungs, *, n: int, overwrite: bool,
+                   corpus: PreTileCorpus, rungs, *, tile: int, n: int, overwrite: bool,
                    failures: list):
     """Every rung of one slide, from ONE sampler. Returns a row per rung written.
 
@@ -359,12 +360,12 @@ def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
     list that disagrees with the address would file one corpus's tiles under
     another's key.
     """
-    if ladder(rungs).key() != corpus.plan:
+    if ladder(rungs, tile, corpus.factor).key() != corpus.plan:
         raise AssertionError(
-            f'rungs {sorted(rungs)} are plan {ladder(rungs).key()}, but the '
+            f'rungs {sorted(rungs)} are plan {ladder(rungs, tile, corpus.factor).key()}, but the '
             f'corpus is addressed as {corpus.plan}')
     stem = wsi_stem_of(wsi)
-    tile, pre_tile_factor = int(cfg.tile), int(corpus.factor)
+    tile, pre_tile_factor = int(tile), int(corpus.factor)
     mask, _hit = masks.mask(wsi)
     segmenter_id = read_meta(
         masks.slide_dir(stem) / 'mask_meta.json').get('segmenter_id', '')
@@ -377,6 +378,7 @@ def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
                                           pre_tile_factor=pre_tile_factor,
                                           rungs=rungs)
     sampler = TileSampler(wsi, mask, cfg).sample(plans)
+    reader = SlideReader(wsi, resize='area')
 
     by_rung = {}
     for sample in sampler:
@@ -395,7 +397,8 @@ def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
                                     corpus, pre_plans[ds_], pre_px, ds_,
                                     by_rung.get(ds_, []),
                                     sampler.reports.get(ds_),
-                                    n=n, overwrite=overwrite))
+                                    tile=tile, n=n, overwrite=overwrite,
+                                    reader=reader))
         except StoreMismatch as e:
             # An existing finished directory. Not a failure -- it is what
             # --overwrite is for, and skipping is what makes this script safe
@@ -411,9 +414,10 @@ def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
 
 def _write_rung(wsi, slide_mask, segmenter_id: str, cfg: SamplerConfig,
                 corpus: PreTileCorpus, plan_pre, pre_px, ds, samples, report, *,
-                n: int, overwrite: bool):
-    """One (slide, ds) directory, from samples the shared sampler already chose."""
-    meta = PreTileMeta.of(wsi, plan_pre, corpus, tile=int(cfg.tile),
+                tile: int, n: int, overwrite: bool, reader):
+    """One (slide, ds) directory, from samples the shared sampler already chose.
+    `reader` is the slide's `SlideReader` ('area' filter)."""
+    meta = PreTileMeta.of(wsi, plan_pre, corpus, tile=int(tile),
                           seed=cfg.seed, segmenter_id=segmenter_id,
                           n_requested=n)
     folder = PreTileStore.create(corpus, meta, overwrite=overwrite)
@@ -446,10 +450,15 @@ def _write_rung(wsi, slide_mask, segmenter_id: str, cfg: SamplerConfig,
                 f'lattice used')
 
         # The RESERVE, not the tile: the store holds pre-tiles and the tile is
-        # their centre crop. `materialise` reads it through the same numbers
-        # the lattice honoured, so the read cannot disagree with the geometry
+        # their centre crop. The reader reads the tile grown by the pre-tile
+        # margin -- the very read `pretile_spec` told the sampler to reserve
+        # (`ReadSpec.place`) -- so the read cannot disagree with the geometry
         # that placed it.
-        image = sample.materialise(wsi, extent='reserve').image
+        image = reader.read(info.x, info.y, pretile_spec(tile, corpus.factor),
+                            info.ds, stack=info.stack_kind)
+        if image is None:
+            raise AssertionError(f'pre-tile {i} at level-0 ({info.x}, {info.y}) '
+                                 f'reads off the slide')
         if image.shape[0] != pre_px:
             image = cv2.resize(image, (pre_px, pre_px),
                                interpolation=cv2.INTER_AREA)
@@ -467,7 +476,6 @@ def _write_rung(wsi, slide_mask, segmenter_id: str, cfg: SamplerConfig,
         path = PreTileStore.save_tile(folder, record, image, meta)
         written += os.path.getsize(path)
         records.append(record)
-        sample.release()          # streaming: the pixels are on disk now
 
     PreTileStore.write_index(folder, records)
 

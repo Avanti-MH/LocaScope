@@ -33,7 +33,7 @@ import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
 for _d in (_HERE, _HERE.parent / 'aiNNModel'):
@@ -248,11 +248,20 @@ def add_mask_args(ap, default: str = 'hest') -> None:
                     help="override the recipe's region filter")
 
 
-def mask_cfg_from_args(args) -> TissueMaskConfig:
+def mask_cfg_from_args(args, base: Optional[TissueMaskConfig] = None
+                       ) -> TissueMaskConfig:
     """The recipe `--seg` names, with any override applied. The result is a
     different config and therefore a different `seg_id` / `region_id`, so an
-    override can never be served a cached mask made without it."""
-    cfg = MASK_RECIPES[args.seg]
+    override can never be served a cached mask made without it.
+
+    `base` is a config the caller keeps in one visible place (a bench's CONFIG
+    block). It is what a tool uses when `--seg` was not given -- which needs
+    `add_mask_args(ap, default=None)` -- and `--seg` still names a recipe over it.
+    Without a `base`, no `--seg` means the hest recipe, as always."""
+    if args.seg is not None:
+        cfg = MASK_RECIPES[args.seg]
+    else:
+        cfg = base if base is not None else MASK_RECIPES['hest']
     seg_over = {}
     if args.mask_ds is not None:
         seg_over['ds'] = float(args.mask_ds)
@@ -263,7 +272,7 @@ def mask_cfg_from_args(args) -> TissueMaskConfig:
     if seg_over:
         if not isinstance(cfg.seg, PlaneSegConfig):
             raise ValueError(
-                f'--seg {args.seg} reads the slide itself; '
+                f'{args.seg or "the base config"} reads the slide itself; '
                 f'{", ".join(sorted(seg_over))} do not apply to it')
         cfg = replace(cfg, seg=replace(cfg.seg, **seg_over))
     if args.min_region_ratio is not None:

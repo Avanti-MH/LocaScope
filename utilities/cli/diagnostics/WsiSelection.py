@@ -66,7 +66,6 @@ def resolve_wsi_paths(dataset=None, wsi=None, val_only: bool = False) -> list:
 def val_split_names(dataset_id: str, split_job: str = None) -> list:
     """The recorded val half of `dataset_id`'s split -- read, never
     re-derived: a split recomputed here could disagree with the one a
-    checkpoint was actually selected against. `WsiSplit.read_split` refuses,
+    checkpoint was actually selected against. The dataset `<id>#val` refuses,
     naming `make_split.py`, when the split has not been written."""
-    from WsiSplit import SPLIT_JOB, read_split, split_path
-    return read_split(split_path(split_job or SPLIT_JOB, dataset_id))[0]
+    return list_names(dataset=f'{dataset_id}#val', split_job=split_job)
