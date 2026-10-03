@@ -20,6 +20,30 @@ can sit beside `KnnEstMpp`/`ClassifierEstMpp` on the same `stage1_compare`
 scorecard). This package is the classifier-head baseline that any of those
 has to beat, not a step towards them.
 
+## 詞彙
+
+| 中文 | English | 定義 |
+|---|---|---|
+| 區塊輸出 | block output | encoder 第 k 個 transformer block 的輸出 `[N, T, D]`，還沒經過模型最後的 LayerNorm |
+| 終端 norm | final norm | 模型最後那個 LayerNorm（timm 的 `model.norm`） |
+| 層 token | layer tokens | 區塊輸出再經過終端 norm，prefix token 在前。最後一個 block 的層 token 就是 `TileEncoder.tokens()` |
+| 描述子 | descriptor | 層 token 縮成的一個向量：CLS、`cls_avg`、attention pool 的輸出 |
+| L2 單位化 | L2 normalise | 把向量長度縮放成 1。`tokens()` 沒有做；`fixed` 對 CLS 做 |
+| 縮減方式 | reduction | head 把 token 縮成一個向量的方法，`common.Head.REDUCTIONS`：`fixed`、`attn`、`clsattn` |
+| 固定縮減 | fixed | 最後一層的 CLS（CNN 為空間格平均），L2 單位化；沒有可學參數 |
+| 注意力池化 | attn | 丟掉 prefix token，對 patch 做一個可學 query 的 attention pool（`AttentionPoolHead`） |
+| CLS 加注意力池化 | clsattn | 最後一層 CLS 與 attn 的輸出各自 L2 單位化後串接，再接 LayerNorm；分類器輸入為 `2 × D`。需要 CLS，只用於 ViT |
+| encoder 層 | `encoder_layers` | head 取哪幾個 block 的層 token。整數是絕對位置，從 0 開始、可為負（同 timm 的 `indices`）；小數是相對位置 (0, 1]，換成 block `round(r × 深度) − 1`。一律寫成 list / tuple。空的 `()` 是只用最後一層，即這個欄位出現以前的行為 |
+| 層權重 | layer weights | 混合多層時每層一個可學純量，softmax 後加權；每層先過自己的 LayerNorm |
+| 多層混合 | `mix_` | head 名稱前綴：`encoder_layers` 為 `MIX_LAYERS = (0.25, 0.5, 0.75, 1.0)`，UNI2 為 block 5/11/17/23，GigaPath 為 9/19/29/39。只配 `attn` / `clsattn`，只用於 ViT |
+| 讀取模式 | `read_level` | 訓練 tile 從金字塔哪一層讀：`pyramid`（最近層規則，有原生層就讀原生層，否則讀較細一層再縮小；這個欄位出現以前唯一的行為）、`resampled`（從比 rung 細的層中均勻抽一層，讀進來再縮小）、`mixed`（`resampled_share` 比例走 resampled，其餘走 pyramid）。只用於訓練；val、test 一律 `pyramid` |
+| 縮小來源 | `resample_from` | `finer`：任何比 rung 細的層；`l0`：只有 level 0 |
+| 最大縮小倍數 | `max_resample_factor` | 候選層需要的縮小倍數（rung ÷ 該層 ds）超過它就不列入；控制讀取成本（讀取邊長 = tile × 倍數）。預設不設 |
+| 重新取樣比例 | `resampled_share` | 只用於 `mixed`：走 resampled 的比例，預設 0.5 |
+| 讀取模式標籤 | read tag | 讀取模式寫成一個字串，用在權重與 resume 檔名、wandb run 名稱、CSV 的 `read_level` 欄、評估標籤：`resampled-finer`、`resampled-finer-x8`、`mixed-l0-p0.3`。預設模式為空字串，CSV 寫 `pyramid`。四個預設值固定不改，舊的檔名與 resume 檔才繼續代表 pyramid |
+| 原生 / 重新取樣（tile） | native / resampled (tile) | 一張 tile 是否直接讀自目標 mpp 的金字塔層（`QueryFromWSI.reads_natively`），CSV 的 `n_native`、`level_accuracy_resampled`、`native` 欄。與 Camera 風格參數 `native`（`CAMERA_GEOMETRY_ONLY`）無關，也與讀取模式不同：讀取模式描述模型怎麼訓練，這個描述一張 tile 怎麼讀出來 |
+| head 名稱 | head name | `[mix_]` + `[attn_ / clsattn_ / 無]` + 分類器名；沒有前綴即 `fixed`、只用最後一層。名稱只是 `HEAD_CHOICES` 的 key，`Runtime.head_parts` 從登記內容讀回各部分 |
+
 ## Task
 
 6-way classification over `DsLadder.DEFAULT_RUNGS = (1, 2, 4, 8, 16, 32)`.
@@ -51,6 +75,9 @@ full space, so there is nothing to gain from adding that step here.
 | 3-1 | trunk (fine-tuned) → Linear | 3 | trunk + head | **main line** — matches the checkpoint's own validated head shape; more head capacity does not help bridge the natural→pathology domain gap (that is what fine-tuning the trunk itself already does) and this dataset's scale (10-50k tiles fine-tuning a 28M-param trunk, not training it from scratch) argues for fewer trainable head params, not more |
 | 3-2 | trunk (fine-tuned) → MLP → Linear | 3 | trunk + head | **observation arm**, not a default — exists to empirically check the 3-1 reasoning rather than assert it: does an extra projection layer actually hurt cross-dataset generalisation (train=ki67_pure, eval=bracs/test+ki67_with_photo) the way the capacity argument predicts, or not |
 | 2-6 / 3-3 | AttentionPoolHead (learnable pooling over the UN-pooled grid, CLS excluded) → LinearHead | 2 and 3 | head only (2) / trunk+head (3) | **genuine learnable pooling**, not just added capacity — takes `[N, L, D]` (L = 196 patch tokens for GigaPath/UNI2 with the CLS token excluded, or 49 spatial cells for ConvNeXt V2's 7x7 map), learns one query that attends over the L positions to produce `[N, D]`, then classifies with the SAME `LinearHead` class 2-1/3-1 use. CLS excluded on purpose: CLS is already a pooled summary the encoder's OWN pretraining trained it to be, and mixing it into a pooler meant to learn a TASK-specific aggregation would muddy which one the comparison is actually testing. Parameter count depends on `in_dim`/`n_head`, not on L — unlike flattening the grid into one giant Linear, which for GigaPath's 14x14x1536 grid would be a ~231M-parameter first layer alone (measured 2026-09-15), several orders above what a 10-50k-tile fine-tuning set can support without overfitting |
+| 2-7 | AttentionPoolHead → MLP depth 2 (`attn_mlp_deep`, `attn_mlp_deep_wide`) | 2 and 3 | head only (2) / trunk+head (3) | the pool under the classifier that leads on the CLS view. `attn_linear` alone could not separate "the pool does not help" from "the pool was paired with the weakest classifier" |
+| 2-8 | CLS + AttentionPoolHead → MLP depth 2 (`clsattn_mlp_deep`) | 2 | head only | keeps the encoder's own summary and adds a task-specific one, so it should not lose to `mlp_deep` unless the two halves are scaled wrongly (each is L2-normalised before the concatenation for that reason) |
+| 2-9 | multi-layer mix → `attn` / `clsattn` → MLP depth 2 (`mix_attn_mlp_deep`, `mix_clsattn_mlp_deep`) | 2 | head only | asks whether scale is better read from earlier blocks, which keep more texture than the last one. The learned layer weights are themselves a result |
 | — | Prototypical Networks | independent | yes (episodic) | **deferred — design in discussion with AI, not yet code** |
 | — | Relation Networks | independent | yes | **deferred**, same reason |
 | — | Siamese / Triplet | independent | yes | **deferred**, same reason |

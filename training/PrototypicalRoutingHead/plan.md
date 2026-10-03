@@ -238,7 +238,7 @@ MppRoutingHead 自己的程式碼都可能拿錯。改叫 `Episodes.py`,spec.md 
 **`_CameraBank`/`_render_row` 已改成公開**（`CameraBank`/`render_row`,
 2026-09-20，使用者選了「聯動改動」這個選項）——`MppRoutingHead/Datasets.py`
 自己內部的呼叫、`cli/train.py`/`Runtime.py`/
-`test_camera_output_to_level0.py` 裡提到這兩個名字的註解,全部同步改名,
+`test_camera.py` 裡提到這兩個名字的註解,全部同步改名,
 `py_compile` 都過。
 
 ### 2.3 support/query WSI 抽樣（2026-09-20 定案，已寫進 2.2）

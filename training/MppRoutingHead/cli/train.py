@@ -102,10 +102,12 @@ import torch.nn.functional as F                                     # noqa: E402
 
 import _paths                                                       # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
-    NUM_CLASSES, RUNGS, RenderConfig, add_cache_args, build_manifest,
-    class_weights, iterate_epoch, open_caches)
-from WsiSplit import read_split, split_path                          # noqa: E402
-from Heads import HeadConfig                                        # noqa: E402
+    NUM_CLASSES, READ_LEVELS, RESAMPLE_FROM, RUNGS, RenderConfig,
+    add_cache_args, build_manifest, cache_jobs, class_weights, iterate_epoch,
+    open_caches)
+from AccessDatasets import list_names                                # noqa: E402
+from Heads import HeadConfig, resolve_encoder_layers                # noqa: E402
+from Features import check_layer_tokens                              # noqa: E402
 from training.MppRoutingHead.Runtime import (                       # noqa: E402
     BASELINE3_ENCODER, HEAD_CHOICES, encode_raw, heads_for, predict,
     rescore, rescore_by_rung, save_checkpoint, trunk_raw,
@@ -117,18 +119,47 @@ from Resume import ResumeFile, resume_identity                       # noqa: E40
 #: logged, or which models this invocation covers -- not what one model IS.
 #: `resume_identity` leaves them out.
 _NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
-                 'wandb_mode', 'run_name', 'merge', 'num_workers', 'encoders',
+                 'wandb_mode', 'run_name', 'merge', 'num_workers', 'cpu_processes',
+                 'encoders',
                  'heads', 'baseline', 'encode_batch', 'mask_cache_job',
-                 'sampler_cache_job', 'split_cache_job')
+                 'sampler_cache_job', 'split_cache_job',
+                 # the read mode enters as ONE key, `read_tag`, and only when it
+                 # is not the default -- see `_identity`
+                 'read_level', 'resample_from', 'max_resample_factor',
+                 'resampled_share')
 
 
-def _resume_name(baseline: int, encoder_name: str, loss: str, head: str = '') -> str:
+def train_render_cfg(args) -> RenderConfig:
+    '''The `RenderConfig` TRAINING renders with: the tile and the read mode.
+    Val and test build their own at the defaults, so they always read
+    `pyramid`.'''
+    return RenderConfig(tile_size=args.tile, read_level=args.read_level,
+                        resample_from=args.resample_from,
+                        max_resample_factor=args.max_resample_factor,
+                        resampled_share=args.resampled_share)
+
+
+def _identity(args, **more) -> Dict:
+    '''The resume identity: the arguments that decide what is trained, plus
+    `more`. The read mode is in it as `read_tag` only when it is not the
+    default, so every resume file written before the read mode existed is
+    still this run's identity at the default.'''
+    identity = dict(resume_identity(args, _NOT_IDENTITY), **more)
+    tag = train_render_cfg(args).read_tag
+    if tag:
+        identity['read_tag'] = tag
+    return identity
+
+
+def _resume_name(baseline: int, encoder_name: str, loss: str, head: str = '',
+                 read_tag: str = '') -> str:
     '''The resume unit: baseline 2 is one ENCODER with every head it feeds
     (one shared forward, one shared epoch loop), baseline 3 one HEAD with its
-    own fine-tuned trunk.'''
-    loss_seg = '' if loss == 'bal' else f'_{loss}'
-    return (f'b2_{encoder_name}_frozen{loss_seg}' if baseline == 2 else
-            f'b3_{encoder_name}_finetuned_{head}{loss_seg}')
+    own fine-tuned trunk. The loss and the read mode each add a segment only
+    when they are not the default, so a default run's file keeps its name.'''
+    seg = ('' if loss == 'bal' else f'_{loss}') + (f'_{read_tag}' if read_tag else '')
+    return (f'b2_{encoder_name}_frozen{seg}' if baseline == 2 else
+            f'b3_{encoder_name}_finetuned_{head}{seg}')
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -155,12 +186,14 @@ def train_rows(args, caches, out_dir) -> List:
 
 def val_rows(args, caches, out_dir) -> List:
     '''The val halves of every eval dataset, concatenated. The split is READ
-    (`WsiSplit.read_split`), never derived here -- `make_split.py` is the
+    (the datasets `<id>#val` and `<id>#test`), never derived here -- `make_split.py` is the
     one place that writes it.'''
     rows: List = []
     for dataset_id in args.eval_datasets:
-        val_names, test_names = read_split(
-            split_path(caches.split_job, dataset_id))
+        val_names = list_names(dataset=f'{dataset_id}#val',
+                               split_job=caches.split_job)
+        test_names = list_names(dataset=f'{dataset_id}#test',
+                                split_job=caches.split_job)
         part = build_manifest(
             dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
             report_dir=_report_dir(out_dir, dataset_id, 'val'),
@@ -204,8 +237,8 @@ def print_class_weights(weights) -> None:
 
 
 #: Field width for a head NAME column in the prints below -- wide enough
-#: for the longest registered `HEAD_CHOICES` key (`mlp_deep_residual`, 17
-#: chars) plus a margin, so a name never runs longer than its field.
+#: for the longest registered `HEAD_CHOICES` key (`mix_clsattn_mlp_deep`,
+#: 20 chars) plus a margin, so a name never runs longer than its field.
 #: STILL followed by an explicit literal space at every call site, never
 #: relied on alone -- `f'{name:_NAME_W}s'` does not TRUNCATE a name that
 #: somehow exceeds this width, it just stops padding, so a name and the
@@ -214,7 +247,7 @@ def print_class_weights(weights) -> None:
 #: the 2026-09-20 bug this fixes: `f'{name:12s}{dataset_id:17s}'` (no space
 #: between the two fields) printed `mlp_deep_residualbracs/test` once
 #: `name` (17 chars) exceeded the old 12-char field.
-_NAME_W = 18
+_NAME_W = 22
 
 
 def val_report(name: str, combined: Dict, rows: List[Dict],
@@ -351,7 +384,7 @@ def rung_report(name: str, rows: List[Dict], datasets: List[str],
 #  baseline 2: one frozen encoder, every head off its one forward pass
 # ══════════════════════════════════════════════════════════════════════════
 
-def _head_cfg_for(name: str, in_dim: int, args) -> HeadConfig:
+def _head_cfg_for(name: str, in_dim: int, args, depth: int = 0) -> HeadConfig:
     '''`HeadConfig` for one head NAME -- reads `HEAD_CHOICES[name]`'s
     optional 4th element (a dict of `HeadConfig` field overrides, e.g.
     `mlp_deep`'s `{'mlp_depth': 2}`) on top of the CLI's own `--mlp-*`
@@ -359,8 +392,18 @@ def _head_cfg_for(name: str, in_dim: int, args) -> HeadConfig:
     trained in the SAME run, each with its own architecture -- see
     `Runtime.HEAD_CHOICES`'s own comment for why this has to be resolved per
     name rather than built once and shared.
+
+    `encoder_layers` is resolved here, against the encoder's `depth`, the same
+    way `mlp_width_mult` is resolved against `in_dim`: the registry writes one
+    spread for every encoder, the config records the blocks it meant.
     '''
     overrides = HEAD_CHOICES[name][3] if len(HEAD_CHOICES[name]) > 3 else {}
+    layers = overrides.get('encoder_layers', ())
+    if layers:
+        if depth < 1:
+            raise ValueError(f'{name} mixes encoder layers and this encoder has '
+                             f'no block depth to resolve them against')
+        layers = resolve_encoder_layers(layers, depth)
     mlp_width = (int(in_dim * overrides['mlp_width_mult'])
                 if 'mlp_width_mult' in overrides else
                 overrides.get('mlp_width', args.mlp_width))
@@ -369,7 +412,8 @@ def _head_cfg_for(name: str, in_dim: int, args) -> HeadConfig:
         mlp_depth=overrides.get('mlp_depth', args.mlp_depth),
         mlp_width=mlp_width,
         mlp_residual=overrides.get('mlp_residual', args.mlp_residual),
-        mlp_dropout=args.mlp_dropout)
+        mlp_dropout=args.mlp_dropout,
+        encoder_layers=layers)
 
 
 def _compute_loss(logits: torch.Tensor, target: torch.Tensor, weights,
@@ -516,8 +560,17 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
     # docstring: mlp/mlp_deep/mlp_wide/mlp_deep_wide each need their own
     # depth/width, and a single shared config could only ever give them all
     # the same one.
-    head_cfgs = {n: _head_cfg_for(n, int(spec.dim), args) for n in names}
+    depth = encoder.depth if spec.kind == 'tokens' else 0
+    head_cfgs = {n: _head_cfg_for(n, int(spec.dim), args, depth) for n in names}
     heads = {n: Head(head_cfgs[n], *HEAD_CHOICES[n][:2]).to(device) for n in names}
+    # Every block any head mixes, read in the one forward they share. Empty --
+    # no mix_ head in the run -- keeps encode_raw's plain tensor.
+    mix_blocks = tuple(sorted({b for c in head_cfgs.values()
+                               for b in c.encoder_layers}))
+    for n in names:
+        if head_cfgs[n].encoder_layers:
+            print(f'  {n}: mixes encoder blocks {head_cfgs[n].encoder_layers} '
+                  f'of {depth}', flush=True)
     print(f'baseline 2  {encoder_name}  dim={spec.dim} kind={spec.kind} '
           f'num_prefix={num_prefix}  (frozen)', flush=True)
 
@@ -542,9 +595,18 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
     # RESUME: one file for the encoder and every head it feeds, since they
     # share one forward and one epoch loop (Resume.py has the rule).
     resume = ResumeFile.for_model(args.resume_dir,
-                                  _resume_name(2, encoder_name, args.loss))
-    identity = dict(resume_identity(args, _NOT_IDENTITY), baseline=2,
-                    encoder=encoder_name, heads=list(names))
+                                  _resume_name(2, encoder_name, args.loss,
+                                               read_tag=train_render_cfg(args).read_tag))
+    identity = _identity(args, baseline=2, encoder=encoder_name,
+                         heads=list(names))
+    # Which blocks a mix_ head read is not in its NAME, so a registry edit that
+    # kept the name would otherwise resume onto weights for other blocks. Only
+    # heads that mix are listed, and the key only exists when one does, so a
+    # resume file from before this is still the same identity.
+    mixed = {n: list(c.encoder_layers) for n, c in head_cfgs.items()
+             if c.encoder_layers}
+    if mixed:
+        identity['encoder_layers'] = mixed
     start_epoch = 0
     state = resume.load(identity)
     if state is not None:
@@ -558,20 +620,33 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
         print(f'  [resume] no {resume.path.name} yet -- training from scratch, '
               f'writing it every epoch', flush=True)
     end_epoch = args.epochs
-    raw_of = lambda p: encode_raw(encoder, p, args.encode_batch, device)  # noqa: E731
+    raw_of = lambda p: encode_raw(encoder, p, args.encode_batch, device,  # noqa: E731
+                                  layers=mix_blocks)
+    layers_checked = False
 
     # ONE run for this encoder, covering every head trained off it -- see
     # `Runtime.wandb_init`'s docstring for why the boundary is per encoder
     # here and per head in `run_baseline3`.
-    run_name = f'{args.run_name}-b2-{encoder_name}' if args.run_name else f'b2-{encoder_name}'
-    wb = wandb_init(args.wandb_project, args.wandb_mode, run_name, config=dict(
+    slurm_job_name = os.environ.get('SLURM_JOB_NAME', '')
+    prefix = args.run_name or slurm_job_name
+    run_name = f'{prefix}-b2-{encoder_name}' if prefix else f'b2-{encoder_name}'
+    read_cfg = train_render_cfg(args)
+    run_name += f'-{read_cfg.read_tag}' if read_cfg.read_tag else ''
+    # No epoch left: no run. It would log nothing, and an empty run is a row in
+    # every chart's legend with no line.
+    wb = None if start_epoch >= end_epoch else wandb_init(
+        args.wandb_project, args.wandb_mode, run_name, config=dict(
         baseline=2, encoder=encoder_name, heads=names,
         encoder_dtype=args.dtype, head_dtype='fp32',
         class_weight=args.class_weight, loss=args.loss, seg=args.seg,
         ordinal_weight=args.ordinal_weight, ordinal_sigma=args.ordinal_sigma,
         lr=args.lr, epochs=args.epochs, n_per_rung=args.n_per_rung,
         tile=args.tile, batch_size=args.batch_size, seed=args.seed,
-        train_dataset=args.train_dataset, eval_datasets=args.eval_datasets))
+        train_dataset=args.train_dataset, eval_datasets=args.eval_datasets,
+        slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
+        slurm_job_name=slurm_job_name, read_level_label=read_cfg.read_label,
+        **cache_jobs(args, 'MppRoutingHead', caches)),
+        run_id=resume.wandb_run_id(state is not None))
 
     for epoch in range(start_epoch + 1, end_epoch + 1):
         for n, opt in opts.items():
@@ -584,10 +659,21 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
         for batch in iterate_epoch(
                 rows, wsi_group_size=args.wsi_group_size,
                 batch_size=args.batch_size, num_workers=args.num_workers,
-                cfg=RenderConfig(tile_size=args.tile), epoch_seed=epoch):
+                cfg=train_render_cfg(args), epoch_seed=epoch):
             # ONE pass, every head. Moved to the device once here rather than
             # per head: the heads differ in how they reduce it, not in which
             # copy of it they read.
+            if mix_blocks and not layers_checked:
+                (same, decoy), ok = check_layer_tokens(encoder, batch['patches'])
+                print(f'  layer tokens: last block vs tokens() min cos '
+                      f'{same:.6f}, block before it {decoy:.6f}  '
+                      f'{"OK" if ok else "FAIL"}', flush=True)
+                if not ok:
+                    raise RuntimeError(
+                        'layer_tokens does not reproduce tokens() on its last '
+                        'block, so every mix_ head would train on something '
+                        'else than its name says')
+                layers_checked = True
             raw = raw_of(batch['patches'])
             target = batch['labels'].to(device)
             seen_class += torch.bincount(batch['labels'], minlength=NUM_CLASSES)
@@ -625,20 +711,24 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
                 name, val[name], detail[name], args.eval_datasets, epoch,
                 end_epoch, totals[name][0] / max(totals[name][1], 1),
                 baseline=2, encoder=encoder_name, loss_kind=args.loss,
-                seg=args.seg)
+                read_level=train_render_cfg(args).read_label, seg=args.seg)
             epoch_rung_rows += rung_report(
                 name, detail[name], args.eval_datasets, epoch,
                 baseline=2, encoder=encoder_name, loss_kind=args.loss,
-                seg=args.seg)
+                read_level=train_render_cfg(args).read_label, seg=args.seg)
         out += epoch_rows
         out_rung += epoch_rung_rows
-        wandb_log(wb, epoch, wandb_epoch_metrics(epoch_rows))
         for name, head in heads.items():
             best[name] = save_tagged(out_dir, head, encoder, encoder_name, True,
                                      name, head_cfgs[name], args, epoch, val[name],
                                      best[name], opts[name])
         resume.save(identity, epoch=epoch, modules=heads, optimizers=opts,
                     best=best, extra=(out, out_rung))
+        # Logged AFTER the resume file is written. Before it, a job killed between
+        # the two leaves wandb holding an epoch the resume file does not: the rerun
+        # trains that epoch again, wandb refuses its step as already logged, and
+        # the curve keeps the dead job's numbers.
+        wandb_log(wb, epoch, wandb_epoch_metrics(epoch_rows))
     wandb_finish(wb)
     return out, out_rung
 
@@ -708,9 +798,10 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
 
         modules = {'head': head, 'trunk': encoder.model}
         resume = ResumeFile.for_model(
-            args.resume_dir, _resume_name(3, BASELINE3_ENCODER, args.loss, name))
-        identity = dict(resume_identity(args, _NOT_IDENTITY), baseline=3,
-                        encoder=BASELINE3_ENCODER, head=name)
+            args.resume_dir, _resume_name(3, BASELINE3_ENCODER, args.loss, name,
+                                          read_tag=train_render_cfg(args).read_tag))
+        identity = _identity(args, baseline=3, encoder=BASELINE3_ENCODER,
+                             head=name)
         start_epoch = 0
         head_rows: List[Dict] = []
         head_rung_rows: List[Dict] = []
@@ -730,11 +821,16 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
         # ONE run for this head -- it owns its own trunk/optimizer/epoch loop,
         # so it is one experiment on its own (contrast baseline 2's per-
         # ENCODER boundary, where several heads share one epoch axis).
-        run_label = f'{args.run_name}-b3-{name}' if args.run_name else f'b3-{name}'
+        slurm_job_name = os.environ.get('SLURM_JOB_NAME', '')
+        prefix = args.run_name or slurm_job_name
+        run_label = f'{prefix}-b3-{name}' if prefix else f'b3-{name}'
+        read_cfg = train_render_cfg(args)
+        run_label += f'-{read_cfg.read_tag}' if read_cfg.read_tag else ''
         # No `dtype=args.dtype` here -- baseline 3 has nothing left for it to
         # control (trunk and head are both hardcoded fp32, above), so logging
         # it would imply a knob that does not exist for this baseline.
-        wb = wandb_init(args.wandb_project, args.wandb_mode, run_label, config=dict(
+        wb = None if start_epoch >= end_epoch else wandb_init(
+            args.wandb_project, args.wandb_mode, run_label, config=dict(
             baseline=3, encoder=BASELINE3_ENCODER, head=name, reduction=reduction,
             classifier=classifier.__name__, trunk_dtype='fp32', head_dtype='fp32',
             class_weight=args.class_weight, loss=args.loss, seg=args.seg,
@@ -742,7 +838,11 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
             lr=args.lr, trunk_lr=args.trunk_lr, epochs=args.epochs,
             n_per_rung=args.n_per_rung, tile=args.tile, batch_size=args.batch_size,
             seed=args.seed, train_dataset=args.train_dataset,
-            eval_datasets=args.eval_datasets))
+            eval_datasets=args.eval_datasets,
+            slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
+            slurm_job_name=slurm_job_name, read_level_label=read_cfg.read_label,
+            **cache_jobs(args, 'MppRoutingHead', caches)),
+            run_id=resume.wandb_run_id(state is not None))
 
         for epoch in range(start_epoch + 1, end_epoch + 1):
             _apply_warmup(opt, epoch, args.warmup_epochs, base_lrs)
@@ -754,7 +854,7 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
             for batch in iterate_epoch(
                     rows, wsi_group_size=args.wsi_group_size,
                     batch_size=args.batch_size, num_workers=args.num_workers,
-                    cfg=RenderConfig(tile_size=args.tile), epoch_seed=epoch):
+                    cfg=train_render_cfg(args), epoch_seed=epoch):
                 target = batch['labels'].to(device)
                 seen_class += torch.bincount(batch['labels'], minlength=NUM_CLASSES)
                 native_class += torch.bincount(batch['labels'][batch['native']],
@@ -782,18 +882,19 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
                 name, val[name], detail[name], args.eval_datasets, epoch,
                 end_epoch, total / max(seen, 1),
                 baseline=3, encoder=BASELINE3_ENCODER, loss_kind=args.loss,
-                seg=args.seg)
+                read_level=train_render_cfg(args).read_label, seg=args.seg)
             head_rows += epoch_rows
             head_rung_rows += rung_report(
                 name, detail[name], args.eval_datasets, epoch,
                 baseline=3, encoder=BASELINE3_ENCODER, loss_kind=args.loss,
-                seg=args.seg)
-            wandb_log(wb, epoch, wandb_epoch_metrics(epoch_rows))
+                read_level=train_render_cfg(args).read_label, seg=args.seg)
             best = save_tagged(out_dir, head, encoder, BASELINE3_ENCODER, False,
                                name, head_cfg, args, epoch, val[name], best, opt)
             resume.save(identity, epoch=epoch, modules=modules,
                         optimizers={'adam': opt}, best=best,
                         extra=(head_rows, head_rung_rows))
+            # after the resume file, as in run_baseline2
+            wandb_log(wb, epoch, wandb_epoch_metrics(epoch_rows))
         wandb_finish(wb)
         out += head_rows
         out_rung += head_rung_rows
@@ -826,6 +927,7 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
     # `extra`: this package's own label-space facts, which the generic
     # checkpoint format (`aiNNModel/models/common/Checkpoints.py`) has no
     # opinion about -- see `save_checkpoint`'s own docstring.
+    read_tag = train_render_cfg(args).read_tag
     common = dict(head=head, encoder=encoder, encoder_name=encoder_name,
                   frozen=frozen, head_name=head_name, head_cfg=head_cfg,
                   epoch=epoch, val=val, run_args=vars(args),
@@ -839,23 +941,26 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
                   # checkpoint was actually trained against.
                   extra=dict(tile_size=args.tile, rungs=RUNGS))
     save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                           'last', loss=args.loss), **common)
+                                           'last', loss=args.loss,
+                                           read_tag=read_tag), **common)
 
     acc = val['level_accuracy']
     if acc > best_n_weighted:
         save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                               'best', loss=args.loss), **common)
+                                               'best', loss=args.loss,
+                                               read_tag=read_tag), **common)
         print(f'      new best, n-weighted ({acc:.4f}) -> '
-              f'{weight_filename(encoder_name, frozen, head_name, "best", loss=args.loss)}',
+              f'{weight_filename(encoder_name, frozen, head_name, "best", loss=args.loss, read_tag=read_tag)}',
               flush=True)
         best_n_weighted = acc
 
     acc_u = val['level_accuracy_unweighted']
     if acc_u > best_unweighted:
         save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                               'best_unweighted', loss=args.loss), **common)
+                                               'best_unweighted', loss=args.loss,
+                                               read_tag=read_tag), **common)
         print(f'      new best, unweighted ({acc_u:.4f}) -> '
-              f'{weight_filename(encoder_name, frozen, head_name, "best_unweighted", loss=args.loss)}',
+              f'{weight_filename(encoder_name, frozen, head_name, "best_unweighted", loss=args.loss, read_tag=read_tag)}',
               flush=True)
         best_unweighted = acc_u
 
@@ -882,6 +987,11 @@ def _merge_val_scores(path: Path, out_rows: List[Dict]) -> List[Dict]:
     run's behaviour before `--loss` existed, so it is the correct default
     for an old row, not a guess.
 
+    `read_level` (2026-10-02) joined the key for the same reason `loss_kind`
+    did: a `resampled` run of a (baseline, encoder, head, loss) would otherwise
+    replace the `pyramid` run's rows. A row without it, or with it empty, is
+    `pyramid` -- the only read mode before it existed.
+
     `csv.DictReader` reads every value as a str (`baseline` is `'2'`/`'3'`,
     not `2`/`3`) -- the key comparison normalizes `out_rows`' own values to
     str on that side rather than parsing the file's ints back, since the
@@ -890,12 +1000,12 @@ def _merge_val_scores(path: Path, out_rows: List[Dict]) -> List[Dict]:
     '''
     if not path.exists():
         return out_rows
-    new_keys = {(str(r['baseline']), r['encoder'], r['head'],
-                r.get('loss_kind', 'bal')) for r in out_rows}
+    def key(r):
+        return (str(r['baseline']), r['encoder'], r['head'],
+                r.get('loss_kind') or 'bal', r.get('read_level') or 'pyramid')
+    new_keys = {key(r) for r in out_rows}
     with open(path, newline='') as fh:
-        kept = [r for r in csv.DictReader(fh)
-               if (r['baseline'], r['encoder'], r['head'],
-                  r.get('loss_kind', 'bal')) not in new_keys]
+        kept = [r for r in csv.DictReader(fh) if key(r) not in new_keys]
     return kept + out_rows
 
 
@@ -927,6 +1037,10 @@ def main() -> int:
     ap.add_argument('--encode-batch', type=int, default=256,
                     help='PATCHES per frozen-encoder call (baseline 2)')
     ap.add_argument('--num-workers', type=int, default=8)
+    ap.add_argument('--cpu-processes', type=int, default=1,
+                    help='training processes this job runs side by side (the '
+                         'jobscript runs baselines 2 and 3 as two). Each takes '
+                         'cpus / this for its workers and threads -- CpuBudget')
     ap.add_argument('--baseline', choices=['2', '3', 'all'], default='all',
                     help='2 = frozen encoder, every head off one pass; '
                          '3 = fine-tuned trunk, one independent run per head; '
@@ -954,6 +1068,23 @@ def main() -> int:
                          "distance (--ordinal-sigma) -- 'bal' is what sigma->0 "
                          "would recover, so there is no off-by-default value "
                          "for sigma the way --ordinal-weight=0 is for ord_a")
+    ap.add_argument('--read-level', choices=READ_LEVELS, default='pyramid',
+                    help="which pyramid level a TRAINING tile is read from "
+                         "(spec.md 詞彙). 'pyramid' (default): the nearest-level "
+                         "rule every run before this used. 'resampled': a finer "
+                         "level, drawn uniformly, then resampled down. 'mixed': "
+                         "'resampled' for --resampled-share of the tiles. Val "
+                         "and test always read 'pyramid'")
+    ap.add_argument('--resample-from', choices=RESAMPLE_FROM, default='finer',
+                    help="'finer' (default): any level finer than the rung. "
+                         "'l0': level 0 only")
+    ap.add_argument('--max-resample-factor', type=float, default=None,
+                    help='drop a candidate level that needs more than this '
+                         'much downsampling (a read cost bound: the read side '
+                         'is tile x factor). Default: no bound')
+    ap.add_argument('--resampled-share', type=float, default=0.5,
+                    help="--read-level mixed only: the share of tiles read "
+                         "'resampled' (default 0.5)")
     ap.add_argument('--ordinal-weight', type=float, default=1.0,
                     help="ord_a's lambda: (E_c[log2 rung] - log2 rung_true)^2, "
                          "weight on top of the weighted-CE term. Unvalidated "
@@ -1052,6 +1183,17 @@ def main() -> int:
                          "heads' history. Off by default: a plain overwrite "
                          'is still what a full run wants.')
     args = ap.parse_args()
+    try:
+        read_cfg = train_render_cfg(args)       # refused here, not mid-run
+    except ValueError as exc:
+        ap.error(str(exc))
+    print(f'  training read mode: {read_cfg.read_label}', flush=True)
+    # The render runs in --num-workers DataLoader workers; this process keeps
+    # what is left of the cpus. With torch's default it ran 8 threads beside 8
+    # workers and its encode took 3x as long (CpuBudget's docstring).
+    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    print(f'  {CpuBudget.for_job(processes=args.cpu_processes, workers=args.num_workers).apply().line()}',
+          flush=True)
 
     device = torch.device(args.device)
     caches = open_caches(args, 'MppRoutingHead', device)
@@ -1070,10 +1212,11 @@ def main() -> int:
         f'  ordinal_weight={args.ordinal_weight}' if args.loss == 'ord_a' else
         f'  ordinal_sigma={args.ordinal_sigma}' if args.loss == 'ord_b' else ''))
     # NOT "wandb auto-names it" when --run-name is unset -- run_baseline2/3
-    # build a real name either way (`b2-<encoder>`, `b3-<head>`, optionally
-    # prefixed by --run-name). wandb's own random name generator
+    # build a real name either way (`b2-<encoder>`, `b3-<head>`, prefixed by
+    # --run-name, else by the job's name). wandb's own random name generator
     # ("electric-unicorn-42") never fires here.
-    prefix = args.run_name or '(none -- still named b2-<encoder> / b3-<head>)'
+    prefix = (args.run_name or os.environ.get('SLURM_JOB_NAME', '')
+              or '(none -- named b2-<encoder> / b3-<head>)')
     print(f'  wandb project={args.wandb_project}   mode={args.wandb_mode}   '
          f'run_name prefix={prefix}')
 

@@ -2,7 +2,7 @@
 """Tests for training/PrototypicalRoutingHead/Episodes.py -- the mixed-pool
 draws training and validation make.
 
-    python utilities/test_modules/test_episodes.py
+    python utilities/test_modules/RoutingHeadsTest/test_episodes.py
 
 No slide, no model, no GPU: the pools are hand-built ManifestRows whose
 coordinates are chosen so the right answer is known.

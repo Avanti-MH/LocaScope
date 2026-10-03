@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 # _paths holds the one definition of every package's sys.path entry
 # (setup_import_paths) -- utilities/ goes on the path here, by hand, because
@@ -45,7 +45,7 @@ __all__ = [
     'Head', 'grid_view', 'pooled_view',
     'encode_raw', 'normalise_patches', 'trunk_raw',
     'build_from_checkpoint', 'save_checkpoint', 'weight_filename',
-    'BASELINE3_ENCODER', 'HEAD_CHOICES', 'heads_for',
+    'BASELINE3_ENCODER', 'HEAD_CHOICES', 'MIX_LAYERS', 'head_parts', 'heads_for',
     'wandb_init', 'wandb_log', 'wandb_finish', 'wandb_epoch_metrics',
     'score', 'rescore', 'predict',
 ]
@@ -85,6 +85,16 @@ BASELINE3_ENCODER = 'convnext_v2'
 #:
 #: spec.md's 2-2 (NCM) and 2-4 (Mahalanobis) are still absent: neither is
 #: gradient-trained, so both need a fit-once path the training loop lacks.
+#: What a `mix_` head mixes: the blocks at a quarter, half, three quarters and
+#: the whole of the encoder's depth (`Heads.resolve_encoder_layers`), so one
+#: entry means the same spread on UNI2's 24 blocks (5, 11, 17, 23) and
+#: GigaPath's 40 (9, 19, 29, 39).
+MIX_LAYERS = (0.25, 0.5, 0.75, 1.0)
+
+#: The head NAME is `[mix_]` + `[attn_ | clsattn_ | nothing]` + classifier:
+#: nothing before the classifier is the `fixed` reduction on the last block.
+#: The name is only a key -- what a head is lives in its entry -- and
+#: `head_parts` reads the parts back off the entry, never off the string.
 HEAD_CHOICES = {
     'linear':        ('fixed', LinearHead,  (2, 3), {}),  # 2-1/3-1  main line
     'mlp':           ('fixed', MlpHead,     (2, 3), {}),  # 2-5/3-2  observation
@@ -99,8 +109,37 @@ HEAD_CHOICES = {
     'mlp_narrow':    ('fixed', MlpHead,     (2, 3),
                       dict(mlp_width_mult=0.5)),  # narrower than in_dim, not wider
     'attn_linear':   ('attn',  LinearHead,  (2, 3), {}),  # 2-6/3-3  learnable pool
+    # The learnable pool under the two deep MLPs that lead on the CLS view.
+    # attn_linear alone could not say whether the pool helps: it paired the
+    # pool with the weakest classifier, and classifier depth moved val more
+    # than the reduction did.
+    'attn_mlp_deep':      ('attn', MlpHead, (2, 3), dict(mlp_depth=2)),
+    'attn_mlp_deep_wide': ('attn', MlpHead, (2, 3),
+                           dict(mlp_depth=2, mlp_width_mult=2)),
+    # clsattn needs a CLS and a mix needs blocks of one width, so neither runs
+    # on baseline 3's ConvNeXt; `common.Head.Head` refuses both there as well.
+    'clsattn_mlp_deep':      ('clsattn', MlpHead, (2,), dict(mlp_depth=2)),
+    'mix_attn_mlp_deep':     ('attn', MlpHead, (2,),
+                              dict(mlp_depth=2, encoder_layers=MIX_LAYERS)),
+    'mix_clsattn_mlp_deep':  ('clsattn', MlpHead, (2,),
+                              dict(mlp_depth=2, encoder_layers=MIX_LAYERS)),
     'arcface':       ('fixed', ArcFaceHead, (2,),   {}),  # 2-3      angular margin
 }
+
+
+def head_parts(name: str) -> Tuple[str, str, bool]:
+    """`(classifier, reduction, mixes)` for a registered head name: the
+    classifier family it is drawn in (`mlp_deep` for `mix_attn_mlp_deep`), its
+    reduction, and whether it mixes encoder layers. Read off `HEAD_CHOICES`;
+    a name that is not registered (an old CSV) is taken as `fixed`, unmixed."""
+    entry = HEAD_CHOICES.get(name)
+    if entry is None:
+        return name, 'fixed', False
+    reduction = entry[0]
+    mixes = bool(len(entry) > 3 and entry[3].get('encoder_layers'))
+    prefix = ('mix_' if mixes else '') + ('' if reduction == 'fixed'
+                                          else f'{reduction}_')
+    return name[len(prefix):] if name.startswith(prefix) else name, reduction, mixes
 
 
 def heads_for(requested: List[str], baseline: int) -> List[str]:
@@ -123,7 +162,8 @@ def heads_for(requested: List[str], baseline: int) -> List[str]:
 #  run sets to keep this off the server -- see jobscripts/_env.sh.
 # ══════════════════════════════════════════════════════════════════════════
 
-def wandb_init(project: str, mode: str, name: str, config: Dict):
+def wandb_init(project: str, mode: str, name: str, config: Dict,
+               run_id: str = None):
     '''Returns a run, or `None` if wandb is not installed or `mode='disabled'`
     -- every other function here takes that `None` and no-ops, so a caller
     never has to branch on whether wandb exists.
@@ -137,6 +177,16 @@ def wandb_init(project: str, mode: str, name: str, config: Dict):
     epoch axis and one encoder forward pass, so they are one experiment with
     several lines); `run_baseline3` inits one run per HEAD (each owns its own
     trunk, optimizer and epoch loop, so each is its own experiment).
+
+    `run_id` makes the run CONTINUABLE: with an id, `resume='allow'` appends to
+    the run of that id when it exists and starts it when it does not, so a model
+    resumed from its checkpoint keeps drawing on the same curves
+    (`ResumeFile.wandb_run_id`). None starts a fresh run each time.
+
+    `config` goes in through `config.update(..., allow_val_change=True)` rather
+    than `init(config=...)`: a continued run already holds a config, and a value
+    that differs from last time (`slurm_job_id` always does) is the new job, not
+    an error.
     '''
     try:
         import wandb                                                # noqa: PLC0415
@@ -144,8 +194,10 @@ def wandb_init(project: str, mode: str, name: str, config: Dict):
         print('wandb not installed; logging to stdout and the CSVs only',
               flush=True)
         return None
-    return wandb.init(project=project, mode=mode, name=name or None,
-                      config=config)
+    run = wandb.init(project=project, mode=mode, name=name or None,
+                     id=run_id, resume='allow' if run_id else None)
+    run.config.update(config, allow_val_change=True)
+    return run
 
 
 def wandb_log(run, step: int, metrics: Dict[str, float]) -> None:
@@ -196,7 +248,7 @@ def score(pred_class: torch.Tensor, true_class: torch.Tensor,
     same quantity the KNN bench reports, restricted to a discrete ladder.
 
     `native` (`Datasets.render_row`'s third element,
-    `QueryFromWSI.reads_natively`) splits `level_accuracy` a second way, and
+    `Render.reads_natively`) splits `level_accuracy` a second way, and
     the split is a CONFOUND CHECK rather than a breakdown for its own sake.
 
     A rung whose mpp is not on the slide's pyramid is read one level finer and

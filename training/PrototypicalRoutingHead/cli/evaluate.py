@@ -76,7 +76,7 @@ import torch                                                        # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, build_manifest, open_caches, RUNGS, RenderConfig,
     CameraBank)
-from WsiSplit import read_split, split_path                          # noqa: E402
+from AccessDatasets import list_names                                # noqa: E402
 from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
     HELD_OUT_COMBOS, group_by_wsi_name, max_feasible_k, pool_by_rung,
     render_episode, sample_val_episode)
@@ -96,23 +96,23 @@ def test_manifests(args, caches, out_dir: Path):
     `wsi_split.csv` already shuffled once, so a prefix is a sample, and the
     SAME sample every time without a second seed to keep in step with the
     first (`MppRoutingHead/cli/evaluate.py`'s own `test_rows` reasoning).
-    The split is READ (`read_split` refuses when it is missing): one derived
+    The split is READ (`<dataset>#test`; it refuses when the split is missing): one derived
     here could disagree with the one `train.py` selected checkpoints on.
     '''
-    out, pools = {}, {}
+    out, pools, sizes = {}, {}, {}
     for dataset_id in args.eval_datasets:
-        names = read_split(split_path(caches.split_job, dataset_id))[1][:args.n_wsi]
+        names = list_names(dataset=f'{dataset_id}#test',
+                           split_job=caches.split_job)[:args.n_wsi]
         part = build_manifest(
             dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
             report_dir=(out_dir / 'sampler_reports'
                         / f'{dataset_id.replace("/", "_")}_test'),
             tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
             wsi_names=names)
-        print(f'[test]  {dataset_id}: {len(part)} positions from '
-             f'{len(names)} WSIs ({", ".join(names)})', flush=True)
         out[dataset_id] = group_by_wsi_name(part)
         pools[dataset_id] = pool_by_rung(part)
-    return out, pools
+        sizes[dataset_id] = (len(names), len(part), names)
+    return out, pools, sizes
 
 
 def find_weights(args, out_dir: Path) -> List[Path]:
@@ -178,6 +178,17 @@ def main() -> int:
     ap.add_argument('--max-overlap', type=float, default=0.0,
                     help="K x K table: train.py's overlap rule")
     ap.add_argument('--feasibility-tries', type=int, default=5)
+    ap.add_argument('--support-native', choices=('checkpoint', 'on', 'off'),
+                    default='checkpoint',
+                    help="how the SUPPORT side is rendered. 'checkpoint' "
+                         "(default): as each checkpoint trained (its own "
+                         "--support-native). 'on': CAMERA_GEOMETRY_ONLY for "
+                         "every checkpoint -- rotation only, closer to the raw "
+                         "WSI crops PrototypeEstMpp feeds at deployment (which "
+                         "do not rotate). 'off': CAMERA_FULL for every one. Off "
+                         "the default, the CSVs are named test_scores[_kxk]_"
+                         "support-<on|off>_* so they do not replace the default "
+                         "run's")
     ap.add_argument('--encode-batch', type=int, default=64)
     ap.add_argument('--seed', type=int, default=42)
     # --seg: every checkpoint scored must have been trained under the same one
@@ -190,10 +201,7 @@ def main() -> int:
     caches = open_caches(args, 'PrototypicalRoutingHead', device)
     out_dir = Path(args.out or job_result_dir('PrototypicalRoutingHead'))
     weights = find_weights(args, out_dir)
-    print(f'{len(weights)} checkpoint(s), test split of '
-         f'{", ".join(args.eval_datasets)}, full 6-way combo only', flush=True)
-
-    test_by_dataset, test_pools = test_manifests(args, caches, out_dir)
+    test_by_dataset, test_pools, test_sizes = test_manifests(args, caches, out_dir)
     caches.masks.close()
 
     kxk_max = min(max_feasible_k(
@@ -202,8 +210,31 @@ def main() -> int:
         max_overlap=args.max_overlap, tries=args.feasibility_tries,
         seed=args.seed) for pool in test_pools.values())
     kxk_k = kxk_max if args.kxk_k == 'auto' else args.kxk_k
-    print(f'  --kxk-k {args.kxk_k} -> K = {kxk_k}   (max drawable on the test '
-          f'split: {kxk_max})', flush=True)
+    print(f'\n======== evaluate.py -- TEST split ========', flush=True)
+    where = ('given by --weights' if args.weights else
+             f'{", ".join("*_" + t + ".pt" for t in args.tag)} in {out_dir / "weights"}')
+    print(f'checkpoints   {len(weights)}  ({where})', flush=True)
+    for i, (dataset_id, (n_wsi, n_pos, names)) in enumerate(test_sizes.items()):
+        print(f'{"test slides" if i == 0 else "":<14s}{dataset_id:<17s} {n_wsi} WSIs  '
+              f'{n_pos} positions  ({", ".join(names)})', flush=True)
+    print(f'per checkpoint, two tables:', flush=True)
+    print(f'  [A] random 6-way   {args.n_episodes} episodes of all six rungs per '
+          f'dataset; accuracy pooled over their query tiles, per rung, and split by '
+          f'how a tile was read (native level / resampled from a finer one) '
+          f'-> test_scores_per_*.csv', flush=True)
+    print(f'  [B] K x K          K = {kxk_k} ({args.kxk_k}; the largest the test '
+          f'split can draw is {kxk_max}); every held-out combination, KxK '
+          f'support x query pairs, rung -> combo -> dataset -> total means '
+          f'-> test_scores_kxk_per_*.csv', flush=True)
+    print(f'support       ' + (
+        'as each checkpoint trained (--support-native recorded in it)'
+        if args.support_native == 'checkpoint' else
+        f'{args.support_native} for every checkpoint ('
+        f'{"CAMERA_GEOMETRY_ONLY: rotation only" if args.support_native == "on" else "CAMERA_FULL"})'),
+        flush=True)
+    print(f'retries       --feasibility-tries {args.feasibility_tries}: a draw '
+          f'that cannot be drawn or rendered is drawn again, this many times',
+          flush=True)
     if kxk_k < 1 or kxk_k > kxk_max:
         raise SystemExit(f'K x K table: K={kxk_k} cannot be drawn (max {kxk_max}). '
                          f'Lower --n-support/--n-query or raise --n-per-rung')
@@ -215,7 +246,7 @@ def main() -> int:
     out_rung_rows: List[Dict] = []
     kxk_combo_rows: List[Dict] = []
     kxk_rung_rows: List[Dict] = []
-    for path in weights:
+    for i_ckpt, path in enumerate(weights, 1):
         (pooling, support_context, query_context, collapse, head,
         encoder, ckpt) = build_prototype_from_checkpoint(path, device)
 
@@ -237,14 +268,18 @@ def main() -> int:
 
         num_prefix = int(encoder.model_spec.num_prefix)
         extra = ckpt.get('extra', {})
-        # support_native (2026-09-22): read back off THIS checkpoint's own
-        # recorded args, same as tile above -- render_episode has to
-        # reproduce whatever this specific arm actually trained under
-        # (CAMERA_FULL or CAMERA_GEOMETRY_ONLY on the support side), not
-        # this file's own --support-native (there is no such flag here on
-        # purpose: --weights all scores several arms in one call, and they
-        # can each have trained under a different value).
-        support_native = bool(run_args.get('support_native', False))
+        # support_native (2026-09-22): by default read back off THIS
+        # checkpoint's own recorded args, same as tile above -- render_episode
+        # reproduces whatever this specific arm trained under (CAMERA_FULL or
+        # CAMERA_GEOMETRY_ONLY on the support side); --weights all scores
+        # several arms in one call, and each may have trained differently.
+        # --support-native on/off (2026-10-02) overrides that for every
+        # checkpoint, to score them all against one kind of support -- the
+        # `support_native` column below still says how each one TRAINED,
+        # `eval_support` how this run rendered.
+        trained_native = bool(run_args.get('support_native', False))
+        support_native = (trained_native if args.support_native == 'checkpoint'
+                          else args.support_native == 'on')
         # support_context/query_context/collapse/routing_head are top-
         # level fields (Checkpoints.save_prototype_checkpoint's own
         # docstring) -- read directly, no extra fallback: every checkpoint
@@ -263,10 +298,19 @@ def main() -> int:
             # registry name needing a lookup).
             train_dataset=run_args.get('train_dataset', ''),
             loss=run_args.get('loss', ''),
-            support_native=support_native, seg=run_args['seg'],
+            support_native=trained_native,
+            eval_support='native' if support_native else 'full',
+            seg=run_args['seg'],
             episode_reuse=extra.get('episode_reuse', ''),
             reuse_k=extra.get('reuse_k', ''))
         tag = path.stem.rsplit('_', 1)[-1]
+        cross = identity['cross_domain_dataset'] or 'off'
+        print(f'\n-------- [{i_ckpt}/{len(weights)}] reuse '
+              f'{identity["episode_reuse"] or "-"} | {identity["collapse"]} | '
+              f'{identity["routing_head"]} | ctx {identity["support_context"]}/'
+              f'{identity["query_context"]} | cross {cross} | tag {tag} --------',
+              flush=True)
+        print(f'{path.name}', flush=True)
 
         rng = random.Random(args.seed)
         detail: Dict[str, List[Dict]] = {d: [] for d in args.eval_datasets}
@@ -297,14 +341,15 @@ def main() -> int:
                 detail[dataset_id] += val_episode_detail(
                     rendered, logits, target, native, dataset_id)
                 n_done += 1
-        print(f'  {path.name}  ({n_redraws} redraws)', flush=True)
+        print(f'[A] random 6-way   ({n_redraws} redraws: episodes that could '
+              f'not be drawn or rendered, drawn again)', flush=True)
 
         c_rows, r_rows = combo_report(detail, int(ckpt['epoch']),
                                       weights=path.name, tag=tag, **identity)
         out_combo_rows += c_rows
         out_rung_rows += r_rows
 
-        print(f'  {path.name}  K x K, K={kxk_k}', flush=True)
+        print(f'[B] K x K, K={kxk_k}', flush=True)
         for m in (pooling, support_context, query_context, collapse, head):
             m.eval()
         results = score_kxk(
@@ -316,13 +361,15 @@ def main() -> int:
             query_context=query_context, collapse=collapse, head=head,
             batch_size=args.encode_batch, device=device)
         c_rows, r_rows, _summary = kxk_report(
-            results, int(ckpt['epoch']), k=kxk_k, weights=path.name, tag=tag,
-            **identity)
+            results, int(ckpt['epoch']), k=kxk_k, scope='test',
+            weights=path.name, tag=tag, **identity)
         kxk_combo_rows += c_rows
         kxk_rung_rows += r_rows
 
-    rc = write_csvs(out_dir, out_combo_rows, out_rung_rows)
-    rc_kxk = write_csvs(out_dir, kxk_combo_rows, kxk_rung_rows, prefix='test_scores_kxk')
+    seg = '' if args.support_native == 'checkpoint' else f'_support-{args.support_native}'
+    rc = write_csvs(out_dir, out_combo_rows, out_rung_rows, prefix=f'test_scores{seg}')
+    rc_kxk = write_csvs(out_dir, kxk_combo_rows, kxk_rung_rows,
+                        prefix=f'test_scores_kxk{seg}')
     return rc or rc_kxk
 
 

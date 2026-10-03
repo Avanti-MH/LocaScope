@@ -66,16 +66,29 @@ from PrototypeChoices import (SUPPORT_CONTEXT_CHOICES, QUERY_CONTEXT_CHOICES,  #
 #  instead.
 # ══════════════════════════════════════════════════════════════════════════
 
-def wandb_init(project: str, mode: str, name: str, config: Dict):
+def wandb_init(project: str, mode: str, name: str, config: Dict,
+               run_id: str = None):
     '''Returns a run, or `None` if wandb is not installed -- every other
-    function here takes that `None` and no-ops.'''
+    function here takes that `None` and no-ops.
+
+    `run_id` makes the run CONTINUABLE: with an id, `resume='allow'` appends to
+    the run of that id when it exists and starts it when it does not, so a model
+    resumed from its checkpoint keeps drawing on the same curves. None starts a
+    fresh run each time.
+
+    `config` goes in through `config.update(..., allow_val_change=True)` rather
+    than `init(config=...)`: a continued run already holds a config, and a value
+    that differs from last time (`slurm_job_id` always does) is not an error
+    here, it is the new job.'''
     try:
         import wandb                                                # noqa: PLC0415
     except ImportError:
         print('wandb not installed; logging to stdout only', flush=True)
         return None
-    return wandb.init(project=project, mode=mode, name=name or None,
-                      config=config)
+    run = wandb.init(project=project, mode=mode, name=name or None,
+                     id=run_id, resume='allow' if run_id else None)
+    run.config.update(config, allow_val_change=True)
+    return run
 
 
 def wandb_log(run, step: int, metrics: Dict[str, float]) -> None:

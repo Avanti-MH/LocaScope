@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for `kxk_report` in training/PrototypicalRoutingHead/cli/train.py --
+"""Tests for `kxk_report` and `improves_everywhere` in training/PrototypicalRoutingHead/cli/train.py --
 the validation accuracy the checkpoints are chosen on.
 
-    python utilities/test_modules/test_kxk_report.py
+    python utilities/test_modules/RoutingHeadsTest/test_kxk_report.py
 
 No model: hand-written per-pair, per-rung accuracies whose answer is worked
 out below.
@@ -32,7 +32,8 @@ from _paths import setup_import_paths                            # noqa: E402
 
 setup_import_paths()
 
-from training.PrototypicalRoutingHead.cli.train import kxk_report  # noqa: E402
+from training.PrototypicalRoutingHead.cli.train import (      # noqa: E402
+    improves_everywhere, kxk_report)
 
 _RESULTS = []
 
@@ -95,6 +96,33 @@ def t_a_combo_that_could_not_be_drawn_is_missing_not_zero():
     assert abs(summary['total'] - 0.5) < 1e-12, (
         f'{summary["total"]}: a missing combo was averaged in as a number')
     return 'skipped, not scored as 0'
+
+
+def t_best_needs_every_dataset_to_hold_and_one_to_rise():
+    """`_best.pt` is chosen by `improves_everywhere`. The decoy is the rule it
+    replaced, the mean going up, which the third case below satisfies while
+    one dataset falls."""
+    nan = float('nan')
+    saved = {'bracs': 0.60, 'ki67': 0.80}
+    cases = [
+        ('one up, one level',         {'bracs': 0.65, 'ki67': 0.80}, True),
+        ('both up',                   {'bracs': 0.65, 'ki67': 0.85}, True),
+        ('mean up, one falls',        {'bracs': 0.75, 'ki67': 0.79}, False),
+        ('both level',                {'bracs': 0.60, 'ki67': 0.80}, False),
+        ('one falls, none rise',      {'bracs': 0.59, 'ki67': 0.80}, False),
+        ('one cannot be scored',      {'bracs': 0.65, 'ki67': nan},  True),
+        ('unscored one, other falls', {'bracs': 0.50, 'ki67': nan},  False),
+    ]
+    for label, now, want in cases:
+        got = improves_everywhere(now, saved)
+        assert got == want, f'{label}: {now} against {saved} gave {got}'
+    mean_up = {'bracs': 0.75, 'ki67': 0.79}
+    assert sum(mean_up.values()) > sum(saved.values()), 'the decoy must pass'
+    assert improves_everywhere({'bracs': 0.5, 'ki67': 0.5}, {}), \
+        'the first epoch has nothing to fall below'
+    assert not improves_everywhere({'bracs': nan, 'ki67': nan}, {}), \
+        'nothing scored is not an improvement'
+    return f'{len(cases)} cases, and the mean-went-up decoy refused'
 
 
 # ══════════════════════════════════════════════════════════════════════════════

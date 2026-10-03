@@ -242,7 +242,7 @@ identity, the same photo every time. Both names were renamed public
 in `MppRoutingHead/Datasets.py` first (were `_CameraBank`/`_render_row`) so
 this reuse is legitimate rather than reaching past a no-stability-promise
 underscore — every reference to the old names, including comments in
-`cli/train.py`/`Runtime.py`/`test_camera_output_to_level0.py`, was updated
+`cli/train.py`/`Runtime.py`/`test_camera.py`, was updated
 in the same change.
 
 **Validation, K x K** (user, 2026-09-24). For each eval dataset and each

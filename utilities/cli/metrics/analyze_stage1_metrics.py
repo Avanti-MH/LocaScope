@@ -105,11 +105,11 @@ BAR = '=' * 78
 #: one label). Nothing here was ever updated to match, so every lookup has
 #: been falling through to the `_INK_SECONDARY` grey fallback since that
 #: switch -- this was found and fixed the same day as the `loss` column,
-#: not a regression it introduced. Colours reused from `training/
-#: MppRoutingHead/cli/evaluate.py`'s own `HEAD_COLORS` (same head_name
-#: keys, one extra file keying off the same 8) for consistency across the
-#: two reports; `mlp_narrow` (present in `HEAD_CHOICES`, absent from that
-#: file's own dict too) gets a 9th colour here, not yet backfilled there.
+#: not a regression it introduced. One colour per head recipe, its own table:
+#: `training/MppRoutingHead/cli/evaluate.py` no longer has a per-head table to
+#: share -- since 2026-10-01 it colours by classifier and marks the reduction
+#: by shape (`CLASSIFIER_COLORS`, `head_style`), so the two reports do not use
+#: the same colour for the same head.
 HEAD_RECIPE_COLORS = {
     'baseline':              '#2a78d6',   # raw KnnEstMpp
     'linear+fixed':          '#eb6834',
@@ -209,6 +209,11 @@ def method_of(row: dict) -> str:
     loss = cell(row, 'loss')
     if loss and loss != 'bal':
         parts.append(loss)
+    # `read_level` (2026-10-02), the same rule one column on: only off the
+    # default, so a pyramid-trained head keeps its label
+    read = cell(row, 'read_level')
+    if read and read != 'pyramid':
+        parts.append(read)
     return '+'.join(parts)
 
 
@@ -300,6 +305,7 @@ def cross_slide_rung(rows: list) -> list:
                         classifier=cell(grp[0], 'classifier') or '',
                         reduction=cell(grp[0], 'reduction') or '',
                         loss=cell(grp[0], 'loss') or '',
+                        read_level=cell(grp[0], 'read_level') or '',
                         n_slides=n_slides, **score_group(grp)))
     return out
 
@@ -446,8 +452,8 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
         for r in rows:
             if encoder_of(r['method']) == encoder:
                 recipe = head_recipe_of(r['classifier'], r['reduction'])
-                by_line[(recipe, r['loss'])].append(r)
-        for (recipe, loss), line_rows in sorted(by_line.items()):
+                by_line[(recipe, r['loss'], r.get('read_level') or '')].append(r)
+        for (recipe, loss, read), line_rows in sorted(by_line.items()):
             line_rows.sort(key=lambda r: r['rung'])
             color = HEAD_RECIPE_COLORS.get(recipe, _INK_SECONDARY)
             # baseline (KnnEstMpp) has no loss at all -- dashed regardless,
@@ -456,11 +462,16 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
             # docstring: colour is head identity, loss is the line).
             style = '--' if recipe == 'baseline' else LOSS_LINESTYLES.get(loss, '-')
             label = recipe if loss in ('', 'bal') else f'{recipe} ({loss})'
+            # a head trained off the default read mode: same colour and
+            # line as its pyramid twin, faded, and named in the legend
+            off = read not in ('', 'pyramid')
+            if off:
+                label = f'{label} [{read}]'
             ax.plot([r['rung'] for r in line_rows],
                     [r['level_accuracy'] for r in line_rows],
                     color=color, linewidth=2, marker='o', markersize=8,
-                    linestyle=style, label=label)
-            seen[(recipe, loss)] = (color, style, label)
+                    linestyle=style, label=label, alpha=0.5 if off else 1.0)
+            seen[(recipe, loss, read)] = (color, style, label, 0.5 if off else 1.0)
         ax.set_xscale('log', base=2)
         ax.set_xticks(RUNGS)
         ax.set_xticklabels([f'{int(r)}' for r in RUNGS], color=_INK_SECONDARY)
@@ -474,8 +485,8 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
 
     axes[0].set_ylabel('level accuracy', color=_INK_SECONDARY, fontsize=9)
     handles = [plt.Line2D([0], [0], color=color, linewidth=2, marker='o',
-                          markersize=6, linestyle=style, label=label)
-              for color, style, label in seen.values()]
+                          markersize=6, linestyle=style, label=label, alpha=alpha)
+              for color, style, label, alpha in seen.values()]
     fig.legend(handles=handles, loc='lower center', ncol=min(len(handles), 5),
               bbox_to_anchor=(0.5, 0.0), frameon=False,
               fontsize=9, labelcolor=_INK_SECONDARY)

@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=12                         # DataLoader workers + main
 #SBATCH --ntasks-per-node=1                        # Tasks per node
 #SBATCH --mem=600G                                 # host RAM
-#SBATCH -o /work/u26130998/log/MppRoutingHead      # STDOUT
-#SBATCH -e /work/u26130998/log/MppRoutingHead      # STDERR
+#SBATCH -o /work/u26130998/log/%x      # STDOUT
+#SBATCH -e /work/u26130998/log/%x      # STDERR
 
 ml purge
 ml load miniconda3/24.11.1
@@ -96,15 +96,10 @@ ORDINAL_SIGMA="${ORDINAL_SIGMA:-1.0}"
 EVAL_ONLY="${EVAL_ONLY:-0}"
 TAG="${TAG:-best}"
 WANDB_PROJECT="${WANDB_PROJECT:-mpp-routing-head}"
-# Defaults to the SLURM job id, not empty -- an empty RUN_NAME still gets a
-# real wandb run name (b2-<encoder> / b3-<arm>, see cli/train.py), but with
-# no prefix two submissions of this same script are two runs with the
-# IDENTICAL name, distinguishable only by timestamp in the wandb UI.
-# $SLURM_JOB_ID does not exist yet at `sbatch` time on the submitting shell --
-# it is only set once this script is actually running on the allocated node,
-# which is exactly why this default lives HERE and not in a `sbatch
-# --export=...` example.
-RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-}}"
+# Empty by default: cli/train.py then names the wandb run after the job
+# (SLURM_JOB_NAME) -- <job name>-b2-<encoder> / <job name>-b3-<arm> -- and keeps
+# the job id and name in the run's config. Set RUN_NAME to replace the job name.
+RUN_NAME="${RUN_NAME:-}"
 # WANDB_MODE itself is NOT set here -- jobscripts/_env.sh (sourced above)
 # already exports it project-wide, and train.py's own --wandb-mode default
 # reads it. This file only needs to pass the project/run-name through.
@@ -174,16 +169,45 @@ MERGE_ARG="--merge"
 TRAIN_EXTRA_ARGS=""
 [ "$CLIP_GRAD_NORM" != "0" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --clip-grad-norm $CLIP_GRAD_NORM"
 [ "$WARMUP_EPOCHS" != "0" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --warmup-epochs $WARMUP_EPOCHS"
+# Training read mode (cli/train.py --read-level and its three companions,
+# spec.md 詞彙). Unset: train.py's defaults, i.e. 'pyramid', the only mode
+# before these existed -- same file names, same resume files.
+[ -n "${READ_LEVEL:-}" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --read-level $READ_LEVEL"
+[ -n "${RESAMPLE_FROM:-}" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --resample-from $RESAMPLE_FROM"
+[ -n "${MAX_RESAMPLE_FACTOR:-}" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --max-resample-factor $MAX_RESAMPLE_FACTOR"
+[ -n "${RESAMPLED_SHARE:-}" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --resampled-share $RESAMPLED_SHARE"
+
+# WHOSE CACHES TO READ -- train.py's and evaluate.py's --mask-cache-job /
+# --sampler-cache-job / --split-cache-job. Without them a cache is named after
+# THIS job (SLURM_JOB_NAME), so a run under another --job-name (a smoke, a side
+# experiment) finds an empty result/cache/<that name>_mask/ and segments every
+# slide again. Mask and sampler therefore default to MppRoutingHead, the job
+# that built them -- the same default PrototypicalRoutingHead.sh's CACHE_JOB
+# has -- which is no change for a run under the default job name.
+#
+#     CACHE_JOB             both mask and sampler (default MppRoutingHead)
+#     MASK_CACHE_JOB        the mask alone, overriding CACHE_JOB
+#     SAMPLER_CACHE_JOB     the sampler alone, overriding CACHE_JOB
+#     SPLIT_CACHE_JOB       the val/test split (unset: the readers' own
+#                           default, MakeSplit, which step [0] writes)
+CACHE_JOB="${CACHE_JOB:-MppRoutingHead}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-$CACHE_JOB}"
+SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB:-$CACHE_JOB}"
+CACHE_ARGS="--mask-cache-job $MASK_CACHE_JOB --sampler-cache-job $SAMPLER_CACHE_JOB"
+[ -n "${SPLIT_CACHE_JOB:-}" ] && CACHE_ARGS="$CACHE_ARGS --split-cache-job $SPLIT_CACHE_JOB"
+TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS $CACHE_ARGS"
 
 echo "======== MppRoutingHead ========"
 echo "  out       $OUT"
 echo "  baseline  $BASELINE   parallel=$PARALLEL"
+echo "  read      ${READ_LEVEL:-pyramid}${RESAMPLE_FROM:+ from $RESAMPLE_FROM}${MAX_RESAMPLE_FACTOR:+ max x$MAX_RESAMPLE_FACTOR}${RESAMPLED_SHARE:+ share $RESAMPLED_SHARE}"
+echo "  caches    mask from $MASK_CACHE_JOB, sampler from $SAMPLER_CACHE_JOB, split from ${SPLIT_CACHE_JOB:-MakeSplit}"
 echo "  encoders  $ENCODERS"
 echo "  arms      $ARMS"
 echo "  bal on    baseline $BASELINE   ordinal passes: ${ORD_LOSSES:-(none)} on ${ORD_ENCODERS}"
 echo "  epochs    $EPOCHS   n_per_rung $N_PER_RUNG   cpus $CPUS"
 echo "  wandb     project=$WANDB_PROJECT   mode=${WANDB_MODE:-online, unset here -- train.py falls back to the same}"
-echo "  run_name  prefix=${RUN_NAME:-(none)}   (defaults to \$SLURM_JOB_ID; runs are still b2-<encoder> / b3-<arm> even with no prefix)"
+echo "  run_name  prefix=${RUN_NAME:-(job name)}   (runs are <prefix>-b2-<encoder> / <prefix>-b3-<arm>)"
 [ -n "$MAX_WSI" ] && echo "  max_wsi   $MAX_WSI"
 echo "  resume    ${RESUME_DIR:-off (RESUME_DIR set empty)}"
 [ "$CLIP_GRAD_NORM" != "0" ] && echo "  clip_grad_norm  $CLIP_GRAD_NORM"
@@ -229,8 +253,8 @@ elif [ "$PARALLEL" = "1" ]; then
     # printing per-epoch lines at their own pace is not "still readable, just
     # ugly", it is two numbers from two different epochs landing on one line.
     mkdir -p "$OUT/b2" "$OUT/b3"
-    LOG2="/work/u26130998/log/MppRoutingHead_b2.log"
-    LOG3="/work/u26130998/log/MppRoutingHead_b3.log"
+    LOG2="/work/u26130998/log/${SLURM_JOB_NAME:-MppRoutingHead}_b2.log"
+    LOG3="/work/u26130998/log/${SLURM_JOB_NAME:-MppRoutingHead}_b3.log"
     echo "  baseline 2 -> GPU 0, $NUM_WORKERS_PAR workers, log: $LOG2"
     echo "  baseline 3 -> GPU 1, $NUM_WORKERS_PAR workers, log: $LOG3"
 
@@ -243,7 +267,7 @@ elif [ "$PARALLEL" = "1" ]; then
         --n-per-rung "$N_PER_RUNG" \
         --batch-size "$BATCH_SIZE" \
         --wsi-group-size "$WSI_GROUP" \
-        --num-workers "$NUM_WORKERS_PAR" \
+        --num-workers "$NUM_WORKERS_PAR" --cpu-processes 2 \
         --device cuda:0 \
         --wandb-project "$WANDB_PROJECT" \
         $RUN_NAME_ARG \
@@ -259,8 +283,8 @@ elif [ "$PARALLEL" = "1" ]; then
         --n-per-rung "$N_PER_RUNG" \
         --batch-size "$BATCH_SIZE" \
         --wsi-group-size "$WSI_GROUP" \
-        --num-workers "$NUM_WORKERS_PAR" \
-        --device cuda:1 \
+        --num-workers "$NUM_WORKERS_PAR" --cpu-processes 2 \
+        --device cuda:0 \
         --wandb-project "$WANDB_PROJECT" \
         $RUN_NAME_ARG \
         $MAX_WSI_ARG $RESUME_DIR_ARG $MERGE_ARG $TRAIN_EXTRA_ARGS --out "$OUT/b3" \
@@ -300,11 +324,13 @@ elif [ "$PARALLEL" = "1" ]; then
 import csv, sys
 a, b, out = sys.argv[1:4]
 rows = []
-header = None
+header = []
+# the UNION of both headers, in first-seen order: one file can carry a column
+# the other predates (read_level), and DictWriter refuses a key its header lacks
 for path in (a, b):
     with open(path, newline='') as fh:
         r = csv.DictReader(fh)
-        header = header or r.fieldnames
+        header += [f for f in r.fieldnames if f not in header]
         rows += list(r)
 with open(out, 'w', newline='') as fh:
     wr = csv.DictWriter(fh, fieldnames=header)
@@ -382,6 +408,7 @@ echo "======== [2] evaluate ========"
 python training/MppRoutingHead/cli/evaluate.py \
     --tag "$TAG" \
     --seg "$SEG" \
+    $CACHE_ARGS \
     --num-workers "$NUM_WORKERS" \
     --out "$OUT"
 rc=$?

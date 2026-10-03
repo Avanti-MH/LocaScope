@@ -37,7 +37,8 @@ epoch prints each combination's accuracy and its per-rung accuracies.
 held-out combination. The val draw uses a fresh `random.Random(--seed)` every
 epoch, so the same questions are asked every epoch and only the model changes.
 
-CHECKPOINTS: `_best.pt` on the TOTAL, `_6rung.pt` on the full 6-way
+CHECKPOINTS: `_best.pt` when EVERY dataset scores at least what the saved epoch
+did and one scores more (`improves_everywhere`), `_6rung.pt` on the full 6-way
 combination's accuracy (mean over datasets), `_native.pt` on the mean over the
 combinations whose every query rendered natively.
 
@@ -70,10 +71,10 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
-    add_cache_args, build_manifest, CameraBank, open_caches, RenderConfig,
-    RUNGS)
-from WsiSplit import (native_bracs_rung_wsi_names, read_split,       # noqa: E402
-                      split_path)
+    add_cache_args, build_manifest, cache_jobs, CameraBank, open_caches,
+    RenderConfig, RUNGS)
+from AccessDatasets import list_names                                # noqa: E402
+from WsiSplit import native_bracs_rung_wsi_names                     # noqa: E402
 from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
     HELD_OUT_COMBOS, REUSE_MODES, batch_shape, draw, epoch_schedule,
     episodes_per_epoch,
@@ -171,8 +172,9 @@ def episode_forward(rendered, *, encoder, num_prefix: int, pooling,
 # ══════════════════════════════════════════════════════════════════════════
 
 def val_manifests(args, caches, out_dir: Path):
-    '''`{dataset_id: {rung: [row, ...]}}` -- the MIXED pool of every
-    `--eval-datasets` entry's held-out WSIs.
+    '''`({dataset_id: {rung: [row, ...]}}, {dataset_id: (val WSIs, test WSIs)})`
+    -- the MIXED pool of every `--eval-datasets` entry's held-out WSIs, and how
+    many WSIs the split gave val and test (the supply table prints both).
 
     The held-out names are READ from the split `utilities/cli/build_cache/
     make_split.py` wrote (`--split-cache-job`, default MakeSplit) --
@@ -181,27 +183,21 @@ def val_manifests(args, caches, out_dir: Path):
     derivations happening to agree. The BRACS native filter is applied there,
     by the one writer.
     '''
-    out = {}
+    out, sizes = {}, {}
     for dataset_id in args.eval_datasets:
-        val_names, test_names = read_split(
-            split_path(caches.split_job, dataset_id))
+        val_names = list_names(dataset=f'{dataset_id}#val',
+                               split_job=caches.split_job)
+        test_names = list_names(dataset=f'{dataset_id}#test',
+                                split_job=caches.split_job)
         part = build_manifest(
             dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
             report_dir=(out_dir / 'sampler_reports'
                         / f'{dataset_id.replace("/", "_")}_val'),
             tile_size=args.tile, n_per_rung=args.val_n_per_rung,
             seed=args.seed, wsi_names=val_names)
-        print(f'[val]   {dataset_id}: {len(part)} positions from '
-             f'{len(val_names)} WSIs ({len(test_names)} held back for test)',
-             flush=True)
-        # Manifest SUPPLY: what every val WSI together offers per rung, before
-        # any draw. The coarsest rung here is what bounds --val-reuse-k.
-        by_rung = Counter(r.rung for r in part)
-        print(f'          rung  {"  ".join(f"{r:>7g}" for r in RUNGS)}\n'
-             f'          n     {"  ".join(f"{by_rung.get(r, 0):>7d}" for r in RUNGS)}',
-             flush=True)
+        sizes[dataset_id] = (len(val_names), len(test_names))
         out[dataset_id] = pool_by_rung(part)
-    return out
+    return out, sizes
 
 
 def _combo_label(rungs) -> str:
@@ -274,29 +270,31 @@ def combo_report(detail_by_dataset, epoch: int, **identity):
     TRAINING shortfall, which has no equivalent at the per-episode level.
     '''
     combo_rows, rung_rows = [], []
+    # One row per (dataset, combination), under the same rung columns
+    # `kxk_report` uses; the right side is the pooled accuracy and its split by
+    # how the query tiles were read (native level / resampled from a finer one).
+    print(f'    {"dataset   combo":<33s}' + ''.join(f'{r:>8g}' for r in RUNGS)
+          + f' |{"acc":>8s}{"native":>9s}{"resampled":>11s}', flush=True)
     for dataset_id, rows in detail_by_dataset.items():
         combos = sorted({r['combo'] for r in rows},
                         key=lambda c: (c.count('+'), c))
         for combo in combos:
             combo_detail = [r for r in rows if r['combo'] == combo]
             result = rescore(combo_detail)
-            print(f'         {dataset_id:17s} combo {combo:20s} '
-                 f'acc {result["level_accuracy"]:.4f}  '
-                 f'native {result["level_accuracy_native"]:.4f} '
-                 f'(n={result["n_native"]})  '
-                 f'resampled {result["level_accuracy_resampled"]:.4f} '
-                 f'(n={result["n_resampled"]})', flush=True)
             combo_rows.append(dict(**identity, epoch=epoch, val_dataset=dataset_id,
                                    combo=combo, **result))
 
             combo_rungs = sorted({r['gt_rung'] for r in combo_detail})
             per_rung = {rung: rescore([r for r in combo_detail if r['gt_rung'] == rung])
                        for rung in combo_rungs}
-            print(f'         {"":17s}       rung   '
-                 + '  '.join(f'{r:>7g}' for r in combo_rungs), flush=True)
-            print(f'         {"":17s}       acc    '
-                 + '  '.join(f'{per_rung[r]["level_accuracy"]:>7.4f}'
-                             for r in combo_rungs), flush=True)
+            nat, res = result['level_accuracy_native'], result['level_accuracy_resampled']
+            print(f'    {dataset_id:<17s} {combo:<15s}'
+                  + _rung_cells([per_rung[r]['level_accuracy'] if r in per_rung
+                                 else None for r in RUNGS])
+                  + f' |{result["level_accuracy"]:>8.4f}'
+                  + (f'{nat:>9.4f}' if nat == nat else f'{"-":>9s}')
+                  + (f'{res:>11.4f}' if res == res else f'{"-":>11s}'),
+                  flush=True)
             for rung, r in per_rung.items():
                 rung_rows.append(dict(**identity, epoch=epoch, val_dataset=dataset_id,
                                       combo=combo, rung=rung, **r))
@@ -384,25 +382,23 @@ def score_kxk(pools_by_dataset, combos, *, k: int, n_support: int, n_query: int,
             if rendered is None:
                 if n_drawn == 0:
                     print(
-                        f'    [kxk:draw-failed] {dataset_id} {label}: '
-                        f'no valid K={k} draw in {tries} attempts '
-                        f'-- scored as missing',
+                        f'    ! {dataset_id} {label}: no valid K={k} draw in '
+                        f'{tries} attempts -- scored as missing [draw-failed]',
                         flush=True,
                     )
                 elif draw_exhausted:
                     print(
-                        f'    [kxk:mixed-failed] {dataset_id} {label}: '
-                        f'{n_render_failed} valid draw(s) failed rendering; '
-                        f'then no valid K={k} draw in the next {tries} attempts '
-                        f'-- scored as missing',
+                        f'    ! {dataset_id} {label}: {n_render_failed} K={k} '
+                        f'draw(s) failed rendering, then no valid draw in the '
+                        f'next {tries} attempts -- scored as missing '
+                        f'[mixed-failed]',
                         flush=True,
                     )
                 else:
                     print(
-                        f'    [kxk:render-failed] {dataset_id} {label}: '
-                        f'all {n_render_failed} valid K={k} draw(s) contained '
-                        f'at least one unrenderable tile '
-                        f'-- scored as missing',
+                        f'    ! {dataset_id} {label}: all {n_render_failed} K={k} '
+                        f'draws held a tile that cannot be rendered -- scored '
+                        f'as missing [render-failed]',
                         flush=True,
                     )
 
@@ -442,7 +438,8 @@ def _nanmean(values) -> float:
     return sum(vals) / len(vals) if vals else float('nan')
 
 
-def kxk_report(results, epoch: int, *, k: int, **identity):
+def kxk_report(results, epoch: int, *, k: int, header: bool = True,
+               scope: str = 'val', **identity):
     """The user's definition (2026-09-24), in order:
 
         rung in a combo   mean over the K x K pairs of that rung's accuracy
@@ -450,13 +447,17 @@ def kxk_report(results, epoch: int, *, k: int, **identity):
         dataset           mean of its combos
         total             mean of the datasets
 
-    Prints every combination's accuracy and its per-rung row, then each
-    dataset's and the total. Returns `(combo_rows, rung_rows, summary)`;
+    Prints one row per combination (its per-rung accuracies, its accuracy and
+    its resampled-query count), then each dataset's and the total, under a
+    `rung_header` unless the caller has printed one (`header=False`). `scope`
+    names the split in the total line: `val` here, `test` from evaluate.py. Returns `(combo_rows, rung_rows, summary)`;
     `summary` has `total`, `by_dataset`, `six_rung` (the full 6-way combo,
     mean over datasets) and `native` (mean over combos with no resampled
     query)."""
     combo_rows, rung_rows = [], []
     by_dataset: Dict[str, float] = {}
+    if header:
+        print(rung_header('dataset   combo'), flush=True)
     six_label = _combo_label(RUNGS)
     six, native_accs = [], []
     for dataset_id, per_combo in results.items():
@@ -471,13 +472,9 @@ def kxk_report(results, epoch: int, *, k: int, **identity):
                 six.append(acc)
             if res['ok'] and res['n_resampled'] == 0:
                 native_accs.append(acc)
-            print(f'         {dataset_id:17s} combo {label:20s} acc {acc:.4f}   '
-                  f'({k}x{k} pairs, {res["n_resampled"]} resampled queries)',
-                  flush=True)
-            print(f'         {"":17s}       rung   '
-                  + '  '.join(f'{r:>7g}' for r in rungs), flush=True)
-            print(f'         {"":17s}       acc    '
-                  + '  '.join(f'{per_rung[r]:>7.4f}' for r in rungs), flush=True)
+            print(f'    {dataset_id:<17s} {label:<15s}'
+                  + _rung_cells([per_rung.get(r) for r in RUNGS])
+                  + f' |{acc:>8.4f}{res["n_resampled"]:>11d}', flush=True)
             combo_rows.append(dict(**identity, epoch=epoch, val_dataset=dataset_id,
                                    combo=label, k=k, n_pairs=len(res['acc_by_pair_rung']),
                                    n_resampled=res['n_resampled'], level_accuracy=acc))
@@ -486,11 +483,11 @@ def kxk_report(results, epoch: int, *, k: int, **identity):
                                       combo=label, k=k, rung=r,
                                       level_accuracy=per_rung[r]))
         by_dataset[dataset_id] = _nanmean(combo_accs)
-        print(f'         {dataset_id:17s} dataset acc {by_dataset[dataset_id]:.4f}',
-              flush=True)
+        print(f'    {dataset_id:<17s} {"dataset":<15s}{"":48s} '
+              f'|{by_dataset[dataset_id]:>8.4f}', flush=True)
     total = _nanmean(by_dataset.values())
-    print(f'         total acc {total:.4f}   (mean of '
-          f'{len(by_dataset)} dataset(s))', flush=True)
+    print(f'    {f"{scope} total (mean of {len(by_dataset)} dataset(s))":<33s}{"":48s} '
+          f'|{total:>8.4f}', flush=True)
     return combo_rows, rung_rows, dict(total=total, by_dataset=by_dataset,
                                        six_rung=_nanmean(six),
                                        native=_nanmean(native_accs))
@@ -623,7 +620,8 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
     """Three files, three criteria, because they do not always pick the same
     epoch:
 
-        _best.pt    the val TOTAL (mean of datasets of combos of rungs)
+        _best.pt    every dataset (its mean over combos of rungs) no lower than
+                    the saved epoch's, one higher
         _6rung.pt   the full 6-way combination, mean over datasets -- the
                     deployment task, never rehearsed in training
         _native.pt  the mean over combinations whose every query rendered
@@ -660,14 +658,45 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
             args.loss, tag, run['episode_reuse'], run['reuse_k'])
 
     best = dict(best)
-    for tag, key in (('best', 'total'), ('6rung', 'six_rung'), ('native', 'native')):
+    # `_best.pt`: every dataset at least as good as the saved epoch's, one
+    # strictly better -- not the mean going up, which one dataset can carry
+    # while another falls.
+    now = summary['by_dataset']
+    if improves_everywhere(now, best['best']):
+        save_prototype_checkpoint(weights_dir / fname('best'), **common)
+        print('  *new best best   every dataset held, one rose: '
+              + '  '.join(f'{d} {v:.4f}' for d, v in now.items()), flush=True)
+        # a dataset with nothing to score this epoch keeps its old baseline
+        best['best'] = {d: (now[d] if now[d] == now[d] else best['best'].get(d))
+                        for d in now}
+    for tag, key in (('6rung', 'six_rung'), ('native', 'native')):
         value = summary[key]
         if value == value and value > best[tag]:
             save_prototype_checkpoint(weights_dir / fname(tag), **common)
-            print(f'      new best, {tag} ({key} {value:.4f}) -> {fname(tag)}',
-                  flush=True)
+            print(f'  *new best {tag:<6s} {key} {value:.4f}', flush=True)
             best[tag] = value
     return best
+
+
+def improves_everywhere(now: Dict[str, float], best: Dict[str, float]) -> bool:
+    """Is this epoch a new `_best`? True when no dataset scores below the
+    saved epoch's number and at least one scores above it. A dataset with no
+    saved number yet (the first epoch, or one that had nothing to score) is
+    never a regression and counts as a rise once it has a value; a dataset
+    with nothing to score now (NaN) is skipped, not counted as a fall -- or
+    one dataset that could not draw an episode would freeze `_best.pt`."""
+    rose = False
+    for dataset_id, value in now.items():
+        if value != value:
+            continue
+        prev = best.get(dataset_id)
+        if prev is None or prev != prev:
+            rose = True
+        elif value < prev:
+            return False
+        elif value > prev:
+            rose = True
+    return rose
 
 
 def _auto_int(value: str):
@@ -680,9 +709,31 @@ def _auto_int(value: str):
     return n
 
 
-def _supply_line(label: str, pool) -> str:
-    return (f'  {label:28s}' + '  '.join(f'{len(pool.get(float(r), ())):>7d}'
-                                         for r in RUNGS))
+def _supply_line(label: str, pool, n_wsi: int, n_test=None) -> str:
+    """One row of the supply table: positions per rung, their total, how many
+    WSIs they came from, and (val only) how many WSIs the split held back for
+    test. The total is the row's sum, so nothing else prints it."""
+    counts = [len(pool.get(float(r), ())) for r in RUNGS]
+    held = '-' if n_test is None else str(n_test)
+    return (f'  {label:28s}' + '  '.join(f'{c:>7d}' for c in counts)
+            + f'  {sum(counts):>8d}  {n_wsi:>5d}  {held:>19s}')
+
+
+def _rung_cells(values, width: int = 8, fmt: str = '.4f') -> str:
+    """One right-aligned cell per rung; NaN or None (a rung this combination
+    does not contain) is a `-`."""
+    out = []
+    for v in values:
+        out.append(f'{"-":>{width}s}' if v is None or v != v
+                   else f'{v:>{width}{fmt}}')
+    return ''.join(out)
+
+
+def rung_header(left: str = '') -> str:
+    """The `rung 1 2 4 8 16 32 | acc resampled` line the epoch table's rows sit
+    under. `left` fills the 37 columns the row labels take."""
+    return (f'    {left:<33s}' + ''.join(f'{r:>8g}' for r in RUNGS)
+            + f' |{"acc":>8s}{"resampled":>11s}')
 
 
 #: `resume_identity` leaves these out: they change where output goes, how long
@@ -740,16 +791,22 @@ def resolve_episodes(args, train_pool, cross_pool, val_pools):
                val_reuse_k=int(val_k), episodes_per_epoch=int(n_draws),
                k_max=int(k_max), val_k_max=int(val_k_max))
 
-    print('\nepisode settings  (given -> used)', flush=True)
-    print(f'  --episode-reuse       {args.episode_reuse}   '
-          f'({ks} support x {kq} query batches per draw)', flush=True)
-    print(f'  --reuse-k             {args.reuse_k} -> K = {k}   '
-          f'(max drawable for hold_s/hold_q: {k_max})', flush=True)
-    print(f'  --val-reuse-k         {args.val_reuse_k} -> val K = {val_k}   '
-          f'(max drawable: {val_k_max}; per dataset {val_max})', flush=True)
-    print(f'  --episodes-per-epoch  {args.episodes_per_epoch} -> {n_draws} draws '
-          f'x {ks * kq} pair(s) = {n_draws * ks * kq} optimizer steps per epoch   '
-          f'({len(combos)} training combinations)', flush=True)
+    per_val = ', '.join(f'{d} {v}' for d, v in val_max.items())
+    table = [('flag', 'given', 'used', 'note'),
+             ('--episode-reuse', args.episode_reuse, args.episode_reuse,
+              f'{ks} support x {kq} query batch(es) per draw'),
+             ('--reuse-k', args.reuse_k, f'K = {k}',
+              f'max drawable for hold_s/hold_q: {k_max}'),
+             ('--val-reuse-k', args.val_reuse_k, f'val K = {val_k}',
+              f'max drawable {val_k_max}  ({per_val})'),
+             ('--episodes-per-epoch', args.episodes_per_epoch,
+              f'{n_draws * ks * kq} steps = {n_draws} draws x {ks * kq} pairs',
+              f'{len(combos)} training combinations')]
+    widths = [max(len(str(row[i])) for row in table) for i in range(3)]
+    print('\nepisode settings', flush=True)
+    for flag, given, used, note in table:
+        print(f'  {flag:<{widths[0]}}   {str(given):<{widths[1]}}   '
+              f'{str(used):<{widths[2]}}   {note}', flush=True)
     return run, combos
 
 
@@ -876,8 +933,7 @@ def main() -> int:
         tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
         max_wsi=args.max_wsi)
     train_pool = pool_by_rung(rows)
-    print(f'  {len(rows)} positions across '
-          f'{len(group_by_wsi_name(rows))} WSIs', flush=True)
+    n_train_wsi = len(group_by_wsi_name(rows))
 
     cross_pool = None
     if args.cross_domain_dataset:
@@ -896,17 +952,22 @@ def main() -> int:
             tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
             max_wsi=args.max_wsi, wsi_names=cd_wsi_names)
         cross_pool = pool_by_rung(cd_rows)
+        n_cross_wsi = len(group_by_wsi_name(cd_rows))
 
-    val_pools = val_manifests(args, caches, out_dir)
+    val_pools, val_sizes = val_manifests(args, caches, out_dir)
     caches.masks.close()        # the segmenter is not needed past here
 
     print('\nsupply (positions per rung)', flush=True)
-    print(f'  {"":28s}' + '  '.join(f'{r:>7g}' for r in RUNGS), flush=True)
-    print(_supply_line(f'train {args.train_dataset}', train_pool), flush=True)
+    print(f'  {"":28s}' + '  '.join(f'{r:>7g}' for r in RUNGS)
+          + f'  {"total":>8s}  {"WSIs":>5s}  {"held back for test":>19s}', flush=True)
+    print(_supply_line(f'train {args.train_dataset}', train_pool, n_train_wsi),
+          flush=True)
     if cross_pool is not None:
-        print(_supply_line(f'cross {args.cross_domain_dataset}', cross_pool), flush=True)
+        print(_supply_line(f'cross {args.cross_domain_dataset}', cross_pool,
+                           n_cross_wsi), flush=True)
     for dataset_id, pool in val_pools.items():
-        print(_supply_line(f'val {dataset_id}', pool), flush=True)
+        n_val, n_test = val_sizes[dataset_id]
+        print(_supply_line(f'val {dataset_id}', pool, n_val, n_test), flush=True)
 
     if args.supply_only and cross_pool is not None:
         # The cross-domain pool can lower K (bracs supplies a side of some
@@ -930,8 +991,8 @@ def main() -> int:
     encoder = build_encoder(args.encoder, args.dtype, device)
     spec = encoder.model_spec
     in_dim, num_prefix = int(spec.dim), int(spec.num_prefix)
-    print(f'\nencoder {args.encoder}  dim={in_dim}  num_prefix={num_prefix}  '
-          f'kind={spec.kind}  (frozen)', flush=True)
+    print(f'\nmodel\n  encoder    {args.encoder}  (frozen)   dim {in_dim}   '
+          f'prefix tokens {num_prefix}   kind {spec.kind}', flush=True)
 
     pooling = Pooling(PoolingConfig(kind=args.pooling, in_dim=in_dim)).to(device)
     support_context, support_context_cfg = SUPPORT_CONTEXT_CHOICES[
@@ -951,9 +1012,9 @@ def main() -> int:
             f'({"collapses" if collapses else "does NOT collapse"}) is not '
             f'compatible with --routing-head {args.routing_head!r} '
             f'({"needs raw per-rung support" if head_needs_raw else "needs a collapsed prototype stack"})')
-    print(f'  stage 2: support-context={args.support_context}  '
-          f'query-context={args.query_context}  collapse={args.collapse}   '
-          f'stage 3 routing head: {args.routing_head}', flush=True)
+    print(f'  stage 2    support {args.support_context}  |  '
+          f'query {args.query_context}  |  collapse {args.collapse}\n'
+          f'  stage 3    routing head {args.routing_head}', flush=True)
 
     trainable = dict(pooling=pooling, support_context=support_context,
                      query_context=query_context, collapse=collapse, head=head)
@@ -966,7 +1027,7 @@ def main() -> int:
     bank = CameraBank(render_cfg)
     rng = random.Random(args.seed)
 
-    best = {'best': -1.0, '6rung': -1.0, 'native': -1.0}
+    best = {'best': {}, '6rung': -1.0, 'native': -1.0}   # best: {dataset: its number}
     out_rung_rows: List[Dict] = []
     out_combo_rows: List[Dict] = []
     start_epoch = 0
@@ -983,19 +1044,37 @@ def main() -> int:
                            schedulers={'plateau': lr_scheduler},
                            named_rngs={'episodes': rng})
         start_epoch = int(state['epoch'])
-        best = state['best']
+        best = dict(state['best'])
+        if not isinstance(best.get('best'), dict):          # a resume file from before _best was per dataset
+            best['best'] = {}
         out_rung_rows, out_combo_rows = state['extra']
-        print(f'[resume] {resume.path}: continuing after epoch {start_epoch} '
-              f'of {args.epochs}', flush=True)
+        print(f'  resume     continuing after epoch {start_epoch} of '
+              f'{args.epochs}  ({resume.path})', flush=True)
     elif resume.enabled:
-        print(f'[resume] no {resume.path.name} yet -- training from scratch, '
-              f'writing it every epoch', flush=True)
+        print(f'  resume     none yet -- training from scratch, writes '
+              f'{resume.path.name} every epoch', flush=True)
 
-    run_name = (f'{args.run_name}-{args.encoder}-{args.collapse}-'
-                f'{args.routing_head}-{args.episode_reuse}' if args.run_name else
-                f'{args.encoder}-{args.collapse}-{args.routing_head}-{args.episode_reuse}')
-    wb = wandb_init(args.wandb_project, args.wandb_mode, run_name, config=dict(
-        vars(args), **run))
+    # <job name>-<encoder>-<collapse>-<routing_head>-<episode_reuse>: the job's
+    # name says which sbatch, the rest which of its models. `--run-name`
+    # replaces the job name.
+    slurm_job_name = os.environ.get('SLURM_JOB_NAME', '')
+    run_name = (f'{args.run_name or slurm_job_name}-{args.encoder}-'
+                f'{args.collapse}-{args.routing_head}-{args.episode_reuse}')
+    # A resumed model continues the wandb run it was writing (the id sits next
+    # to the resume file; `ResumeFile.wandb_run_id`). A model with no epoch left
+    # opens no run at all: it would log nothing, and an empty run is a row in
+    # every chart's legend with no line.
+    wb = None
+    if start_epoch < args.epochs:
+        wb = wandb_init(args.wandb_project, args.wandb_mode, run_name, config=dict(
+            vars(args), **run,
+            # `vars(args)` holds None for an unset --split-cache-job; these hold
+            # the job each cache was really read from, so the config can be
+            # filtered on
+            **cache_jobs(args, 'PrototypicalRoutingHead', caches),
+            slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
+            slurm_job_name=slurm_job_name),
+            run_id=resume.wandb_run_id(state is not None))
 
     identity_cols = dict(
         training_framework='metric_based', encoder=args.encoder,
@@ -1063,19 +1142,20 @@ def main() -> int:
         mean_loss = total_loss / max(n_steps, 1)
         acc_by_rung = {r: (correct_by_rung[r] / n_by_rung[r] if n_by_rung[r]
                            else float('nan')) for r in RUNGS}
-        print(f'  epoch {epoch}/{args.epochs}  loss {mean_loss:.4f}  '
-              f'({n_draws} draws x {ks}x{kq} = {n_steps} steps, {n_redraws} '
-              f'redraws; episode-reuse {args.episode_reuse}, K {k})', flush=True)
-        print(f'    rung        {"  ".join(f"{r:>7g}" for r in RUNGS)}\n'
-              f'    query n     {"  ".join(f"{n_by_rung[r]:>7d}" for r in RUNGS)}'
-              f'   (of {sum(n_by_rung.values())} query examples)\n'
-              f'    train acc   {"  ".join(f"{acc_by_rung[r]:>7.4f}" for r in RUNGS)}',
-              flush=True)
+        print(f'\nepoch {epoch}/{args.epochs}   loss {mean_loss:.4f}   '
+              f'{n_steps} steps = {n_draws} draws x {ks * kq} pairs   '
+              f'{n_redraws} redraws   {args.episode_reuse} K {k}', flush=True)
+        print(rung_header('rung'), flush=True)
+        print(f'    {"train":<17s} {"acc":<15s}'
+              + _rung_cells([acc_by_rung[r] for r in RUNGS]), flush=True)
+        print(f'    {"train":<17s} {"n":<15s}'
+              + _rung_cells([n_by_rung[r] for r in RUNGS], fmt='d')
+              + f'   (of {sum(n_by_rung.values())} query examples)', flush=True)
 
         # Held-out val, K x K -- same seed every epoch, so the same questions.
         for m in trainable.values():
             m.eval()
-        print(f'    val  K={val_k} ({val_k}x{val_k} pairs per combination)', flush=True)
+        print(f'  val  K={val_k}  ({val_k}x{val_k} pairs per combination)', flush=True)
         results = score_kxk(
             val_pools, HELD_OUT_COMBOS, k=val_k, n_support=args.n_support,
             n_query=args.n_query, max_overlap=args.max_overlap, seed=args.seed,
@@ -1084,7 +1164,7 @@ def main() -> int:
             num_prefix=num_prefix, batch_size=args.encode_batch, device=device,
             **trainable)
         epoch_combo_rows, epoch_rung_rows, summary = kxk_report(
-            results, epoch, k=val_k, **identity_cols)
+            results, epoch, k=val_k, header=False, **identity_cols)
         out_rung_rows += epoch_rung_rows
         out_combo_rows += epoch_combo_rows
 
@@ -1106,8 +1186,6 @@ def main() -> int:
             **{f'val_{r["val_dataset"]}/combo_{r["combo"]}/level_accuracy':
                r['level_accuracy'] for r in epoch_combo_rows},
         }
-        wandb_log(wb, epoch, metrics)
-
         best = save_tagged(weights_dir,
                            (pooling, support_context, query_context, collapse, head),
                            (support_context_cfg, query_context_cfg, collapse_cfg),
@@ -1116,6 +1194,11 @@ def main() -> int:
                     optimizers={'adam': opt}, schedulers={'plateau': lr_scheduler},
                     best=best, extra=(out_rung_rows, out_combo_rows),
                     named_rngs={'episodes': rng})
+        # Logged AFTER the resume file is written. Before it, a job killed between
+        # the two leaves wandb holding an epoch the resume file does not: the rerun
+        # trains that epoch again, wandb refuses its step as already logged, and
+        # the curve keeps the dead job's numbers.
+        wandb_log(wb, epoch, metrics)
 
     wandb_finish(wb)
 

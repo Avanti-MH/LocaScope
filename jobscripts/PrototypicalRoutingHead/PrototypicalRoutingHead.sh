@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                         # encode_batch + main
 #SBATCH --ntasks-per-node=1                       # Tasks per node
 #SBATCH --mem=200G                                # host RAM
-#SBATCH -o /work/u26130998/log/PrototypicalRoutingHead   # STDOUT
-#SBATCH -e /work/u26130998/log/PrototypicalRoutingHead   # STDERR
+#SBATCH -o /work/u26130998/log/%x   # STDOUT
+#SBATCH -e /work/u26130998/log/%x   # STDERR
 
 ml purge
 ml load miniconda3/24.11.1
@@ -19,10 +19,10 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  training/PrototypicalRoutingHead -- ONE JOB, 28 TRAINING RUNS, then test:
+#  training/PrototypicalRoutingHead -- ONE JOB, 11 TRAINING RUNS, then test:
 #
 #    [1]  every model combination in MODELS x every EPISODE_REUSE mode
-#         (none / hold_s / hold_q), --cross-domain-dataset off     9 x 3 = 27
+#         (none / hold_q), --cross-domain-dataset off               5 x 2 = 10
 #    [2]  the Matching-Net combination, episode reuse none,
 #         --cross-domain-dataset $CROSS_DOMAIN_DATASET                    1
 #    [3]  cli/evaluate.py on the test split: the original table AND the K x K
@@ -58,7 +58,8 @@ N_PER_RUNG="${N_PER_RUNG:-100}"
 N_SUPPORT="${N_SUPPORT:-5}"
 N_QUERY="${N_QUERY:-10}"
 N_CHOICES="${N_CHOICES:-3 4 5}"
-EPISODE_REUSES="${EPISODE_REUSES:-none hold_s hold_q}"
+EPISODE_REUSES="${EPISODE_REUSES:-none hold_q}"   # hold_s: same steps per epoch as hold_q, the held side differs; not run by default
+REUSE_K_GIVEN="${REUSE_K-__unset__}"
 REUSE_K="${REUSE_K:-auto}"
 VAL_REUSE_K="${VAL_REUSE_K:-auto}"
 EPISODES_PER_EPOCH="${EPISODES_PER_EPOCH:-auto}"
@@ -77,10 +78,17 @@ ORDINAL_WEIGHT="${ORDINAL_WEIGHT:-1.0}"
 ORDINAL_SIGMA="${ORDINAL_SIGMA:-1.0}"
 ENCODE_BATCH="${ENCODE_BATCH:-64}"
 SEED="${SEED:-42}"
-MAX_WSI="${MAX_WSI:-}"
+# Cap on the WSIs each training manifest draws from (--max-wsi): N chosen at
+# random with --seed, the same N every time. 121 is ki67_pure's whole size, so
+# it caps only the cross-domain bracs/train -- to the 121 slides 366274 trained
+# on, whose masks are already in the MppRoutingHead mask cache. Unset uses 121;
+# set but empty (MAX_WSI=) drops the cap, which segments every native
+# bracs/train slide that is not cached yet.
+MAX_WSI_GIVEN="${MAX_WSI-__unset__}"
+MAX_WSI="${MAX_WSI-121}"
 OUT="${OUT:-}"
 WANDB_PROJECT="${WANDB_PROJECT:-prototypical-routing-head}"
-RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-}}"
+RUN_NAME="${RUN_NAME:-}"          # empty: the wandb run is named after the job (SLURM_JOB_NAME)
 # cli/evaluate.py (test split): 5 slides x 50 per rung, deeper than val. The
 # original table draws EVAL_N_EPISODES full 6-way episodes; the K x K table
 # takes EVAL_KXK_K (auto = the largest the test split supplies).
@@ -88,16 +96,36 @@ EVAL_N_WSI="${EVAL_N_WSI:-5}"
 EVAL_N_PER_RUNG="${EVAL_N_PER_RUNG:-50}"
 EVAL_N_EPISODES="${EVAL_N_EPISODES:-100}"
 EVAL_KXK_K="${EVAL_KXK_K:-auto}"
+# How many times a draw that cannot be drawn or rendered is tried again
+# (--feasibility-tries). FEASIBILITY_TRIES reaches train.py only when set, so a
+# run that leaves it alone keeps train.py's own 100 and its resume identity.
+# EVAL_FEASIBILITY_TRIES defaults to 100 HERE, not to evaluate.py's own 5: with
+# 5, test K x K on bracs scored every combination holding rung 16 or 32 as
+# missing, while train and val had 100.
+FEASIBILITY_TRIES="${FEASIBILITY_TRIES:-}"
+EVAL_FEASIBILITY_TRIES="${EVAL_FEASIBILITY_TRIES:-100}"
+# EVAL_ONLY=1 skips training and scores the checkpoints already in $OUT/weights.
+EVAL_ONLY="${EVAL_ONLY:-0}"
+# How evaluate.py renders the SUPPORT side (--support-native): checkpoint (each
+# as it trained), on (CAMERA_GEOMETRY_ONLY for all), off (CAMERA_FULL for all).
+# Off the default its CSVs are test_scores[_kxk]_support-<on|off>_*.
+EVAL_SUPPORT_NATIVE="${EVAL_SUPPORT_NATIVE:-checkpoint}"
 
 if [ "$SMOKE" = "1" ]; then
     # Rung 32 is ~1 position per ki67 slide, so a few slides only supply a
     # few positions there: 1 support + 2 query per rung keeps K >= 1 drawable
     # on 10 slides. `auto` then resolves whatever that pool allows.
-    MAX_WSI="${MAX_WSI:-10}"
+    # 10 unless MAX_WSI was given on the command line, not the 121 above
+    [ "$MAX_WSI_GIVEN" = "__unset__" ] && MAX_WSI=10
     N_PER_RUNG=20
     N_SUPPORT=5
     N_QUERY=10
     EPISODE_REUSES="${EPISODE_REUSES_SMOKE:-hold_q}"
+    # K support x K query batches per draw. Left at `auto`, hold_q resolves to
+    # the largest K the pool allows (177 on a 10-slide smoke), and one epoch
+    # renders that many batches 39 times -- hours with nothing printed. 2 keeps
+    # every code path and finishes in minutes; REUSE_K on the command line wins.
+    [ "$REUSE_K_GIVEN" = "__unset__" ] && REUSE_K=2
     VAL_N_PER_RUNG=20
     EPOCHS=2
     EVAL_N_WSI=2
@@ -124,16 +152,17 @@ RESUME_ARG=""
 [ -n "$RESUME_DIR" ] && RESUME_ARG="--resume-dir $RESUME_DIR"
 
 # collapse:support_context:query_context:routing_head
+# 5 models (was 8 + the matching net). mean is the parameter-free baseline; set_transformer is
+# attention over the support set, attn_pool attention without interaction; the two routing heads
+# are compared on the two ends (mean, set_transformer) rather than crossed with every collapse.
+# shared_mlp and the other two crossings were dropped 2026-10-03; the matching net is run once,
+# as step [2] (MATCHING_NET below), not here.
 MODELS=(
     "set_transformer:identity:identity:cosine_tau"
     "mean:identity:identity:cosine_tau"
-    "shared_mlp:identity:identity:cosine_tau"
     "attn_pool:identity:identity:cosine_tau"
     "set_transformer:identity:identity:attn_score"
     "mean:identity:identity:attn_score"
-    "shared_mlp:identity:identity:attn_score"
-    "attn_pool:identity:identity:attn_score"
-    "off:bilstm:attnlstm:cosine_logsumexp"
 )
 MATCHING_NET="off:bilstm:attnlstm:cosine_logsumexp"
 
@@ -144,7 +173,14 @@ echo "  reuse-k=$REUSE_K  val-reuse-k=$VAL_REUSE_K  episodes-per-epoch=$EPISODES
 echo "  n_support=$N_SUPPORT  n_query=$N_QUERY  max_overlap=$MAX_OVERLAP  epochs=$EPOCHS"
 echo "  caches: mask/sampler from ${CACHE_JOB}   seg=$SEG"
 echo "  resume: ${RESUME_DIR:-off (RESUME_DIR set empty)}"
+echo "  retries: train ${FEASIBILITY_TRIES:-100 (train.py default)}   eval $EVAL_FEASIBILITY_TRIES   eval_only=$EVAL_ONLY   eval support=$EVAL_SUPPORT_NATIVE"
 echo "  out=$OUT"
+
+# Runs this job makes: every model under every reuse mode, then the matching net.
+# RUN_I counts them for the title line; run_one is a function in THIS shell, not
+# a subshell, so the counter survives between calls.
+RUN_I=0
+RUN_N=$(( ${#MODELS[@]} * $(wc -w <<< "$EPISODE_REUSES") + 1 ))
 
 # run_one <episode_reuse> <cross_domain_dataset> <model spec> [extra args...]
 run_one () {
@@ -152,9 +188,10 @@ run_one () {
     shift 3
     IFS=':' read -r COLLAPSE SUPPORT_CONTEXT QUERY_CONTEXT ROUTING_HEAD <<< "$SPEC"
     local RUN_NAME_ARG=""
-    [ -n "$RUN_NAME" ] && RUN_NAME_ARG="--run-name ${RUN_NAME}_${SUPPORT_CONTEXT}_${QUERY_CONTEXT}_${COLLAPSE}_${ROUTING_HEAD}"
+    [ -n "$RUN_NAME" ] && RUN_NAME_ARG="--run-name $RUN_NAME"
     echo ""
-    echo "-------- $REUSE  collapse=$COLLAPSE support_context=$SUPPORT_CONTEXT query_context=$QUERY_CONTEXT routing_head=$ROUTING_HEAD  cross_domain=${CROSS:-off} --------"
+    RUN_I=$((RUN_I + 1))
+    echo "-------- [$RUN_I/$RUN_N] $REUSE | $COLLAPSE | $ROUTING_HEAD | ctx $SUPPORT_CONTEXT/$QUERY_CONTEXT | cross ${CROSS:-off} --------"
     python training/PrototypicalRoutingHead/cli/train.py \
         --train-dataset "$TRAIN_DATASET" \
         --encoder "$ENCODER" \
@@ -194,6 +231,7 @@ run_one () {
         $RESUME_ARG \
         $RUN_NAME_ARG \
         $MAX_WSI_ARG \
+        ${FEASIBILITY_TRIES:+--feasibility-tries $FEASIBILITY_TRIES} \
         --out "$OUT" "$@"
 }
 
@@ -206,6 +244,7 @@ if [ "$SUPPLY_ONLY" = "1" ]; then
 fi
 
 FAILED=()
+if [ "$EVAL_ONLY" != "1" ]; then
 for REUSE in $EPISODE_REUSES; do
     for spec in "${MODELS[@]}"; do
         run_one "$REUSE" "" "$spec" || FAILED+=("$REUSE $spec")
@@ -224,6 +263,10 @@ else
 fi
 echo "  $OUT/weights/  (*_best.pt / *_6rung.pt / *_native.pt per run)"
 echo "  $OUT/val_scores_per_combo.csv, val_scores_per_rung.csv"
+else
+    echo ""
+    echo "======== EVAL_ONLY: training skipped, scoring $OUT/weights ========"
+fi
 
 # ---------------- evaluate.py: TEST split, every checkpoint ----------------
 echo ""
@@ -243,6 +286,8 @@ python training/PrototypicalRoutingHead/cli/evaluate.py \
     --max-overlap "$MAX_OVERLAP" \
     --encode-batch "$ENCODE_BATCH" \
     --seed "$SEED" \
+    --feasibility-tries "$EVAL_FEASIBILITY_TRIES" \
+    --support-native "$EVAL_SUPPORT_NATIVE" \
     --out "$OUT"
 eval_rc=$?
 

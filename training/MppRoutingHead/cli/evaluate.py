@@ -60,10 +60,11 @@ import torch                                                        # noqa: E402
 
 import _paths                                                       # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
-    RUNGS, add_cache_args, build_manifest, open_caches)
-from WsiSplit import read_split, split_path                          # noqa: E402
+    RUNGS, add_cache_args, build_manifest, open_caches, read_label_of)
+from AccessDatasets import list_names                                # noqa: E402
 from training.MppRoutingHead.Runtime import (                       # noqa: E402
-    build_from_checkpoint, encode_raw, predict, rescore_by_rung, trunk_raw)
+    build_from_checkpoint, encode_raw, head_parts, predict, rescore_by_rung,
+    trunk_raw)
 
 
 def test_rows(args, caches, out_dir, dataset_id: str) -> List:
@@ -77,11 +78,12 @@ def test_rows(args, caches, out_dir, dataset_id: str) -> List:
     seed to keep in step with the first. Which five were used is then readable
     off the rows' own `wsi_name` column and the sampler reports.
 
-    The split is READ (`read_split` refuses when it is missing): a split
+    The split is READ (`<dataset>#test`; it refuses when the split is missing): a split
     derived here could disagree with the one that selected the checkpoints,
     and the disagreement would show up as a good score.
     '''
-    names = read_split(split_path(caches.split_job, dataset_id))[1][:args.n_wsi]
+    names = list_names(dataset=f'{dataset_id}#test',
+                       split_job=caches.split_job)[:args.n_wsi]
     print(f'[test]  {dataset_id}: {len(names)} WSIs ({", ".join(names)})',
           flush=True)
     return build_manifest(
@@ -136,6 +138,8 @@ def main() -> int:
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
+    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    print(f'  {CpuBudget.for_job(workers=args.num_workers).apply().line()}', flush=True)
 
     device = torch.device(args.device)
     caches = open_caches(args, 'MppRoutingHead', device)
@@ -154,7 +158,10 @@ def main() -> int:
         # num_prefix is 0 for the fine-tuned route because its spatial exit has
         # already dropped the prefix -- see `Features.trunk_raw`.
         num_prefix = 0 if not frozen else int(encoder.model_spec.num_prefix)
-        raw_of = ((lambda p: encode_raw(encoder, p, args.encode_batch, device))
+        # A mix_ head reads the blocks its checkpoint recorded; every other
+        # head's `encoder_layers` is () and gets the plain tensor.
+        raw_of = ((lambda p: encode_raw(encoder, p, args.encode_batch, device,
+                                        layers=head.layers))
                   if frozen else (lambda p: trunk_raw(encoder, p, device)))
         # `tile_size` is task-specific, not part of the generic checkpoint
         # format -- `save_tagged` (cli/train.py) puts it under `extra`.
@@ -212,6 +219,10 @@ def main() -> int:
                 trunk='frozen' if frozen else 'finetuned',
                 head=head_name,
                 loss_kind=loss_kind,
+                # how the HEAD was trained; the test tiles themselves are
+                # always read `pyramid` (the per-tile `native` column says
+                # which of them came off a finer level)
+                read_level=read_label_of(ckpt.get('args')),
             )
             out_rows.append(dict(
                 **identity,
@@ -272,23 +283,41 @@ def write_csvs(out_dir: Path, tag: str, out_rows: List[Dict],
 
 BAR = '=' * 78
 
-#: One color per HEAD NAME (not classifier+reduction -- `test_predictions`
-#: has no separate `reduction` column; `head` already names it, e.g.
-#: 'attn_linear' bakes reduction='attn' into the name itself). Eight
-#: entries -- HEAD_CHOICES in Runtime.py has exactly eight registered names
-#: today -- exactly fills the dataviz skill's 8-slot adjacent-safe
-#: categorical order (references/palette.md); a ninth head name would need a
-#: new slot decision, not a silent 9th color.
-HEAD_COLORS = {
+#: A head is drawn by its THREE parts, one visual channel each, so that 14
+#: heads never need 14 colours -- past eight, categorical hues stop being
+#: tellable apart and start to hurt:
+#:     colour   the classifier (`Runtime.head_parts`)  -- CLASSIFIER_COLORS
+#:     marker   the reduction                           -- REDUCTION_MARKERS
+#:     fill     hollow when the head mixes encoder layers (`mix_`)
+#:     line     the loss                                -- LOSS_STYLES
+#: A pair that differs in one part (`mlp_deep` / `attn_mlp_deep`) then shares
+#: a colour and differs in shape, which is the comparison being made. Shape
+#: and line also carry what colour carries, for a reader who cannot rely on
+#: hue. The eight hues are the dataviz skill's adjacent-safe categorical
+#: order (references/palette.md); `mlp_narrow` takes the orange that
+#: `attn_linear` held when every head had its own colour.
+CLASSIFIER_COLORS = {
     'linear':             '#2a78d6',   # slot 1 blue
-    'attn_linear':        '#eb6834',   # slot 2 orange
+    'mlp_narrow':         '#eb6834',   # slot 2 orange
     'mlp':                '#1baf7a',   # slot 3 aqua
-    'mlp_deep':            '#eda100',   # slot 4 yellow
-    'mlp_wide':            '#e87ba4',   # slot 5 magenta
-    'mlp_deep_wide':       '#008300',   # slot 6 green
-    'mlp_deep_residual':   '#4a3aa7',   # slot 7 violet
+    'mlp_deep':           '#eda100',   # slot 4 yellow
+    'mlp_wide':           '#e87ba4',   # slot 5 magenta
+    'mlp_deep_wide':      '#008300',   # slot 6 green
+    'mlp_deep_residual':  '#4a3aa7',   # slot 7 violet
     'arcface':            '#e34948',   # slot 8 red
 }
+REDUCTION_MARKERS = {'fixed': 'o', 'attn': '^', 'clsattn': 's'}
+
+
+def head_style(head: str) -> dict:
+    """`plot` keyword arguments for one head NAME: colour, marker and fill."""
+    classifier, reduction, mixes = head_parts(head)
+    color = CLASSIFIER_COLORS.get(classifier, _INK_SECONDARY)
+    return dict(color=color, marker=REDUCTION_MARKERS.get(reduction, 'o'),
+                markerfacecolor=_SURFACE if mixes else color,
+                markeredgecolor=color)
+
+
 _INK, _INK_SECONDARY = '#0b0b0b', '#52514e'
 _GRIDLINE, _AXIS, _SURFACE = '#e1e0d9', '#c3c2b7', '#fcfcfb'
 LOSS_STYLES = {
@@ -303,7 +332,11 @@ def method_of(row: dict) -> str:
     names it: 'attn_linear' IS reduction='attn', 'linear' IS reduction='fixed'
     -- see `Runtime.HEAD_CHOICES`."""
     # return f'{row["encoder"]}+{row["head"]}'
-    return f'{row["encoder"]}+{row["head"]}+{row["loss_kind"]}'
+    # `+<read mode>` only off the default, so a pyramid method keeps the label
+    # it had; a row from before the column existed is pyramid
+    read = row.get('read_level') or 'pyramid'
+    return (f'{row["encoder"]}+{row["head"]}+{row["loss_kind"]}'
+            + ('' if read == 'pyramid' else f'+{read}'))
 
 
 def _levels_off(row: dict):
@@ -392,13 +425,13 @@ def print_per_slide_rung(rows: list) -> None:
     dw = _col_width(rows, 'dataset', 10)
     ww = _col_width(rows, 'wsi_name', 12, cap=24)
     mw = _col_width(rows, 'method', 10)
-    print(f'  {"dataset":{dw}s}{"wsi_name":{ww}s}{"rung":>6s}{"method":{mw}s}'
+    print(f'  {"dataset":{dw}s}{"wsi_name":{ww}s}{"rung":>6s}  {"method":{mw}s}'
          f'{"n":>5s}{"acc":>7s}{"levels_off":>11s}{"n_nat":>7s}{"acc_nat":>9s}'
          f'{"n_res":>7s}{"acc_res":>9s}')
     for r in rows:
         print(f'  {r["dataset"] or "":{dw}s}'
              f'{(r["wsi_name"] or "")[:ww - 2]:{ww}s}'
-             f'{r["rung"]:>6g}{r["method"]:{mw}s}{r["n"]:>5d}'
+             f'{r["rung"]:>6g}  {r["method"]:{mw}s}{r["n"]:>5d}'
              f'{r["level_accuracy"]:>7.2f}{r["mean_levels_off"]:>11.3f}'
              f'{r["n_native"]:>7d}{r["level_accuracy_native"]:>9.2f}'
              f'{r["n_resampled"]:>7d}{r["level_accuracy_resampled"]:>9.2f}')
@@ -410,10 +443,10 @@ def print_cross_slide_rung(rows: list) -> None:
     print(BAR)
     dw = _col_width(rows, 'dataset', 10)
     mw = _col_width(rows, 'method', 10)
-    print(f'  {"dataset":{dw}s}{"rung":>6s}{"method":{mw}s}{"n_slides":>9s}'
+    print(f'  {"dataset":{dw}s}{"rung":>6s}  {"method":{mw}s}{"n_slides":>9s}'
          f'{"n":>6s}{"acc":>7s}{"levels_off":>11s}')
     for r in rows:
-        print(f'  {r["dataset"] or "":{dw}s}{r["rung"]:>6g}{r["method"]:{mw}s}'
+        print(f'  {r["dataset"] or "":{dw}s}{r["rung"]:>6g}  {r["method"]:{mw}s}'
              f'{r["n_slides"]:>9d}{r["n"]:>6d}{r["level_accuracy"]:>7.2f}'
              f'{r["mean_levels_off"]:>11.3f}')
 
@@ -442,6 +475,18 @@ def head_of(method: str) -> str:
     
 def loss_of(method: str) -> str:
     return method.split('+')[2]
+
+
+def read_of(method: str) -> str:
+    """The training read mode a method label carries, '' for pyramid."""
+    parts = method.split('+')
+    return parts[3] if len(parts) > 3 else ''
+
+
+#: A head trained off the default read mode is drawn at this opacity, so it
+#: sits next to its pyramid twin -- same colour, marker, fill and line --
+#: without being mistaken for it. The legend names the mode.
+READ_ALPHA = 0.5
 
 def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
     """One PNG: accuracy vs rung, one subplot per encoder -- see
@@ -477,7 +522,7 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
     #             by_head[head_of(r['method'])].append(r)
     #     for head, head_rows in sorted(by_head.items()):
     #         head_rows.sort(key=lambda r: r['rung'])
-    #         color = HEAD_COLORS.get(head, _INK_SECONDARY)
+    #         color = CLASSIFIER_COLORS.get(head, _INK_SECONDARY)
     #         ax.plot([r['rung'] for r in head_rows],
     #                 [r['level_accuracy'] for r in head_rows],
     #                 color=color, linewidth=2, marker='o', markersize=8, label=head)
@@ -491,24 +536,25 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
 
         for r in rows:
             if encoder_of(r['method']) == encoder:
-                key = (head_of(r['method']), loss_of(r['method']))
+                key = (head_of(r['method']), loss_of(r['method']),
+                       read_of(r['method']))
                 by_method[key].append(r)
 
-        for (head, loss), method_rows in sorted(by_method.items()):
+        for (head, loss, read), method_rows in sorted(by_method.items()):
             method_rows.sort(key=lambda r: r['rung'])
-            label = f'{head}+{loss}'
+            label = f'{head}+{loss}' + (f'+{read}' if read else '')
             ax.plot(
                 [r['rung'] for r in method_rows],
                 [r['level_accuracy'] for r in method_rows],
-                color=HEAD_COLORS.get(head, _INK_SECONDARY),
+                **head_style(head),
                 linestyle=LOSS_STYLES.get(loss, '-'),
+                alpha=READ_ALPHA if read else 1.0,
                 linewidth=2,
-                marker='o',
                 markersize=8,
                 label=label,
             )
-            if label not in seen_methods:
-                seen_methods.append(label)
+            if (head, loss, read) not in seen_methods:
+                seen_methods.append((head, loss, read))
         ax.set_xscale('log', base=2)
         ticks = sorted({r['rung'] for r in rows})
         ax.set_xticks(ticks)
@@ -522,20 +568,19 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
         ax.tick_params(colors=_AXIS, labelcolor=_INK_SECONDARY)
 
     axes[0].set_ylabel('level accuracy', color=_INK_SECONDARY, fontsize=9)
-    # handles = [plt.Line2D([0], [0], color=HEAD_COLORS.get(h, _INK_SECONDARY),
+    # handles = [plt.Line2D([0], [0], color=CLASSIFIER_COLORS.get(h, _INK_SECONDARY),
     #                       linewidth=2, marker='o', markersize=6, label=h)
     #           for h in seen_heads]
     handles = []
-    for label in seen_methods:
-        head, loss = label.rsplit('+', 1)
+    for head, loss, read in seen_methods:
         handles.append(plt.Line2D(
             [0], [0],
-            color=HEAD_COLORS.get(head, _INK_SECONDARY),
+            **head_style(head),
             linestyle=LOSS_STYLES.get(loss, '-'),
+            alpha=READ_ALPHA if read else 1.0,
             linewidth=2,
-            marker='o',
             markersize=6,
-            label=label,
+            label=f'{head}+{loss}' + (f'+{read}' if read else ''),
         ))
     fig.legend(handles=handles, loc='lower center', ncol=min(len(handles), 4),
               bbox_to_anchor=(0.5, 0.0), frameon=False,
