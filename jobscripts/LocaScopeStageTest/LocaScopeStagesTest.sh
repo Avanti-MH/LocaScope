@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=LocaScopeStagesTest    # Job name
-#SBATCH --partition=normal2               # Partition
-#SBATCH --time=24:00:00                   # Runtime (hh:mm:ss)
+#SBATCH --partition=dev               # Partition
+#SBATCH --time=02:00:00                   # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --mem=600G                        # see the FILTER_SWEEP note below
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o /work/u26130998/log/LocaScopeStagesTest      # STDOUT
-#SBATCH -e /work/u26130998/log/LocaScopeStagesTest      # STDERR
+#SBATCH -o /work/u26130998/log/%x      # STDOUT
+#SBATCH -e /work/u26130998/log/%x      # STDERR
 
 # ---------------- Load modules ----------------
 ml purge

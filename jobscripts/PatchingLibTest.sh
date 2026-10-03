@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=PatchingLibTest        # -> log/%x, result/%x/
-#SBATCH --partition=normal2               # Partition
-#SBATCH --time=24:00:00                   # the containers section reads a WSI
+#SBATCH --partition=dev               # Partition
+#SBATCH --time=02:00:00                   # the containers section reads a WSI
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)

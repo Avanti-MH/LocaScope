@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=TestSuperPathPoint     # -> log/%x, result/%x/
-#SBATCH --partition=normal                # Partition
+#SBATCH --partition=dev                # Partition
 #SBATCH --time=01:00:00                   # every stage here is seconds; the WSI
 #SBATCH --account=MST114560               # reads are the only slow part
 #SBATCH --nodes=1                         # Number of nodes

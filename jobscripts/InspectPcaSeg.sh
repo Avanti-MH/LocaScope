@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=InspectPcaSeg          # -> log/%x, result/%x/
-#SBATCH --partition=normal2               # Partition
-#SBATCH --time=04:00:00                   # measured: 3.5-6 min per slide at level 0
+#SBATCH --partition=dev               # Partition
+#SBATCH --time=02:00:00                   # measured: 3.5-6 min per slide at level 0
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)

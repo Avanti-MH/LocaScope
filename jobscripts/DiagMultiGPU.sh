@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=DiagMultiGPU          # -> log/<name>
-#SBATCH --partition=normal               # Partition
+#SBATCH --partition=dev               # Partition
 #SBATCH --time=01:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
 #SBATCH --nodes=1                        # Number of nodes
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                # one transform loop feeds every card
 #SBATCH --ntasks-per-node=1              # Tasks per node
 #SBATCH --mem=600G                       # RAM
-#SBATCH -o /work/u26130998/log/DiagMultiGPU            # STDOUT
-#SBATCH -e /work/u26130998/log/DiagMultiGPU            # STDERR
+#SBATCH -o /work/u26130998/log/%x            # STDOUT
+#SBATCH -e /work/u26130998/log/%x            # STDERR
 
 # ---------------- Load modules ----------------
 ml purge

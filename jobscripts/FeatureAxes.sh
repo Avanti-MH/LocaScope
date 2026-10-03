@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8                 # covariance and eigh
 #SBATCH --mem=64G                         # one token store in flight per level
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o /work/u26130998/log/FeatureAxes              # STDOUT
-#SBATCH -e /work/u26130998/log/FeatureAxes              # STDERR
+#SBATCH -o /work/u26130998/log/%x              # STDOUT
+#SBATCH -e /work/u26130998/log/%x              # STDERR
 
 # ---------------- Load modules ----------------
 ml purge

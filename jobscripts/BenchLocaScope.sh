@@ -9,8 +9,8 @@
                                          # one CPU-side transform loop
 #SBATCH --mem=600G                       # DataParallel feeds every card from
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH -o /work/u26130998/log/BenchLocaScope          # STDOUT
-#SBATCH -e /work/u26130998/log/BenchLocaScope          # STDERR
+#SBATCH -o /work/u26130998/log/%x          # STDOUT
+#SBATCH -e /work/u26130998/log/%x          # STDERR
 
 # ---------------- Load modules ----------------
 ml purge

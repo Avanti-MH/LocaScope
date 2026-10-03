@@ -7,8 +7,8 @@
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0) -- unused here
 #SBATCH --cpus-per-task=8                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o /work/u26130998/log/SlideWinSift             # STDOUT
-#SBATCH -e /work/u26130998/log/SlideWinSift             # STDERR
+#SBATCH -o /work/u26130998/log/%x             # STDOUT
+#SBATCH -e /work/u26130998/log/%x             # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
