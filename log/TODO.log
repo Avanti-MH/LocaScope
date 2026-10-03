@@ -2613,3 +2613,276 @@ front of whoever flips it.
          跟 L_bal 同一套權重。MppRoutingHead 上 rung 32 只佔 0.3%，舊式子
          裡幾乎不算數，所以 ord_a 的數字會變，不能跟舊 ord_a 比。
        - bal、ord_b 沒動。
+
+[ ] 2026-09-30 | Camera 的 FoV 位置改由 sampler 決定；tissue_ratio 那套整個退役
+
+    1. 為什麼
+       - stage 2 視窗 bench 和 stage 1 bench 都要「可控豐富度、可重現、跨方法
+         配對」的 FoV。Camera 原本只有一個 tissue_ratio 下限（最常見的組織比例
+         段），沒有桶、沒有上限、沒有重疊控制，也不回報短缺。
+       - Stage1MppBench 的 QueryFromWSI.crop + simulate_microscope_photo 沒走
+         Camera：rng 不帶 seed（全域 random），每個方法各自重新增強同一位置，
+         「同一批 FoV」只有位置相同、圖不同；位置由 tile 256 的 sampler 認證，
+         裁的卻是 1440x1024（跟 MppRoutingHead 第一版同一種窗口不一致）。
+
+    2. 做了什麼
+       - query_sim/source/fov_placer.py：FovSamplerConfig(SamplerConfig) 加
+         fov_sizes，FovSampler(TileSampler) 只改寫 _regions / _lattice / _rate
+         （region 要放得下「矩形」、背景比例用矩形算）。_select / sample /
+         cached / save / load 全部繼承，配額語意與 TileSampler 相同。
+         TileSampler 的 tile 取 FoV 長邊當「方形代理」；重疊界線與 jitter 位移
+         以代理方形計算，略保守。SamplerConfig 沒有新欄位，現有 sampler_id 不動。
+       - Camera：set_sampler(cfg, plan=None) / sampler / FoV_bank() / __iter__。
+         rung 由 rect_w_l0 / output_w 與 qfw.chosen_level 推，可傳 plan 覆蓋。
+         __iter__ 抽一批位置就渲染，用完再用 seed+1、seed+2… 抽下一批（已出現過的
+         位置不重複給）；連續 3 批都沒有新位置才算供應耗盡，之後才重複已給過的
+         位置，每一輪換一個 domain gap。批與批之間各自獨立抽，重疊界線只在
+         一批之內成立。每張 FoV 的增強 rng 由 (sampler seed, 位置, ds, 第幾次
+         重複) 導出：同位置同一次同一張圖，跟 Camera 自己的 seed、抽取順序、
+         哪一批抽到它都無關。CameraShot 多了可選欄位 bucket / fov_background /
+         origin / overlap_max / draw_index / pass_index。
+       - 刪掉：Camera 的 tissue_ratio、region_protrusion_ratio、max_pos_tries、
+         max_consecutive_fail、required_region_side_l0、_sample_position、舊
+         __iter__；generator.camera_mask；query_sim/cli/diag_camera_skip.py。
+         generator / batch / multi_batch 改成 --richness default|open。
+         multi_batch 的 skips.csv 現在寫 sampler 的「每桶要多少、實得多少」。
+       - 測試：utilities/test_modules/test_camera.py 合併了
+         test_camera_output_to_level0 / test_augment_equivalence，加上 fov 區段
+         ；test_fov_placer.py 用合成 mask 測 sampler；都由
+         jobscripts/CameraTest.sh 跑。改 camera.py 期間另外用過一個逐位元
+         回歸鎖（記下固定位置的像素 sha256 與增強參數，逐次比對），確認
+         capture / capture_with_gt 的輸出沒變（訓練套件的 resume 依賴它），
+         完成後已拿掉，golden 已刪。
+
+    3. 數字斷點
+       - 用同樣參數重新生成 query_sim 語料，FoV 不會跟舊的一樣（位置抽樣換了）。
+         舊語料（例如 BenchLocaScope 用的 gt.csv）不受影響，但不可重現。
+       - 預設 richness 與 tissue_ratio=0.3 不等價：偏組織密集，背景 > 85% 的
+         FoV 一張都不收。
+       - capture / capture_with_gt 沒動（訓練套件只用這兩個）：改完之後回歸鎖
+         在兩張 slide 上都是 8/8 逐位元相同。
+
+[ ] 2026-09-30 | Store.py 通用化：raw、fp32、分批讀取、同一張 slide 並存多個 pooling
+
+    1. 加了什麼（全是加法，既有呼叫與 fp16 的檔案位元組不變）
+       - pooling='raw'：模型自己的輸出整份存，slot 依模型順序（cls、register、
+         cell）；slot_layout 必須是 'raw:<prefix>+<h>x<w>'，並與 feat_hw、
+         num_prefix、slot 數一致。不沿用 'tokens'：encoder 自己用這個字稱呼兩
+         件事（tokens() 出口與 pooling_kinds 的 'tokens' 模式，後者去掉
+         register 且每個 slot 各自 L2 正規化），同名不同內容讀回來不報錯、只是
+         分數變差。raw 存了之後任何 pooling 都能再推導，反過來不行。
+       - features 的 dtype 允許 fp16 或 fp32（原本只准 fp16）。dtype 不進
+         metadata：tensor 自己帶，所以舊檔讀法不變。FeatureMapCache.save 對
+         fp32 encoder 寫 fp32，其餘（fp16、沒說的）維持 fp16。
+       - FeatureStore.n_rows / iter_chunks：safetensors 的部分讀取，全部串起來
+         等於整批讀。一個 slide 的 L0 raw 約 50 GB，不能整個載入。
+       - FeatureMapCache.save_pooled / check / load_pooled / iter_pooled：每個
+         pooling 一個檔、同一個 key 目錄，套用同樣的兩道檢查（encoder identity、
+         對 mask 的幾何）。
+
+    2. 為什麼 pooling 之間不能互推（決定存 raw 的理由）
+       cls_avg / cls_std / rings / grid 都是先對原始 patch 做平均或標準差、再
+       各自正規化；已正規化的 cell 重新平均得到的是另一個向量，不是
+       production 的描述子。測試用「從 tokens store 推 cls_avg」當誘餌，cos
+       明顯小於 1；沒有任何 arm 讀 register（改 register，所有 arm 與 tokens
+       都不變）。
+
+    3. 驗證與拿掉的東西
+       - 改之前用一個暫時的鎖（result/StoreTest/golden/）記下現況：四種 store
+         的內容 sha（metadata 排序後）、位址、FeatureMapCache 還原值、pre-tile
+         的 PNG 與 index、11 種壞輸入的例外訊息，並檢查新程式讀得回舊檔。
+         改完唯一的差異是 features_fp32 由拒絕變成接受（本來就要的）。鎖已拿掉。
+       - safetensors 寫檔時 metadata 的 key 順序每次不同（同樣 25 個 key，
+         四個檔案順序都不同），所以整個檔案的位元組 sha 不穩定；專案裡沒有任何
+         東西依賴這個 sha（識別碼都由設定字串算出）。
+       - 寫過 utilities/RawFeatures.py（一次 forward 同時產出 raw 與各 arm、
+         從 raw 推導、cached_poolings 決定來源）與它的測試，因為只有 bench 會
+         用、production 與 training 都不用，已刪除。需要時由視窗 bench 自己寫
+         它真正用到的部分。
+
+[2026-09-30] 視窗 bench：overlap 帶來的招回率單獨成表（recall_main / offset / all）
+    主表維持只在 main 視窗上比 arm（-M 與完整格點的 arm 在這裡同一組候選、同一個
+    答案）。overlap 有沒有幫助是另一個問題，另外量：
+      - 每個 query 有兩個答案（grid_answers 給的最近 main 視窗、最近 offset 視窗），
+        各自在自己所屬的池子排名，CSV 記 rank_main_in_main / pool、
+        rank_offset_in_offset / pool_offset、rank_main_in_all / rank_offset_in_all /
+        pool_all（取代只記最近格點排名的 rank_all）。
+      - recall_all@k = min(rank_main_in_all, rank_offset_in_all) <= k，即混合池裡
+        兩個答案較前的那個。另有 main:offset 一列，統計命中裡較前的答案來自
+        哪個格點（並列歸 main，並印出並列筆數）。
+      - 不加距離容忍 R：答案由格點決定（一格一個），R 只是把「多個視窗都算對」
+        調成參數，而且 R 的大小會直接改結論。
+      - 限制：混合池有兩個目標、main 只有一個，all 的 recall 高一部分是目標變多，
+        所以表上並列 random 基準（隨機排名的期望 recall，all 約為 main 的兩倍）。
+      - k 用固定值（K_FIXED），按 level 分開，不跨 level（各層 pool 差幾個量級）。
+    gate 多一項 recall ranks（手算的 3x3 / 2x2 分數圖）；utilities/test_modules/
+    test_bench_window_retrieval.py 用手算 rank 驗證 recall 表與 random 基準。
+
+[2026-09-30] 視窗 bench：參考特徵改成串流，不再存 raw
+    原因：完整格點 raw 緩衝（BRACS_1852 L0 約 26 萬個 tile × 814 KB ≈ 210 GB）
+    超過節點上限 200 GB（sbatch 把 256G 降到 204800 MB）。raw 只是加速用的快取，
+    不是 bench 的目的，所以整條 raw 快取路徑拿掉。
+    做法：query 的 tile 特徵（QGF）先算好；參考端一次讀一列 tile（read_tile_row），
+    encode、對 QGF 算 cosine、累加進該列所屬的視窗（WindowAccumulator）、丟掉。
+    mean / geomean / min 都是累加式的。記憶體不隨 slide 大小增長。
+    驗證：gate 用虛構 region 對 SlidingWindowSimilarity 逐視窗比對，max|Δ| 8.9e-8，
+    多偏一欄的假答案差 0.27。Ki67 那張的 baseline 排名和舊路徑三次完全一致。
+    raw-M 當 arm：patch token（UNI2 256 個 × 1536，不含 9 個 prefix）位置對位
+    cosine 平均，即 concat_slots 用 256 個 slot；gate 驗證與逐位置 cosine 平均相等、
+    prefix 不影響。
+    接受的偏差：BRACS 的 ds 是 4.000022，一列的起點要取整成 level-0 整數座標，
+    與整塊讀取差最多約 0.1 個 level 像素、像素最多差 3/255；BRACS L1 baseline
+    排名 19 -> 17。Ki67（ds 為整數）差 0。gate 改成與「錯位一整個像素」的假答案比，
+    要求條帶至少比假答案近 10 倍，不用固定門檻。
+    每個 (slide, level) 存成 parts-<設定 id>/ 下的一個檔（先寫暫存再改名），
+    重送同一個指令會跳過已完成的；設定 id 由 arm、FoV 數、slide、seed、mask 決定，
+    設定不同就是不同目錄，不會混在一起。
+
+[ ] 2026-10-03 | 讀取統一：SlideReader 讀、Render 畫；選層與像素數各只有一個定義
+
+    1. 為什麼
+       - 同一個位置有四套讀法，選層、讀幾個像素、用哪個濾鏡各自不同：
+         QueryFromWSI 取 mpp 差 5% 以內的層（會讀到比目標粗的層再放大），level
+         像素用 int 截斷；Sample.materialise / DsLadder 取「不比目標粗的最粗層」
+         且 round；GridReader 與 WsiTissuesContainer 另有一套，選層用 nearest。
+       - 後果有實測：sampler 預留的範圍和 Camera 實際讀的範圍不一致，bracs/test
+         的位置有 19/1497 讀到切片外（manifest），Camera 自己的 sampler 是
+         10/1500，每個都差 1 px（int(8192*sqrt2)=11585，實際讀 ceil(...)=11586）。
+         BRACS 的 ds 4.00014 那一層，256 的 tile 讀成 255 px 再放大回 256。
+
+    2. 做了什麼
+       - utilities/ReadGeometry.py：level_for（選層，絕不放大，容忍 0.1%）、
+         level_px（level 像素數，四捨五入，從輸出像素算）、FovGeometry.of(w, h, ds)、
+         ReadSpec（原 CameraSpec）。全部用 ds；mpp 只在呼叫端換算一次，因為
+         base_mpp * ds 再除回來不保證等於 ds，差一點就是一個像素。
+       - 旋轉時讀的外接正方形 square_l0 = ceil(square_out * ds)。原本是 level-0
+         長方形對角線的 ceil，ds 2 時置中 725 卻讀了 726，旋轉中心偏半個 level-0
+         像素。
+       - utilities/SlideReader.py（原 GridReader）：read（單點）、read_grid（區塊
+         讀取 + worker，演算法不變）、read_samples、plan / level_of / native。
+       - query_sim/camera.py：Camera 改名 Render，不自己讀圖，只剩 domain gap、
+         可重現性與 ground truth；at(ds) 換物鏡。FovSupply 與 fov_plan_of 在
+         generator.py。
+       - 刪除：QueryFromWSI、query_sim/QueryFromWSI.py、utilities/Render.py、
+         GridReader.py、SlideContext.py、Sample.materialise 與 TileSampler.images。
+       - 讀取模組從六個（Camera、QueryFromWSI、轉接檔、Render.py、GridReader、
+         SlideContext）減為 Render 與 SlideReader 兩個。
+
+    3. 驗證
+       - 搬進正式碼之前，整套改寫先寫在 diag_read_exp.py，和當時的正式程式並排
+         跑：訓練 capture、FovSupply.bank、output_to_level0、參考 tile（native /
+         ladder / 'R'）、pre-tile、chain tile、read_grid 對 GridReader，共 566
+         次讀取逐像素相同；14 項計時新版都沒有比舊版慢（比值 1.00 到 1.06）。
+       - 規則改動本身造成的差異，用凍結的舊程式量過：讀取計畫相同的 473 次逐像素
+         相同；計畫不同的只有 BRACS 的非原生層（level 像素 725 -> 726），以及
+         ds 落在兩層之間時舊規則會選錯層（3.9、15.5）。
+       - ReadPathTest、RoutingHeadsTest、WindowRetrievalSmoke 全過；
+         TestSuperPathPoint 只有原本就有的兩項失敗（缺 SUPERPOINT_ROOT；
+         AlphaCalibration 的 self-match 欄）。
+
+    4. 數字斷點
+       - 旋轉 capture 在 rung 2 以上（BRACS、Ki67 都是）原點多了半個像素，BRACS
+         非原生層的 level 像素數也變了。訓練影像差：原始讀取平均 4 到 10，增強後
+         1 到 4（0-255）。MppRoutingHead 在這之前的訓練結果不能和之後的比。
+       - sampler cache 的鍵（cam256x256-rot）沒變，但旋轉相機的預留範圍多了 1 px，
+         舊 cache 的位置不保證容得下新的讀取，所以 MppRoutingHead_sampler 要刪。
+       - tile（native、ladder、pre-tile、'R'）和 FoV（不旋轉）的讀取完全不變：
+         參考庫、pre-tile、ChainStack 的快取不用重建。
+
+    5. 速度（不是同一個 job 內的對照，只能當量級）
+       - window bench，BRACS_1952：L0 74,853 個 tile 6768 s -> 93 s，L1 4,511 個
+         448 s -> 21 s。舊版是兩個 shard 共用 CPU，新版單一 process 用 8 顆，
+         倍數不能直接信，量級可以。
+       - grid L0 約 3570 tiles/s（BRACS）；BRACS L1（ds 4.00003）只有 300 tiles/s：
+         非整數 ds 為了讓次像素相位一致，每個 region 只能一次讀完，而那一層只有
+         一個大 region，worker 分不到事。不同 region 已經分給不同 worker，單一
+         region 無法再拆而不改像素。
+
+    6. 還沒做 / 開放問題
+       - pipeline 的 WsiTissuesContainer、PCA 切割的 WsiTileLoader、stage 3 的
+         SlideWinSift 仍然各自讀圖，選層用 nearest，和 level_for 不同。ds 落在
+         兩層之間時兩邊會選到不同層（BRACS 目前碰巧相同）。
+       - 刪掉的檔案中沒進過 git 的（GridReader、Render.py、SlideContext、
+         diag_render_reads.py + DiagRenderReads.sh、diag_read_exp 的舊版並排比對）
+         只有備份，沒有歷史。diag_render_reads.py 是 ARCHITECTURE.md 量測數字的來源，
+         刪掉之後那些數字無法重現。
+       - training/FewShotEoMT 整個目錄還沒進 git，而且在這輪之前就跑不起來
+         （傳給 sampler 不存在的 min_region_ratio / merge_regions）。
+       - UNI2 的前處理和 upstream 不一致（中心裁切，upstream 是縮放），故意暫緩，
+         見 1_estimate_query_mpp/README.md。
+
+[ ] 2026-10-03 | 有破洞的 slide 移出 datasets；ki67_with_photo 的 split 重切
+
+    1. 為什麼
+       - 破洞掃描（WsiHoles，2026-09-16）早就找出有破洞的 slide，但沒有任何
+         程式讀那份結果，AccessDatasets、WsiSplit、各 sampler 照常用它們。window
+         bench 第一次讀到 S1137178，印出 40 次 read failed（Not a JPEG file:
+         starts with 0x00 0x00），掃描也證實那一張 L0 損壞 95/13366 個 block、
+         L1 139/13366。
+
+    2. 名單與數字（WsiHoles，block 為 1024 level-0 px）
+       - Ki67_pure 5 張：S1106939 14、S1112510 40、S1112721 290、S1313787C 28、
+         S1316666 32 個損壞 block。目前 datasets 裡已經不在（121 張，原本 126）。
+       - Ki67_with_photo 3 張：S1137178 234（L0、L1）、S1103037 229（L0、L1）、
+         S1129860 38（L0）。已移到 /work/u26130998/datasets_holed/。這三張
+         附有 189、170、9 張真實照片，合計 368 張，約佔全部 2377 張的 15%。
+       - 用 mv 而不是 rm：程式讀不到，真實照片還留著。
+
+    3. 連帶清掉的
+       - ki67_with_photo 的 wsi_split.csv（訓練開始時 make_split 自動重切）、
+         MppRoutingHead / PrototypicalRoutingHead / WindowRetrievalBench 的結果與
+         log、MppRoutingHead_sampler、三張 slide 的 mask cache。
+       - 新的 split：ki67_with_photo 剩 16 張，val 10 張、test 6 張（原本 test 9
+         張）。bracs/test 的 split 沿用。
+
+    4. 數字斷點
+       - Ki67 test 現在只有 6 張，樣本比以前少，和以前的 Ki67 test 數字不能直接比。
+       - window bench 用的 #val 變了，之前的結果全部作廢。
+
+    5. 還沒做
+       - 重掃 ki67_with_photo（job 369923，16 張加上被移走的 3 張）確認剩下的
+         16 張沒有破洞。第一次掃描在中途移走 slide 後讀不到檔案而當掉，沒有寫出
+         slides_with_holes.csv；log 裡只看到 S1103037 有損壞（L0 111、L1 118
+         個 block，和 09-16 的結果一致）和另外幾張的 0 個損壞 block，沒有掃完，
+         結論要等重掃。
+       - 要不要保留那 368 張真實照片當 stage 1 的真實照片評估，要再決定。
+
+[ ] 2026-10-03 | PrototypicalRoutingHead 的 _best 規則與 arm 清單
+
+    1. _best.pt 的規則
+       - 舊：val total（各 dataset 的平均）比之前高就存。
+       - 新：每個 dataset 的數字都不低於「目前存的那個 epoch」，而且至少一個更高，
+         才存（improves_everywhere）。一個 dataset 退步、另一個大幅進步使平均
+         上升的 epoch，舊規則會存，新規則不存。
+       - 每個 dataset 的數字是 by_dataset[d]：它在 3 個 held-out combo（1-4-16-32、
+         1-2-4、六個 rung 全部）上的準確率平均。沒有可評分的 dataset（NaN）跳過，
+         不算退步，否則抽不到 episode 的 dataset 會讓檔案永遠不更新。
+       - _6rung.pt、_native.pt 不動，仍然是三個檔案。MppRoutingHead 不改。
+       - 沒有選 dataset x combo 共 6 格的版本：6 格比較更嚴格，而且 _best 會和
+         _6rung 重疊（六個 rung 的那一格）。
+
+    2. 和 MppRoutingHead 的可比性
+       - 兩邊判斷 best 的粒度一樣（dataset 層級）。但數字量的不是同一件事：
+         MppRoutingHead 的 dataset 數字是六個 rung 的單 tile 準確率平均；
+         Prototypical 的 3-way、4-way combo 比六類容易，平均進去會偏高。
+       - 要跨套件比數字，用 Prototypical 的六個 rung combo（_6rung.pt 那一格）
+         對 MppRoutingHead 每個 dataset 的六個 rung 平均。
+
+    3. arm 清單：28 個 run -> 11 個（這是依結構推的，沒有數據）
+       - 保留 5 個 model：mean+cosine_tau（沒有可學參數的 baseline）、
+         set_transformer+cosine_tau、attn_pool+cosine_tau、set_transformer+
+         attn_score、mean+attn_score。routing head 的影響只在 mean 與
+         set_transformer 兩端量，不和每個 collapse 交叉。
+       - 刪除 shared_mlp（attn_pool 已是中間點）、attn_pool+attn_score、
+         shared_mlp+attn_score、episode 重用 hold_s（和 hold_q 每個 epoch 的步數
+         一樣，只是固定的一邊不同）。
+       - matching net 只在步驟 [2] 跑一次（跨 domain 對照），不再在 MODELS 裡
+         跑 3 次。
+       - 猜的，不是校準出來的：Prototypical 到目前一個結果都沒有。第一輪跑完才
+         看得出哪些 model 值得留，需要時再刪。
+
+    4. 驗證
+       - test_kxk_report.py 多了 7 種情況（包含平均上升但有一個 dataset 退步的
+         誘餌），RoutingHeadsTest 全過。
+       - PrototypicalRoutingHeadSmoke（job 369928）還沒看結果：要在 log 裡看到
+         新規則實際觸發（*new best best   every dataset held, one rose）。

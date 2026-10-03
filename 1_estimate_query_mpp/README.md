@@ -44,6 +44,30 @@ challenger 還沒升上去。
 這一個形狀；每個方法自己的 build 階段形狀不強行統一——一個從目標 WSI 現場建參
 考庫（貴），一個載入離線訓練好的權重（便宜），硬統一介面只會掩蓋這個真實差異。
 
+### 已知問題：UNI2 的前處理跟 upstream 不一致（刻意暫緩）
+
+> [!WARNING]
+> **`Uni2EncoderConfig` 沒有覆寫 `transform`**，所以繼承了 `TransformConfig()`
+> 的預設值：256 → 中心裁切 224、bicubic。一張 256 的 tile 因此每邊被裁掉 16 px，
+> 而且不縮放。`aiNNModel/Uni2Func.py` 自己的 `_UNI2_BASELINE`，以及 upstream
+> UNI2（`config.json` 的 crop_pct 1、bilinear 224；README 的 `transforms.Resize(224)`），
+> 都是把整張 tile 縮放到 224、不裁切。
+>
+> **2026-10-02 決定暫時不修。** 現有的 uni2 feature store、MppRoutingHead /
+> PrototypicalRoutingHead 的 head checkpoint、stage-1 bench 的數字，全部都是
+> 用裁切版的前處理產生的。只要大家用的是同一套前處理，彼此之間的比較就成立。
+> `build_from_checkpoint` 是從 registry 重建 encoder 的，而 checkpoint 沒有記錄
+> transform，所以一旦修正，舊權重會在沒有任何錯誤的情況下讀到另一種特徵。
+>
+> 量測（`diag_render_reads.py --speed transform`，BRACS_310 ds1，2000 張 tile，
+> 同一個模型只換 transform）：同一張 tile 在兩種前處理下的 CLS cos 中位數
+> 0.55（相鄰 tile 的對照組是 0.41），10-NN 重疊率 0.30，cross top-1 0.32。
+> 這組數字的控制組（同一個 transform 走 `variant` 必須得到 cos 1.0）還沒跑完。
+>
+> **什麼時候修**：等架構確定、要重新訓練和重建 store 的時候一起修。修的時候要同時讓
+> checkpoint 記錄完整的 encoder config（至少要有 transform），讓舊權重讀到不一樣的
+> 前處理時直接報錯，而不是悄悄換了特徵。
+
 ### 方法一覽
 
 #### `KnnEstMpp.py` — canonical
