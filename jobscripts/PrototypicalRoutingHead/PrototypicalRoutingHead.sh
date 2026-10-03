@@ -44,10 +44,18 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  (--mask-cache-job / --sampler-cache-job MppRoutingHead): the same function,
 #  the same config and the same files, so both packages train on the same
 #  positions rather than on two draws that should agree.
+#
+#  TWO CARDS. PARALLEL=2 deals the 11 runs out to two queues, one per card,
+#  running at once; each gets half the job's cpus (CpuBudget). Training is
+#  one process per run, so no run is split across cards -- two runs are
+#  simply in flight together. evaluate.py then runs once, after both queues.
+#
+#      PARALLEL=2 sbatch --gpus-per-node=2 --cpus-per-task=16 <this script>
 # =============================================================================
 
 # ---------------- knobs ----------------
 SMOKE="${SMOKE:-0}"
+PARALLEL="${PARALLEL:-1}"       # N: run the runs in N queues at once, one card each (see the run loop)
 SUPPLY_ONLY="${SUPPLY_ONLY:-0}"
 TRAIN_DATASET="${TRAIN_DATASET:-ki67_pure}"
 ENCODER="${ENCODER:-uni2}"
@@ -226,6 +234,7 @@ run_one () {
         --ordinal-sigma "$ORDINAL_SIGMA" \
         --encode-batch "$ENCODE_BATCH" \
         --seed "$SEED" \
+        --cpu-processes "$PARALLEL" \
         --wandb-project "$WANDB_PROJECT" \
         --merge \
         $RESUME_ARG \
@@ -244,14 +253,61 @@ if [ "$SUPPLY_ONLY" = "1" ]; then
 fi
 
 FAILED=()
+FAIL_DIR="$OUT/.failed"
 if [ "$EVAL_ONLY" != "1" ]; then
+# The runs of this job as "reuse|cross|spec" lines: every model under every
+# reuse mode (cross-domain off), then the matching net (run [2]).
+RUNS=()
 for REUSE in $EPISODE_REUSES; do
     for spec in "${MODELS[@]}"; do
-        run_one "$REUSE" "" "$spec" || FAILED+=("$REUSE $spec")
+        RUNS+=("$REUSE||$spec")
     done
 done
-run_one none "$CROSS_DOMAIN_DATASET" "$MATCHING_NET" \
-    || FAILED+=("none $MATCHING_NET cross=$CROSS_DOMAIN_DATASET")
+RUNS+=("none|$CROSS_DOMAIN_DATASET|$MATCHING_NET")
+
+if [ "$PARALLEL" -le 1 ]; then
+    for entry in "${RUNS[@]}"; do
+        IFS='|' read -r REUSE CROSS spec <<< "$entry"
+        run_one "$REUSE" "$CROSS" "$spec" || FAILED+=("$REUSE $spec cross=${CROSS:-off}")
+    done
+else
+    # PARALLEL=N: N queues at once, one card each, sharing this job's cpus
+    # (CpuBudget gives each a share). The runs are dealt out alternately, so
+    # each queue gets a mix of the cheap and the dear. Every run keeps its own
+    # weights, resume file and wandb run; the two val_scores files are shared
+    # and written under a lock (train.py). Ask for the cards and the cpus on
+    # the command line:
+    #
+    #     PARALLEL=2 sbatch --gpus-per-node=2 --cpus-per-task=16 <this script>
+    #
+    # Queue i logs to <log>.p<i>; this file gets the summary.
+    CARDS=$(nvidia-smi -L | wc -l)
+    if [ "$CARDS" -lt "$PARALLEL" ]; then
+        echo "PARALLEL=$PARALLEL but this job sees $CARDS card(s): ask for them with"
+        echo "  sbatch --gpus-per-node=$PARALLEL ..."
+        exit 2
+    fi
+    LOG="/work/u26130998/log/${SLURM_JOB_NAME:-PrototypicalRoutingHead}"
+    rm -rf "$FAIL_DIR"; mkdir -p "$FAIL_DIR"
+    pids=()
+    for ((i = 0; i < PARALLEL; i++)); do
+        (
+            export CUDA_VISIBLE_DEVICES=$i
+            for ((j = i; j < ${#RUNS[@]}; j += PARALLEL)); do
+                IFS='|' read -r REUSE CROSS spec <<< "${RUNS[$j]}"
+                RUN_I=$j        # run_one counts up from here: [j+1/N]
+                run_one "$REUSE" "$CROSS" "$spec" \
+                    || echo "$REUSE $spec cross=${CROSS:-off}" >> "$FAIL_DIR/p$i"
+            done
+        ) > "$LOG.p$i" 2>&1 &
+        pids+=($!)
+        echo "queue $i/$PARALLEL: pid $! on card $i, log $LOG.p$i"
+    done
+    for pid in "${pids[@]}"; do wait "$pid"; done
+    for f in "$FAIL_DIR"/p*; do
+        [ -s "$f" ] && while IFS= read -r line; do FAILED+=("$line"); done < "$f"
+    done
+fi
 
 echo ""
 echo "======== training done ========"

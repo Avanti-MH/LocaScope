@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import math
 import os
 import random
@@ -741,7 +742,7 @@ def rung_header(left: str = '') -> str:
 _NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
                  'wandb_mode', 'run_name', 'merge', 'encode_batch', 'supply_only',
                  'mask_cache_job', 'sampler_cache_job', 'split_cache_job',
-                 'feasibility_tries')
+                 'feasibility_tries', 'cpu_processes')
 
 
 def resolve_episodes(args, train_pool, cross_pool, val_pools):
@@ -891,6 +892,10 @@ def main() -> int:
     ap.add_argument('--ordinal-weight', type=float, default=1.0)
     ap.add_argument('--ordinal-sigma', type=float, default=1.0)
     ap.add_argument('--encode-batch', type=int, default=64)
+    ap.add_argument('--cpu-processes', type=int, default=1,
+                    help='training processes this job runs side by side (the '
+                         'jobscript'"'"'s PARALLEL). Each takes cpus / this for its '
+                         'torch threads -- CpuBudget')
     ap.add_argument('--seed', type=int, default=42)
     add_cache_args(ap)
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -917,6 +922,15 @@ def main() -> int:
     if args.pooling == 'passthrough':
         ap.error("--pooling passthrough gives Collapse an unpooled grid, not one "
                  "vector per tile -- pick cls/avg/max/attn")
+
+    # This process renders its own batches (no DataLoader workers), so torch
+    # may use its whole share of the job's cpus: all of them alone, a half
+    # each beside a second process. Left at torch's default, two processes
+    # each ran every cpu's worth of threads and slowed each other (CpuBudget's
+    # docstring has the measurements).
+    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    print(f'  {CpuBudget.for_job(processes=args.cpu_processes, workers=0).apply().line()}',
+          flush=True)
 
     device = torch.device(args.device)
     out_dir = Path(args.out or job_result_dir('PrototypicalRoutingHead'))
@@ -1205,16 +1219,22 @@ def main() -> int:
     if not out_combo_rows:
         print('no val rows (no epoch ran) -- nothing to write', flush=True)
         return 0
-    for name, rows_ in (('val_scores_per_rung.csv', out_rung_rows),
-                        ('val_scores_per_combo.csv', out_combo_rows)):
-        path = out_dir / name
-        write_rows = _merge_val_scores(path, rows_) if args.merge else rows_
-        fields = list(dict.fromkeys(k_ for r in write_rows for k_ in r))
-        with open(path, 'w', newline='') as fh:
-            wr = csv.DictWriter(fh, fieldnames=fields)
-            wr.writeheader()
-            wr.writerows(write_rows)
-        print(f'{path}  ({len(write_rows)} rows)', flush=True)
+    # Read, replace this run's rows, write back: two runs finishing together
+    # (the jobscript's PARALLEL=2 trains two at once into this one --out)
+    # would each read the file before the other wrote, and one would lose its
+    # rows. The lock covers the read and the write of both files.
+    with open(out_dir / '.val_scores.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for name, rows_ in (('val_scores_per_rung.csv', out_rung_rows),
+                            ('val_scores_per_combo.csv', out_combo_rows)):
+            path = out_dir / name
+            write_rows = _merge_val_scores(path, rows_) if args.merge else rows_
+            fields = list(dict.fromkeys(k_ for r in write_rows for k_ in r))
+            with open(path, 'w', newline='') as fh:
+                wr = csv.DictWriter(fh, fieldnames=fields)
+                wr.writeheader()
+                wr.writerows(write_rows)
+            print(f'{path}  ({len(write_rows)} rows)', flush=True)
     print(f'{weights_dir}  (*_best.pt / *_6rung.pt / *_native.pt)', flush=True)
     return 0
 

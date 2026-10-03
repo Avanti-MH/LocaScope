@@ -197,6 +197,10 @@ def main() -> int:
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
+    # one process, no workers: torch gets every cpu of the job
+    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    print(f'  {CpuBudget.for_job(workers=0).apply().line()}', flush=True)
+
     device = torch.device(args.device)
     caches = open_caches(args, 'PrototypicalRoutingHead', device)
     out_dir = Path(args.out or job_result_dir('PrototypicalRoutingHead'))
