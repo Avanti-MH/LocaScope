@@ -484,6 +484,32 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     caches.masks.close()
     print(f'  [after segmentation] {_mem_snapshot(device)}')
 
+    # Every photo, made ONCE. The read and the domain-gap simulation depend on
+    # the FoV alone -- its rng is the FoV's own (`fov_rng`) -- so every method
+    # is shown the same photos either way; made inside the method loop they
+    # were redone per method, and that was ~60% of a method's time
+    # (Stage1MppTiming, 2026-10-06). 816 photos of 1440x1024 are ~3.6 GB.
+    t0 = time.perf_counter()
+    photo = ReadSpec(*sensor_size(args.ratio, args.mpixels))
+    photos_by_slide = {}
+    for (dataset_id, wsi_name), (_, positions) in slide_cache.items():
+        wsi = SafeSlide(locate(wsi_name, dataset=dataset_id).path)
+        # the photo, straight off the slide (lanczos, as the microscope
+        # simulation always read), then the domain gap
+        reader = SlideReader(wsi)
+        made = []
+        for pos in positions:
+            image = reader.read(pos['x'], pos['y'], photo, pos['rung'])
+            if image is None:
+                continue
+            made.append((pos, simulate_microscope_photo(
+                image, rng=fov_rng(args.seed, dataset_id, wsi_name, pos))))
+        photos_by_slide[(dataset_id, wsi_name)] = made
+        wsi.close()
+    print(f'  [photos] {sum(len(v) for v in photos_by_slide.values())} made once '
+          f'in {time.perf_counter() - t0:.0f}s  [{_mem_snapshot(device)}]',
+          flush=True)
+
     rows = []
     n_vote_mismatch = 0
     probs_path = out_dir / f'{_sampling_recipe_id(args)}_probs.jsonl'
@@ -498,27 +524,21 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             print(f'  [SKIP] failed to build: {type(exc).__name__}: {exc}  '
                  f'[{_mem_snapshot(device)}]')
             continue
-        # Where a method's time goes, summed over its FoVs. Read and simulate do
-        # not depend on the method, so if they dominate, they are repeated
-        # work the method-outer loop could do once.
-        t_build = t_read = t_sim = t_fwd = t_vote = 0.0
+        # Where a method's time goes, summed over its FoVs.
+        t_build = t_fwd = t_vote = 0.0
         n_fov = 0
 
         for dataset_id, names in slides_by_dataset.items():
             for wsi_name in names:
                 entry = locate(wsi_name, dataset=dataset_id)
-                mask, positions = slide_cache[(dataset_id, wsi_name)]
+                mask, _ = slide_cache[(dataset_id, wsi_name)]
                 wsi = SafeSlide(entry.path)
-                # the photo, straight off the slide (lanczos, as the
-                # microscope simulation always read), then the domain gap
-                reader = SlideReader(wsi)
-                photo = ReadSpec(*sensor_size(args.ratio, args.mpixels))
 
                 t0 = time.perf_counter()
                 estimator.build(wsi, mask=mask)
                 t_build += time.perf_counter() - t0
 
-                for pos in positions:
+                for pos, query in photos_by_slide[(dataset_id, wsi_name)]:
                     gt_ds = pos['rung']
                     gt_mpp = wsi.base_mpp * gt_ds
                     # `rung` is the CANONICAL bin (nearest DEFAULT_RUNGS
@@ -531,20 +551,6 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                     # value for mpp_error_relative.
                     rung = min(DEFAULT_RUNGS,
                               key=lambda r: abs(np.log(gt_ds) - np.log(r)))
-                    t0 = time.perf_counter()
-                    image = reader.read(pos['x'], pos['y'], photo, gt_ds)
-                    t_read += time.perf_counter() - t0
-                    if image is None:
-                        continue
-                    # The rng is the FoV's own, so every method is shown the
-                    # SAME photo. It was the global `random` until 2026-10-05:
-                    # each method then got its own augmentation and rotation
-                    # of one FoV, and the comparison was paired on the
-                    # position only.
-                    t0 = time.perf_counter()
-                    query = simulate_microscope_photo(
-                        image, rng=fov_rng(args.seed, dataset_id, wsi_name, pos))
-                    t_sim += time.perf_counter() - t0
                     n_fov += 1
                     fov = dict(
                         dataset=dataset_id, wsi_name=wsi_name,
@@ -604,8 +610,8 @@ def run_stage1_compare(args, out_dir: Path) -> int:
         # Freed before the NEXT spec's build -- this is the whole point of
         # the method-outer loop: only one method's encoder(s) are ever
         # resident at once.
-        total = t_read + t_sim + t_fwd + t_vote
-        print(f'  [time] build {t_build:.0f}s (all slides)  {n_fov} FoVs  read {t_read:.0f}s  simulate {t_sim:.0f}s  '
+        total = t_build + t_fwd + t_vote
+        print(f'  [time] build {t_build:.0f}s (all slides)  {n_fov} FoVs  '
               f'forward {t_fwd:.0f}s  vote+write {t_vote:.0f}s  '
               f'({total / max(n_fov, 1):.2f} s/FoV)', flush=True)
         del estimator
