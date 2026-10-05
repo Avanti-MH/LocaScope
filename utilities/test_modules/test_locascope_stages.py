@@ -143,7 +143,8 @@ def run_stage2(wsi, encoder, mask, query_np, mpp_est, args):
 
 def run_stage3(retriever, query_qc, retrieval_result, args):
     localizer = SiftRansacLocalizer(
-        retriever.wsi_container, query_qc, retrieval_result,
+        retriever.reader, retriever.grids, retriever.level, query_qc,
+        retrieval_result,
         min_inliers=args.min_inliers, padding=args.padding)
     localizer.read_wsi_crop()
     localizer.detect_and_match()

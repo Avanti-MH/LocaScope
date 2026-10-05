@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT / 'utilities'))
 sys.path.insert(0, str(ROOT / 'aiNNModel'))
 
 import openslide                                                            # noqa: E402
-from PatchingLib          import (QueryPatchContainer, WsiTissuesContainer,   # noqa: E402
+from PatchingLib          import (QueryPatchContainer, PatchGrid, region_grids,  # noqa: E402
                                   FeaturesMap, WsiFeaturesMap)
 from SafeSlide            import SafeSlide                                                # noqa: E402
 from SlideReader          import SlideReader                                              # noqa: E402
@@ -256,6 +256,7 @@ class GigaPathSlidingWinSimRot:
         tile_size: int                          = 256,
         overlap:   bool                         = True,
         feature_store                           = None,
+        read_workers: int                       = 0,
     ):
         # SafeSlide so a hole in a MIRAX cannot kill the handle mid-run; see
         # utilities/SafeSlide.py. Only reached when constructed from a path --
@@ -268,7 +269,8 @@ class GigaPathSlidingWinSimRot:
         self.mpp       = mpp
         self.tile_size = tile_size
         self.overlap   = overlap
-        #: Optional. Anything with load(container) -> WsiFeaturesMap | None and
+        #: Optional. Anything with load(regions, ds=, level=, tile_size=,
+        #: overlap=) -> WsiFeaturesMap | None and
         #: save(WsiFeaturesMap). This class does not know about paths, ids or
         #: safetensors -- it asks, and rebuilds when the answer is None, which
         #: is also what happens when the store decides it does not match.
@@ -280,20 +282,18 @@ class GigaPathSlidingWinSimRot:
         self.level:   Optional[int]                = None
         self.ds:      Optional[float]              = None
         self.regions: Optional[list[TissueRegion]] = None
-        self.wsi_container: Optional[WsiTissuesContainer] = None
-        self.wsi_features:  Optional[list[FeaturesMap]]   = None
-        #: {ds: (container, features)} for every scale built so far.
-        #:
-        #: The container is kept, not released after encoding. It holds each
-        #: region's pixels, which looks like the obvious thing to drop -- 19.7
-        #: GB for a level-0 BRACS region -- but stage 3 reads them:
-        #: SiftRansacLocalizer takes `retriever.wsi_container`
-        #: (LocaScopePipeline.py:264) and crops the matched window out of
-        #: `wsi_container[best_region_index].img` to run SIFT on it. Dropping
-        #: it hands stage 3 a None.
-        #:
-        #: Cached as a pair because the features, the region list and the
-        #: pixels all belong to one scale, and find_best zips the first two.
+        #: One PatchGrid per region of `regions`, at the current scale -- the
+        #: geometry stage 3 places its crop by, and all it needs besides the
+        #: reader. No pixels are held: stage 3 reads its window on demand.
+        self.grids:   Optional[list[PatchGrid]]    = None
+        self.wsi_features:  Optional[WsiFeaturesMap] = None
+        #: The one read path (ARCHITECTURE.md). `read_workers` processes read
+        #: grid blocks ahead of the encoder; the CPU budget is the entry
+        #: point's to decide, so the default reads in this process, as the
+        #: container it replaces did.
+        self.reader = SlideReader(self.wsi, workers=read_workers)
+        #: {ds: (regions, grids, features)} for every scale built so far --
+        #: one scale's three, since find_best zips the first and the last.
         self._by_ds: Dict[float, tuple] = {}
 
         # Per-rotation state (dict keyed by rotation degree)
@@ -333,40 +333,45 @@ class GigaPathSlidingWinSimRot:
 
         # Resolve first: it is free, and it gives the cache key before anything
         # is read or encoded.
-        self.level, self.ds = SlideReader(self.wsi).native_scale(
-            mpp=mpp, ds=ds)
+        self.level, self.ds = self.reader.native_scale(mpp=mpp, ds=ds)
         self.mpp = self.wsi.base_mpp * self.ds   # mpp/ds/level now say one thing
-
 
         # Three ways to end up with features, cheapest first.
         if self.ds in self._by_ds:
-            self.wsi_container, self.wsi_features = self._by_ds[self.ds]
+            self.regions, self.grids, self.wsi_features = self._by_ds[self.ds]
         else:
-            # The container is built either way. It is not only the source of
-            # the tiles -- stage 3 reads pixels back out of it
-            # (SIFT_RANSAC.py:150), so a cache hit skips the ENCODE and not the
-            # read. Half of a level-0 build, measured: 278s read + 285s encode
-            # on BRACS_1228. The other half needs lazy region reads; see
-            # log/TODO.log.
-            self.wsi_container = WsiTissuesContainer.from_ds(
-                self.wsi, self.ds, tile_size=self.tile_size,
-                overlap=self.overlap, mask=self.mask)
+            # `regions` is the FILTERED list -- the regions that can host a
+            # tile at this ds, which the features and similarity maps line up
+            # with -- not self.mask's. A view, so the caller's mask is never
+            # narrowed (see the docstring). No mask: the whole slide, one
+            # region, as the container did.
+            if self.mask is not None:
+                self.regions = self.mask.patchable(self.tile_size * self.ds).tissue_regions
+            else:
+                w0, h0 = self.wsi.level_dimensions[0]
+                self.regions = [TissueRegion(x=0, y=0, w=w0, h=h0, index=0)]
+            geo = dict(ds=self.ds, level=self.level, tile_size=self.tile_size,
+                       overlap=self.overlap)
+            self.grids = region_grids(self.regions, **geo)
 
+            # A cache hit reads nothing off the slide: stage 3 reads its own
+            # window when it needs one, so no pixels have to be resident. With
+            # the container, a hit skipped the encode and not the read -- 278 s
+            # of a 563 s level-0 build on BRACS_1228.
             self.wsi_features = None
             if self.feature_store is not None:
-                self.wsi_features = self.feature_store.load(self.wsi_container)
+                self.wsi_features = self.feature_store.load(self.regions, **geo)
 
             if self.wsi_features is None:
-                self.wsi_features = self.wsi_container.to_features(self.encoder)
+                blocks = self.reader.read_grid(
+                    self.regions, self.grids, self.ds, tile=self.tile_size,
+                    offset=self.overlap, level=self.level)
+                self.wsi_features = WsiFeaturesMap.from_grid_read(
+                    blocks, self.regions, self.grids, self.encoder, **geo)
                 if self.feature_store is not None:
                     self.feature_store.save(self.wsi_features)
 
-            self._by_ds[self.ds] = (self.wsi_container, self.wsi_features)
-        # `regions` is the container's list -- the FILTERED one the features and
-        # similarity maps line up with, not self.mask's. Kept as an attribute
-        # because find_best zips it and reaching two levels down to say so
-        # obscures which list is meant.
-        self.regions = self.wsi_container.tissue_regions
+            self._by_ds[self.ds] = (self.regions, self.grids, self.wsi_features)
 
         # Similarity maps are query features x WSI features, so they belong to
         # the scale that produced them. compute_sim_maps() already rebuilds

@@ -25,7 +25,7 @@ query、shot 沿用 `CLAUDE.md`；pool、rank、答案視窗、arm、pooling 見
 | 主格點 | main lattice | 從 region 原點起、間距 256 px |
 | 偏移格點 | offset lattice | main 平移 (128, 128)；取代舊稱 overlap（程式與 CSV 欄位仍叫 overlap） |
 | 候選 | candidate | `(region_index, lattice, row, col, rotation, score)` |
-| 候選集 | candidate set | 依 score 由高到低排好的候選清單，位置就是名次 |
+| 候選集 | candidate set | 依 score 由高到低排好的候選清單（位置就是名次），加上它的座標框架：level、ds、每個 region 的格點 |
 | 主格點召回率 | main recall, `recall_main@k` | 最近的 main 視窗，在只有 main 視窗的池裡排名 ≤ k 的比例 |
 | 偏移格點召回率 | offset recall, `recall_offset@k` | 最近的 offset 視窗，在只有 offset 視窗的池裡排名 ≤ k 的比例 |
 | 混合召回率 | combined recall, `recall_all@k` | main + offset 混合池裡，上面兩個視窗較前者的排名 ≤ k 的比例 |
@@ -47,24 +47,41 @@ query、shot 沿用 `CLAUDE.md`；pool、rank、答案視窗、arm、pooling 見
 (128, 128)）。
 
     Candidate    = (region_index, lattice, row, col, rotation, score)
-    CandidateSet = 依 score 由高到低排好的 Candidate 清單，位置就是名次
+    CandidateSet = (candidates, level, ds, grids, query_rows, query_cols)
 
 - `lattice` 是 `'main'` 或 `'offset'`（取代 `from_overlap`）。
-- 只放 retrieval 自己找出來的東西。可從 input 推論的（像素座標、視窗大小、
-  level、ds、名次、第一階段的分數）不放；需要的人由 `regions`、`ds`、
-  query 的 tile 格數自己算，公式只寫一處，由 bench、視覺化、pipeline 共用。
+- `Candidate` 只放 retrieval 自己找出來的東西。可從 input 推論的（像素座標、
+  視窗大小、名次、第一階段的分數）不放。
 - 身分 = 前五個欄位。兩個方法的候選是不是同一個視窗，就是這五個欄位相等。
 - 所有第一階段方法都輸出這種格點視窗，評估指標因此共用。
+- `CandidateSet` 是候選清單加上它的座標框架。`candidates` 依 score 由高到低，
+  位置就是名次。`region_index`、`row`、`col` 只對一份 regions、一個層才有意
+  義，所以那份 regions 的格點（`grids`，每個 region 一個 `PatchGrid`，帶
+  level-0 原點）、`level`、`ds` 跟著清單走，不讓呼叫端拿兩個變數自己配對——
+  與 `WsiFeaturesMap` 存在的理由相同。推論的輸入跟著輸出走，推論的結果不存。
+- 位置只有一條公式：視窗左上角的 level-0 讀圖點 =
+  `grids[c.region_index].tile_origin_l0(c.lattice, c.row, c.col)`。不經過截斷
+  的 level-n 整數；bench、視覺化、pipeline、stage 3 都用這一條。
 
 ## 介面
 
-    第一階段   build(wsi, level, mask)       每個 (wsi, level) 一次
-               retrieve(query) → CandidateSet     長度 K
-    第二階段   build(wsi, encoder)           一次
-               rerank(query, CandidateSet) → CandidateSet   長度 K′
+每一階段吃前一階段的輸出，pipeline 只是串接：
 
-K、K′ 是設定，不寫死。`rerank` 輸入輸出同型，第二階段可以整個略過。每個方法
-自有 config 與 build 產物（快取以設定 id 為鍵），沿用 stage 1 的樹幹加分支。
+    stage 1   build(wsi, mask)                              每張 WSI 一次
+              estimate(query)               → EstMppResult
+    stage 2   第一階段  build(wsi, mask)                    每張 WSI 一次
+                        retrieve(query, EstMppResult) → CandidateSet   長度 K
+              第二階段  build(wsi, encoder)                 每張 WSI 一次
+                        rerank(query, CandidateSet)  → CandidateSet   長度 K′
+    stage 3   build(wsi)                                    每張 WSI 一次
+              localize(query, CandidateSet, rank=0)  → 定位結果
+
+    r1 = est.estimate(q);  r2 = ret.retrieve(q, r1);  r3 = loc.localize(q, r2)
+
+- `retrieve` 在 `EstMppResult.chosen_level` 上檢索。層由 stage 1 選一次，stage 2
+  不再自己選；每一層的格點與特徵第一次用到時才建，之後快取。
+- K、K′ 是設定，不寫死。`rerank` 輸入輸出同型，第二階段可以整個略過。每個方
+  法自有 config 與 build 產物（快取以設定 id 為鍵），沿用 stage 1 的樹幹加分支。
 
 ## 第一階段方法
 
@@ -82,10 +99,16 @@ K、K′ 是設定，不寫死。`rerank` 輸入輸出同型，第二階段可�
 
 ## 邊界
 
-- Stage 3（`SiftRansacLocalizer`）目前以鴨子定型讀候選的 `best_x`、`best_y`、
-  `best_region_index`、`best_rotation`、`ds`。`Candidate` 沒有這些屬性，
-  `LocaScopePipeline` 握有 `wsi`、`level`、`regions`，交給 stage 3 前由它轉。
-  Stage 3 本身這次不動。
+- Stage 3（`SiftRansacLocalizer`）直接吃 `CandidateSet`：crop 的 level-0 讀圖點
+  由上面那條公式算，加上 padding，記帳全程用 level-0。它用自己 `build(wsi)`
+  建的 reader 讀，不向 retriever 借。
+- 以前的作法（以鴨子定型讀候選的 `best_x`、`best_y`、`best_region_index`、
+  `best_rotation`、`ds`，crop 原點記成 `int(region.x / ds) + x0`）把 region 原
+  點的小數截掉。openslide 以 bilinear 取樣（位置的小數會被內插出來），所以回報
+  的位置偏 `-frac(region.x / ds) * ds` 個 level-0 像素，方向固定。實測（MppRoutingHead
+  的 mask，`diag_container_retire.py` phase / origins 段）：BRACS 幾乎每個 region
+  都偏將近一個 level 像素，L1 約 1 µm、L2 約 4 µm；Ki67 在 L1、L2 為 0，L3 起
+  約 1 µm 以上。
 
 ## 評估
 

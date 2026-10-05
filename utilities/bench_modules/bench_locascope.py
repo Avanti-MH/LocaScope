@@ -160,7 +160,8 @@ def verify_candidates(pl, retriever, qc, candidates: list, n: int,
     for c in candidates[:n]:
         try:
             loc = SiftRansacLocalizer(
-                wsi_container=retriever.wsi_container,
+                reader=retriever.reader, grids=retriever.grids,
+                level=retriever.level,
                 query=qc, location=c,
                 min_inliers=pl.refiner_min_inliers, padding=pl.refiner_padding,
             )

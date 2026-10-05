@@ -11,7 +11,9 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / 'utilities'))
 sys.path.insert(0, str(ROOT / '2_retrieval'))
 
-from PatchingLib import QueryPatchContainer, WsiTissuesContainer
+from PatchingLib import QueryPatchContainer
+from ReadGeometry import ReadSpec
+from SlideReader import SlideReader
 from GigaPathSlidingWinSimRot import SlideWinSimRotResult
 
 
@@ -79,8 +81,8 @@ class SiftRansacLocalizer:
 
     Stage 1  read_wsi_crop
       ┌─────────────────────────────────────────────┐
-      │  tpc.img裡, 以 best_x/y 為中心               │
-      │  取 ±padding tiles 的一塊 wsi_crop           │
+      │  在 matched region 裡, 以 best_x/y 為中心     │
+      │  讀 ±padding tiles 的一塊 wsi_crop           │
       │  記錄 crop_origin_x/y (wsi_crop[0,0] 的      │
       │  level-n global 座標)                        │
       └─────────────────────────────────────────────┘
@@ -122,13 +124,21 @@ class SiftRansacLocalizer:
 
     def __init__(
         self,
-        wsi_container: WsiTissuesContainer,
+        reader: SlideReader,
+        grids: list,
+        level: int,
         query: QueryPatchContainer,
         location: SlideWinSimRotResult,
         min_inliers: int = 10,
         padding: int = 2,
     ):
-        self.wsi_container = wsi_container
+        # The retriever's reader, grids and level: the crop is READ on demand
+        # rather than cut from region pixels held in memory, which was all the
+        # WsiTissuesContainer was still kept alive for (19.7 GB for a level-0
+        # BRACS region).
+        self.reader = reader
+        self.grids = grids
+        self.level = level
         self.query = query
         self.location = location
         self.min_inliers = min_inliers
@@ -148,14 +158,18 @@ class SiftRansacLocalizer:
     # ── Stage 1 ──────────────────────────────────────────────────────────────
 
     def read_wsi_crop(self, padding: Optional[int] = None) -> np.ndarray:
-        '''Crop WSI image around the retrieval best match, ± padding tiles.'''
+        '''Read the WSI around the retrieval best match, ± padding tiles,
+        clipped to the matched region.'''
         pad = padding if padding is not None else self.padding
-        tpc = self.wsi_container[self.location.best_region_index]
-        ts = self.wsi_container.tile_size
+        grid = self.grids[self.location.best_region_index]
+        ts = grid.tile_size
 
-        # Best match top-left in level-n global coords → local image coords
-        local_x = self.location.best_x - tpc.img_origin_x
-        local_y = self.location.best_y - tpc.img_origin_y
+        # Best match top-left in level-n global coords -> region-local. The
+        # grid's offset is where the region's own image started, and its size
+        # is that image's, so this is the window the region read used to be
+        # cropped to.
+        local_x = self.location.best_x - grid.x_offset
+        local_y = self.location.best_y - grid.y_offset
 
         # Window covers query size rounded up to tile boundary
         win_w = int(np.ceil(self.query.width  / ts)) * ts
@@ -163,25 +177,36 @@ class SiftRansacLocalizer:
 
         x0 = max(0, local_x - pad * ts)
         y0 = max(0, local_y - pad * ts)
-        x1 = min(tpc.img.shape[1], local_x + win_w + pad * ts)
-        y1 = min(tpc.img.shape[0], local_y + win_h + pad * ts)
+        x1 = min(grid.width, local_x + win_w + pad * ts)
+        y1 = min(grid.height, local_y + win_h + pad * ts)
 
         if x1 <= x0 or y1 <= y0:
-            # best_x/best_y landed outside this region's image. That means the
+            # best_x/best_y landed outside this region. That means the
             # retrieval handed over a position it never actually scored — e.g.
             # its (0, 0) sentinel when no window fit anywhere. Fail loudly here
             # rather than letting cv2 report an empty-Mat assertion later.
             raise ValueError(
                 f'empty WSI crop for region {self.location.best_region_index}: '
                 f'best=({self.location.best_x}, {self.location.best_y}) maps to '
-                f'local=({local_x}, {local_y}) in a {tpc.img.shape[1]}x'
-                f'{tpc.img.shape[0]} region image; window {win_w}x{win_h} '
+                f'local=({local_x}, {local_y}) in a {grid.width}x'
+                f'{grid.height} region; window {win_w}x{win_h} '
                 f'+{pad} tiles gives x[{x0}:{x1}] y[{y0}:{y1}]'
             )
 
-        self.wsi_crop = tpc.img[y0:y1, x0:x1].copy()
-        self.crop_origin_x = tpc.img_origin_x + x0   # level-n global
-        self.crop_origin_y = tpc.img_origin_y + y0
+        # Anchored at the region's level-0 origin, the way the region's own
+        # read was (PatchGrid.local_to_l0), at the grid's own ds: a native
+        # read, no resampling.
+        x_l0, y_l0 = grid.local_to_l0(x0, y0)
+        crop = self.reader.read(x_l0, y_l0, ReadSpec(x1 - x0, y1 - y0), grid.ds,
+                                level=self.level)
+        if crop is None:
+            raise ValueError(
+                f'crop at level-0 ({x_l0}, {y_l0}) size {x1 - x0}x{y1 - y0} '
+                f'falls off the slide, inside region '
+                f'{self.location.best_region_index}')
+        self.wsi_crop = crop
+        self.crop_origin_x = grid.x_offset + x0   # level-n global
+        self.crop_origin_y = grid.y_offset + y0
         return self.wsi_crop
 
     # ── Stage 2 ──────────────────────────────────────────────────────────────
@@ -216,7 +241,7 @@ class SiftRansacLocalizer:
 
         ds = self.location.ds
         region_idx = self.location.best_region_index
-        level = self.wsi_container.level
+        level = self.level
         n_matches = len(self.good_matches)
 
         H = None

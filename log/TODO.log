@@ -2886,3 +2886,83 @@ front of whoever flips it.
          誘餌），RoutingHeadsTest 全過。
        - PrototypicalRoutingHeadSmoke（job 369928）還沒看結果：要在 log 裡看到
          新規則實際觸發（*new best best   every dataset held, one rose）。
+
+[ ] 2026-10-05 | 沒拍到的區塊不需要處理；讀後的有效比例篩選拿掉
+
+    1. 重掃結果（job 369923，10-03 完成）
+       - ki67_with_photo 剩下的 16 張全部 0 個壞區塊；移走的 3 張確實有洞
+         （S1137178 234、S1103037 229、S1129860 38）。現在的資料集沒有破洞 slide。
+       - result/WsiHoles/ki67_with_photo/holes/slides_with_holes.csv
+
+    2. 兩種「洞」不是同一件事
+       - 讀壞的區塊：有拍，檔案損壞，原本有組織，補背景後影像是錯的。WsiHoles
+         抓的是這種，已移出資料集。
+       - 沒拍的區塊：MIRAX 預掃判為空白玻片而跳過，正常 slide 也有。SafeSlide
+         合成成背景色，就是它物理上的樣子，不是錯誤。PoolingBench（08-16）在
+         乾淨的 S1104233、S1151088 上看到的 valid < 0.95 的答案 tile 就是 FoV
+         碰到這種玻片。
+       - 所以不在分割時把沒拍到的像素從 mask 扣掉（曾提的 exclude_unscanned，
+         會換 seg_id），也不把讀後檢查改成 assert（乾淨 slide 上會誤報）。
+
+    3. 讀後的有效比例篩選是多餘的
+       - build_reference_store 和 bench_tile_retrieval 讀完圖用 alpha 篩掉
+         valid < 0.95 的 tile，用意是不讓均勻補色的 tile 進參考庫。但位置本來
+         就由 TileSampler + REFERENCE_BANK_RICHNESS 決定，最底下四個桶（背景
+         偏多）在放位置時就排除了。PoolingBench 的 log 每次都是
+         `0 distractors below valid 0.95`：它從沒丟過一個 sampler 抽的 tile。
+       - 決定：兩處拿掉讀後篩選與 valid_frac 欄位，讀圖改走 SlideReader（和
+         KnnEstMpp、PrototypeEstMpp 建參考庫的寫法一樣），併在淘汰
+         WsiTissuesContainer 那一步做。bench_tile_retrieval 的答案 tile 本來
+         就無條件保留。
+
+    4. 這段怎麼走歪的（記下來免得再走一次）
+       - 起點只是「這三處繞過 SlideReader」。提了讓 SlideReader 回傳有效比例，
+         被否決（前期就要確保）之後，把題目誤讀成破洞安全，追了 mask gating、
+         seg_id、assert 三輪，才回頭讀 build_reference_store 自己的 docstring
+         看到篩選的原意。先確認設計意圖再換解法。
+
+[ ] 2026-10-05 | openslide 以 bilinear 取樣；舊 stage 3 記帳偏 frac(region/ds) 個 level 像素
+
+    1. 問題
+       - read_region 只吃 level-0 整數座標。換到第 n 層時，位置是 x / ds，可以帶
+         小數（4001 / 4 = 1000.25）。舊程式記 crop 起點用 int(region.x / ds)，把
+         小數丟掉。這是否是錯，取決於 openslide 實際怎麼取樣：floor 的話舊記帳
+         正確；bilinear 的話偏 frac(region.x / ds) 個 level 像素。
+
+    2. openslide 3.4.1 的取樣規則（diag_container_retire.py phase 段）
+       - 在 a 讀 A、在 a+d 讀 B_d，用三種模型從 A 預測 B_d，殘差中位數（灰階）：
+             BRACS L1 ds 4.00005   floor 1.82   round 0.90   bilinear 0.21
+             BRACS L2 ds 16.0002   floor 6.18   round 3.55   bilinear 0.37
+             Ki67  L1 ds 2         floor 1.53   round 1.53   bilinear 0.22
+             Ki67  L3 ds 8         floor 3.00   round 1.58   bilinear 0.32
+       - bilinear：位置的小數部分會被內插出來。舊記帳確實有偏差。
+
+    3. 真實資料的大小（origins 段，MppRoutingHead mask cache，每資料集 8 張）
+       - region 原點來自 mask 像素格，是 4 的倍數。
+       - Ki67（ds 是 2 的冪次）：L1、L2 整除，0；L3 約 1 µm，L4 2-3 µm，L5 5-7 µm。
+       - BRACS（ds 4.0002、16.004，略大於整數）：4k / 4.0002 落在整數下方一點，
+         小數接近 1，幾乎每個 region 都偏將近一整個 level 像素：L1 約 1 µm，
+         L2 約 4 µm，L3 5-8 µm。方向固定（回報偏左、偏上）。
+       - 先前的 bias 測試量不到：抽到的 BRACS_1413 只有一個原點在 (0,0) 的
+         region，Ki67 在 ds 2 整除，預測偏差全是 0；對照組位移又幾乎是整數，
+         拋物線次像素定位本身約有 0.2 px 誤差。改成上面兩段：不靠定位，直接比讀
+         出的像素，和純算術的普查。
+
+    4. 規則（之後所有座標都照這三條）
+       - 以 level-0 為準：讀圖時用的 level-0 整數就是影像起點，直接記它。
+       - 換到其他層一律保留小數；影像第 j 個像素在 level-0 的 起點 + j * ds。
+       - 只有要再讀一次圖時才取整數，並記下取整後真正讀的那個 level-0 整數。
+       - 有偏差的：PatchInfo / x_offset 換算 level-0、GigaPathSlidingWinSimRot 的
+         _window_xy 與所有 *_x0、SIFT_RANSAC 的 crop 記帳與 int(x_ln * ds)。正確的：
+         SlideReader、ReadGeometry、TileSampler、Render.output_to_level0（合成 GT）、
+         window bench 的答案視窗、SlideWinSift、SuperPathPoint。修正併在 stage 2
+         interface（Candidate + tile_origin_l0）。
+
+    5. 新讀圖路徑和 container 的比較（pixels / crops 段）
+       - 四種情況每個 tile 像素完全相同（精確整數指紋）：BRACS L1 13,895、L2 796、
+         Ki67 L1 15,524、L3 807。feature cache 繼續有效。
+       - 特徵差：BRACS 0；Ki67 L1 5.6e-4（encoder 自己換 batch 大小的差 3.0e-3）、
+         L3 1.6e-3。像素相同，差異只能來自批次切法的運算，與 fp16 存檔的 ~1e-3 同
+         量級。
+       - crop：整數 ds 逐像素相同；非整數 ds 中位數差 0.3-0.4 灰階，符合兩次讀取
+         相位差 <= 0.125 px。

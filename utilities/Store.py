@@ -603,11 +603,11 @@ class FeatureMapCache:
     """Cached WsiFeaturesMaps for one slide: the grid-coverage feature files.
 
         cache = FeatureMapCache(root, wsi_path, encoder, mask_cfg)
-        wfm   = cache.load(container)     # None on a miss, with a reason printed
+        wfm   = cache.load(regions, ds=ds, level=level, tile_size=256, overlap=True)
         cache.save(wfm)
 
     `root` is `Cache.cache_root(<job>, 'features') / encoder_tag`. The file is
-    addressed by the mask recipe's seg_id / region_id and the container's tile,
+    addressed by the mask recipe's seg_id / region_id and the grid's tile,
     overlap and ds; the encoder's full identity and the geometry are checked on
     every read. `load` returns None rather than raising, because the caller's
     policy is to rebuild on a miss -- so every None says why.
@@ -641,12 +641,13 @@ class FeatureMapCache:
             for line in lines:
                 print(f'  [features] {line}', flush=True)
 
-    def path(self, container, pooling: Optional[str] = None) -> Path:
+    def path(self, *, ds: float, tile_size: int, overlap: bool,
+             pooling: Optional[str] = None) -> Path:
         return (FeatureStore.key_dir(
             self.root, seg_id=self.seg_id, slide=self.wsi_stem,
             region_id=self.region_id,
-            key=FeatureStore.grid_key(container.tile_size, container.overlap))
-            / f'{_ds_name(container.ds)}_{pooling or self.pooling}.safetensors')
+            key=FeatureStore.grid_key(tile_size, overlap))
+            / f'{_ds_name(ds)}_{pooling or self.pooling}.safetensors')
 
     def _storage_dtype(self):
         """What the encoder ran at, so the file is no coarser than the compute:
@@ -659,15 +660,21 @@ class FeatureMapCache:
             return torch.float32
         return torch.float16
 
-    def load(self, container):
+    # Every read takes the GEOMETRY the caller is about to use -- the regions
+    # and the scale they are tiled at -- and never pixels: a hit must cost no
+    # read of the slide. These five are what WsiTissuesContainer used to be
+    # passed for, and all it was asked for.
+
+    def load(self, regions, *, ds: float, level: int, tile_size: int,
+             overlap: bool):
         if 'r' not in self.mode:
             return None
-        path = self.path(container)
+        path = self.path(ds=ds, tile_size=tile_size, overlap=overlap)
         if not path.exists():
             self._say(f'no store at {path} -- encoding')
             return None
-        want = {'wsi_stem': self.wsi_stem, 'level': container.level,
-                'ds': float(container.ds), 'encoder_id': self.encoder.identity_id(),
+        want = {'wsi_stem': self.wsi_stem, 'level': level,
+                'ds': float(ds), 'encoder_id': self.encoder.identity_id(),
                 'seg_id': self.seg_id, 'region_id': self.region_id,
                 'coverage': 'grid'}
         meta = FeatureStore.load_meta(path)
@@ -680,18 +687,15 @@ class FeatureMapCache:
             return None
         tensors, _ = FeatureStore.load(path)
         from PatchingLib import region_grids                      # noqa: PLC0415
-        grids = region_grids(container.tissue_regions, ds=container.ds,
-                             level=container.level, tile_size=container.tile_size,
-                             overlap=container.overlap)
+        grids = region_grids(regions, ds=ds, level=level, tile_size=tile_size,
+                             overlap=overlap)
         bad = geometry_mismatch(tensors, grids)
         if bad:
             self._say(f'{path.name} has the right address and the wrong regions:',
                       *[f'    {b}' for b in bad])
             return None
-        wfm = from_store_tensors(tensors, container.tissue_regions,
-                                 ds=container.ds, level=container.level,
-                                 tile_size=container.tile_size,
-                                 overlap=container.overlap)
+        wfm = from_store_tensors(tensors, regions, ds=ds, level=level,
+                                 tile_size=tile_size, overlap=overlap)
         self._say(f'{path}  {wfm.n_patches():,} tiles, {len(wfm)} regions -- '
                   f'no encoding needed')
         return wfm
@@ -725,14 +729,9 @@ class FeatureMapCache:
     # the others, under the same address rules and the same two checks (the
     # encoder's identity, and the geometry against the mask in hand).
 
-    def _grid_columns(self, container) -> dict:
-        from PatchingLib import region_grids                      # noqa: PLC0415
-        grids = region_grids(container.tissue_regions, ds=container.ds,
-                             level=container.level, tile_size=container.tile_size,
-                             overlap=container.overlap)
-        return _columns(grids)
-
-    def save_pooled(self, container, pooled: Dict[str, 'PooledFeatures']) -> Dict[str, Path]:
+    def save_pooled(self, regions, pooled: Dict[str, 'PooledFeatures'], *,
+                    ds: float, level: int, tile_size: int,
+                    overlap: bool) -> Dict[str, Path]:
         """Write each pooling of `pooled` as its own file. `{name: path}`.
 
         The features are stored as given -- fp16 or fp32 -- so what runs at fp32
@@ -741,7 +740,9 @@ class FeatureMapCache:
         if 'w' not in self.mode:
             return {}
         base_mpp = float(getattr(self.encoder, 'base_mpp', 0.0)) or 0.0
-        columns = self._grid_columns(container)
+        from PatchingLib import region_grids                      # noqa: PLC0415
+        columns = _columns(region_grids(regions, ds=ds, level=level,
+                                        tile_size=tile_size, overlap=overlap))
         n = int(columns['x'].numel())
         out = {}
         for name, item in pooled.items():
@@ -752,9 +753,9 @@ class FeatureMapCache:
                     f'positions')
             meta = FeatureMeta(
                 wsi_stem=self.wsi_stem, wsi_path=self.wsi_path,
-                level=container.level, ds=float(container.ds),
-                mpp=base_mpp * container.ds, base_mpp=base_mpp,
-                tile_size=container.tile_size, overlap=container.overlap,
+                level=level, ds=float(ds),
+                mpp=base_mpp * ds, base_mpp=base_mpp,
+                tile_size=tile_size, overlap=overlap,
                 pooling=name, slots=tuple(item.slots),
                 slot_layout=item.slot_layout, dim=int(features.shape[2]),
                 feat_hw=self.encoder.model_spec.feat_hw,
@@ -767,19 +768,21 @@ class FeatureMapCache:
             self._say(f'wrote {out[name]}  {n:,} tiles, {name}')
         return out
 
-    def check(self, container, pooling: str) -> Optional[FeatureMeta]:
+    def check(self, regions, pooling: str, *, ds: float, level: int,
+              tile_size: int, overlap: bool) -> Optional[FeatureMeta]:
         """The stored metadata of one pooling if the file is the one wanted --
         the right encoder, the right address, the geometry of THIS mask -- else
         None, with the reason printed. Reads the header and the four small
         grid columns, never the features."""
         if 'r' not in self.mode:
             return None
-        path = self.path(container, pooling)
+        path = self.path(ds=ds, tile_size=tile_size, overlap=overlap,
+                         pooling=pooling)
         if not path.exists():
             self._say(f'no {pooling} store at {path}')
             return None
-        want = {'wsi_stem': self.wsi_stem, 'level': container.level,
-                'ds': float(container.ds), 'encoder_id': self.encoder.identity_id(),
+        want = {'wsi_stem': self.wsi_stem, 'level': level,
+                'ds': float(ds), 'encoder_id': self.encoder.identity_id(),
                 'seg_id': self.seg_id, 'region_id': self.region_id,
                 'coverage': 'grid', 'pooling': pooling}
         meta = FeatureStore.load_meta(path)
@@ -793,28 +796,33 @@ class FeatureMapCache:
         columns, _ = FeatureStore.load(path, keys=('x', 'y', 'region', 'grid_rc'))
         from PatchingLib import region_grids                      # noqa: PLC0415
         bad = geometry_mismatch(columns, region_grids(
-            container.tissue_regions, ds=container.ds, level=container.level,
-            tile_size=container.tile_size, overlap=container.overlap))
+            regions, ds=ds, level=level, tile_size=tile_size, overlap=overlap))
         if bad:
             self._say(f'{path.name} has the right address and the wrong regions:',
                       *[f'    {b}' for b in bad])
             return None
         return meta
 
-    def load_pooled(self, container, pooling: str):
+    def load_pooled(self, regions, pooling: str, *, ds: float, level: int,
+                    tile_size: int, overlap: bool):
         """`(tensors, meta)` of one pooling, or None on a miss. Loads it all:
         for a raw store of a big slide use `iter_pooled`."""
-        meta = self.check(container, pooling)
-        if meta is None:
+        geo = dict(ds=ds, level=level, tile_size=tile_size, overlap=overlap)
+        if self.check(regions, pooling, **geo) is None:
             return None
-        return FeatureStore.load(self.path(container, pooling))
+        return FeatureStore.load(self.path(ds=ds, tile_size=tile_size,
+                                           overlap=overlap, pooling=pooling))
 
-    def iter_pooled(self, container, pooling: str, rows: int = 8192):
+    def iter_pooled(self, regions, pooling: str, *, ds: float, level: int,
+                    tile_size: int, overlap: bool, rows: int = 8192):
         """`(start, features)` in chunks of `rows` tiles after the same checks,
         or None on a miss. What is resident is one chunk at a time."""
-        if self.check(container, pooling) is None:
+        if self.check(regions, pooling, ds=ds, level=level, tile_size=tile_size,
+                      overlap=overlap) is None:
             return None
-        return FeatureStore.iter_chunks(self.path(container, pooling), rows=rows)
+        return FeatureStore.iter_chunks(
+            self.path(ds=ds, tile_size=tile_size, overlap=overlap, pooling=pooling),
+            rows=rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

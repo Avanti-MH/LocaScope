@@ -200,7 +200,7 @@ class LocaScopePipeline:
     # `_level_mask` used to live here: a per-level copy of the mask keeping only
     # regions that can host a tile. It was the patchable filter written out a
     # second time, because the mask's filter then mutated in place and this
-    # needed a copy. It moved into the library -- `WsiTissuesContainer.from_ds`
+    # needed a copy. It moved into the retriever -- `build_wsi_features`
     # takes a `mask.patchable(...)` view -- so the
     # retriever now narrows the mask itself, at the ds it is actually going to
     # build at. Which is the point: this class did not know that ds, it only
@@ -310,7 +310,8 @@ class LocaScopePipeline:
         # Stage 3 — SIFT+RANSAC refine
         try:
             localizer = SiftRansacLocalizer(
-                wsi_container=retriever.wsi_container,
+                reader=retriever.reader, grids=retriever.grids,
+                level=retriever.level,
                 query=qc, location=retrieval,
                 min_inliers=self.refiner_min_inliers,
                 padding=self.refiner_padding,

@@ -285,32 +285,33 @@ class _Recipe:
         return self.region
 
 
-def _container(regions=REGIONS):
-    return SimpleNamespace(tile_size=TILE, overlap=True, ds=DS, level=LEVEL,
-                           tissue_regions=regions)
+#: The geometry every FeatureMapCache read takes alongside the regions -- what
+#: a WsiTissuesContainer used to be passed for.
+GEO = dict(ds=DS, level=LEVEL, tile_size=TILE, overlap=True)
+PATH = dict(ds=DS, tile_size=TILE, overlap=True)
 
 
 def t_map_cache_hits_and_misses_for_the_right_reasons():
     with tempfile.TemporaryDirectory() as root:
         cache = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                                 verbose=False)
-        assert cache.load(_container()) is None, 'a hit before any write'
+        assert cache.load(REGIONS, **GEO) is None, 'a hit before any write'
         path = cache.save(a_wfm())
-        assert path == cache.path(_container()), (path, cache.path(_container()))
+        assert path == cache.path(**PATH), (path, cache.path(**PATH))
         assert path.parts[-5:-1] == ('hest-e3b0c442', 'SLIDE_A', 'abcd1234',
                                      'grid-t256-o1'), path
-        back = cache.load(_container())
+        back = cache.load(REGIONS, **GEO)
         assert back is not None and back.n_patches() == a_wfm().n_patches()
         # the address is right, the encoder is not: a miss
         other = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder('enc99999'),
                                 _Recipe(), verbose=False)
-        assert other.load(_container()) is None, 'another encoder was served'
+        assert other.load(REGIONS, **GEO) is None, 'another encoder was served'
         # the address is right, the regions are not: the gate
-        assert cache.load(_container(REGIONS[:2])) is None, 'narrowed regions served'
+        assert cache.load(REGIONS[:2], **GEO) is None, 'narrowed regions served'
         # another recipe is another address
         moved = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(),
                                 _Recipe(region='ffff0000'), verbose=False)
-        assert moved.path(_container()) != path
+        assert moved.path(**PATH) != path
         ro = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                              mode='r', verbose=False)
         assert ro.save(a_wfm()) is None, "mode='r' wrote"
@@ -556,33 +557,33 @@ def t_several_poolings_of_one_slide_sit_side_by_side():
     with tempfile.TemporaryDirectory() as root:
         cache = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                                 verbose=False)
-        paths = cache.save_pooled(_container(), pooled)
+        paths = cache.save_pooled(REGIONS, pooled, **GEO)
         assert set(paths) == {'cls', 'raw'} and paths['cls'] != paths['raw']
         assert paths['raw'].name == 'ds4_raw.safetensors', paths['raw'].name
         assert paths['raw'].parent == paths['cls'].parent, 'not in one key directory'
-        assert cache.check(_container(), 'raw').slot_layout == 'raw:1+14x14'
-        got, meta = cache.load_pooled(_container(), 'raw')
+        assert cache.check(REGIONS, 'raw', **GEO).slot_layout == 'raw:1+14x14'
+        got, meta = cache.load_pooled(REGIONS, 'raw', **GEO)
         assert torch.equal(got['features'], pooled['raw'].features)
         assert meta.pooling == 'raw' and meta.n_tiles == n
-        chunks = cache.iter_pooled(_container(), 'raw', rows=7)
+        chunks = cache.iter_pooled(REGIONS, 'raw', rows=7, **GEO)
         assert torch.equal(torch.cat([c for _, c in chunks]), pooled['raw'].features)
-        got_cls, _ = cache.load_pooled(_container(), 'cls')
+        got_cls, _ = cache.load_pooled(REGIONS, 'cls', **GEO)
         assert torch.equal(got_cls['features'], pooled['cls'].features), (
             'writing raw overwrote cls')
         # the one-vector API reads what save_pooled wrote for the same pooling
-        assert cache.load(_container()).n_patches() == n
+        assert cache.load(REGIONS, **GEO).n_patches() == n
         # the checks every read makes
-        assert cache.check(_container(REGIONS[:2]), 'raw') is None, 'narrowed regions served'
+        assert cache.check(REGIONS[:2], 'raw', **GEO) is None, 'narrowed regions served'
         other = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder('enc99999'),
                                 _Recipe(), verbose=False)
-        assert other.check(_container(), 'raw') is None, 'another encoder was served'
-        assert cache.check(_container(), 'rings3') is None, 'a pooling nobody wrote'
-        assert cache.iter_pooled(_container(), 'rings3') is None
+        assert other.check(REGIONS, 'raw', **GEO) is None, 'another encoder was served'
+        assert cache.check(REGIONS, 'rings3', **GEO) is None, 'a pooling nobody wrote'
+        assert cache.iter_pooled(REGIONS, 'rings3', **GEO) is None
         ro = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                              mode='r', verbose=False)
-        assert ro.save_pooled(_container(), pooled) == {}, "mode='r' wrote"
+        assert ro.save_pooled(REGIONS, pooled, **GEO) == {}, "mode='r' wrote"
         bad = PooledFeatures(pooled['cls'].features[:-1], ('cls',), 'none')
-        rejects(lambda: cache.save_pooled(_container(), {'cls': bad}), 'grid')
+        rejects(lambda: cache.save_pooled(REGIONS, {'cls': bad}, **GEO), 'grid')
     return 'cls and raw coexist; encoder, regions and pooling are checked'
 
 
@@ -601,7 +602,7 @@ def t_an_fp32_encoder_writes_fp32_and_anything_else_writes_fp16():
                                     verbose=False)
             path = cache.save(a_wfm())
             seen[name] = FS.load(path)[0]['features'].dtype
-            assert cache.load(_container()) is not None, name
+            assert cache.load(REGIONS, **GEO) is not None, name
     assert seen == {'fp32': torch.float32, 'fp16': torch.float16,
                     'unsaid': torch.float16}, seen
     return 'fp32 encoder -> fp32; fp16 and an encoder that does not say -> fp16'

@@ -335,11 +335,19 @@ class PatchGrid:
         origin plus the tile's level-n offset inside the region, times ds.
         Not `tile_origin * ds` -- that carries x_offset's truncation, a whole
         level pixel off the phase the region's own read has.'''
-        if self.origin_l0 is None:
-            raise ValueError('tile_origin_l0 needs a grid made by for_region')
         half = self._half(lattice)
-        return (int(round(self.origin_l0[0] + (self._main_col_starts[col] + half) * self.ds)),
-                int(round(self.origin_l0[1] + (self._main_row_starts[row] + half) * self.ds)))
+        return self.local_to_l0(self._main_col_starts[col] + half,
+                                self._main_row_starts[row] + half)
+
+    def local_to_l0(self, lx: float, ly: float) -> Tuple[int, int]:
+        '''Level-0 (x, y) of a point `(lx, ly)` level px from the region's
+        own top-left -- where a read of anything inside the region starts so
+        it lands on the phase the region's own read has. THE formula: a tile's
+        read (`tile_origin_l0`) and stage 3's crop both come through here.'''
+        if self.origin_l0 is None:
+            raise ValueError('local_to_l0 needs a grid made by for_region')
+        return (int(round(self.origin_l0[0] + lx * self.ds)),
+                int(round(self.origin_l0[1] + ly * self.ds)))
 
     # ── Properties ────────────────────────────────────────────────────────────
 
@@ -735,11 +743,8 @@ class WsiFeaturesMap:
                 f'are paired by position, so a length difference means the '
                 f'features were built over a different region list')
         for i, (region, fmap) in enumerate(zip(regions, maps)):
-            want = len(PatchGrid.from_size(
-                int(region.w / ds), int(region.h / ds), tile_size,
-                overlap=overlap,
-                x_offset=int(region.x / ds), y_offset=int(region.y / ds),
-                ds=ds, level=level))
+            want = len(PatchGrid.for_region(region, ds, tile_size,
+                                            overlap=overlap, level=level))
             if len(fmap) != want:
                 raise ValueError(
                     f'region {i} at ds {ds} offers {want} patches and its '
@@ -752,6 +757,49 @@ class WsiFeaturesMap:
         self.level = level
         self.tile_size = tile_size
         self.overlap = overlap
+
+    @classmethod
+    def from_grid_read(cls, blocks, regions: list, grids: List[PatchGrid],
+                       encoder: EncodeFn, *, ds: float, level: int,
+                       tile_size: int, overlap: bool) -> 'WsiFeaturesMap':
+        '''Encode what `SlideReader.read_grid` yields, block by block, into
+        every region's FeaturesMap -- the slide never held whole, which is
+        what WsiTissuesContainer did.
+
+        A block carries main rows `row0 ..` and the offset rows between
+        them, each row-major; tile (r, c) of a lattice goes to the flat slot
+        `grid.flat_index_for_main/overlap(r, c)` names, so the result is in
+        exactly the order a container's `to_features` produced. Every slot
+        must be written exactly once, or this raises: a block lost, or read
+        twice, would otherwise leave zeros that score like a real tile.'''
+        feats: List[Any] = [None] * len(grids)
+        hits = [torch.zeros(len(g), dtype=torch.int32) for g in grids]
+        for b in blocks:
+            grid = grids[b.region]
+            lattices = [(b.main, b.cols, grid.flat_index_for_main)]
+            if b.offset_rows:
+                lattices.append((b.offset, b.cols - 1, grid.flat_index_for_overlap))
+            for tiles, cols, slot in lattices:
+                if not len(tiles):
+                    continue
+                idx = torch.tensor([slot(b.row0 + i // cols, i % cols)
+                                    for i in range(len(tiles))])
+                f = encoder(tiles)
+                f = f.unsqueeze(0) if f.ndim == 1 else f
+                if feats[b.region] is None:
+                    feats[b.region] = torch.empty(len(grid), f.shape[1], dtype=f.dtype)
+                feats[b.region][idx] = f.detach().cpu()
+                hits[b.region][idx] += 1
+        dim = next((f.shape[1] for f in feats if f is not None), 0)
+        for r, (grid, h) in enumerate(zip(grids, hits)):
+            if len(grid) and not bool((h == 1).all()):
+                raise RuntimeError(
+                    f'region {r}: {int((h == 0).sum())} of {len(grid)} tiles never '
+                    f'read and {int((h > 1).sum())} read more than once')
+            if feats[r] is None:
+                feats[r] = torch.empty(0, dim)
+        return cls(regions, [FeaturesMap(g, f) for g, f in zip(grids, feats)],
+                   ds=ds, level=level, tile_size=tile_size, overlap=overlap)
 
     @property
     def feat_dim(self) -> int:
