@@ -44,7 +44,7 @@ setup_import_paths()
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SafeSlide import SafeSlide                                         # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
-from StageInterface import EstMppResult                                 # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult                                 # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
                          TileSampler, native_plans)
 from TissueMaskConfig import MASK_RECIPES                                # noqa: E402

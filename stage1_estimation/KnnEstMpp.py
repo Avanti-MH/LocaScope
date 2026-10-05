@@ -69,7 +69,7 @@ from TissueMask import TissueMask                        # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
                          TileSampler, native_plans)
 
-from StageInterface import EstMppResult                                 # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult                                 # noqa: E402
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
 

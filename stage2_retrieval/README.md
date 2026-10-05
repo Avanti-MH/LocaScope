@@ -1,4 +1,4 @@
-## 2_retrieval
+## stage2_retrieval
 
 ### 原則（stage module = 可重用純邏輯）
 

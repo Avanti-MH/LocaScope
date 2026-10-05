@@ -113,8 +113,8 @@ from SafeSlide import SafeSlide                                         # noqa: 
 from Checkpoints import build_prototype_from_checkpoint                  # noqa: E402
 from Features import encode_raw, trunk_raw                              # noqa: E402
 
-from StageInterface import EstMppResult                                 # noqa: E402
-from FoVVote import vote as fov_vote                                     # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult                                 # noqa: E402
+from stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
 

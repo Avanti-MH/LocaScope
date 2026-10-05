@@ -47,16 +47,15 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # is the cost this bench deliberately accepted rather than reading tile by tile
 # the way bench_offgrid_score does.
 #
-# So MODE=smoke runs two slides and two levels, chosen to be opposite in the
-# two ways that have historically mattered here:
-#
-#   BRACS_1228   H&E    4x pyramid   tissue 38.2%   1 region after merge
-#   S1104233     Ki67   2x pyramid   tissue  3.5%   23 regions after merge
-#
-# The region count is the point. `rank_of` accumulates a candidate pool across
-# regions and `sample_fovs` picks one to sit in; a single-region slide never
-# exercises either. Levels 1 and 2 walk every code path in minutes -- level 0
-# adds read time and memory, not logic, so it stays out of the smoke test.
+# So MODE=smoke runs one slide per dataset (--n-wsi 1: the first of each #val
+# split as MakeSplit recorded it, BRACS_310 and S1128171) and the two finest
+# levels: an H&E slide on a 4x pyramid and a Ki67 one on a 2x pyramid, both
+# with their masks in MppRoutingHead's cache, so the smoke segments nothing.
+# Levels 1 and 2 walk every code path in minutes -- level 0 adds read time and
+# memory, not logic, so it stays out of the smoke test. (It used to name
+# BRACS_1228 and S1104233 for their 1 and 23 regions; neither is the first of
+# the recut split, and a slide with one region does not exercise `rank_of`
+# pooling candidates across regions.)
 #
 # GATES RUN FIRST, on 32 tiles read straight from the middle of the first
 # slide, before the model has been asked for anything expensive:

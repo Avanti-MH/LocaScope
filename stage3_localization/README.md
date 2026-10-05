@@ -1,4 +1,4 @@
-## 3_localization
+## stage3_localization
 
 ### 原則（stage module = 可重用純邏輯）
 
@@ -46,6 +46,6 @@ retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC
   truth 比較時才站得住。
 
 > ⚠ `location: SlideWinSimResult` 這個型別標註（`SIFT_RANSAC.py:127`）指向
-> `2_retrieval/GigaPathSlidingWinSim.py` 的非旋轉版本，但 production 實際傳入
+> `stage2_retrieval/GigaPathSlidingWinSim.py` 的非旋轉版本，但 production 實際傳入
 > 的是 `SlideWinSimRotResult`——能動是因為鴨子定型，標註本身在說謊。抽出一個
 > Stage 2/3 共用的 result protocol 是畫布審查排定的下一步，這裡先誠實記下來。

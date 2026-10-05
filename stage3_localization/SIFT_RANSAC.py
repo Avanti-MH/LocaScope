@@ -6,15 +6,17 @@ from typing import Optional
 import cv2
 import numpy as np
 
+# utilities/ by hand, then _paths for the rest -- the idiom stage1_estimation
+# uses. The project root it adds is what resolves `stage2_retrieval.X`.
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-sys.path.insert(0, str(ROOT / 'utilities'))
-sys.path.insert(0, str(ROOT / '2_retrieval'))
+sys.path.insert(0, str(HERE.parent / 'utilities'))
+from _paths import setup_import_paths                                   # noqa: E402
+setup_import_paths()
 
-from PatchingLib import QueryPatchContainer
-from ReadGeometry import ReadSpec
-from SlideReader import SlideReader
-from GigaPathSlidingWinSimRot import SlideWinSimRotResult
+from PatchingLib import QueryPatchContainer                     # noqa: E402
+from ReadGeometry import ReadSpec                              # noqa: E402
+from SlideReader import SlideReader                            # noqa: E402
+from stage2_retrieval.GigaPathSlidingWinSimRot import SlideWinSimRotResult  # noqa: E402
 
 
 # ── homography predicate ──────────────────────────────────────────────────────
