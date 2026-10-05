@@ -291,7 +291,7 @@ test 再放大規模。
 上 `stage1_compare` 那個計分板（`utilities/bench_modules/
 bench_stage1_mpp.py`），跟 `KnnEstMpp`、`MppRoutingHead` 現有
 checkpoint 站在同一批 slide 上比——需要一個新的 `PrototypicalEstMpp`
-（`1_estimate_query_mpp/`，`StageInterface.MppEstimator` 形狀),但這是
+（`stage1_estimation/`，`StageInterface.MppEstimator` 形狀),但這是
 之後的事,先不寫。
 
 ## 4. Baseline prototype learning arm

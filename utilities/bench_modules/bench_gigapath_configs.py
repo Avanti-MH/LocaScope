@@ -93,7 +93,7 @@ from ReadGeometry import ReadSpec                                               
 from SlideReader import SlideReader                                             # noqa: E402
 from GigaPathFunc import GigaPathEncoderConfig                        # noqa: E402
 from TileEncoderFunc import TransformConfig                          # noqa: E402
-from KnnEstMpp import REFERENCE_BANK_RICHNESS                        # noqa: E402
+from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                        # noqa: E402
 
 
 # ── shared config table ─────────────────────────────────────────────────────

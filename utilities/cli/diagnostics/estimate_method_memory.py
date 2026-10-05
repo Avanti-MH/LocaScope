@@ -54,8 +54,8 @@ _paths.setup_import_paths()
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
-from KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
-from ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
+from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
+from stage1_estimation.ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
 from TileSampler import OverlapConfig, SamplerConfig                  # noqa: E402
 
 

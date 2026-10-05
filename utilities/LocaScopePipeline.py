@@ -65,7 +65,7 @@ import torch
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-for _d in ('utilities', '1_estimate_query_mpp', '2_retrieval', '3_localization'):
+for _d in ('utilities', ''):     # '' = the root, which resolves the stage packages
     p = str(_ROOT / _d)
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -74,10 +74,10 @@ from PatchingLib             import QueryPatchContainer                         
 from SafeSlide               import SafeSlide                                          # noqa: E402
 from TissueMask      import TissueMask                                 # noqa: E402
 from TileSampler             import OverlapConfig, SamplerConfig                       # noqa: E402
-from KnnEstMpp                import (KnnEstMpp, KnnEstMppConfig,                       # noqa: E402
+from stage1_estimation.KnnEstMpp                import (KnnEstMpp, KnnEstMppConfig,                       # noqa: E402
                                       REFERENCE_BANK_RICHNESS)
-from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot, SlideWinSimRotResult     # noqa: E402
-from SIFT_RANSAC             import SiftRansacLocalizer, SiftRansacResult              # noqa: E402
+from stage2_retrieval.GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot, SlideWinSimRotResult     # noqa: E402
+from stage3_localization.SIFT_RANSAC             import SiftRansacLocalizer, SiftRansacResult              # noqa: E402
 
 
 @dataclass

@@ -24,6 +24,6 @@ Anything a stage module imports, because `<N>_<stage>/` is pure logic by the
 repo's own rule and may not pull matplotlib in through the side door. The
 homography code is split along exactly that line: `query_quad` draws, so it
 lives in `_sift_plot` here, while `is_invertible` decides whether an H is
-usable at all and therefore lives in `3_localization/SIFT_RANSAC.py`, where
+usable at all and therefore lives in `stage3_localization/SIFT_RANSAC.py`, where
 `SIFT_RANSAC` and `SlideWinSift` can both reach it.
 """

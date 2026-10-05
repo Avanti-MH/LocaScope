@@ -15,7 +15,7 @@ WSI 套件的分層參照 `/work/u26130998/prov-gigapath`。所有從上游抄�
 
 ## 0. 為什麼做這個
 
-LocaScope 的 stage 3 目前是 `3_localization/SIFT_RANSAC.py`：retrieval 給一個
+LocaScope 的 stage 3 目前是 `stage3_localization/SIFT_RANSAC.py`：retrieval 給一個
 tile 級的位置，SIFT keypoint + RANSAC homography 把它細化到次像素。它有效
 （`log/TODO.log:1683`：一旦拿到含真值的視窗就收斂到微米級），但 SIFT 的點是
 手工設計的 blob，它不懂 H&E 紋理，也不知道自己在哪個解析度會消失。
@@ -680,7 +680,7 @@ Stage B 的表必須記下 detector 的 `identity_id`。否則換一個 detector
 
 ```
 training/SuperPathPoint/
-  README.md                    # 照 3_localization/README.md：原則 + 檔案狀態標籤
+  README.md                    # 照 stage3_localization/README.md：原則 + 檔案狀態標籤
   common/
     Interfaces.py              # Backbone / DetectorDecoder / Head protocol + 輸出 dataclass
     Homography.py              # sample_homography / warp_points / warp_image / valid_mask
@@ -2114,12 +2114,12 @@ teacher 是 COCO domain 的權重，H&E 是 out-of-domain，label 的品質是�
 
 ### 11.1 接回 stage 3
 
-`3_localization/` 多一個 `SuperPathPointLocalizer`，和 `SIFT_RANSAC.py` 平行。
+`stage3_localization/` 多一個 `SuperPathPointLocalizer`，和 `SIFT_RANSAC.py` 平行。
 鴨子定型讀同樣那五個屬性——`best_region_index`、`best_x`、`best_y`、`ds`、
-`best_rotation`（`3_localization/README.md` 記著這件事）——回傳
+`best_rotation`（`stage3_localization/README.md` 記著這件事）——回傳
 `SiftRansacResult` 形狀的結果，含 `center_x0/center_y0`。
 
-`3_localization/README.md` 已經標記了一個待辦：那個 `location: SlideWinSimResult`
+`stage3_localization/README.md` 已經標記了一個待辦：那個 `location: SlideWinSimResult`
 的型別標註在說謊，production 傳的是 `SlideWinSimRotResult`。加第二個 localizer
 是抽出共用 result protocol 的自然時機——**但那是另一次的事**，不要順手做。
 

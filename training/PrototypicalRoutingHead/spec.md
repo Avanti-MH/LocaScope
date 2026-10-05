@@ -341,7 +341,7 @@ final decision.
    `Checkpoints.save_checkpoint`/`build_from_checkpoint`
    (`aiNNModel/models/common/Checkpoints.py`) are shaped around ONE encoder +
    ONE `Head` and have real callers today (`MppRoutingHead`,
-   `1_estimate_query_mpp/ClassifierEstMpp.py`) that must not break —
+   `stage1_estimation/ClassifierEstMpp.py`) that must not break —
    untouched. Added `save_prototype_checkpoint`/`build_prototype_from_
    checkpoint` in the SAME file instead: three trained modules (pooling,
    generator, head) rather than one `Head`, `pooling_cfg`/`generator_cfg`

@@ -290,7 +290,7 @@ PrototypicalRoutingHead 的渲染移到 DataLoader worker；pipeline 改用 `rea
 │   │                            rerank(query, CandidateSet) → CandidateSet(K′)
 │   └─ stage 3  定位            SiftRansacLocalizer；SuperPathPoint (未實作)
 │   每個 stage 方法在自己的 config 指定 encoder、head、pooling；不同 stage 可以用不同 encoder
-│   stage 2 的兩段式設計見 2_retrieval/spec.md
+│   stage 2 的兩段式設計見 stage2_retrieval/spec.md
 ├─ training/MppRoutingHead/cli/{train,evaluate}.py  啟動時套用 CpuBudget
 ├─ utilities/bench_modules/bench_window_retrieval  CpuBudget、SlideReader.read_grid、特徵留在 GPU
 └─ query_sim CLI
@@ -349,6 +349,6 @@ window bench
 
 ## 已知但刻意暫緩
 
-- UNI2 的前處理和 upstream 不一致：現在是中心裁切，upstream 是縮放。見 `1_estimate_query_mpp/README.md`。
+- UNI2 的前處理和 upstream 不一致：現在是中心裁切，upstream 是縮放。見 `stage1_estimation/README.md`。
 - GPU 擴增（C1）。
 - CONCH 這類需要真正縮放的 encoder：GPU 前處理和 PIL 不是逐位元相同，差異量由 `test_tile_encoder` 量測。

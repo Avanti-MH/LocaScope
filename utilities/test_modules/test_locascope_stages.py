@@ -56,9 +56,9 @@ from TileEncoderFunc import encoder_config, encoder_names             # noqa: E4
 from TileSampler import OverlapConfig, SamplerConfig                  # noqa: E402
 from ReadGeometry import ReadSpec                                   # noqa: E402
 from TissueMaskConfig import add_mask_args, mask_cfg_from_args        # noqa: E402
-from KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
-from GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot          # noqa: E402
-from SIFT_RANSAC import SiftRansacLocalizer                            # noqa: E402
+from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
+from stage2_retrieval.GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot          # noqa: E402
+from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer                            # noqa: E402
 
 
 # ── --stages ─────────────────────────────────────────────────────────────────

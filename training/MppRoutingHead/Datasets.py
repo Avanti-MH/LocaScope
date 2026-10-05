@@ -50,7 +50,7 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _dir in ('utilities', 'aiNNModel', '1_estimate_query_mpp', 'query_sim'):
+for _dir in ('utilities', 'aiNNModel', '', 'query_sim'):     # '' = the root: stage packages
     _path = str(_ROOT / _dir)
     if _path not in sys.path:
         sys.path.insert(0, _path)

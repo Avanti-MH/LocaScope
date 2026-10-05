@@ -744,7 +744,7 @@ is this package's own type and the generic layer has no business knowing it
 exists — and takes an open `extra: Optional[Dict]` instead of hardcoded
 fields. `cli/train.py`'s `save_tagged` passes `extra=dict(tile_size=args.tile,
 rungs=RUNGS)`: `tile_size` is read back by `evaluate.py`'s tile-size guard,
-`rungs` by `1_estimate_query_mpp/ClassifierEstMpp.py` to turn a predicted
+`rungs` by `stage1_estimation/ClassifierEstMpp.py` to turn a predicted
 class back into a ds value without importing this package's own `Datasets.py`
 at inference time. `num_classes` is not carried — `len(rungs)` already says
 it, and a stored copy could disagree with the tuple sitting right next to it.

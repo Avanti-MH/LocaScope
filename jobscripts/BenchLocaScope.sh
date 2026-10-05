@@ -100,7 +100,7 @@ echo
 # `make clean-job JOB=cache` is then the one obvious way to purge it.
 #
 # A HIT SKIPS THE ENCODE, NOT THE READ. Stage 3 reads pixels back out of the
-# container (3_localization/SIFT_RANSAC.py:150), so the container is built
+# container (stage3_localization/SIFT_RANSAC.py:150), so the container is built
 # either way: 278s read + 285s encode on BRACS_1228 L0, so roughly half. The
 # other half needs lazy per-region reads; see log/TODO.log.
 #

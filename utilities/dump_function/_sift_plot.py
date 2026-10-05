@@ -7,7 +7,7 @@
     [2] Zoomed +-N tiles  green--=GT  yellow=main  orange=overlap  blue=SIFT
     [3] Homography        query boundary + patch grid + translation arrow
 
-Works with SlideWinSimRotResult (2_retrieval/GigaPathSlidingWinSimRot), which
+Works with SlideWinSimRotResult (stage2_retrieval/GigaPathSlidingWinSimRot), which
 exposes the best_*/main_*/overlap_* fields this module reads. When the result
 carries a `best_rotation`, it is shown in the summary panel.
 """
@@ -33,7 +33,7 @@ def query_quad(query_shape, H) -> np.ndarray:
 
     Every caller draws with it, which is why it sits here, while `is_invertible`
     -- the other question worth asking about an H -- sits in
-    3_localization/SIFT_RANSAC.py, where the code that must not import
+    stage3_localization/SIFT_RANSAC.py, where the code that must not import
     matplotlib can reach it.
     """
     h_q, w_q = query_shape[:2]

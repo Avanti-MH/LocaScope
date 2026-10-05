@@ -279,7 +279,7 @@ from types import SimpleNamespace
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _d in ('utilities', 'aiNNModel', 'query_sim', '2_retrieval'):
+for _d in ('utilities', 'aiNNModel', 'query_sim', ''):     # '' = the root: stage packages
     _p = str(_ROOT / _d)
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -316,7 +316,7 @@ from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F
                                            attach_baseline, frac_label, grid_table,
                                            group_by, group_levels, k_at, pct,
                                            print_level_heading, report, truth_rank)
-from GigaPathSlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
+from stage2_retrieval.GigaPathSlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
 from camera import Render                                        # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
 from _paths import encoder_tag, job_result_dir                   # noqa: E402

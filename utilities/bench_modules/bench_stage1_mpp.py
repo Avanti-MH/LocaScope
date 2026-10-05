@@ -58,13 +58,13 @@ sys.path.insert(0, str(_HERE.parent.parent / 'utilities'))
 import _paths                                                       # noqa: E402
 _paths.setup_import_paths()
 
-from KnnEstMpp import (KnnEstMpp, KnnEstMppConfig,                  # noqa: E402
+from stage1_estimation.KnnEstMpp import (KnnEstMpp, KnnEstMppConfig,                  # noqa: E402
                        REFERENCE_BANK_RICHNESS)
-from ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
-from PrototypeEstMpp import PrototypeEstMpp, PrototypeEstMppConfig  # noqa: E402
-from estimate_mpp_classic import ClassicEstMpp, ClassicEstMppConfig  # noqa: E402
-from FoVVote import QUALITY_SIGNALS, diagnose                      # noqa: E402
-from StageInterface import EstMppResult                             # noqa: E402
+from stage1_estimation.ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
+from stage1_estimation.PrototypeEstMpp import PrototypeEstMpp, PrototypeEstMppConfig  # noqa: E402
+from stage1_estimation.estimate_mpp_classic import ClassicEstMpp, ClassicEstMppConfig  # noqa: E402
+from stage1_estimation.FoVVote import QUALITY_SIGNALS, diagnose                      # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult                             # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402

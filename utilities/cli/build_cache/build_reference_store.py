@@ -49,7 +49,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent.parent
-for _d in ('utilities', 'aiNNModel', '1_estimate_query_mpp'):
+for _d in ('utilities', 'aiNNModel', ''):     # '' = the root: stage packages
     p = str(_ROOT / _d)
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -58,7 +58,7 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
 import Cache                                                        # noqa: E402
-from KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
+from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from Store import FeatureStore as FS                                # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names           # noqa: E402

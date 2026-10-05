@@ -34,14 +34,14 @@ OUTPUT_ROOT = os.environ.get(
 RESULT_DIR = os.path.join(OUTPUT_ROOT, 'result')
 LOG_DIR = os.path.join(OUTPUT_ROOT, 'log')
 QUERY_SIM_DIR = os.path.join(PROJECT_ROOT, 'query_sim')
-ESTIMATE_MPP_DIR = os.path.join(PROJECT_ROOT, '1_estimate_query_mpp')
-RETRIEVAL_DIR = os.path.join(PROJECT_ROOT, '2_retrieval')
-LOCALIZATION_DIR = os.path.join(PROJECT_ROOT, '3_localization')
+# stage1_estimation/, stage2_retrieval/ and stage3_localization/ are real
+# packages (2026-10-05): imported as `stage2_retrieval.X` off PROJECT_ROOT, so
+# none of them is a sys.path entry and none has a constant here.
 AINM_DIR = os.path.join(PROJECT_ROOT, 'aiNNModel')
 
 #: Generic encoder+head plumbing (`Heads.py`, `common/Head.py`/`Features.py`/
 #: `Checkpoints.py`) shared by any task built on an encoder+head pair --
-#: `training/MppRoutingHead/` today, `1_estimate_query_mpp/ClassifierEstMpp.py`
+#: `training/MppRoutingHead/` today, `stage1_estimation/ClassifierEstMpp.py`
 #: and the planned retrieval work (GraphNN/tree/reranking NN) after it. Two
 #: entries, not one, for the same reason `AINM_DIR` and `SUPERPATHPOINT_DIR`
 #: are separate from `PROJECT_ROOT`: what goes on sys.path is the directory
@@ -70,9 +70,10 @@ PROTOTYPICALROUTINGHEAD_DIR = os.path.join(
     PROJECT_ROOT, 'training', 'PrototypicalRoutingHead')
 
 def setup_import_paths():
-    """Make utilities/, query_sim/, 1_estimate_query_mpp/, 2_retrieval/,
-    3_localization/, aiNNModel/ (+ its models/ and models/common/) and
-    project root importable.
+    """Make utilities/, query_sim/, aiNNModel/ (+ its models/ and
+    models/common/) and the project root importable -- the root is what makes
+    the stage packages (`stage1_estimation`, `stage2_retrieval`,
+    `stage3_localization`) and `training` importable by their full names.
 
     Does NOT add any training package's own directory (2026-09-22 --
     before this, it added all three: SUPERPATHPOINT_DIR/MPPROUTINGHEAD_DIR/
@@ -96,8 +97,8 @@ def setup_import_paths():
     file that collides with anything in the other two, so a plain
     `sys.path` entry was never actually ambiguous for it.
     """
-    for path in (UTILITIES_DIR, QUERY_SIM_DIR, ESTIMATE_MPP_DIR, RETRIEVAL_DIR,
-                LOCALIZATION_DIR, AINM_DIR, AINM_MODELS_DIR, AINM_MODELS_COMMON_DIR,
+    for path in (UTILITIES_DIR, QUERY_SIM_DIR,
+                AINM_DIR, AINM_MODELS_DIR, AINM_MODELS_COMMON_DIR,
                 PROJECT_ROOT):
         if path not in sys.path:
             sys.path.insert(0, path)

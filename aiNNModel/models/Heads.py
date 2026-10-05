@@ -31,7 +31,7 @@ for a trunk.
 this file has no opinion about that composition, only about what each
 building block computes on its own. Moved here from
 `training/MppRoutingHead/Models.py` on 2026-09-17 -- none of it was ever
-specific to routing a tile to an mpp rung, and `1_estimate_query_mpp/
+specific to routing a tile to an mpp rung, and `stage1_estimation/
 ClassifierEstMpp.py` needs the same classes a training loop does, without
 importing a training package to get them.
 '''

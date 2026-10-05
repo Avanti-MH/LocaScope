@@ -72,7 +72,7 @@ NOT `--arms`/`Arm`/`ARMS` (2026-09-17). Those names came from a context where
 several configurations were trained SIDE BY SIDE for comparison -- "arm" the
 way a clinical trial has arms. This file still compares (that is what it is
 for), but the underlying class (`common.Head.Head`) and its per-task registry
-(`Runtime.HEAD_CHOICES`) are also used by `1_estimate_query_mpp/
+(`Runtime.HEAD_CHOICES`) are also used by `stage1_estimation/
 ClassifierEstMpp.py`, which loads exactly ONE trained head to run inference
 with -- no comparison happening there, so "arm" would misname what it is
 doing. "Head" is the standard word for "the task-specific top of a network"
@@ -933,7 +933,7 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
                   epoch=epoch, val=val, run_args=vars(args),
                   optimizer_state=optimizer.state_dict(),
                   # `rungs`: the label space this head classifies into --
-                  # `1_estimate_query_mpp/ClassifierEstMpp.py` reads it back
+                  # `stage1_estimation/ClassifierEstMpp.py` reads it back
                   # to turn a predicted class into a ds value, so it has to
                   # travel WITH the checkpoint rather than be re-imported from
                   # this package's own `Datasets.RUNGS` at inference time,

@@ -52,7 +52,7 @@ sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 
-sys.path.insert(0, str(_ROOT / '3_localization'))
+sys.path.insert(0, str(_ROOT))     # the root, which resolves the stage packages
 
 from _paths            import encoder_tag, job_result_dir               # noqa: E402
 import Cache                                                           # noqa: E402
@@ -63,7 +63,7 @@ from dump_function._locascope_plots import (append_metrics_row,         # noqa: 
                                             load_metrics_csv, render_all)
 from LocaScopePipeline import LocaScopePipeline, LocaScopeQueryResult    # noqa: E402
 from TissueMaskConfig import add_mask_args, mask_cfg_from_args           # noqa: E402
-from SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
+from stage3_localization.SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names             # noqa: E402
 
 

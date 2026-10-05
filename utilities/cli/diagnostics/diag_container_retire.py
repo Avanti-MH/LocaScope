@@ -72,7 +72,7 @@ from AccessDatasets import locate                                   # noqa: E402
 from PatchingLib import (WsiFeaturesMap, WsiTissuesContainer,       # noqa: E402
                          region_grids)
 from SafeSlide import SafeSlide                                     # noqa: E402
-from SIFT_RANSAC import SiftRansacLocalizer                         # noqa: E402
+from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer                         # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from TileEncoderFunc import encoder_config                          # noqa: E402
 from TissueMaskConfig import (MASK_RECIPES, MaskMaker,              # noqa: E402

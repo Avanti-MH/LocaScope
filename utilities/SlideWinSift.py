@@ -68,14 +68,15 @@ import numpy as np
 from SafeSlide import SafeSlide
 
 # The one exception to the dependency list above. is_invertible lives with the
-# other RANSAC caller, and reaching it pulls 3_localization -> 2_retrieval ->
+# other RANSAC caller, and reaching it pulls stage3_localization -> stage2_retrieval ->
 # torch and the encoder config into this file. Taken deliberately: this module
 # has exactly one importer, cli/driver/slide_win_sift.py:80, and it is the brute-force
 # baseline rather than anything the pipeline runs, so the import cost buys
-# convenience at no risk to production. 3_localization is not on sys.path when
-# that CLI loads us -- it inserts utilities/ only -- so put it there here.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / '3_localization'))
-from SIFT_RANSAC import is_invertible          # noqa: E402
+# convenience at no risk to production. The project root is not on sys.path when
+# that CLI loads us -- it inserts utilities/ only -- and stage3_localization is
+# a package off the root, so put the root there here.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))     # the root: stage packages
+from stage3_localization.SIFT_RANSAC import is_invertible          # noqa: E402
 
 
 # A homography needs 4 correspondences. Below this, findHomography either

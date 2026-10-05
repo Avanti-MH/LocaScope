@@ -103,7 +103,7 @@ _paths.setup_import_paths()
 
 from Store import FeatureStore                                      # noqa: E402
 from GigaPathFunc import pooling_kinds                                # noqa: E402
-from KnnEstMpp import KnnClassifier                                  # noqa: E402
+from stage1_estimation.KnnEstMpp import KnnClassifier                                  # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 from AccessDatasets import locate                                    # noqa: E402
 from training.MppRoutingHead.Datasets import add_cache_args         # noqa: E402

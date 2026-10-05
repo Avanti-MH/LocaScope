@@ -102,7 +102,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _directory in ('utilities', 'aiNNModel', 'query_sim', '2_retrieval'):
+for _directory in ('utilities', 'aiNNModel', 'query_sim', ''):     # '' = the root: stage packages
     _path = str(_ROOT / _directory)
     if _path not in sys.path:
         sys.path.insert(0, _path)
@@ -120,7 +120,7 @@ from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMask import TissueRegion                                  # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
-from GigaPathSlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
+from stage2_retrieval.GigaPathSlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
 from camera import Render                                           # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402

@@ -2,7 +2,7 @@
 `cli/train.py`'s val/test scoring loop and its wandb logging. The generic
 pieces (head classes, the `Head` assembly, patches->raw-features, checkpoint
 save/load) moved to `aiNNModel/models/` on 2026-09-17: nothing about them was
-specific to routing a tile to an mpp rung, and `1_estimate_query_mpp/
+specific to routing a tile to an mpp rung, and `stage1_estimation/
 ClassifierEstMpp.py` needs the same pieces a training loop does, without
 importing a training package to get them. This file re-exports what
 `cli/train.py`/`cli/evaluate.py` still need from there, so their own imports
