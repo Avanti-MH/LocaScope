@@ -391,6 +391,18 @@ class PrototypeEstMpp(IdentifiedBuild):
         return self
 
     def estimate(self, query: np.ndarray) -> PrototypeEstMppResult:
+        return self.from_probs(self.patch_probs(query), self.cfg.vote)
+
+    @property
+    def classes_ds(self) -> List[float]:
+        '''The ds each class of `patch_probs` stands for, in column order:
+        this WSI's own native levels, set by `build`.'''
+        return self.level_ds
+
+    def patch_probs(self, query: np.ndarray) -> torch.Tensor:
+        '''`[N, K]`: each main patch's softmax over `classes_ds`. The half of
+        `estimate` that runs the model -- a caller comparing vote rules
+        computes this once and hands it to `from_probs` per rule.'''
         if self.wsi is None:
             raise RuntimeError(
                 'call build(wsi) before estimate() -- the reference bank '
@@ -408,10 +420,12 @@ class PrototypeEstMpp(IdentifiedBuild):
             query_vecs = self.query_context(query_vecs, self.g_output_by_level)
             support = self.prototypes if self.collapses else self.raw_support
             logits = self.head(query_vecs, support)                    # [N, K]
-            probs = torch.softmax(logits, dim=1)
+            return torch.softmax(logits, dim=1)
 
-        predicted_idx, vote_extra = fov_vote(
-            self.cfg.vote, probs, rungs=self.level_ds)
+    def from_probs(self, probs: torch.Tensor, vote: str) -> PrototypeEstMppResult:
+        '''The other half: one `FoVVote` rule over `patch_probs`, then the
+        snap to this WSI's pyramid.'''
+        predicted_idx, vote_extra = fov_vote(vote, probs, rungs=self.level_ds)
 
         base_mpp = self.wsi.base_mpp
         estimated_ds = self.level_ds[predicted_idx]

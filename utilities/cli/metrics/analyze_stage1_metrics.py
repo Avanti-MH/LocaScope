@@ -28,6 +28,23 @@ question here needs it -- not the other way round.
                                               confidence, ...), JSON-encoded
                                               so a new method never needs a
                                               new column
+        kind                                  -- knn / classifier / prototype /
+                                              classic (2026-10-05; absent in
+                                              older files, see kind_of)
+        vote                                  -- the FoVVote rule, on
+                                              classifier and prototype rows
+                                              only: one row per rule, all
+                                              from one forward pass
+        fov_*                                 -- that FoV's per-patch
+                                              distribution, on voting rows
+                                              (bench_stage1_mpp.fov_stats)
+
+Section 5 is the vote diagnosis: which rule wins, where two rules disagree
+which is right, how much any rule could gain (some-rule-right vs best rule),
+and every rule's accuracy inside strata of the FoV distribution -- so the
+answer can be "rule X when the patches agree, rule Y when they scatter",
+not only one winner. Its tables also go to `<csv stem>_vote_*.csv` and
+`<csv stem>_fov_distribution.csv` next to the input.
 
 Filename: `<sampler_id>_<seg_id>.csv` -- the sampling recipe's own hash
 (rungs, n per rung, seed, native_only, tile size, wh_ratio, mpixels) plus the
@@ -214,7 +231,33 @@ def method_of(row: dict) -> str:
     read = cell(row, 'read_level')
     if read and read != 'pyramid':
         parts.append(read)
-    return '+'.join(parts)
+    label = '+'.join(parts)
+    # `vote` (2026-10-05): a classifier or prototype row is one FoVVote rule
+    # over the method's patch probabilities, and two rules of one checkpoint
+    # are two methods here. '@' rather than '+', so `base_method_of` can
+    # strip it without parsing the head recipe.
+    vote = cell(row, 'vote')
+    return f'{label}@{vote}' if vote else label
+
+
+def base_method_of(row: dict) -> str:
+    """`method_of` without the vote rule: the checkpoint, every vote of it."""
+    return method_of(row).split('@', 1)[0]
+
+
+def kind_of(row: dict) -> str:
+    """knn / classifier / prototype / classic. A csv from before the `kind`
+    column has only knn (blank classifier) and classifier rows."""
+    return cell(row, 'kind') or ('classifier' if cell(row, 'classifier') else 'knn')
+
+
+#: The rule both voting estimators use by default (`cfg.vote`), i.e. what the
+#: pipeline would run. Views 1-2 and the figure show only this rule.
+DEFAULT_VOTE = 'mean_probability'
+
+
+def is_default_vote(row: dict) -> bool:
+    return cell(row, 'vote') in (None, DEFAULT_VOTE)
 
 
 def nearest_rung(ds: float, rungs=RUNGS) -> float:
@@ -399,6 +442,271 @@ def print_overall(rows: list) -> None:
              f'{r["mean_level_accuracy"]:>10.3f}{r["mean_mpp_error_relative_p50"]:>18.3f}')
 
 
+# ── 5. vote diagnosis ────────────────────────────────────────────────────────
+#
+# Every classifier/prototype checkpoint is scored under every FoVVote rule
+# from ONE forward pass, so two rules of one checkpoint saw identical
+# probabilities and differ only in how they aggregate them. Every comparison
+# below is paired that way: per FoV, per checkpoint, rule against rule.
+#
+# The question is not only "which rule wins" but "which rule suits which kind
+# of FoV", so the FoV is described by its per-patch distribution (`fov_*`,
+# written by bench_stage1_mpp.fov_stats) and every rule is scored inside
+# strata of it.
+
+#: (column, [(label, lo, hi)]) -- lo inclusive, hi exclusive, except a bin
+#: whose lo == hi, which matches that value exactly.
+STRATA = (
+    ('fov_agree_frac', [('<0.5', 0.0, 0.5), ('0.5-0.75', 0.5, 0.75),
+                        ('0.75-1', 0.75, 1.0), ('=1', 1.0, 1.0)]),
+    ('fov_pooled_entropy', [('<0.25', 0.0, 0.25), ('0.25-0.5', 0.25, 0.5),
+                            ('0.5-0.75', 0.5, 0.75), ('>=0.75', 0.75, 9.0)]),
+    ('fov_argmax_log2_spread', [('=0', 0.0, 0.0), ('0-0.5', 1e-9, 0.5),
+                                ('0.5-1', 0.5, 1.0), ('>=1', 1.0, 99.0)]),
+    ('fov_pooled_margin', [('<0.1', 0.0, 0.1), ('0.1-0.3', 0.1, 0.3),
+                           ('0.3-0.6', 0.3, 0.6), ('>=0.6', 0.6, 9.0)]),
+)
+
+#: The distribution columns summarised per rung by `fov_distribution`.
+FOV_COLUMNS = ('fov_agree_frac', 'fov_n_distinct', 'fov_patch_entropy',
+               'fov_pooled_entropy', 'fov_pooled_margin',
+               'fov_argmax_log2_spread', 'fov_gt_prob', 'fov_gt_patch_frac')
+
+
+def _bin_of(value, bins):
+    if value is None:
+        return None
+    for label, lo, hi in bins:
+        if (lo == hi and value == lo) or (lo != hi and lo <= value < hi):
+            return label
+    return None
+
+
+def fov_key(row: dict) -> tuple:
+    return (cell(row, 'dataset'), cell(row, 'wsi_name'), cell(row, 'x'),
+            cell(row, 'y'), num(row, 'gt_ds'))
+
+
+def _paired(rows: list) -> dict:
+    """{(dataset, kind, base_method, fov_key): {vote: row}} over voting rows."""
+    out = collections.defaultdict(dict)
+    for r in rows:
+        if cell(r, 'vote'):
+            out[(cell(r, 'dataset'), kind_of(r), base_method_of(r),
+                 fov_key(r))][cell(r, 'vote')] = r
+    return out
+
+
+def vote_accuracy(rows: list) -> list:
+    """(dataset, kind, base_method, vote) -> the view-3 number (mean of the
+    per-rung accuracies) for that rule, plus `rank` among that checkpoint's
+    rules (1 = best)."""
+    voting = [r for r in rows if cell(r, 'vote')]
+    kinds = {base_method_of(r): kind_of(r) for r in voting}
+    out = []
+    for o in overall(voting):
+        base, vote = o['method'].split('@', 1)
+        out.append(dict(dataset=o['dataset'], kind=kinds[base], method=base,
+                        vote=vote, n_rungs=o['n_rungs'],
+                        mean_level_accuracy=o['mean_level_accuracy']))
+    groups = collections.defaultdict(list)
+    for r in out:
+        groups[(r['dataset'], r['method'])].append(r)
+    # Competition ranking: 1 + how many rules are STRICTLY better, so rules
+    # that tie share a rank and all count as best. Ranking by position in a
+    # sorted list split ties by name, and the alphabetically first rule was
+    # reported best on every checkpoint where all six scored the same.
+    for grp in groups.values():
+        for r in grp:
+            r['rank'] = 1 + sum(o['mean_level_accuracy'] > r['mean_level_accuracy']
+                                for o in grp)
+    return out
+
+
+def vote_summary(acc_rows: list) -> list:
+    """(dataset, kind, vote): mean accuracy over that kind's checkpoints,
+    how many checkpoints the rule is best on, and its mean rank."""
+    g = collections.defaultdict(list)
+    for r in acc_rows:
+        g[(r['dataset'], r['kind'], r['vote'])].append(r)
+    out = []
+    for (dataset, kind, vote), grp in sorted(g.items()):
+        accs = [r['mean_level_accuracy'] for r in grp
+                if not math.isnan(r['mean_level_accuracy'])]
+        out.append(dict(dataset=dataset, kind=kind, vote=vote,
+                        n_methods=len(grp),
+                        mean_acc=sum(accs) / len(accs) if accs else float('nan'),
+                        n_best=sum(r['rank'] == 1 for r in grp),
+                        mean_rank=sum(r['rank'] for r in grp) / len(grp)))
+    return out
+
+
+def vote_pairwise(paired: dict) -> list:
+    """(dataset, kind, a, b): on the FoVs where rule a and rule b answer
+    differently, how often each one was the right one."""
+    g = collections.defaultdict(lambda: [0, 0, 0, 0])
+    for (dataset, kind, _, _), by_vote in paired.items():
+        votes = sorted(by_vote)
+        for i, a in enumerate(votes):
+            for b in votes[i + 1:]:
+                ra, rb = by_vote[a], by_vote[b]
+                s = g[(dataset, kind, a, b)]
+                s[0] += 1
+                if nearest_rung(num(ra, 'estimated_ds')) != nearest_rung(num(rb, 'estimated_ds')):
+                    s[1] += 1
+                    s[2] += is_correct(ra)
+                    s[3] += is_correct(rb)
+    return [dict(dataset=d, kind=k, vote_a=a, vote_b=b, n_fov=n, n_disagree=nd,
+                 a_right=ar, b_right=br,
+                 disagree_rate=nd / n if n else float('nan'))
+            for (d, k, a, b), (n, nd, ar, br) in sorted(g.items())]
+
+
+def vote_oracle(paired: dict) -> list:
+    """(dataset, kind, base_method): the share of FoVs SOME rule gets right,
+    EVERY rule gets right, and the best single rule's share -- the room any
+    choice of rule has, and how much of it the best one takes."""
+    g = collections.defaultdict(list)
+    for (dataset, kind, base, _), by_vote in paired.items():
+        g[(dataset, kind, base)].append({v: is_correct(r) for v, r in by_vote.items()})
+    out = []
+    for (dataset, kind, base), fovs in sorted(g.items()):
+        votes = sorted({v for f in fovs for v in f})
+        per_vote = {v: sum(f.get(v, False) for f in fovs) / len(fovs) for v in votes}
+        best = max(per_vote, key=per_vote.get)
+        out.append(dict(dataset=dataset, kind=kind, method=base, n_fov=len(fovs),
+                        any_right=sum(any(f.values()) for f in fovs) / len(fovs),
+                        all_right=sum(all(f.values()) for f in fovs) / len(fovs),
+                        best_vote=best, best_vote_acc=per_vote[best]))
+    return out
+
+
+def vote_strata(rows: list, by_method: bool) -> list:
+    """Accuracy of every rule inside each stratum of each `STRATA` column --
+    pooled per (dataset, kind), or per checkpoint when `by_method`. FoVs whose
+    true ds is no class of the method (`fov_gt_reachable` false) are their own
+    stratum: no rule can be right there, and mixing them in would lower
+    every rule equally and hide nothing but the signal."""
+    g = collections.defaultdict(lambda: [0, 0])
+    for r in rows:
+        vote = cell(r, 'vote')
+        if not vote:
+            continue
+        who = base_method_of(r) if by_method else ''
+        head = (cell(r, 'dataset'), kind_of(r), who)
+        if boolean(r, 'fov_gt_reachable') is False:
+            s = g[head + ('fov_gt_reachable', 'false', vote)]
+            s[0] += 1
+            s[1] += is_correct(r)
+            continue
+        for column, bins in STRATA:
+            label = _bin_of(num(r, column), bins)
+            if label is None:
+                continue
+            s = g[head + (column, label, vote)]
+            s[0] += 1
+            s[1] += is_correct(r)
+    order = {c: [b[0] for b in bins] for c, bins in STRATA}
+    order['fov_gt_reachable'] = ['false']
+    out = [dict(dataset=d, kind=k, method=m, stat=c, bin=b, vote=v, n=n,
+                accuracy=right / n if n else float('nan'))
+           for (d, k, m, c, b, v), (n, right) in g.items()]
+    return sorted(out, key=lambda r: (r['dataset'] or '', r['kind'], r['method'],
+                                      r['stat'], order[r['stat']].index(r['bin']),
+                                      r['vote']))
+
+
+def fov_distribution(rows: list) -> list:
+    """(dataset, kind, rung, outcome): the median of every `FOV_COLUMNS`
+    column, outcome being right/wrong under DEFAULT_VOTE -- what a FoV the
+    method gets wrong looks like next to one it gets right, scale by scale.
+    One row per FoV and checkpoint (the distribution does not depend on the
+    rule)."""
+    g = collections.defaultdict(list)
+    for r in rows:
+        if cell(r, 'vote') != DEFAULT_VOTE:
+            continue
+        outcome = 'right' if is_correct(r) else 'wrong'
+        g[(cell(r, 'dataset'), kind_of(r), num(r, 'rung'), outcome)].append(r)
+    out = []
+    for (dataset, kind, rung, outcome), grp in sorted(
+            g.items(), key=lambda kv: (kv[0][0] or '', kv[0][1], kv[0][2] or 0, kv[0][3])):
+        row = dict(dataset=dataset, kind=kind, rung=rung, outcome=outcome, n=len(grp))
+        for c in FOV_COLUMNS:
+            row[f'{c}_p50'] = pctl([num(r, c) for r in grp], 50)
+        row['gt_reachable_share'] = (sum(boolean(r, 'fov_gt_reachable') is True
+                                         for r in grp) / len(grp))
+        out.append(row)
+    return out
+
+
+def write_rows(rows: list, path: str) -> None:
+    if not rows:
+        return
+    keys = list(dict.fromkeys(k for r in rows for k in r))
+    with open(path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(rows)
+    print(f'  {path}  ({len(rows)} rows)')
+
+
+def print_vote_diagnosis(summary, pairwise, oracle, strata, distribution) -> None:
+    print('\n' + BAR)
+    print('5. VOTE RULES   (every classifier / prototype checkpoint, one forward '
+          'pass, every rule)')
+    print(BAR)
+    print('\n  5a. per (dataset, kind, rule): mean accuracy over checkpoints, '
+          'checkpoints where it is best, mean rank')
+    vw = _col_width(summary, 'vote', 10)
+    for r in summary:
+        print(f'  {r["dataset"]:18s}{r["kind"]:11s}{r["vote"]:{vw}s}'
+              f'n={r["n_methods"]:<4d}acc {r["mean_acc"]:.3f}   best on '
+              f'{r["n_best"]:>3d}   mean rank {r["mean_rank"]:.2f}')
+    mismatch = [p for p in pairwise
+                if {p['vote_a'], p['vote_b']} == {'mean_probability', 'quality_weighted'}
+                and p['n_disagree']]
+    if mismatch:
+        print('\n  [FAIL] quality_weighted differs from mean_probability on '
+              f'{sum(p["n_disagree"] for p in mismatch)} FoVs -- with no quality '
+              'signal they are one rule, so the dispatch is broken')
+    print('\n  5b. where two rules disagree, which one is right   (pooled per kind)')
+    for p in pairwise:
+        if not p['n_disagree']:
+            continue
+        print(f'  {p["dataset"]:18s}{p["kind"]:11s}{p["vote_a"]:>20s} vs '
+              f'{p["vote_b"]:<20s} disagree {p["disagree_rate"]:6.1%} '
+              f'({p["n_disagree"]})   right: {p["a_right"]:>5d} / {p["b_right"]:<5d}')
+    print('\n  5c. headroom per checkpoint: some rule right / every rule right / '
+          'best single rule')
+    mw = _col_width(oracle, 'method', 10, cap=60)
+    for o in oracle:
+        print(f'  {o["dataset"]:18s}{o["method"][:mw - 2]:{mw}s}any {o["any_right"]:.3f}  '
+              f'all {o["all_right"]:.3f}  best {o["best_vote"]} {o["best_vote_acc"]:.3f}')
+    print('\n  5d. accuracy per rule inside strata of the FoV distribution  '
+          '(pooled per kind; per checkpoint in the csv)')
+    cells = collections.defaultdict(dict)
+    for s in strata:
+        cells[(s['dataset'], s['kind'], s['stat'], s['bin'])][s['vote']] = s
+    votes = sorted({s['vote'] for s in strata})
+    print(f'  {"":18s}{"":11s}{"stat":24s}{"bin":10s}{"n":>6s}'
+          + ''.join(f'{v[:12]:>13s}' for v in votes))
+    for (dataset, kind, stat, b), by_vote in cells.items():
+        n = max(s['n'] for s in by_vote.values())
+        print(f'  {dataset:18s}{kind:11s}{stat:24s}{b:10s}{n:>6d}'
+              + ''.join(f'{by_vote[v]["accuracy"]:>13.3f}' if v in by_vote
+                        else f'{"":>13s}' for v in votes))
+    print('\n  5e. FoV distribution, right vs wrong under '
+          f'{DEFAULT_VOTE}  (medians; per rung)')
+    for d in distribution:
+        print(f'  {d["dataset"]:18s}{d["kind"]:11s}rung {d["rung"]:>4g} '
+              f'{d["outcome"]:6s}n={d["n"]:<6d}agree {d["fov_agree_frac_p50"]:.2f}  '
+              f'pooled_H {d["fov_pooled_entropy_p50"]:.2f}  '
+              f'margin {d["fov_pooled_margin_p50"]:.2f}  '
+              f'spread {d["fov_argmax_log2_spread_p50"]:.2f}  '
+              f'gt_p {d["fov_gt_prob_p50"]:.2f}  reachable {d["gt_reachable_share"]:.2f}')
+
+
 # ── plotting ─────────────────────────────────────────────────────────────────
 
 def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
@@ -506,6 +814,9 @@ def main() -> int:
     ap.add_argument('--method', nargs='+', default=None,
                     help='keep only these method labels (see method_of)')
     ap.add_argument('--dataset', nargs='+', default=None)
+    ap.add_argument('--all-votes', action='store_true',
+                    help='views 1-2 and the figure for every vote rule, not '
+                         f'only {DEFAULT_VOTE}')
     args = ap.parse_args()
 
     with open(args.csv_path, newline='') as f:
@@ -519,18 +830,39 @@ def main() -> int:
     if not rows:
         sys.exit('no rows left after filtering')
 
-    view1 = per_slide_rung(rows)
-    view2 = cross_slide_rung(rows)
+    # Views 1-2 and the figure: each voting checkpoint under its default rule
+    # only, unless --all-votes -- six rules per checkpoint would bury them.
+    # View 3 always carries every rule; section 5 compares them.
+    shown = rows if args.all_votes else [r for r in rows if is_default_vote(r)]
+    view1 = per_slide_rung(shown)
+    view2 = cross_slide_rung(shown)
     view3 = overall(rows)
     print_per_slide_rung(view1)
     print_cross_slide_rung(view2)
     print_overall(view3)
 
+    csv_dir = os.path.dirname(os.path.abspath(args.csv_path)) or '.'
+    csv_stem = os.path.splitext(os.path.basename(args.csv_path))[0]
+    if any(cell(r, 'vote') for r in rows):
+        paired = _paired(rows)
+        acc = vote_accuracy(rows)
+        summary = vote_summary(acc)
+        pairwise = vote_pairwise(paired)
+        oracle = vote_oracle(paired)
+        strata_kind = vote_strata(rows, by_method=False)
+        distribution = fov_distribution(rows)
+        print_vote_diagnosis(summary, pairwise, oracle, strata_kind, distribution)
+        print()
+        for name, table in (('vote_accuracy', acc), ('vote_summary', summary),
+                            ('vote_pairwise', pairwise), ('vote_oracle', oracle),
+                            ('vote_strata', strata_kind),
+                            ('vote_strata_per_method', vote_strata(rows, by_method=True)),
+                            ('fov_distribution', distribution)):
+            write_rows(table, os.path.join(csv_dir, f'{csv_stem}_{name}.csv'))
+
     print('\n' + BAR)
     print('4. PNG (accuracy vs rung, one file per dataset -- see plot_dataset)')
     print(BAR)
-    csv_dir = os.path.dirname(os.path.abspath(args.csv_path)) or '.'
-    csv_stem = os.path.splitext(os.path.basename(args.csv_path))[0]
     for dataset in sorted({r['dataset'] for r in view2}):
         stem = dataset.replace('/', '_')
         plot_dataset(view2, dataset,

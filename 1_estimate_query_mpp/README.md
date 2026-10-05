@@ -124,4 +124,9 @@ patch 編碼後去投票。
 
 #### `estimate_mpp_classic.py` — baseline
 
-沒有任何檔案 import 它；只有自己的 `if __name__ == '__main__'` CLI（`python estimate_mpp_classic.py slide.svs query.jpg`）。不看位置，比對「倍率指紋」（頻率重心 + 自相關長度），跟任何深度學習表徵完全獨立——這正是 baseline 的判準：它從來不是 canonical 的候選，存在的價值是拿來比較。
+不看位置，比對「倍率指紋」（頻率重心 + 自相關長度），跟任何深度學習表徵完全獨立——這正是 baseline 的判準：它從來不是 canonical 的候選，存在的價值是拿來比較。
+
+- **介面**：`ClassicEstMpp(ClassicEstMppConfig(tile, samples, k, min_std, seed)).build(wsi, mask=None).estimate(query)`，回傳 `ClassicEstMppResult(EstMppResult)`，多兩個欄位 `query_fingerprint`、`neighbour_levels`。`bench_stage1_mpp --classic` 用它和其他方法在同一批 FoV 上比較。
+- **建置**：每個原生層由 TileSampler 在 tissue mask 內放 `samples` 個位置、SlideReader 讀出，灰階標準差低於 `min_std` 的不計，兩個指紋各取中位數。
+- **估計**：query 中央裁切 `tile`（不縮放）算指紋，兩維 z-score 後做距離加權 KNN，在 log-mpp 上平均。
+- 2026-10-05 前是只有 CLI 的腳本：在整層上無種子地隨機抽位置、自己 read_region，單一指紋的版本只 print 不回傳。

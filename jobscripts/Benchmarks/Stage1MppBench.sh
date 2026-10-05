@@ -91,7 +91,7 @@ KNN_K="${KNN_K:-5}"
 # (cli/train.py's --encoders default) -- not to "none", so a plain
 # run compares something without the caller having to
 # name it. Pass KNN_ENCODER="" explicitly to skip KnnEstMpp entirely.
-KNN_ENCODER="${KNN_ENCODER:-gigapath uni2}"
+KNN_ENCODER="${KNN_ENCODER-gigapath uni2}"   # no colon: an explicit "" skips
 # CLASSIFIER_WEIGHTS: space-separated checkpoint paths, or "all" (default)
 # to glob EVERY *_best.pt this repo has trained so far -- run all of them
 # together rather than one at a time, so a new checkpoint from a fresh
@@ -109,7 +109,7 @@ KNN_ENCODER="${KNN_ENCODER:-gigapath uni2}"
 # overwriting each other, so one glob genuinely finds all of them --
 # analyze_stage1_metrics.py's method_of() is what then tells them apart in
 # the report (loss appended to the label only when it is not 'bal').
-CLASSIFIER_WEIGHTS="${CLASSIFIER_WEIGHTS:-all}"
+CLASSIFIER_WEIGHTS="${CLASSIFIER_WEIGHTS-all}"   # no colon: an explicit "" skips
 if [ "$CLASSIFIER_WEIGHTS" = "all" ]; then
   WEIGHTS_DIR="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result/MppRoutingHead/weights"
   CLASSIFIER_WEIGHTS="$(ls "$WEIGHTS_DIR"/*_best.pt 2>/dev/null | tr '\n' ' ')"
@@ -117,6 +117,25 @@ if [ "$CLASSIFIER_WEIGHTS" = "all" ]; then
     echo "[warn] CLASSIFIER_WEIGHTS=all found no *_best.pt under $WEIGHTS_DIR"
   fi
 fi
+
+# PROTOTYPE_WEIGHTS: the same rule for PrototypicalRoutingHead -- "all"
+# (default) globs every *_best.pt under its weights directory, "" skips
+# PrototypeEstMpp. _6rung.pt / _native.pt are other selections of the same
+# runs and are not read.
+PROTOTYPE_WEIGHTS="${PROTOTYPE_WEIGHTS-all}"   # no colon: an explicit "" skips
+if [ "$PROTOTYPE_WEIGHTS" = "all" ]; then
+  PROTO_DIR="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result/PrototypicalRoutingHead/weights"
+  PROTOTYPE_WEIGHTS="$(ls "$PROTO_DIR"/*_best.pt 2>/dev/null | tr '\n' ' ')"
+  if [ -z "$PROTOTYPE_WEIGHTS" ]; then
+    echo "[warn] PROTOTYPE_WEIGHTS=all found no *_best.pt under $PROTO_DIR"
+  fi
+fi
+# CLASSIC=1 (default) runs the fingerprint baseline ClassicEstMpp; 0 skips it.
+CLASSIC="${CLASSIC:-1}"
+CLASSIC_K="${CLASSIC_K:-3}"
+# VOTES: FoVVote rules every classifier and prototype method is scored under,
+# all from one forward pass. Empty (default) = every rule.
+VOTES="${VOTES:-}"
 
 STAGE1_ARGS=(--seg "$SEG")
 [ -n "$MASK_CACHE_JOB" ] && STAGE1_ARGS+=(--mask-cache-job "$MASK_CACHE_JOB")
@@ -126,6 +145,9 @@ STAGE1_ARGS=(--seg "$SEG")
 [ "${OVERLAP:-0}" = "1" ] && STAGE1_ARGS+=(--overlap)
 [ -n "$KNN_ENCODER" ] && STAGE1_ARGS+=(--knn-encoder $KNN_ENCODER)
 [ -n "$CLASSIFIER_WEIGHTS" ] && STAGE1_ARGS+=(--classifier-weights $CLASSIFIER_WEIGHTS)
+[ -n "$PROTOTYPE_WEIGHTS" ] && STAGE1_ARGS+=(--prototype-weights $PROTOTYPE_WEIGHTS)
+[ "$CLASSIC" = "1" ] && STAGE1_ARGS+=(--classic --classic-k "$CLASSIC_K")
+[ -n "$VOTES" ] && STAGE1_ARGS+=(--votes $VOTES)
 
 # Real numbers before the real run, not a guess: params memory (exact) +
 # one measured forward pass's peak, per method -- "one at a time" is what
@@ -186,12 +208,12 @@ echo "======== done (exit $status) ========"
 echo "  result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv  (no <encoder> -- spans several)"
 echo "    python utilities/cli/metrics/analyze_stage1_metrics.py <that csv>"
 echo ""
-echo "  Runs EVERYTHING by default -- KnnEstMpp(gigapath), KnnEstMpp(uni2), and"
-echo "  every *_best.pt checkpoint already trained under"
-echo "  result/MppRoutingHead/weights/, all on the same drawn FoVs:"
+echo "  Runs EVERYTHING by default -- KnnEstMpp(gigapath), KnnEstMpp(uni2), ClassicEstMpp,"
+echo "  and every *_best.pt under result/MppRoutingHead/weights/ and"
+echo "  result/PrototypicalRoutingHead/weights/ under every vote rule, on the same FoVs:"
 echo "    sbatch jobscripts/Benchmarks/Stage1MppBench.sh"
-echo "  Narrow it with KNN_ENCODER=/CLASSIFIER_WEIGHTS=, e.g. one checkpoint only:"
-echo "    KNN_ENCODER='' \\"
+echo "  Narrow it with KNN_ENCODER= CLASSIFIER_WEIGHTS= PROTOTYPE_WEIGHTS= CLASSIC=0 VOTES=, e.g.:"
+echo "    KNN_ENCODER= PROTOTYPE_WEIGHTS= CLASSIC=0 \\"
 echo "      CLASSIFIER_WEIGHTS=/work/u26130998/result/MppRoutingHead/weights/gigapath_frozen_arcface_best.pt \\"
 echo "      sbatch jobscripts/Benchmarks/Stage1MppBench.sh"
 

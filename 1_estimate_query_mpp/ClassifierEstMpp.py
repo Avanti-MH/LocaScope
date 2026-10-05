@@ -52,7 +52,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Union
+from typing import Any, Dict, Tuple, Union
 
 import numpy as np
 import openslide
@@ -264,6 +264,17 @@ class ClassifierEstMpp(IdentifiedBuild):
         return self
 
     def estimate(self, query: np.ndarray) -> ClassifierEstMppResult:
+        return self.from_probs(self.patch_probs(query), self.cfg.vote)
+
+    @property
+    def classes_ds(self) -> Tuple[float, ...]:
+        '''The ds each class of `patch_probs` stands for, in column order.'''
+        return self.rungs
+
+    def patch_probs(self, query: np.ndarray) -> torch.Tensor:
+        '''`[M, num_classes]`: each main patch's softmax over `classes_ds`.
+        The half of `estimate` that runs the model -- a caller comparing vote
+        rules computes this once and hands it to `from_probs` per rule.'''
         if self.wsi is None:
             raise RuntimeError(
                 'call build(wsi) before estimate() -- chosen_ds/chosen_mpp '
@@ -278,10 +289,12 @@ class ClassifierEstMpp(IdentifiedBuild):
         with torch.no_grad():
             raw = self._raw_of(patches)
             logits = self.head(raw, self._num_prefix)      # [M, num_classes]
-            probs = torch.softmax(logits, dim=1)             # [M, num_classes]
+            return torch.softmax(logits, dim=1)              # [M, num_classes]
 
-        predicted_class, vote_extra = fov_vote(
-            self.cfg.vote, probs, rungs=self.rungs)
+    def from_probs(self, probs: torch.Tensor, vote: str) -> ClassifierEstMppResult:
+        '''The other half: one `FoVVote` rule over `patch_probs`, then the
+        snap to this WSI's pyramid.'''
+        predicted_class, vote_extra = fov_vote(vote, probs, rungs=self.rungs)
 
         base_mpp = self.wsi.base_mpp
         estimated_ds = self.rungs[predicted_class]

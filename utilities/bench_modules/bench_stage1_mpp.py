@@ -3,17 +3,30 @@
 
     python utilities/bench_modules/bench_stage1_mpp.py \
         --knn-encoder gigapath uni2 --classifier-weights <ckpt> ... \
+        --prototype-weights <ckpt> ... --classic \
         --datasets bracs/test ki67_with_photo --n-wsi 9
 
-One KnnEstMpp per --knn-encoder and one ClassifierEstMpp per
---classifier-weights checkpoint, each run on the SAME synthetic FoVs (drawn
-once per slide, from the RECORDED test split) across --n-wsi slides of every
---datasets. Writes one row per (FoV, method) to
+Every stage-1 method, each run on the SAME synthetic FoVs (drawn once per
+slide, from the RECORDED test split) across --n-wsi slides of every
+--datasets, and shown the same photo of each (`fov_rng`):
+
+    KnnEstMpp          one per --knn-encoder
+    ClassifierEstMpp   one per --classifier-weights checkpoint (MppRoutingHead)
+    PrototypeEstMpp    one per --prototype-weights checkpoint
+                       (PrototypicalRoutingHead)
+    ClassicEstMpp      --classic, the fingerprint baseline
+
+The two that vote over per-patch probabilities (classifier, prototype) run
+once per FoV and are scored under every --votes rule (FoVVote), one row per
+rule, with the FoV's distribution statistics (`fov_stats`) on each row. Writes
 
     result/<SLURM_JOB_NAME or Stage1MppBench>/<sampler_id>_<seg_id>_<region_id>.csv
+    result/<...>/<sampler_id>_<seg_id>_<region_id>_probs.jsonl
 
-which utilities/cli/metrics/analyze_stage1_metrics.py scores. The scoring
-lives there, not here: this bench only produces rows.
+-- one row per (FoV, method, vote), and the raw per-patch probabilities once
+per (FoV, voting method). utilities/cli/metrics/analyze_stage1_metrics.py
+scores them, the vote diagnosis included. The scoring lives there, not here:
+this bench only produces rows.
 
 Split out of bench_mpp_feature_decomposition.py (2026-09-29), where it was the
 `stage1_compare` part. That file's other three parts (axes, subspace_knn,
@@ -28,7 +41,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import math
+import random
 import os
 import resource
 import sys
@@ -45,6 +61,9 @@ _paths.setup_import_paths()
 from KnnEstMpp import (KnnEstMpp, KnnEstMppConfig,                  # noqa: E402
                        REFERENCE_BANK_RICHNESS)
 from ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
+from PrototypeEstMpp import PrototypeEstMpp, PrototypeEstMppConfig  # noqa: E402
+from estimate_mpp_classic import ClassicEstMpp, ClassicEstMppConfig  # noqa: E402
+from FoVVote import VOTE_CHOICES                                    # noqa: E402
 from StageInterface import EstMppResult                             # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
@@ -189,10 +208,32 @@ def _method_specs(args) -> list:
             read_level=read_label_of(ckpt.get('args')),
             weights=os.path.basename(weights), weights_path=weights,
             needs_mask=False))
+    for weights in args.prototype_weights:
+        try:
+            ckpt = torch.load(weights, map_location='cpu')
+        except Exception as exc:                             # noqa: BLE001
+            print(f'  [SKIP] {weights}: {type(exc).__name__}: {exc}')
+            continue
+        # The arm is the filename: train.py names a run by every axis that
+        # changes it (contexts, collapse, head, episode reuse, K), so the stem
+        # without the encoder prefix and the checkpoint tag is the label --
+        # two arms can never share one.
+        stem = os.path.basename(weights).rsplit('_best.pt', 1)[0]
+        arm = stem[len(ckpt['encoder']) + 1:] if stem.startswith(
+            ckpt['encoder'] + '_') else stem
+        specs.append(dict(
+            kind='prototype', encoder=ckpt['encoder'],
+            classifier=f'proto:{arm}', reduction='', loss='', read_level='',
+            weights=os.path.basename(weights), weights_path=weights,
+            needs_mask=True))
+    if args.classic:
+        specs.append(dict(kind='classic', encoder='classic', classifier='',
+                          reduction='', loss='', read_level='', weights='',
+                          weights_path=None, needs_mask=True))
     if not specs:
         raise ValueError(
-            'stage1_compare needs at least one method: pass --knn-encoder '
-            'and/or --classifier-weights')
+            'stage1_compare needs at least one method: pass --knn-encoder, '
+            '--classifier-weights, --prototype-weights and/or --classic')
     return specs
 
 
@@ -209,8 +250,90 @@ def _instantiate(spec: dict, args, device):
                                       overlap=_overlap_cfg(args.overlap)),
             k=args.knn_k, tile_size=args.tile)
         return KnnEstMpp(cfg, device)
+    if spec['kind'] == 'prototype':
+        return PrototypeEstMpp(
+            PrototypeEstMppConfig.from_checkpoint(spec['weights_path']), device)
+    if spec['kind'] == 'classic':
+        return ClassicEstMpp(ClassicEstMppConfig(
+            tile=args.tile, samples=args.knn_samples, k=args.classic_k,
+            seed=args.seed), device)
     cfg = ClassifierEstMppConfig.from_checkpoint(spec['weights_path'])
     return ClassifierEstMpp(cfg, device)
+
+
+#: Methods whose answer is a vote over per-patch class probabilities, so every
+#: `--votes` rule can be applied to ONE forward pass (`patch_probs`).
+VOTING_KINDS = ('classifier', 'prototype')
+
+
+def fov_stats(probs: torch.Tensor, classes_ds, gt_ds: float) -> dict:
+    """What one FoV's per-patch distribution looked like -- the columns the
+    vote diagnosis in analyze_stage1_metrics.py stratifies by. Independent of
+    the vote rule, so every vote row of one FoV carries the same values.
+
+        fov_agree_frac        share of patches whose argmax is the plurality
+                              class: 1.0 = every patch agrees
+        fov_n_distinct        how many classes some patch picked
+        fov_patch_entropy     mean per-patch entropy / log C: how sure each
+                              patch is on its own
+        fov_pooled_entropy    entropy of the mean distribution / log C
+        fov_pooled_margin     top-1 minus top-2 of the mean distribution
+        fov_argmax_log2_spread  std of log2(ds) of the patches' argmaxes: how
+                              far apart, in octaves, the patches disagree
+        fov_gt_reachable      a class within 1% of the true ds exists. A
+                              prototype head's classes are the slide's own
+                              levels, so ds 2 on a 4x pyramid has none
+        fov_gt_prob / fov_gt_rank / fov_gt_patch_frac
+                              mean probability on the true class, its rank
+                              (0 = top), share of patches whose argmax it is
+    """
+    p = probs.detach().float().cpu()
+    m, c = p.shape
+    arg = p.argmax(dim=1)
+    counts = torch.bincount(arg, minlength=c)
+    pooled = p.mean(dim=0)
+    log_c = math.log(c) if c > 1 else 1.0
+
+    def entropy(q):
+        return -(q.clamp_min(1e-12).log() * q).sum(dim=-1)
+
+    log2_ds = torch.log2(torch.tensor([float(d) for d in classes_ds]))[arg]
+    top = pooled.topk(min(2, c)).values
+    gt = min(range(c), key=lambda i: abs(math.log(float(classes_ds[i]) / gt_ds)))
+    reachable = abs(math.log(float(classes_ds[gt]) / gt_ds)) < math.log(1.01)
+    out = dict(
+        fov_n_patches=m, fov_n_classes=c,
+        fov_agree_frac=float(counts.max()) / m,
+        fov_n_distinct=int((counts > 0).sum()),
+        fov_patch_entropy=float(entropy(p).mean()) / log_c,
+        fov_pooled_entropy=float(entropy(pooled)) / log_c,
+        fov_pooled_margin=float(top[0] - top[1]) if c > 1 else 1.0,
+        fov_argmax_log2_spread=float(log2_ds.std(unbiased=False)) if m > 1 else 0.0,
+        fov_gt_reachable=reachable)
+    if reachable:
+        out.update(fov_gt_prob=float(pooled[gt]),
+                   fov_gt_rank=int((pooled > pooled[gt]).sum()),
+                   fov_gt_patch_frac=float(counts[gt]) / m)
+    return out
+
+
+def fov_rng(seed: int, dataset: str, wsi_name: str, pos: dict) -> random.Random:
+    """The photo simulation's rng for one FoV, the same for every method:
+    seeded by the bench seed and the FoV's identity, through sha256 because
+    Python's hash() of a str changes per process."""
+    key = f'{seed}|{dataset}|{wsi_name}|{pos["x"]}|{pos["y"]}|{pos["rung"]!r}'
+    return random.Random(int(hashlib.sha256(key.encode()).hexdigest()[:16], 16))
+
+
+def result_row(fov: dict, result, vote: str) -> dict:
+    """One csv row: the FoV and method columns, the vote rule ('' for a method
+    that does not vote), and the EstMppResult."""
+    return dict(fov, vote=vote,
+                estimated_ds=result.estimated_ds,
+                estimated_mpp=result.estimated_mpp,
+                chosen_ds=result.chosen_ds, chosen_mpp=result.chosen_mpp,
+                chosen_level=result.chosen_level,
+                extra_json=json.dumps(_extra_fields(result)))
 
 
 def _extra_fields(result) -> dict:
@@ -325,6 +448,9 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     print(f'  [after segmentation] {_mem_snapshot(device)}')
 
     rows = []
+    n_vote_mismatch = 0
+    probs_path = out_dir / f'{_sampling_recipe_id(args)}_probs.jsonl'
+    probs_out = open(probs_path, 'w')
     for spec in specs:
         label = spec['encoder'] + (f'+{spec["classifier"]}'
                                    if spec['classifier'] else '')
@@ -367,24 +493,47 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                     image = reader.read(pos['x'], pos['y'], photo, gt_ds)
                     if image is None:
                         continue
-                    query = simulate_microscope_photo(image)
-
-                    result = estimator.estimate(query)
-                    rows.append(dict(
+                    # The rng is the FoV's own, so every method is shown the
+                    # SAME photo. It was the global `random` until 2026-10-05:
+                    # each method then got its own augmentation and rotation
+                    # of one FoV, and the comparison was paired on the
+                    # position only.
+                    query = simulate_microscope_photo(
+                        image, rng=fov_rng(args.seed, dataset_id, wsi_name, pos))
+                    fov = dict(
                         dataset=dataset_id, wsi_name=wsi_name,
                         x=pos['x'], y=pos['y'],
                         h=query.shape[0], w=query.shape[1],
                         rung=rung, native=pos['native'],
                         gt_mpp=gt_mpp, gt_ds=gt_ds,
+                        kind=spec['kind'],
                         encoder=spec['encoder'], classifier=spec['classifier'],
                         reduction=spec['reduction'], loss=spec['loss'],
                         read_level=spec['read_level'],
-                        weights=spec['weights'],
-                        estimated_ds=result.estimated_ds,
-                        estimated_mpp=result.estimated_mpp,
-                        chosen_ds=result.chosen_ds, chosen_mpp=result.chosen_mpp,
-                        chosen_level=result.chosen_level,
-                        extra_json=json.dumps(_extra_fields(result))))
+                        weights=spec['weights'])
+
+                    if spec['kind'] not in VOTING_KINDS:
+                        rows.append(result_row(fov, estimator.estimate(query), ''))
+                        continue
+                    # One forward pass, every vote rule over it.
+                    probs = estimator.patch_probs(query)
+                    classes = [float(d) for d in estimator.classes_ds]
+                    stats = fov_stats(probs, classes, gt_ds)
+                    picked = {}
+                    for vote_name in args.votes:
+                        result = estimator.from_probs(probs, vote_name)
+                        picked[vote_name] = result.estimated_ds
+                        rows.append({**result_row(fov, result, vote_name), **stats})
+                    # quality_weighted with no quality signal IS
+                    # mean_probability; a disagreement means the dispatch is
+                    # broken, not that one rule is better.
+                    if ('quality_weighted' in picked and 'mean_probability' in picked
+                            and picked['quality_weighted'] != picked['mean_probability']):
+                        n_vote_mismatch += 1
+                    probs_out.write(json.dumps(dict(
+                        fov, classes_ds=classes,
+                        probs=[[round(float(v), 5) for v in row]
+                               for row in probs.detach().float().cpu()])) + '\n')
                 wsi.close()
 
         # Freed before the NEXT spec's build -- this is the whole point of
@@ -395,6 +544,12 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             torch.cuda.empty_cache()
         print(f'  [after free] {_mem_snapshot(device)}')
 
+    probs_out.close()
+    print(f'  {probs_path}  (per-patch probabilities, one line per FoV x voting method)')
+    if n_vote_mismatch:
+        print(f'  [FAIL] quality_weighted and mean_probability disagreed on '
+              f'{n_vote_mismatch} FoV(s); with no quality signal they are the '
+              f'same rule, so the vote dispatch is broken')
     path = out_dir / f'{_sampling_recipe_id(args)}.csv'
     write_csv(rows, path)
     print(f'\n{path}  ({len(rows)} rows) -- read with '
@@ -464,6 +619,18 @@ def main() -> int:
     parser.add_argument('--classifier-weights', nargs='+', default=[],
                         help='one ClassifierEstMpp per '
                              'trained checkpoint path')
+    parser.add_argument('--prototype-weights', nargs='+', default=[],
+                        help='one PrototypeEstMpp per PrototypicalRoutingHead '
+                             'checkpoint path')
+    parser.add_argument('--classic', action='store_true',
+                        help='also run ClassicEstMpp, the fingerprint baseline '
+                             '(--knn-samples tiles per level, --classic-k)')
+    parser.add_argument('--classic-k', type=int, default=3)
+    parser.add_argument('--votes', nargs='+', default=list(VOTE_CHOICES),
+                        choices=list(VOTE_CHOICES),
+                        help='FoVVote rules applied to every classifier and '
+                             'prototype method, all from one forward pass; '
+                             'one row per rule. Default: every rule')
 
     parser.add_argument(
         '--out', default=None,
@@ -471,8 +638,10 @@ def main() -> int:
              f'result/<SLURM_JOB_NAME or {JOB_NAME}>/ (no encoder tag: one '
              'CSV can span several encoders)')
     args = parser.parse_args()
-    if not (args.knn_encoder or args.classifier_weights):
-        parser.error('needs --knn-encoder and/or --classifier-weights')
+    if not (args.knn_encoder or args.classifier_weights or args.prototype_weights
+            or args.classic):
+        parser.error('needs at least one of --knn-encoder, --classifier-weights, '
+                     '--prototype-weights, --classic')
 
     out_dir = Path(args.out or job_result_dir(JOB_NAME))
     out_dir.mkdir(parents=True, exist_ok=True)
