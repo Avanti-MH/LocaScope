@@ -1,7 +1,7 @@
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -16,7 +16,7 @@ setup_import_paths()
 from PatchingLib import QueryPatchContainer                     # noqa: E402
 from ReadGeometry import ReadSpec                              # noqa: E402
 from SlideReader import SlideReader                            # noqa: E402
-from stage2_retrieval.GigaPathSlidingWinSimRot import SlideWinSimRotResult  # noqa: E402
+from stage2_retrieval.StageInterface import Candidate, CandidateSet  # noqa: E402
 
 
 # ── homography predicate ──────────────────────────────────────────────────────
@@ -51,105 +51,74 @@ def is_invertible(H) -> bool:
 
 @dataclass(frozen=True)
 class SiftRansacResult:
-    x: int               # top-left X @ level-n in WSI global space
-    y: int               # top-left Y @ level-n
-    x0: int              # top-left X @ level-0
-    y0: int              # top-left Y @ level-0
-    H: Optional[np.ndarray]  # 3×3 homography (query px → wsi_crop px), None if failed
+    '''Where the query is, LEVEL-0 and fractional: the crop's read origin
+    plus the homography's offset times ds, with nothing truncated on the way
+    (see stage2_retrieval/StageInterface.py for why that matters).
+
+    `x0, y0` is where the query's own (0, 0) landed; `center_x0, center_y0`
+    its centre through H. The centre is the rotation-invariant anchor -- the
+    query is rotated about it -- so prefer it when the orientation is unknown.
+    On a failed fit both fall back to the candidate window's own position.'''
+    x0: float
+    y0: float
+    center_x0: float
+    center_y0: float
+    H: Optional[np.ndarray]  # 3x3, query px -> wsi_crop px; None if failed
     inlier_count: int
     match_count: int
     success: bool
-    region_index: int
+    rank: int                # which candidate of the CandidateSet
+    candidate: Candidate
     ds: float
     level: int
-    # Query CENTRE mapped through H. Rotation-invariant anchor: the query is
-    # rotated about its own centre, so this stays comparable to a ground-truth
-    # centre no matter which 90-degree step the query came in at. Prefer these
-    # over x/y when the query orientation is unknown.
-    center_x:  int = 0   # centre X @ level-n
-    center_y:  int = 0   # centre Y @ level-n
-    center_x0: int = 0   # centre X @ level-0
-    center_y0: int = 0   # centre Y @ level-0
 
 
 # ── Localizer class ───────────────────────────────────────────────────────────
 
 class SiftRansacLocalizer:
     '''
-    Staged SIFT+RANSAC sub-tile localizer.
+    Stage 3: SIFT + RANSAC inside one candidate window.
 
-    Sliding window retrieval 給的是 tile 級精度（best_x/y 對齊到 tile grid），
-    SIFT+RANSAC 把它細化到 sub-pixel 級：
+        loc = SiftRansacLocalizer(min_inliers=10, padding=2).build(wsi)
+        result = loc.localize(query, candidate_set, rank=0)
 
-    Stage 1  read_wsi_crop
-      ┌─────────────────────────────────────────────┐
-      │  在 matched region 裡, 以 best_x/y 為中心     │
-      │  讀 ±padding tiles 的一塊 wsi_crop           │
-      │  記錄 crop_origin_x/y (wsi_crop[0,0] 的      │
-      │  level-n global 座標)                        │
-      └─────────────────────────────────────────────┘
-               ↓
-    Stage 2  detect_and_match
-      ┌─────────────────────────────────────────────┐
-      │  query_img → SIFT keypoints + descriptors   │
-      │  wsi_crop  → SIFT keypoints + descriptors   │
-      │  BFMatcher knnMatch(k=2) + Lowe ratio 0.75  │
-      └─────────────────────────────────────────────┘
-               ↓
-    Stage 3  estimate_homography
-      ┌─────────────────────────────────────────────┐
-      │  good_matches 裡每對點：                     │
-      │    src_pts[i] = query keypoint (query px)   │
-      │    dst_pts[i] = crop  keypoint (crop px)    │
-      │                                             │
-      │  H, mask = findHomography(                  │
-      │      src_pts, dst_pts, RANSAC, 5.0)         │
-      │  # H: query px → wsi_crop px                │
-      │                                             │
-      │  tl_in_crop = perspectiveTransform(         │
-      │      [[0, 0]], H)  →  (dx, dy)              │
-      │                                             │
-      │  x_ln = crop_origin_x + dx  # level-n       │
-      │  y_ln = crop_origin_y + dy                  │
-      │  x0   = x_ln * ds           # level-0       │
-      └─────────────────────────────────────────────┘
+    Retrieval places the query to a tile; this places it to a pixel:
 
-    若 RANSAC 失敗或 inliers < min_inliers，fallback 到 retrieval 的 best_x/y。
+      read_wsi_crop       the candidate's window +- `padding` tiles, clipped to
+                          its region, read on demand at the candidate set's
+                          level; `crop_origin_l0` is the level-0 integer the
+                          read started at
+      detect_and_match    SIFT on query and crop, BFMatcher, Lowe ratio 0.75
+      estimate_homography RANSAC H: query px -> crop px; a crop pixel (u, v)
+                          is level-0 crop_origin_l0 + (u, v) * ds, so the
+                          query's (0, 0) and centre go through H and land at
+                          level-0, fractional
 
-    精度提升的關鍵：retrieval 只能找到「哪個 256px tile 最像」，誤差 ≤ 1 tile。
-    SIFT keypoint 精確到 subpixel，H 把 query(0,0) 映射到 crop 的精確位置，
-    誤差理論上降到 keypoint 定位精度（~1–3 px @ level-n）。
-
-    All intermediate state is stored on self for debugging and visualization.
-    Stages that depend on earlier ones are built automatically if not called yet.
+    A fit with fewer than `min_inliers` inliers, or a degenerate H, falls back
+    to the candidate window's own position. Intermediate state stays on self
+    for the figures; each step builds the ones before it if not called yet.
     '''
 
-    def __init__(
-        self,
-        reader: SlideReader,
-        grids: list,
-        level: int,
-        query: QueryPatchContainer,
-        location: SlideWinSimRotResult,
-        min_inliers: int = 10,
-        padding: int = 2,
-    ):
-        # The retriever's reader, grids and level: the crop is READ on demand
-        # rather than cut from region pixels held in memory, which was all the
-        # WsiTissuesContainer was still kept alive for (19.7 GB for a level-0
-        # BRACS region).
-        self.reader = reader
-        self.grids = grids
-        self.level = level
-        self.query = query
-        self.location = location
+    def __init__(self, min_inliers: int = 10, padding: int = 2):
         self.min_inliers = min_inliers
         self.padding = padding
+        self.reader: Optional[SlideReader] = None
+        self._reset(None, None, 0)
 
-        # Intermediate state
+    def build(self, wsi) -> 'SiftRansacLocalizer':
+        '''Bind a slide. The localizer reads its own crops: a SlideReader of
+        its own, not one borrowed from stage 2.'''
+        self.reader = wsi if isinstance(wsi, SlideReader) else SlideReader(wsi)
+        return self
+
+    def _reset(self, query, cs, rank) -> None:
+        self.query = query
+        self.cs = cs
+        self.rank = rank
+        self.candidate: Optional[Candidate] = cs[rank] if cs is not None else None
         self.wsi_crop: Optional[np.ndarray] = None
-        self.crop_origin_x: Optional[int] = None   # level-n global x of wsi_crop[0,0]
-        self.crop_origin_y: Optional[int] = None   # level-n global y of wsi_crop[0,0]
+        #: level-0 integer the crop's read started at: wsi_crop[0, 0]
+        self.crop_origin_l0: Optional[Tuple[int, int]] = None
         self.query_kps = None
         self.query_descs: Optional[np.ndarray] = None
         self.crop_kps = None
@@ -157,23 +126,35 @@ class SiftRansacLocalizer:
         self.good_matches: Optional[list] = None
         self.result: Optional[SiftRansacResult] = None
 
+    def localize(self, query, cs: CandidateSet, rank: int = 0) -> SiftRansacResult:
+        '''Stage 3 on stage 2's output: candidate `rank` of `cs`.'''
+        self.prepare(query, cs, rank)
+        return self.estimate_homography()
+
+    def prepare(self, query, cs: CandidateSet, rank: int = 0) -> 'SiftRansacLocalizer':
+        '''Set the query and the candidate without running anything -- for a
+        caller that steps through the stages (the figures).'''
+        if self.reader is None:
+            raise RuntimeError('call build(wsi) first')
+        if not isinstance(query, QueryPatchContainer):
+            qc = QueryPatchContainer(np.asarray(query))
+            qc.extract_all(cs.grids[cs[rank].region_index].tile_size, overlap=True)
+            query = qc
+        self._reset(query, cs, rank)
+        return self
+
     # ── Stage 1 ──────────────────────────────────────────────────────────────
 
     def read_wsi_crop(self, padding: Optional[int] = None) -> np.ndarray:
-        '''Read the WSI around the retrieval best match, ± padding tiles,
-        clipped to the matched region.'''
+        '''Read the candidate's window +- padding tiles, clipped to its region.'''
         pad = padding if padding is not None else self.padding
-        grid = self.grids[self.location.best_region_index]
+        cs, c = self.cs, self.candidate
+        grid = cs.grids[c.region_index]
         ts = grid.tile_size
 
-        # Best match top-left in level-n global coords -> region-local. The
-        # grid's offset is where the region's own image started, and its size
-        # is that image's, so this is the window the region read used to be
-        # cropped to.
-        local_x = self.location.best_x - grid.x_offset
-        local_y = self.location.best_y - grid.y_offset
-
-        # Window covers query size rounded up to tile boundary
+        # The window's top-left, level px from the region's own origin
+        local_x, local_y = cs.window_local(c)
+        # Window covers the query rounded up to whole tiles
         win_w = int(np.ceil(self.query.width  / ts)) * ts
         win_h = int(np.ceil(self.query.height / ts)) * ts
 
@@ -181,35 +162,31 @@ class SiftRansacLocalizer:
         y0 = max(0, local_y - pad * ts)
         x1 = min(grid.width, local_x + win_w + pad * ts)
         y1 = min(grid.height, local_y + win_h + pad * ts)
-
         if x1 <= x0 or y1 <= y0:
-            # best_x/best_y landed outside this region. That means the
-            # retrieval handed over a position it never actually scored — e.g.
-            # its (0, 0) sentinel when no window fit anywhere. Fail loudly here
-            # rather than letting cv2 report an empty-Mat assertion later.
             raise ValueError(
-                f'empty WSI crop for region {self.location.best_region_index}: '
-                f'best=({self.location.best_x}, {self.location.best_y}) maps to '
-                f'local=({local_x}, {local_y}) in a {grid.width}x'
-                f'{grid.height} region; window {win_w}x{win_h} '
-                f'+{pad} tiles gives x[{x0}:{x1}] y[{y0}:{y1}]'
-            )
+                f'empty WSI crop for candidate {self.rank} '
+                f'(region {c.region_index} {c.lattice} r{c.row} c{c.col}): '
+                f'window at local ({local_x}, {local_y}) in a {grid.width}x'
+                f'{grid.height} region; {win_w}x{win_h} +{pad} tiles gives '
+                f'x[{x0}:{x1}] y[{y0}:{y1}]')
 
-        # Anchored at the region's level-0 origin, the way the region's own
-        # read was (PatchGrid.local_to_l0), at the grid's own ds: a native
-        # read, no resampling.
-        x_l0, y_l0 = grid.local_to_l0(x0, y0)
-        crop = self.reader.read(x_l0, y_l0, ReadSpec(x1 - x0, y1 - y0), grid.ds,
-                                level=self.level)
+        # Anchored at the region's level-0 origin, the region's own phase, at
+        # the set's ds: a native read, no resampling. The integer it starts at
+        # is what is booked -- not a level-n position, which would truncate.
+        self.crop_origin_l0 = grid.local_to_l0(x0, y0)
+        crop = self.reader.read(self.crop_origin_l0[0], self.crop_origin_l0[1],
+                                ReadSpec(x1 - x0, y1 - y0), cs.ds, level=cs.level)
         if crop is None:
-            raise ValueError(
-                f'crop at level-0 ({x_l0}, {y_l0}) size {x1 - x0}x{y1 - y0} '
-                f'falls off the slide, inside region '
-                f'{self.location.best_region_index}')
+            raise ValueError(f'crop at level-0 {self.crop_origin_l0} size '
+                             f'{x1 - x0}x{y1 - y0} falls off the slide')
         self.wsi_crop = crop
-        self.crop_origin_x = grid.x_offset + x0   # level-n global
-        self.crop_origin_y = grid.y_offset + y0
         return self.wsi_crop
+
+    def crop_to_l0(self, u, v) -> Tuple[float, float]:
+        '''Level-0 position of crop pixel (u, v) -- fractional, through
+        openslide's own rule: the read origin plus (u, v) level px times ds.'''
+        ds = self.cs.ds
+        return self.crop_origin_l0[0] + u * ds, self.crop_origin_l0[1] + v * ds
 
     # ── Stage 2 ──────────────────────────────────────────────────────────────
 
@@ -237,29 +214,22 @@ class SiftRansacLocalizer:
     # ── Stage 3 ──────────────────────────────────────────────────────────────
 
     def estimate_homography(self) -> SiftRansacResult:
-        '''RANSAC homography → map query top-left to WSI level-n/level-0 coordinates.'''
+        '''RANSAC homography -> the query's top-left and centre at level-0.'''
         if self.good_matches is None:
             self.detect_and_match()
 
-        ds = self.location.ds
-        region_idx = self.location.best_region_index
-        level = self.level
+        cs, c = self.cs, self.candidate
         n_matches = len(self.good_matches)
-
         H = None
         inliers = 0
         success = False
-        x_ln = self.location.best_x
-        y_ln = self.location.best_y
 
-        # Query footprint at level-n. When the retrieval reports a rotation,
-        # the matched window is the ROTATED query, so width/height swap for
-        # the 90/270 steps — used for the fallback centre below.
+        # Fallback: the candidate window's own place. The query footprint is
+        # the ROTATED query's, so width/height swap at 90/270.
         h_q, w_q = self.query.img.shape[:2]
-        rot = getattr(self.location, 'best_rotation', 0)
-        w_eff, h_eff = (h_q, w_q) if rot in (90, 270) else (w_q, h_q)
-        cx_ln = x_ln + w_eff // 2
-        cy_ln = y_ln + h_eff // 2
+        w_eff, h_eff = (h_q, w_q) if c.rotation in (90, 270) else (w_q, h_q)
+        x0, y0 = (float(v) for v in cs.origin_l0(c))
+        cx0, cy0 = x0 + w_eff / 2.0 * cs.ds, y0 + h_eff / 2.0 * cs.ds
 
         if n_matches >= 4:
             src_pts = np.float32(
@@ -279,39 +249,20 @@ class SiftRansacLocalizer:
                     success = inliers >= self.min_inliers
                 else:
                     # findHomography returns a degenerate H when RANSAC's support
-                    # is the bare 4-point minimal sample. 4 pairs give exactly the
-                    # 8 equations H's 8 degrees of freedom need, so ANY quadruple
-                    # is reproduced with zero reprojection error and counts as its
-                    # own inlier set -- there is no fifth point to veto a
-                    # degenerate configuration (3 points collinear, or two SIFT
-                    # keypoints at the same location). The result is rank-deficient
-                    # and has no inverse. Drop it here so the consumers' existing
-                    # `H is not None` check means what it says; keeping it made
-                    # locate_photo's failure figure raise LinAlgError, and made
-                    # every non-raising near-singular case draw a garbage panel.
+                    # is the bare 4-point minimal sample: 4 pairs give exactly the
+                    # 8 equations H needs, so any quadruple is its own inlier set,
+                    # and a collinear or coincident one has no inverse. Dropped so
+                    # consumers' `H is not None` means what it says.
                     H = None
                 if success:
-                    # Map query top-left (0,0) and centre through H → wsi_crop px
-                    pts = np.array(
-                        [[[0.0, 0.0]], [[w_q / 2.0, h_q / 2.0]]], dtype=np.float32,
-                    )
+                    pts = np.array([[[0.0, 0.0]], [[w_q / 2.0, h_q / 2.0]]],
+                                   dtype=np.float32)
                     mapped = cv2.perspectiveTransform(pts, H).reshape(-1, 2)
-                    x_ln  = int(self.crop_origin_x + mapped[0][0])
-                    y_ln  = int(self.crop_origin_y + mapped[0][1])
-                    cx_ln = int(self.crop_origin_x + mapped[1][0])
-                    cy_ln = int(self.crop_origin_y + mapped[1][1])
+                    x0, y0 = self.crop_to_l0(*mapped[0])
+                    cx0, cy0 = self.crop_to_l0(*mapped[1])
 
         self.result = SiftRansacResult(
-            x=x_ln,  y=y_ln,
-            x0=int(x_ln * ds), y0=int(y_ln * ds),
-            H=H,
-            inlier_count=inliers,
-            match_count=n_matches,
-            success=success,
-            region_index=region_idx,
-            ds=ds,
-            level=level,
-            center_x=cx_ln, center_y=cy_ln,
-            center_x0=int(cx_ln * ds), center_y0=int(cy_ln * ds),
-        )
+            x0=float(x0), y0=float(y0), center_x0=float(cx0), center_y0=float(cy0),
+            H=H, inlier_count=inliers, match_count=n_matches, success=success,
+            rank=self.rank, candidate=c, ds=cs.ds, level=cs.level)
         return self.result

@@ -176,7 +176,7 @@ echo "  datasets  $DATASETS   n_wsi=$N_WSI   seg=$SEG   native_only=${NATIVE_ONL
 # still streams to this job's stdout/log. `${PIPESTATUS[0]}` (not `$?`, which
 # after a pipe is `tee`'s) keeps the exit status honest.
 STAGE1_LOG_TEE="$(mktemp)"
-python utilities/bench_modules/bench_stage1_mpp.py \
+python -u utilities/bench_modules/bench_stage1_mpp.py \
   --tile "$TILE" \
   --mpixels "$MPIXELS" \
   --seed "${SEED:-42}" \

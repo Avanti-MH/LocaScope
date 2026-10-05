@@ -80,6 +80,10 @@ from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
                                       blend_in_footprint,
                                       checker_in_footprint)
 from LocaScopePipeline import LocaScopePipeline                      # noqa: E402
+from stage1_estimation.KnnEstMpp import knn_estimator                 # noqa: E402
+from stage2_retrieval.SlidingWinSimRot import (               # noqa: E402
+    SlidingWinSimRot, SlidingWinSimRotConfig)
+from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer       # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names                # noqa: E402
 
 
@@ -91,7 +95,7 @@ PHOTO_EXTS = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
 # One row per photo. Column order is the reading order: what it is, then the
 # answer, then each stage's evidence for that answer, then run bookkeeping.
 #
-# The raw `inliers` / `matches` / `retr_margin` columns are kept even though
+# The raw `inliers` / `matches` columns are kept even though
 # `confidence` summarises them, because the confidence thresholds below are a
 # guess -- with no ground truth they cannot be calibrated yet. Keeping the raw
 # numbers means reclassifying later is a pandas one-liner, not a 2296-photo
@@ -106,7 +110,7 @@ FIELDS = [
     'est_mpp', 'routed_level', 'level_mpp', 'ds', 'unusable_level',
     # stage 2 -- coarse retrieval
     'retr_x0', 'retr_y0', 'retr_cx0', 'retr_cy0',
-    'retr_score', 'retr_rot', 'retr_margin', 'retr_region', 'retr_from_overlap',
+    'retr_score', 'retr_rot', 'retr_region', 'retr_from_overlap',
     'score_rot0', 'score_rot90', 'score_rot180', 'score_rot270',
     # stage 3 -- SIFT+RANSAC
     'sift_x0', 'sift_y0', 'sift_cx0', 'sift_cy0',
@@ -177,35 +181,23 @@ def build_row(slide_tag, photo_path, img, res, base_mpp, tile_size,
 
     pred_x0 = pred_y0 = None
 
-    r = res.retrieval
-    if r is not None:
-        # The query footprint in level-0 px, so the retrieval top-left can be
-        # turned into a centre. extract_all's main grid is floor(size/tile)
-        # tiles, and at 90/270 degrees the query was rotated before matching,
-        # so its footprint in WSI space is transposed.
-        cols = img.shape[1] // tile_size
-        rows_ = img.shape[0] // tile_size
-        if r.best_rotation in (90, 270):
-            cols, rows_ = rows_, cols
-        retr_cx0 = int(r.best_x0 + cols * tile_size * r.ds / 2)
-        retr_cy0 = int(r.best_y0 + rows_ * tile_size * r.ds / 2)
-
-        sc = dict(r.scores_by_rotation)
-        ordered = sorted(sc.values(), reverse=True)
-        # Best minus runner-up across rotations. With no ground truth this is
-        # the only confidence signal stage 2 produces on its own: a flat
-        # profile means the retriever could not tell the orientations apart.
-        margin = (ordered[0] - ordered[1]) if len(ordered) > 1 else float('nan')
+    cs = res.retrieval
+    if cs is not None:
+        # The best candidate's window: its read origin and centre at level-0,
+        # through the CandidateSet's own formulas (the window is the query's
+        # tile grid, transposed at 90/270 because the query was turned first).
+        best = cs.best
+        retr_x0, retr_y0 = cs.origin_l0(best)
+        retr_cx0, retr_cy0 = (int(round(v)) for v in cs.centre_l0(best, res.query_qc))
 
         row.update(
-            ds=r.ds,
-            retr_x0=r.best_x0, retr_y0=r.best_y0,
+            ds=cs.ds,
+            retr_x0=retr_x0, retr_y0=retr_y0,
             retr_cx0=retr_cx0, retr_cy0=retr_cy0,
-            retr_score=round(float(r.best_score), 6),
-            retr_rot=r.best_rotation,
-            retr_margin=round(float(margin), 6),
-            retr_region=r.best_region_index,
-            retr_from_overlap=int(bool(r.from_overlap)),
+            retr_score=round(float(best.score), 6),
+            retr_rot=best.rotation,
+            retr_region=best.region_index,
+            retr_from_overlap=int(best.lattice == 'offset'),
             score_rot0=round(float(sc.get(0, float('nan'))), 6),
             score_rot90=round(float(sc.get(90, float('nan'))), 6),
             score_rot180=round(float(sc.get(180, float('nan'))), 6),
@@ -280,7 +272,7 @@ def save_shot_figure(img, res, stem, wsi_tag, out_dir) -> str | None:
         axes[1].set_xlim(0, crop.shape[1])
         axes[1].set_ylim(crop.shape[0], 0)
         axes[1].set_title('Photo footprint in the WSI crop\n'
-                          f'centre @level-0 = ({s.center_x0}, {s.center_y0})')
+                          f'centre @level-0 = ({s.center_x0:.1f}, {s.center_y0:.1f})')
 
         axes[2].imshow(blend_in_footprint(crop, warped, cover))
         axes[2].set_title('Blend 50/50 inside the footprint\n'
@@ -313,10 +305,10 @@ def save_shot_figure(img, res, stem, wsi_tag, out_dir) -> str | None:
     fig.suptitle(
         f'{stem}  ->  {wsi_tag}    '
         f'est_mpp={res.est_mpp:.4f} (L{res.routed_level})   '
-        f'retr score={res.retrieval.best_score:.4f} '
-        f'rot={res.retrieval.best_rotation}deg   '
+        f'retr score={res.retrieval.best.score:.4f} '
+        f'rot={res.retrieval.best.rotation}deg   '
         f'SIFT {s.inlier_count}/{s.match_count} inliers   '
-        f'predicted centre @ level-0 = ({s.center_x0}, {s.center_y0})',
+        f'predicted centre @ level-0 = ({s.center_x0:.1f}, {s.center_y0:.1f})',
         fontsize=12,
     )
     fig.tight_layout()
@@ -498,22 +490,21 @@ def main():
     over = {'head': args.head} if args.head else {}
     cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')
-    encoder = cfg.build(device)
     from TissueMaskConfig import MASK_RECIPES
     mask_cfg = MASK_RECIPES['hest']
 
     # Built ONCE for the whole folder -- see the module docstring.
     print('Building pipeline (mask + mpp reference bank) ...', flush=True)
     t0 = time.perf_counter()
-    pl = LocaScopePipeline(args.wsi,
-                           encoder,
-                           tile_size=256,
-                           mask_cfg=mask_cfg,
-                           knn_samples=100,
-                           knn_k=5,
-                           retriever_overlap=True,
-                           refiner_min_inliers=10,
-                           refiner_padding=2).build()
+    # Each stage from its own config; stage 1 and stage 2 build their own
+    # encoders (stage 1 from the registry name, stage 2 from `cfg` above).
+    estimator = knn_estimator(args.encoder, mask_cfg, tile_size=256,
+                              samples=100, k=5, device=device)
+    retriever = SlidingWinSimRot(
+        SlidingWinSimRotConfig(cfg, tile_size=256, overlap=True), device)
+    localizer = SiftRansacLocalizer(min_inliers=10, padding=2)
+    pl = LocaScopePipeline(args.wsi, estimator, retriever, localizer,
+                           mask_cfg=mask_cfg).build()
     print(f'  base_mpp={pl.base_mpp:.4f}  levels={pl.wsi.level_count}  '
           f'mask_regions={len(pl.mask.tissue_regions)}  '
           f'({time.perf_counter() - t0:.1f}s)', flush=True)

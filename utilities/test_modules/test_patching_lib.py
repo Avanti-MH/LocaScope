@@ -6,7 +6,7 @@ test_tissue_patch_container.py.
 
 Sections:
   1. PatchGrid — layout counts, flat/unified indexing, offset metadata
-  2. PatchInfo — for_query/for_wsi, to_level0(), grid offset coordinates
+  2. PatchInfo — for_query/for_wsi, grid offset coordinates
   3. Containers — QueryPatchContainer & TissuePatchContainer extraction, real data
   4. Scale — from_ds: which level, which downsample, which
      regions survive it. No model needed; the first two checks need no WSI.
@@ -353,25 +353,6 @@ def validate_for_wsi():
     assert info.level == 2
     assert info.x == 100 and info.y == 200
     print('[PASS] PatchInfo.for_wsi')
-
-
-def validate_to_level0():
-    cases = [
-        # (x, y, size_px, ds)  ->  expected level-0 (x0, y0, s0)
-        (100, 200, 256, 4.0,  400,  800, 1024),
-        (50,   75, 128, 2.0,  100,  150,  256),
-        (64,   64, 128, 1.0,   64,   64,  128),  # ds=1: no change
-        (33,   17, 100, 3.0,   99,   51,  300),
-    ]
-    for x, y, s, ds, ex, ey, es in cases:
-        info = PatchInfo.for_wsi(0, 0, x, y, s, 'main', ds=ds)
-        l0 = info.to_level0()
-        assert l0.x == ex, f'to_level0 x: got {l0.x}, expected {ex} (ds={ds})'
-        assert l0.y == ey, f'to_level0 y: got {l0.y}, expected {ey} (ds={ds})'
-        assert l0.size_px == es, f'to_level0 size_px: got {l0.size_px}, expected {es}'
-        assert l0.ds == 1.0
-        assert l0.level == 0
-    print('[PASS] PatchInfo.to_level0 (4 cases)')
 
 
 # ── PatchGrid offset validation ───────────────────────────────────────────────
@@ -1117,7 +1098,6 @@ def run_patchinfo_section(size: int, out_dir: str) -> None:
     print('\n=== PatchInfo / coordinates ===')
     validate_for_query()
     validate_for_wsi()
-    validate_to_level0()
     grid, ox, oy, rw, rh = validate_grid_offset(size)
     img, region, ds = validate_grid_offset_pixels(size)
     W, H = 512, 512
@@ -1151,7 +1131,7 @@ def run_patchinfo_section(size: int, out_dir: str) -> None:
     axes[1].set_yticks(range(len(ds_vals)))
     axes[1].set_yticklabels([f'ds={d}' for d in ds_vals], color='white')
     axes[1].tick_params(colors='white')
-    axes[1].set_title('to_level0: x * ds → level-0 x', color='white')
+    axes[1].set_title('x * ds (scale only; a read starts at tile_origin_l0)', color='white')
     axes[1].set_facecolor('#1a1a2e')
     fig.patch.set_facecolor('#1a1a2e')
     axes[0].set_facecolor('#1a1a2e')

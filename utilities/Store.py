@@ -483,7 +483,7 @@ def _validate(features, x, y, region, grid_rc, meta: FeatureMeta, extra) -> None
 
 # ── WsiFeaturesMap <-> the grid-coverage file ─────────────────────────────────
 #
-# GigaPathSlidingWinSimRot holds one FeaturesMap per tissue region, each with
+# SlidingWinSimRot holds one FeaturesMap per tissue region, each with
 # its own PatchGrid; the store holds one tensor per column over every tile of
 # the slide. The conversion both ways, plus the check that decides whether a
 # stored grid still describes the mask in hand.

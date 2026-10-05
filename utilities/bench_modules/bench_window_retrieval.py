@@ -255,7 +255,7 @@ window, which must sit at 0.50. If the coordinate mapping is wrong the truth
 window is effectively random, and this is what says so.
 
 Rotation defaults to 0. `SlidingWindowSimilarity` scores both grids against the
-MAIN query kernel only (GigaPathSlidingWinSimRot.SlidingWindowSimilarity); a rotated FoV fails for
+MAIN query kernel only (SlidingWinSimRot.SlidingWindowSimilarity); a rotated FoV fails for
 reasons that have nothing to do with pooling, and rotation has its own test in
 test_gigapath_slide_win_sim.py step 5.
 """
@@ -316,7 +316,7 @@ from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F
                                            attach_baseline, frac_label, grid_table,
                                            group_by, group_levels, k_at, pct,
                                            print_level_heading, report, truth_rank)
-from stage2_retrieval.GigaPathSlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
+from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
 from camera import Render                                        # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
 from _paths import encoder_tag, job_result_dir                   # noqa: E402

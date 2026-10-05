@@ -45,9 +45,10 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # the ceiling and killed the two --no-filter rounds that had been passing.
 # Read the default before overriding it; sacct prints it as ReqMem.
 #
-# MPP below is 0.252 against the slide's own 0.2524, so every round builds at
-# LEVEL 0. Tile pixels are 9.5 GB with the filter and 10.9 GB without -- nearly
-# equal, so the tiles are not what differs. The regions are: the filter leaves
+# Measured on BRACS_1228, the slide this used to hard-code, at mpp 0.252
+# against its own 0.2524, so every round built at LEVEL 0 (RUNG=1 does the
+# same on whichever slide is picked). Tile pixels are 9.5 GB with the filter
+# and 10.9 GB without -- nearly equal, so the tiles are not what differs. The regions are: the filter leaves
 # 5 merged ones, no-filter leaves 2988, each reading its own bounding box, and
 # those boxes overlap heavily, so the total read is a multiple of the tissue
 # area rather than equal to it.
@@ -64,10 +65,11 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # 40 minutes into a sweep is not.
 
 # ---------------- Parameters ----------------
-WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
-X=31700
-Y=33600
-MPP="${MPP:-0.252}"
+# A val slide (every one has a mask in the MppRoutingHead cache) and one FoV
+# drawn on it at RUNG -- nothing is segmented. PICK_SEED picks both.
+DATASET="${DATASET:-bracs/test#val}"   # or ki67_with_photo#val
+RUNG="${RUNG:-1}"
+PICK_SEED="${PICK_SEED:-0}"
 RATIO=45:32
 MPIXELS=1.475
 TILE=256
@@ -81,8 +83,7 @@ STAGES="${STAGES:-1,2,3}"
 FILTER_SWEEP="${FILTER_SWEEP:-0}"
 
 BASE_ARGS="
-  --wsi $WSI
-  --x $X --y $Y --mpp $MPP
+  --dataset $DATASET --rung $RUNG --pick-seed $PICK_SEED
   --ratio $RATIO --mpixels $MPIXELS
   --tile $TILE --samples $SAMPLES --k $K --batch $BATCH
   --min-region-ratio $MIN_REGION_RATIO

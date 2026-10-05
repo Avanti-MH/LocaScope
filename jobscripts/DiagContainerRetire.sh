@@ -24,6 +24,7 @@ source jobscripts/_env.sh
 #    pixels   read_grid tiles against the container's, pixel for pixel; the
 #             feature difference beside the encoder's own noise floor
 #    crops    the on-demand stage-3 crop against the container's
+#    localize stage 3 booked the old way and the new, against a known point
 #    phase    how openslide samples a level at a non-multiple level-0 point:
 #             floor / round / bilinear, by a noise-free read-and-compare
 #    origins  frac(region origin / ds) over cached masks, per dataset and level
@@ -37,7 +38,7 @@ source jobscripts/_env.sh
 # =============================================================================
 
 SLIDES="${SLIDES:-bracs/test:BRACS_1413:1 bracs/test:BRACS_1413:2 ki67_with_photo:S1130983,G7E,110816:1 ki67_with_photo:S1130983,G7E,110816:3}"
-CHECKS="${CHECKS:-pixels crops phase origins}"
+CHECKS="${CHECKS:-pixels crops localize phase origins}"
 ENCODER="${ENCODER:-uni2}"
 MASK_CACHE_JOB="${MASK_CACHE_JOB:-MppRoutingHead}"
 ORIGIN_PER_DATASET="${ORIGIN_PER_DATASET:-8}"

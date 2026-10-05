@@ -70,7 +70,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #
 # Rotation is fixed at 0 on purpose. This measures displacement alone, and
 # mixing rotation into it would leave one number answering two questions.
-# (The rotation-recovery checks that used to cover GigaPathSlidingWinSimRot's
+# (The rotation-recovery checks that used to cover SlidingWinSimRot's
 # rotation path -- test_gigapath_slide_win_sim.py step 5 -- were dropped when
 # that file was merged into test_locascope_stages.py, 2026-09-17; nothing
 # currently covers rotation on its own.)

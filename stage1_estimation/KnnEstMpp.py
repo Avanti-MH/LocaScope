@@ -337,3 +337,22 @@ class KnnEstMpp(IdentifiedBuild):
             estimated_ds=estimated_ds, estimated_mpp=estimated_mpp,
             chosen_ds=chosen_ds, chosen_mpp=chosen_mpp,
             chosen_level=chosen_level)
+
+
+def knn_estimator(encoder_name: str, mask_cfg: TissueMaskConfig,
+                  tile_size: int = 256, samples: int = 40, k: int = 5,
+                  seed: int = 42,
+                  device: Union[str, torch.device, None] = None) -> KnnEstMpp:
+    '''The KNN estimator with the reference bank LocaScopePipeline used to
+    build for itself: `samples` tiles per rung, the bank's richness, overlap
+    sampling. `mask_cfg` names the recipe of the mask its build() will be
+    handed, so its identity says where that mask came from.'''
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    cfg = KnnEstMppConfig(
+        encoder=encoder_name, mask_cfg=mask_cfg,
+        sampler_cfg=SamplerConfig(
+            n_per_rung=samples, seed=seed, richness=REFERENCE_BANK_RICHNESS,
+            overlap=OverlapConfig()),
+        k=k, tile_size=tile_size)
+    return KnnEstMpp(cfg, device=device)

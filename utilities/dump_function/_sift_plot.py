@@ -7,9 +7,10 @@
     [2] Zoomed +-N tiles  green--=GT  yellow=main  orange=overlap  blue=SIFT
     [3] Homography        query boundary + patch grid + translation arrow
 
-Works with SlideWinSimRotResult (stage2_retrieval/GigaPathSlidingWinSimRot), which
-exposes the best_*/main_*/overlap_* fields this module reads. When the result
-carries a `best_rotation`, it is shown in the summary panel.
+Takes stage 2's CandidateSet (stage2_retrieval/StageInterface.py) and stage 3's
+SiftRansacResult, and places everything through the set's own level-0
+formulas (`origin_l0`, `centre_l0`) and the SIFT crop's read origin -- the
+figure and the metrics read one geometry.
 """
 
 from __future__ import annotations
@@ -161,18 +162,18 @@ def read_anchored_crop(wsi, x0_l0: float, y0_l0: float, ds: float,
 
 def read_zoom_crop(wsi, retrieval, tile_size: int, query_rows: int,
                    query_cols: int, zoom_pad: int = 4):
-    """Read the panel-[2] zoom crop around the retrieval best match.
+    """Read the panel-[2] zoom crop around the retrieval's best candidate
+    (`retrieval` is a CandidateSet).
 
     Returns (crop_img, crop_x0, crop_y0, crop_ds) — all level-0 anchored.
     """
-    return read_anchored_crop(wsi, retrieval.best_x0, retrieval.best_y0,
-                              retrieval.ds, tile_size, query_rows, query_cols,
-                              zoom_pad)
+    x0, y0 = retrieval.origin_l0(retrieval.best)
+    return read_anchored_crop(wsi, x0, y0, retrieval.ds, tile_size,
+                              query_rows, query_cols, zoom_pad)
 
 
-def _retrieval_center(retrieval, query_img, tile_size, query_rows, query_cols,
-                      override=None):
-    """Centre @ level-0 of the retrieval's matched window.
+def _retrieval_center(retrieval, query_qc, override=None):
+    """Centre @ level-0 of the best candidate's window (CandidateSet.centre_l0).
 
     `override` lets the caller pass the value it already computed (the bench
     derives it from the FoV footprint, not the grid-rounded one) so the figure
@@ -180,9 +181,7 @@ def _retrieval_center(retrieval, query_img, tile_size, query_rows, query_cols,
     """
     if override is not None:
         return override
-    w_l0 = query_cols * tile_size * retrieval.ds
-    h_l0 = query_rows * tile_size * retrieval.ds
-    return retrieval.best_x0 + w_l0 / 2.0, retrieval.best_y0 + h_l0 / 2.0
+    return retrieval.centre_l0(retrieval.best, query_qc)
 
 
 # ── the 4 panels ──────────────────────────────────────────────────────────────
@@ -194,7 +193,8 @@ def draw_localization_row(
     wsi_crop:    Optional[np.ndarray],
     crop_kps,
     good_matches,
-    retrieval,                  # SlideWinSimRotResult
+    retrieval,                  # CandidateSet (stage 2's output)
+    query_qc,                   # the UNROTATED QueryPatchContainer stages 2-3 got
     sift,                       # SiftRansacResult
     gt_x: int, gt_y: int,
     base_mpp: float,
@@ -202,7 +202,7 @@ def draw_localization_row(
     crop_img: np.ndarray, crop_x0: int, crop_y0: int, crop_ds: float,
     zoom_pad: int,
     query_rows: int, query_cols: int,
-    crop_origin_x: int = 0, crop_origin_y: int = 0,
+    crop_origin_l0: Optional[tuple] = None,  # level-0 integer the SIFT crop was read at
     gt_center:   Optional[tuple] = None,  # (cx, cy) @ level-0 — rotation-invariant GT
     retr_center: Optional[tuple] = None,  # (cx, cy) @ level-0 — caller's own value
     gt_box_wh:   Optional[tuple] = None,  # (w, h) @ level-0 of the UNROTATED GT rect
@@ -218,9 +218,11 @@ def draw_localization_row(
             return float('nan')
         return math.sqrt((x - gt_center[0]) ** 2 + (y - gt_center[1]) ** 2) * base_mpp
 
-    ret_err  = dist_um(retrieval.best_x0, retrieval.best_y0)
+    best = retrieval.best
+    best_x0, best_y0 = retrieval.origin_l0(best)
+    ret_err  = dist_um(best_x0, best_y0)
     sift_err = dist_um(sift.x0, sift.y0) if sift.success else float('nan')
-    best_rot = getattr(retrieval, 'best_rotation', None)
+    best_rot = best.rotation
 
     # ── [0] SIFT matches ──────────────────────────────────────────────────────
     ax = axes[0]
@@ -236,19 +238,15 @@ def draw_localization_row(
     ax = axes[1]
     lines = [
         'Retrieval (GigaPath sliding window)',
-        f'  best_x0 = {retrieval.best_x0}',
-        f'  best_y0 = {retrieval.best_y0}',
-        f'  score   = {retrieval.best_score:.4f}',
-        f'  overlap = {retrieval.from_overlap}',
+        f'  best_x0 = {best_x0}',
+        f'  best_y0 = {best_y0}',
+        f'  score   = {best.score:.4f}',
+        f'  window  = region {best.region_index} {best.lattice} '
+        f'r{best.row} c{best.col}',
         f'  error   = {ret_err:.1f} um',
     ]
     if best_rot is not None:
         lines.append(f'  rotation= {best_rot} deg')
-        scores = getattr(retrieval, 'scores_by_rotation', None)
-        if scores:
-            for r in sorted(scores):
-                mark = ' <-' if r == best_rot else ''
-                lines.append(f'    rot {r:>3}: {scores[r]:.4f}{mark}')
     lines += [
         '',
         'SIFT + RANSAC',
@@ -262,8 +260,7 @@ def draw_localization_row(
         f'GT  x={gt_x}  y={gt_y}',
     ]
     if gt_center is not None:
-        c_ret = center_err_um(*_retrieval_center(retrieval, query_img, tile_size,
-                                                 query_rows, query_cols,
+        c_ret = center_err_um(*_retrieval_center(retrieval, query_qc,
                                                  override=retr_center))
         c_sft = center_err_um(sift.center_x0, sift.center_y0)
         lines += [
@@ -281,8 +278,11 @@ def draw_localization_row(
     ax = axes[2]
     ax.imshow(crop_img)
     tile_px = tile_size * retrieval.ds / crop_ds
-    bm_px   = (retrieval.main_x0 - crop_x0) / crop_ds
-    bm_py   = (retrieval.main_y0 - crop_y0) / crop_ds
+    # The grid lines sit on the best region's main lattice, from its level-0
+    # origin (PatchGrid.tile_origin_l0) -- not on a truncated level-n offset.
+    lat_x0, lat_y0 = retrieval.grids[best.region_index].tile_origin_l0('main', 0, 0)
+    bm_px   = (lat_x0 - crop_x0) / crop_ds
+    bm_py   = (lat_y0 - crop_y0) / crop_ds
     crop_h_px, crop_w_px = crop_img.shape[:2]
     half_px = tile_px / 2
 
@@ -303,13 +303,18 @@ def draw_localization_row(
     box_h = query_rows * tile_px
 
     ax.add_patch(mpatches.Rectangle(
-        (bm_px, bm_py), box_w, box_h,
-        fill=False, edgecolor='yellow', linewidth=2.0, label='Main best'))
-    bo_px = (retrieval.overlap_x0 - crop_x0) / crop_ds
-    bo_py = (retrieval.overlap_y0 - crop_y0) / crop_ds
-    ax.add_patch(mpatches.Rectangle(
-        (bo_px, bo_py), box_w, box_h,
-        fill=False, edgecolor='orange', linewidth=2.0, label='Overlap best'))
+        ((best_x0 - crop_x0) / crop_ds, (best_y0 - crop_y0) / crop_ds), box_w, box_h,
+        fill=False, edgecolor='yellow', linewidth=2.0, label=f'Best ({best.lattice})'))
+    # The strongest window of the OTHER lattice at the same rotation, when the
+    # candidate set holds one (suppression can drop it as a near duplicate).
+    other = next((c for c in retrieval.candidates[1:]
+                  if c.rotation == best.rotation and c.lattice != best.lattice), None)
+    if other is not None:
+        ox0, oy0 = retrieval.origin_l0(other)
+        ax.add_patch(mpatches.Rectangle(
+            ((ox0 - crop_x0) / crop_ds, (oy0 - crop_y0) / crop_ds), box_w, box_h,
+            fill=False, edgecolor='orange', linewidth=2.0,
+            label=f'Best {other.lattice}'))
     # gt_box_wh is the footprint the shot actually covers, so its dims are
     # swapped for a 90/270 shot. Anchor on the GT CENTRE, not on gt_x/gt_y:
     # the rotation happens about that centre, and the pre-rotation corner no
@@ -331,9 +336,9 @@ def draw_localization_row(
     # wrong direction and push the centre marker outside it.
     if sift.success and sift.H is not None:
         mapped = query_quad(query_img.shape, sift.H)
-        # crop px (level-n) -> level-n global -> level-0 -> zoom-crop px
-        qx = ((mapped[:, 0] + crop_origin_x) * sift.ds - crop_x0) / crop_ds
-        qy = ((mapped[:, 1] + crop_origin_y) * sift.ds - crop_y0) / crop_ds
+        # SIFT-crop px -> level-0 (read origin + px * ds) -> zoom-crop px
+        qx = (crop_origin_l0[0] + mapped[:, 0] * sift.ds - crop_x0) / crop_ds
+        qy = (crop_origin_l0[1] + mapped[:, 1] * sift.ds - crop_y0) / crop_ds
         ax.plot(np.append(qx, qx[0]), np.append(qy, qy[0]),
                 color='dodgerblue', lw=2.0, label='SIFT')
     elif sift.success:
@@ -350,9 +355,7 @@ def draw_localization_row(
         gx, gy = to_crop(*gt_center)
         ax.plot(gx, gy, '*', color='lime', ms=16, mec='black', mew=0.8,
                 label='GT centre')
-        rx, ry = to_crop(*_retrieval_center(retrieval, query_img, tile_size,
-                                            query_rows, query_cols,
-                                            override=retr_center))
+        rx, ry = to_crop(*_retrieval_center(retrieval, query_qc, override=retr_center))
         ax.plot(rx, ry, 'x', color='yellow', ms=10, mew=2.2, label='Retr centre')
         if sift.success:
             sx_, sy_ = to_crop(sift.center_x0, sift.center_y0)
@@ -367,7 +370,7 @@ def draw_localization_row(
 
     ax.legend(fontsize=7, loc='upper right', framealpha=0.6)
     ax.set_title(f'Zoomed +-{zoom_pad} tiles\n'
-                 f'boxes: green--=GT yellow=main orange=overlap blue=SIFT   '
+                 f'boxes: green--=GT yellow=best orange=other lattice blue=SIFT   '
                  f'markers = centres')
 
     # ── [3] Homography analysis ───────────────────────────────────────────────
@@ -421,10 +424,9 @@ def draw_localization_row(
             # Compare CENTRES, not top-lefts: for a 90/180/270 shot the two
             # top-lefts are different corners of the same footprint, so an arrow
             # between them shows the rotation rather than the correction.
-            rc = _retrieval_center(retrieval, query_img, tile_size,
-                                   query_rows, query_cols, override=retr_center)
-            ret_cx = float(rc[0] / sift.ds - crop_origin_x)
-            ret_cy = float(rc[1] / sift.ds - crop_origin_y)
+            rc = _retrieval_center(retrieval, query_qc, override=retr_center)
+            ret_cx = float((rc[0] - crop_origin_l0[0]) / sift.ds)
+            ret_cy = float((rc[1] - crop_origin_l0[1]) / sift.ds)
             sc = cv2.perspectiveTransform(
                 np.float32([[[w_q / 2.0, h_q / 2.0]]]), H)[0, 0]
             ax.annotate('', xy=(float(sc[0]), float(sc[1])), xytext=(ret_cx, ret_cy),

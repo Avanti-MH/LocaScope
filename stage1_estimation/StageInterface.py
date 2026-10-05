@@ -5,10 +5,12 @@ TREE, NOT A LIST OF ALTERNATIVES. This module is the STEM — the one thing
 every mpp-estimation method shares (an `EstMppResult` to return, an
 `estimate(query)` to return it from). `ClassifierEstMpp.py` and
 `KnnEstMpp.py` are BRANCHES: each owns its own config, its own
-build-time setup (a KNN reference bank is not a loaded checkpoint, and
-forcing them through one shared `build()` signature would hide that they
-really do different work), and its own `<Method>EstMppResult(EstMppResult)`
-subclass for whatever is specific to how it arrived at an answer.
+build-time WORK (a KNN reference bank is sampled and encoded, a classifier
+only binds the slide) and its own `<Method>EstMppResult(EstMppResult)`
+subclass for whatever is specific to how it arrived at an answer. The CALL
+that starts that work is shared, `build(wsi, mask=None)`: what a method does
+inside it differs, how it is called does not, and a method that samples
+nothing from the slide takes the mask and ignores it.
 
 WHY BOTH `estimated_*` AND `chosen_*`. `estimated_ds`/`estimated_mpp` is the
 method's own raw answer -- what it thinks the query's scale is, in whichever
@@ -81,16 +83,22 @@ class EstMppResult:
 
 @runtime_checkable
 class MppEstimator(Protocol):
-    '''The one call shape every stage-1 estimator's `.estimate()` honours.
+    '''The call shape every stage-1 estimator honours: `build(wsi, mask=None)`
+    once per slide, then `estimate(query)` per query.
 
-    Deliberately THIN: build-time setup (what a KNN reference bank needs vs.
-    what loading a trained checkpoint needs) is not part of this Protocol on
-    purpose -- see this module's own docstring for why forcing that through
-    one signature would hide a real difference between methods rather than
-    unify a superficial one. `query` is a raw image array on purpose too --
-    "the input interface is just the query image" is the one thing every
-    estimator this Protocol describes was asked to agree on.
+    `mask` is the TissueMask the caller already built for the slide, or None
+    for the method to make its own. A method that samples nothing from the
+    slide (ClassifierEstMpp) takes it and ignores it, so a caller never has to
+    ask which kind it holds -- the pipeline and the stage-1 bench each had a
+    workaround for that (a signature probe, a `needs_mask` flag) while the
+    classifier's build took no mask. Named, not `**kwargs`: a misspelt keyword
+    is an error, not silently dropped. `query` is a raw image array -- "the
+    input interface is just the query image" is the one thing every estimator
+    was asked to agree on.
     '''
+
+    def build(self, wsi, mask=None) -> 'MppEstimator':
+        ...
 
     def estimate(self, query: np.ndarray) -> EstMppResult:
         ...

@@ -2,20 +2,20 @@
 
 Wraps the three stage primitives into one WSI-scoped object:
 
-    Stage 1 — mpp estimation    via KnnEstMpp
-    Stage 2 — retrieval         via GigaPathSlidingWinSimRot (cached per level)
+    Stage 1 — mpp estimation    via the estimator handed in
+    Stage 2 — retrieval         via SlidingWinSimRot (cached per level)
     Stage 3 — SIFT+RANSAC       via SiftRansacLocalizer
 
 Design:
 
-* build() does the WSI-wide one-time work (mask + KNN reference bank).
+* build() does the WSI-wide one-time work (mask + the estimator's build).
 * The mask comes from `mask_cfg` (a `MASK_RECIPES` entry, hest by default),
   whose segmenter reads the level tile by tile -- a heavy method such as HEST
   DeepLabV3 OOMs on a whole MRXS level otherwise: at mask_ds=16 one slide's
   level image is ~313 MP, and a single ResNet layer1 activation on that is
   18.6 GiB. The chunk budgets are fields of the recipe's segmenter config.
 * A retriever is built lazily on first use for each pyramid level; the
-  routed level is `KnnEstMpp.estimate`'s own `chosen_level` --
+  routed level is the estimator's own `chosen_level` --
   `wsi.coarser_level_for_downsample`, the repo's own measured, coarse-biased
   routing rule (`SafeSlide.py`'s own docstring: 91.1% recovered by stage 3 at
   one level coarse against 15.7% at one level fine, 1398 shots). This file
@@ -31,22 +31,25 @@ Design:
 * Errors in any stage produce a LocaScopeQueryResult with `.error` set;
   earlier stages' results are preserved.
 
-`encoder` IS A REGISTRY NAME (`TileEncoderFunc`'s, e.g. `'gigapath'`), not a
-built object -- `KnnEstMpp` builds its own from it (`KnnEstMppConfig`'s own
-design: an estimator does not need to be handed an already-built encoder to
-be usable standing alone). This pipeline still wants ONE encoder shared
-across mask-building, stage 1 and stage 2 rather than three separate copies
-in GPU memory, so it does not build a second one itself: `build()` reads the
-one `self.estimator` already built off `self.estimator.encoder` and reuses
-THAT for everything downstream. The sharing was always incidental to what
-`KnnEstMpp` needs for itself, never a requirement of it -- this is the
-pipeline arranging for it, not the estimator promising it.
+The three stages come in BUILT, each from its own config, and not yet bound
+to a slide: `estimator` (any stage-1 method -- KnnEstMpp, ClassifierEstMpp,
+PrototypeEstMpp), `retriever` (SlidingWinSimRot) and `localizer`
+(SiftRansacLocalizer). This class builds the mask, binds all three to the
+slide, and runs a shot through them; it does not choose a method or a
+parameter of any of them. Each stage builds its own encoder, so stage 1 and
+stage 2 never share one: a ClassifierEstMpp checkpoint may carry a fine-tuned
+trunk, and stage 2 has to score with the encoder its feature cache was written
+by. A second copy of the weights in GPU memory is the price. The stages are
+reusable across slides: a loop over slides builds them once and a pipeline per
+slide.
 
 Usage:
 
-    from utilities.LocaScopePipeline import LocaScopePipeline
-
-    pl = LocaScopePipeline(wsi, encoder='gigapath').build()
+    est = knn_estimator('gigapath', mask_cfg, device=device)
+    ret = SlidingWinSimRot(
+        SlidingWinSimRotConfig(encoder_config('gigapath')), device)
+    loc = SiftRansacLocalizer()
+    pl  = LocaScopePipeline(wsi, est, ret, loc, mask_cfg=mask_cfg).build()
     result = pl.run(shot_img)
     # result.est_mpp, result.routed_level, result.retrieval, result.refine
 """
@@ -73,10 +76,8 @@ for _d in ('utilities', ''):     # '' = the root, which resolves the stage packa
 from PatchingLib             import QueryPatchContainer                                # noqa: E402
 from SafeSlide               import SafeSlide                                          # noqa: E402
 from TissueMask      import TissueMask                                 # noqa: E402
-from TileSampler             import OverlapConfig, SamplerConfig                       # noqa: E402
-from stage1_estimation.KnnEstMpp                import (KnnEstMpp, KnnEstMppConfig,                       # noqa: E402
-                                      REFERENCE_BANK_RICHNESS)
-from stage2_retrieval.GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot, SlideWinSimRotResult     # noqa: E402
+from stage2_retrieval.SlidingWinSimRot import SlidingWinSimRot     # noqa: E402
+from stage2_retrieval.StageInterface import CandidateSet                        # noqa: E402
 from stage3_localization.SIFT_RANSAC             import SiftRansacLocalizer, SiftRansacResult              # noqa: E402
 
 
@@ -91,14 +92,15 @@ class LocaScopeQueryResult:
     est_mpp:        Optional[float]
     routed_level:   Optional[int]
     unusable_level: bool
-    retrieval:      Optional[SlideWinSimRotResult]
+    retrieval:      Optional[CandidateSet]
     refine:         Optional[SiftRansacResult]
     error:          Optional[str]
     # Heavyweight refs kept only for diagnostics/plotting (not for bulk storage).
     # Populated when run(..., keep_objects=True).
-    retriever: object = None      # GigaPathSlidingWinSimRot
+    retriever: object = None      # SlidingWinSimRot
     localizer: object = None      # SiftRansacLocalizer
     query_qc:  object = None      # QueryPatchContainer at the winning rotation
+
 
 
 class LocaScopePipeline:
@@ -107,36 +109,22 @@ class LocaScopePipeline:
     def __init__(
         self,
         wsi:                 Union[openslide.OpenSlide, str],
-        encoder:             str,
-        device:              Union[str, torch.device] = 'cuda' if torch.cuda.is_available() else 'cpu',
-        tile_size:           int   = 256,
+        estimator,                    # stage 1, built, not yet bound
+        retriever:           SlidingWinSimRot,
+        localizer:           SiftRansacLocalizer,
         mask_cfg:            'TissueMaskConfig' = None,
         feature_store_root:  Optional[str] = None,
         feature_store_mode:  str = 'rw',
-        knn_samples:         int   = 40,
-        knn_k:               int   = 5,
-        knn_seed:            int   = 42,
-        retriever_overlap:   bool  = True,
-        refiner_min_inliers: int   = 10,
-        refiner_padding:     int   = 2,
     ):
         # SafeSlide, not OpenSlide: a MIRAX read that lands on a cell the
         # scanner never wrote raises, and that raise latches on the handle, so
         # every later call fails -- metadata included. Since this one object is
-        # handed to TissueMask, TileSampler and GigaPathSlidingWinSimRot,
+        # handed to TissueMask, TileSampler and SlidingWinSimRot,
         # the recovery has to live inside it; healing swaps the native handle in
         # place and every holder keeps working.
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi                 = wsi
-        # A REGISTRY NAME, not a built object -- see this module's own
-        # docstring. Resolved to the real thing in build(), and read off
-        # `self.estimator.encoder` from there on so mask-building and stage 2
-        # share the exact object `KnnEstMpp` built for itself.
-        self.encoder_name        = encoder
-        self.device              = torch.device(device)
-        self.encoder = None
-        self.tile_size           = tile_size
         # One value instead of five parameters and two remembered method calls.
         # The mask a pipeline builds can now say how it was built, which is what
         # a cache has to ask before trusting a stored feature map.
@@ -144,12 +132,6 @@ class LocaScopePipeline:
         self.mask_cfg            = mask_cfg or MASK_RECIPES['hest']
         self.feature_store_root  = feature_store_root
         self.feature_store_mode  = feature_store_mode
-        self.knn_samples         = knn_samples
-        self.knn_k               = knn_k
-        self.knn_seed            = knn_seed
-        self.retriever_overlap   = retriever_overlap
-        self.refiner_min_inliers = refiner_min_inliers
-        self.refiner_padding     = refiner_padding
 
         # SafeSlide.base_mpp: the mean of mpp-x and mpp-y, with an aperio
         # fallback. This line used to read mpp-x alone, which disagreed with
@@ -157,42 +139,39 @@ class LocaScopePipeline:
         self.base_mpp = wsi.base_mpp   # raises if the slide carries no mpp
 
         self.mask:      Optional[TissueMask] = None
-        self.estimator: Optional[KnnEstMpp] = None
+        self.estimator           = estimator
+        self._built = False
         # None value == "tried, unusable"; missing key == "not tried yet"
-        self._retrievers: Dict[int, Optional[GigaPathSlidingWinSimRot]] = {}
-        self._retriever_reason: Dict[int, str] = {}   # why a level is unusable
+        # One retriever and one localizer for the slide: the retriever keeps
+        # every level it has built (per ds), so there is no per-level object.
+        self.retriever           = retriever
+        self.localizer           = localizer
+        # The tile the query is cut at is the retriever's, which compares it
+        # against tiles of that size.
+        self.tile_size           = retriever.tile_size
+        self._level_reason: Dict[int, Optional[str]] = {}   # None = usable
 
     # ── One-time setup ────────────────────────────────────────────────────────
     def build(self) -> 'LocaScopePipeline':
-        """Build the encoder + mask + mpp KNN reference bank (per-WSI one-time)."""
-        # KnnEstMpp builds its own encoder from cfg.encoder -- constructing
-        # it here, before the mask, is what lets mask-building below reuse
-        # THAT object instead of building a second encoder of its own.
-        # `mask_cfg=self.mask_cfg` even though `build(wsi, mask=...)` below
-        # hands the estimator an already-built mask directly: identity should
-        # still name the recipe that mask actually came from, not whatever
-        # KnnEstMppConfig's own default happens to be.
-        cfg = KnnEstMppConfig(
-            encoder=self.encoder_name, mask_cfg=self.mask_cfg,
-            sampler_cfg=SamplerConfig(
-                n_per_rung=self.knn_samples,
-                seed=self.knn_seed, richness=REFERENCE_BANK_RICHNESS,
-                overlap=OverlapConfig()),
-            k=self.knn_k, tile_size=self.tile_size)
-        self.estimator = KnnEstMpp(cfg, device=self.device)
-        self.encoder = self.estimator.encoder
-
+        """Build the mask, then bind the estimator and stages 2-3 to this slide
+        (per-WSI one-time)."""
         # Segment, filter and merge in one place and in one order. merge is
         # incomplete without filter having run first -- it skips nested boxes on
         # the assumption they are already gone -- and that dependency used to be
         # two lines every caller wrote out.
         self.mask = self.mask_cfg.build(
-            self.wsi, getattr(self.encoder, 'device', None))
+            self.wsi, getattr(self.retriever.encoder, 'device', None))
 
-        # Reuses `self.mask` rather than letting KnnEstMpp segment its own --
-        # same mask, so stage 1's reference bank and stage 2's retriever agree
-        # on which regions are tissue.
+        # The same mask to stage 1, so its reference bank and stage 2's
+        # retriever agree on which regions are tissue (a method that samples
+        # nothing ignores it -- StageInterface.MppEstimator).
         self.estimator.build(self.wsi, mask=self.mask)
+        # Stage 2 and 3 bound to the same slide and mask. No level is built
+        # here: the retriever builds the one stage 1 routes a shot to, once.
+        self.retriever.build(self.wsi, self.mask, feature_store=self._feature_store())
+        self.localizer.build(self.wsi)
+        self._level_reason = {}
+        self._built = True
         return self
 
     # ── Lazy per-level retriever cache ────────────────────────────────────────
@@ -219,69 +198,51 @@ class LocaScopePipeline:
         from Store import FeatureMapCache
         return FeatureMapCache(
             self.feature_store_root, getattr(self.wsi, '_filename', ''),
-            self.encoder, self.mask_cfg, mode=self.feature_store_mode)
+            self.retriever.encoder, self.mask_cfg, mode=self.feature_store_mode)
 
-    def _get_retriever(self, level: int) -> Optional[GigaPathSlidingWinSimRot]:
-        """Return cached rotation-aware retriever for this level, or None if unusable."""
-        if level in self._retrievers:
-            return self._retrievers[level]
-
-        level_mpp = self.base_mpp * self.wsi.level_downsamples[level]
-        print(f'  [retriever L{level}] mpp={level_mpp:.4f}', flush=True)
-
+    def _level_ready(self, level: int) -> Optional[str]:
+        """Build the retriever's features for `level` if not yet, and say why
+        the level is unusable (None when it is usable). Remembered per level:
+        a level that failed once is not rebuilt for every shot routed to it."""
+        if level in self._level_reason:
+            return self._level_reason[level]
+        print(f'  [retriever L{level}] mpp='
+              f'{self.base_mpp * self.wsi.level_downsamples[level]:.4f}', flush=True)
+        reason = None
         try:
-            r = GigaPathSlidingWinSimRot(
-                self.wsi, encoder=self.encoder, mask=self.mask,
-                mpp=level_mpp, tile_size=self.tile_size,
-                overlap=self.retriever_overlap,
-                feature_store=self._feature_store(),
-            )
-            r.build_wsi_features()
-            # How many regions survived is only knowable after the build now,
-            # because the retriever filters at the ds it resolved rather than
-            # at the one asked for. An empty feature list is the same condition
-            # the old n_ok == 0 check caught, one step later and for the same
-            # reason.
+            self.retriever.build_wsi_features(level=level)
             print(f'  [retriever L{level}] regions '
-                  f'{len(r.regions)}/{len(self.mask.tissue_regions)} patchable '
-                  f'at ds={r.ds:g}', flush=True)
-            if not r.wsi_features:
+                  f'{len(self.retriever.regions)}/{len(self.mask.tissue_regions)} '
+                  f'patchable at ds={self.retriever.ds:g}', flush=True)
+            if not self.retriever.wsi_features:
                 reason = 'build_wsi_features produced no feature maps'
-                print(f'  [retriever L{level}] UNUSABLE: {reason}', flush=True)
-                self._retrievers[level] = None
-                self._retriever_reason[level] = reason
-                return None
         except Exception as e:
-            # Never swallow this silently — a failed retriever turns every shot
-            # routed to this level into a bare `unusable_level` with no reason.
+            # Never swallow this silently -- a failed level turns every shot
+            # routed to it into a bare `unusable_level` with no reason.
             reason = f'build failed: {type(e).__name__}: {e}'
-            print(f'  [retriever L{level}] {reason}', flush=True)
             traceback.print_exc()
-            self._retrievers[level] = None
-            self._retriever_reason[level] = reason
-            return None
-        self._retrievers[level] = r
-        return r
+        if reason:
+            print(f'  [retriever L{level}] UNUSABLE: {reason}', flush=True)
+        self._level_reason[level] = reason
+        return reason
 
     # ── Per-shot end-to-end ───────────────────────────────────────────────────
     def run(self, img_np: np.ndarray, keep_objects: bool = False) -> LocaScopeQueryResult:
-        """Run all 3 stages on one shot image.
+        """Run all 3 stages on one shot image, each on the previous one's
+        output: EstMppResult -> CandidateSet -> SiftRansacResult.
 
         `keep_objects=True` attaches the retriever / localizer / query container
         to the result so diagnostics can plot keypoints, matches and homography.
         Leave False for bulk runs — those objects hold large tensors.
         """
-        if self.estimator is None:
+        if not self._built:
             raise RuntimeError('LocaScopePipeline not built; call .build() first.')
 
-        # Stage 1 — estimate mpp AND route to a pyramid level.
-        # `chosen_level` is `KnnEstMpp.estimate`'s own snap
-        # (`wsi.coarser_level_for_downsample`) -- there is no separate
-        # routing step left to fail on its own, so a routing failure now
-        # surfaces as `stage1 failed` rather than its own category. See this
-        # module's own docstring for why that snap moved off this file.
+        # Stage 1 — estimate mpp AND route to a pyramid level (`chosen_level`,
+        # the estimator's own snap). Stage 2 searches that level; it does not
+        # choose again.
         try:
-            r1 = self.estimator.estimate(img_np, overlap=True)
+            r1 = self.estimator.estimate(img_np)
             est_mpp = float(r1.estimated_mpp)
             level = r1.chosen_level
         except Exception as e:
@@ -289,36 +250,22 @@ class LocaScopePipeline:
                 None, None, False, None, None,
                 f'stage1 failed: {type(e).__name__}: {e}')
 
-        # Stage 2 — retrieve (cached retriever per level)
-        retriever = self._get_retriever(level)
-        if retriever is None:
-            return LocaScopeQueryResult(
-                est_mpp, level, True, None, None,
-                self._retriever_reason.get(level, 'retriever unavailable'))
-
+        # Stage 2 — candidate windows at the routed level
+        reason = self._level_ready(level)
+        if reason:
+            return LocaScopeQueryResult(est_mpp, level, True, None, None, reason)
         try:
             qc = QueryPatchContainer(img_np)
-            qc.extract_all(self.tile_size, overlap=self.retriever_overlap)
-            retriever.build_query_features(qc)
-            retriever.compute_sim_maps()
-            retrieval = retriever.find_best()
+            qc.extract_all(self.tile_size, overlap=self.retriever.overlap)
+            retrieval = self.retriever.retrieve(qc, r1)
         except Exception as e:
             return LocaScopeQueryResult(
                 est_mpp, level, False, None, None,
                 f'stage2 failed: {type(e).__name__}: {e}')
 
-        # Stage 3 — SIFT+RANSAC refine
+        # Stage 3 — SIFT+RANSAC inside the best candidate
         try:
-            localizer = SiftRansacLocalizer(
-                reader=retriever.reader, grids=retriever.grids,
-                level=retriever.level,
-                query=qc, location=retrieval,
-                min_inliers=self.refiner_min_inliers,
-                padding=self.refiner_padding,
-            )
-            localizer.read_wsi_crop()
-            localizer.detect_and_match()
-            refine = localizer.estimate_homography()
+            refine = self.localizer.localize(qc, retrieval, rank=0)
         except Exception as e:
             return LocaScopeQueryResult(
                 est_mpp, level, False, retrieval, None,
@@ -326,7 +273,7 @@ class LocaScopePipeline:
 
         return LocaScopeQueryResult(
             est_mpp, level, False, retrieval, refine, None,
-            retriever = retriever if keep_objects else None,
-            localizer = localizer if keep_objects else None,
-            query_qc  = qc        if keep_objects else None,
+            retriever = self.retriever if keep_objects else None,
+            localizer = self.localizer if keep_objects else None,
+            query_qc  = qc             if keep_objects else None,
         )

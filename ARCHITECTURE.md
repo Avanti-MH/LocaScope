@@ -284,7 +284,7 @@ PrototypicalRoutingHead 的渲染移到 DataLoader worker；pipeline 改用 `rea
 入口
 ├─ utilities/LocaScopePipeline                    尚未改用新的讀取（pipeline 遷移時改）
 │   ├─ stage 1  mpp 估計        KnnEstMpp / ClassifierEstMpp / PrototypeEstMpp / classic
-│   ├─ stage 2a 粗檢索          GigaPathSlidingWinSimRot；graph / FAISS (未實作)
+│   ├─ stage 2a 粗檢索          SlidingWinSimRot；graph / FAISS (未實作)
 │   │                            build(ctx, level) → retrieve(query) → CandidateSet(K)
 │   ├─ stage 2b 重排序          raw cosine / transformer (未實作)，可略過
 │   │                            rerank(query, CandidateSet) → CandidateSet(K′)

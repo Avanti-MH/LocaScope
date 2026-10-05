@@ -2644,7 +2644,7 @@ label，而且不會報錯。
 
 - 多卡 / DDP。第一版單卡，理由見 8.3
 - keypoint 的旋轉不變性。LocaScope 的 retrieval 已經在處理旋轉
-  （`GigaPathSlidingWinSimRot`），這裡的 homography 取樣含旋轉所以 detector 會學到
+  （`SlidingWinSimRot`），這裡的 homography 取樣含旋轉所以 detector 會學到
   一些，但沒有明確的設計或量測
 - 真實 query 上的直接訓練。真實照片沒有 keypoint 的真值，而 HA 需要能對整張圖做
   homography——一張 1440x1024 的照片可以，但它不在任何 ds 階梯上。這是之後的事

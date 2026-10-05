@@ -10,6 +10,9 @@
 > | `LocaScopeResult` | `LocaScopeQueryResult` |
 > | `TissuesRegionsMask.from_wsi(wsi, ds=seg_ds).filter_regions(r)` | `TissueMaskConfig.build(wsi)`（recipe 由 `mask_cfg` 決定；cache 走 `MaskMaker`） |
 > | `mask.filter_patchable(tile_size, ds)` | `mask.patchable(side_l0)`，回傳 view，不改原 mask |
+> | `.find_best()` → `SlideWinSimResult` | `retriever.retrieve(query, EstMppResult)` → `CandidateSet`（`stage2_retrieval/StageInterface.py`） |
+> | `SiftRansacLocalizer(container, query, location).read_wsi_crop()...` | `SiftRansacLocalizer(...).build(wsi).localize(query, CandidateSet)`，位置以 level-0 記帳 |
+> | `retrieval.best_x0` 等像素欄位 | `cs.origin_l0(cs.best)`、`cs.centre_l0(...)`：由候選集換算，不另存 |
 >
 > 實作另外多了本文件沒有的 level routing、per-level retriever cache、
 > `unusable_level`，以及三個 stage 各自 try/except。下面保留為當初的設計

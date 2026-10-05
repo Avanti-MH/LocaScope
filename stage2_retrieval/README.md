@@ -27,32 +27,30 @@ legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical �
 
 ### 方法一覽
 
-#### `GigaPathSlidingWinSimRot.py` — canonical
+#### `StageInterface.py` — 介面（設計見 `spec.md`）
 
-`LocaScopePipeline` 唯一呼叫的檢索器（`utilities/LocaScopePipeline.py`）。試 4 個
-cardinal 旋轉（0/90/180/270 度），挑分數最高的方向，因此下游 `SiftRansacLocalizer`
-才拿得到 `best_rotation` 去對齊 query。
+- `Candidate(region_index, lattice, row, col, rotation, score)`：只放檢索自己找到的東西。
+- `CandidateSet`：候選依分數排好（位置就是名次），加上它的座標框架——`level`、`ds`、
+  每個 region 的 `PatchGrid`（tile 大小也從它拿）。視窗大小是 query 的 tile 格，由方法吃 query 算出。下一站從自己的輸入就拿得到的
+  東西不放進來。
+- 位置只從 `CandidateSet` 的方法來：`origin_l0`（視窗讀圖的 level-0 整數起點，
+  `PatchGrid.tile_origin_l0`）、`window_l0`、`centre_l0`、`window_local`。不經過截斷的
+  level-n 座標——openslide 以 bilinear 取樣，`int(region.x / ds)` 會偏一個 level 像素以內。
+- `Retriever`、`Reranker` 兩個 Protocol；`Reranker` 還沒有實作。
 
-- **主要入口**：`GigaPathSlidingWinSimRot(wsi, encoder, mask=None, mpp=None, tile_size=256, overlap=True)`
-- **四階段**：
-  1. `build_wsi_features(mpp)` — 對 WSI tile 化並編碼，只做一次
-  2. `build_query_features(query)` — 對 query 的 4 個旋轉各自抽 patch + 編碼
-  3. `compute_sim_maps()` — 4 組相似度圖
-  4. `find_best()` → `SlideWinSimRotResult`（`best_x/y`、`best_rotation`、`scores_by_rotation`）
-  - `top_k(k)` — 同一批分數的完整排名，用於驗證候選（`SiftRansacLocalizer` 可直接吃 `SlideWinSimCandidate`，鴨子定型）
-- **測試**：`utilities/test_modules/test_gigapath_slide_win_sim.py` 的第 5 步
-  （旋轉恢復四個角度 + 對照非旋轉版；步驟 1-4 是同一個檔案測非旋轉版的原始
-  內容，兩者合併進同一支腳本，因為分開跑會把同一次裁切、同一次模型載入的
-  GPU 成本付兩次）
+#### `SlidingWinSimRot.py` — canonical
 
-#### `GigaPathSlidingWinSim.py` — 一個檔案，兩種狀態
+`LocaScopePipeline` 唯一呼叫的檢索器。試 4 個 cardinal 旋轉（0/90/180/270 度），
+所有旋轉、兩組格點、所有 region 的視窗一起排名。視窗相似度核心
+`SlidingWindowSimilarity` 也在這個檔案（2026-10-05 從已刪除的
+`GigaPathSlidingWinSim.py` 搬進來），window bench 與 off-grid bench 都從這裡 import。
 
-`SlidingWindowSimilarity` 是 **primitive**：真正共用的相似度核心，
-`GigaPathSlidingWinSimRot` 在內部 import 它，自己沒有獨立呼叫端。
-
-`GigaPathSlidingWinSim` class 與 `compute_gigapath_sliding_win_similarity` 是
-**legacy**：只搜尋 query 給定的單一方向，不會找旋轉——這正是 Rot 版取代它的
-理由。`LocaScopePipeline` 不呼叫它們，但還沒被移除，因為
-`utilities/test_modules/test_gigapath_slide_win_sim.py`（步驟 1-4）和
-`test_sift_ransac.py` 還在測這條路徑，尚未依畫布審查的結論重新分類——現在兩
-條路徑的測試結果會一起跑出來，決定去留時兩邊的證據都在同一份輸出裡。
+- **入口**：`SlidingWinSimRot(SlidingWinSimRotConfig(encoder_cfg, tile_size=256,
+  overlap=True, k=20, min_sep_tiles=1.0), device, multi_gpu=False).build(wsi, mask, feature_store=None)`，
+  encoder 由 `encoder_cfg`（`TileEncoderConfig`，含精度與 batch）自己建，和 stage 1 一樣不收外部的；然後
+  `retrieve(query, EstMppResult) → CandidateSet`：在 stage 1 的 `chosen_level` 上檢索，
+  該層的格點與特徵第一次用到時才建（cache 命中不讀圖），之後快取。
+- **步驟**（bench 自己控制尺度時用）：`build_wsi_features(mpp= | ds= | level=)`、
+  `build_query_features(query)`、`compute_sim_maps()`、`candidate_set(k)`。
+- `min_sep_tiles`：同一旋轉下，視窗起點彼此距離小於這麼多 tile 的候選只留分數高的
+  （一個強峰會從 main 和 offset 兩組格點重複出現）；不同旋轉不互相抑制。

@@ -33,19 +33,20 @@ legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical �
 retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC homography
 細化到 sub-pixel。
 
-- **主要入口**：`SiftRansacLocalizer(wsi_container, query, location, min_inliers=10, ...)`
-  - `location` 接受 `SlideWinSimRotResult` 或 `SlideWinSimCandidate`（鴨子定型：
-    只讀 `best_region_index`、`best_x`、`best_y`、`ds`、`best_rotation` 五個屬性）
-- **三階段**：
-  1. `read_wsi_crop(padding)` — 以 retrieval 給的位置為中心，取 `±padding` tile 的 crop
+- **入口**：`SiftRansacLocalizer(min_inliers=10, padding=2).build(wsi)`，然後
+  `localize(query, CandidateSet, rank=0) → SiftRansacResult`：吃 stage 2 的輸出，用自己
+  `build` 建的 `SlideReader` 讀圖，不向 retriever 借。
+- **三步**（畫圖時可逐步跑，先 `prepare(query, cs, rank)`）：
+  1. `read_wsi_crop(padding)` — 候選視窗 `±padding` tile，夾在它的 region 內，在候選集的
+     level 上讀；`crop_origin_l0` 是這次讀圖真正的 level-0 整數起點
   2. `detect_and_match()` — query 與 crop 的 SIFT keypoint + BFMatcher(knn=2) + Lowe ratio
-  3. `estimate_homography()` → `SiftRansacResult`（`H`、`inlier_count`、`success`，
-     RANSAC 失敗或 inlier 不足時 fallback 回 retrieval 的 `best_x/y`）
-- **Output** `SiftRansacResult` 的 `center_x/y`（連同 `center_x0/y0`）優先於
-  `x/y`：query 是繞自己中心旋轉的，中心點不受旋轉影響，跟未知方向的 ground
-  truth 比較時才站得住。
-
-> ⚠ `location: SlideWinSimResult` 這個型別標註（`SIFT_RANSAC.py:127`）指向
-> `stage2_retrieval/GigaPathSlidingWinSim.py` 的非旋轉版本，但 production 實際傳入
-> 的是 `SlideWinSimRotResult`——能動是因為鴨子定型，標註本身在說謊。抽出一個
-> Stage 2/3 共用的 result protocol 是畫布審查排定的下一步，這裡先誠實記下來。
+  3. `estimate_homography()` — RANSAC H（query px → crop px）；crop 的像素 (u, v) 在 level-0
+     的 `crop_origin_l0 + (u, v) * ds`，所以 query 的 (0, 0) 和中心經 H 後直接得到 level-0
+     位置，保留小數。inlier 不足或 H 退化時 fallback 回候選視窗本身的位置。
+- **Output** `SiftRansacResult`：`x0/y0`、`center_x0/y0`（level-0，float）、`H`、
+  `inlier_count`、`match_count`、`success`、`rank`、`candidate`、`ds`、`level`。
+  中心點優先於左上角：query 繞自己中心旋轉，中心不受旋轉影響。
+- **2026-10-05 前的記帳**把 crop 原點記成 `int(region.x / ds) + x0`，截掉 region 原點的
+  小數；openslide 以 bilinear 取樣，所以回報位置偏 `-frac(region.x / ds) * ds` 個 level-0
+  像素（BRACS L1 約 1 µm、L2 約 4 µm）。現在直接記讀圖起點，見
+  `utilities/cli/diagnostics/diag_container_retire.py` 的 localize 段。

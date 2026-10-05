@@ -36,9 +36,9 @@ query、shot 沿用 `CLAUDE.md`；pool、rank、答案視窗、arm、pooling 見
 
 | | 現況 | 目標（未實作） |
 |---|---|---|
-| 第一階段 | `GigaPathSlidingWinSimRot`（canonical，滑窗 cosine，試 4 個旋轉） | 同左，加 graph 方法 |
+| 第一階段 | `SlidingWinSimRot`（canonical，滑窗 cosine，試 4 個旋轉） | 同左，加 graph 方法 |
 | 第二階段 | 無 | raw cosine、transformer |
-| 候選 | `SlideWinSimCandidate`（含像素座標、名次、footprint） | `Candidate`（見下） |
+| 候選 | `Candidate` / `CandidateSet`（`StageInterface.py`，見下） | 同左 |
 
 ## 候選
 
@@ -47,7 +47,7 @@ query、shot 沿用 `CLAUDE.md`；pool、rank、答案視窗、arm、pooling 見
 (128, 128)）。
 
     Candidate    = (region_index, lattice, row, col, rotation, score)
-    CandidateSet = (candidates, level, ds, grids, query_rows, query_cols)
+    CandidateSet = (candidates, level, ds, grids)
 
 - `lattice` 是 `'main'` 或 `'offset'`（取代 `from_overlap`）。
 - `Candidate` 只放 retrieval 自己找出來的東西。可從 input 推論的（像素座標、
@@ -59,6 +59,10 @@ query、shot 沿用 `CLAUDE.md`；pool、rank、答案視窗、arm、pooling 見
   義，所以那份 regions 的格點（`grids`，每個 region 一個 `PatchGrid`，帶
   level-0 原點）、`level`、`ds` 跟著清單走，不讓呼叫端拿兩個變數自己配對——
   與 `WsiFeaturesMap` 存在的理由相同。推論的輸入跟著輸出走，推論的結果不存。
+- 視窗大小不在 `CandidateSet` 裡。它是 query 的 tile 格，只由 query 決定，而
+  query 本來就沿著副 flow 傳到 stage 3；需要它的方法（`window_tiles`、
+  `window_l0`、`centre_l0`）直接吃未旋轉的 `QueryPatchContainer`，並檢查它的
+  tile 大小與 `grids` 的相同。
 - 位置只有一條公式：視窗左上角的 level-0 讀圖點 =
   `grids[c.region_index].tile_origin_l0(c.lattice, c.row, c.col)`。不經過截斷
   的 level-n 整數；bench、視覺化、pipeline、stage 3 都用這一條。

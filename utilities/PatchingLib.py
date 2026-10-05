@@ -49,7 +49,14 @@ def as_rgb_uint8(image: np.ndarray) -> np.ndarray:
 
 @dataclass
 class PatchInfo:
-    '''Location of one patch in a grid (query pixels or WSI level-n or mpp coords).'''
+    '''Location of one patch in a grid (query pixels or WSI level-n coords).
+
+    For a WSI grid, x and y are level-n integers counted from
+    int(region.x / ds) -- the region's origin TRUNCATED. openslide samples
+    level n at the fractional x / ds, so x * ds is not where the patch's
+    pixels are, by up to one level pixel. The level-0 point a read of the
+    patch starts at is PatchGrid.tile_origin_l0; there is deliberately no
+    level-0 conversion here (to_level0 was int(x * ds) and went 2026-10-05).'''
     row: int
     col: int
     y: int          # top-left row or y at ds coords.
@@ -67,15 +74,6 @@ class PatchInfo:
     def for_wsi(cls, row, col, x, y, size_px, kind, ds=1.0, level=None):
         return cls(row=row, col=col, x=x, y=y, size_px=size_px, kind=kind, ds=ds, level=level)
     
-    def to_level0(self) -> PatchInfo:
-        return PatchInfo(
-            row=self.row, col=self.col,
-            y=int(self.y * self.ds), x=int(self.x * self.ds),
-            size_px=int(self.size_px * self.ds),
-            kind=self.kind,
-            ds=1.0,
-            level=0,
-        )
 class PatchGrid:
     '''
     Patch layout and indexing for a width x height region (no pixels, no features).
@@ -718,7 +716,7 @@ class WsiFeaturesMap:
                                      with sim_maps (filtered). Every window
                                      landed on a neighbouring region's
                                      coordinates. Nothing raised.
-        GigaPathSlidingWinSimRot     had to publish `self.regions` with a
+        SlidingWinSimRot     had to publish `self.regions` with a
                                      comment saying which of the two lists it
                                      is, because the features line up with one
                                      and not the other.

@@ -18,11 +18,12 @@ it substitutes that stage's own required input directly, so a stage-2/3
 failure can never be blamed on stage 1:
 
     stages start at 1   KnnEstMpp actually estimates the query's mpp
-    stages start at 2   `--mpp` (the ground truth) is used AS the estimate
+    stages start at 2   the drawn FoV's own mpp (the ground truth) is used AS
+                        the estimate
 
 WHAT THIS MERGE DROPPED, ON PURPOSE. `test_gigapath_slide_win_sim.py` carried
 ~250 lines of rotation-recovery and sim-tensor-kernel-equivalence checks
-specific to `GigaPathSlidingWinSimRot`'s internals, and both retrieval-facing
+specific to `SlidingWinSimRot`'s internals, and both retrieval-facing
 source files carried their own ~150-line multi-panel matplotlib figure.
 Stage 2/3 are getting the same interface redesign stage 1 just got
 (`StageInterface.py`), so polishing tests against the CURRENT interface is
@@ -37,8 +38,10 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import random
 import sys
 import time
+from types import SimpleNamespace
 from typing import Tuple
 
 sys.path.insert(0, os.path.join(
@@ -53,11 +56,16 @@ from PatchingLib import QueryPatchContainer                          # noqa: E40
 from camera import sensor_size                                      # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names             # noqa: E402
-from TileSampler import OverlapConfig, SamplerConfig                  # noqa: E402
+from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
+                         SamplerConfig, TileSampler)
+from AccessDatasets import list_names, locate                        # noqa: E402
+from Cache import cache_root, job_name                               # noqa: E402
+from SafeSlide import SafeSlide                                     # noqa: E402
 from ReadGeometry import ReadSpec                                   # noqa: E402
-from TissueMaskConfig import add_mask_args, mask_cfg_from_args        # noqa: E402
+from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
-from stage2_retrieval.GigaPathSlidingWinSimRot import GigaPathSlidingWinSimRot          # noqa: E402
+from stage2_retrieval.SlidingWinSimRot import (                     # noqa: E402
+    SlidingWinSimRot, SlidingWinSimRotConfig)
 from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer                            # noqa: E402
 
 
@@ -86,6 +94,31 @@ def parse_stages(text: str) -> Tuple[int, ...]:
 
 # ── steps shared by every --stages combination ────────────────────────────────
 
+def pick_fov(args, masks) -> None:
+    """Set args.wsi / x / y / mpp: a slide of `--dataset` and one FoV drawn on
+    it at `--rung`, as Stage1MppBench draws its FoVs (a TileSampler draw for
+    the query camera, cached). `x, y` is the FoV's own top-left."""
+    names = list_names(dataset=args.dataset, split_job=args.split_cache_job)
+    name = args.slide or random.Random(args.pick_seed).choice(names)
+    entry = locate(name, dataset=args.dataset, split_job=args.split_cache_job)
+    sampler_root = cache_root(
+        args.sampler_cache_job or job_name('LocaScopeStagesTest'), 'sampler')
+    sampler = TileSampler.cached(
+        entry.path,
+        SamplerConfig(n_per_rung=1, seed=args.pick_seed,
+                      richness=RichnessConfig(), overlap=OverlapConfig()),
+        PlanSpec('ladder', (args.rung,),
+                 camera=ReadSpec(*sensor_size(args.ratio, args.mpixels))),
+        sampler_root, masks=masks)
+    drawn = list(sampler)
+    if not drawn:
+        sys.exit(f'[FAIL] no FoV fits {name} at rung {args.rung:g}')
+    meta = drawn[0].meta
+    args.wsi = str(entry.path)
+    args.x, args.y = int(meta.fov_rect[0]), int(meta.fov_rect[1])
+    args.mpp = SafeSlide(entry.path).base_mpp * float(meta.ds)
+
+
 def crop_query(args):
     reader = SlideReader(args.wsi)
     query_np = reader.read(args.x, args.y,
@@ -103,16 +136,14 @@ def crop_query(args):
     return reader.slide, query_np, qc
 
 
-def load_encoder(args, device):
+def stage2_encoder_cfg(args):
     over = {'head': args.head} if args.head else {}
     return encoder_config(args.encoder, batch_size=args.batch, **over)\
-        .with_model(dtype='fp32').build(device)
+        .with_model(dtype='fp32')
 
 
-def run_stage1(wsi, mask, query_qc, args, device) -> Tuple[float, object]:
-    """Returns (mpp_est, the encoder KnnEstMpp built -- reused by stage 2/3
-    rather than building a second copy; see `KnnEstMpp.py`'s own docstring
-    for why that sharing is the caller's job, not a guarantee of the class)."""
+def run_stage1(wsi, mask, query_qc, args, device):
+    """Returns the EstMppResult."""
     cfg = KnnEstMppConfig(
         encoder=args.encoder, mask_cfg=mask_cfg_from_args(args),
         sampler_cfg=SamplerConfig(n_per_rung=args.samples,
@@ -123,32 +154,30 @@ def run_stage1(wsi, mask, query_qc, args, device) -> Tuple[float, object]:
     result = est.estimate(query_qc)
     err_pct = abs(result.estimated_mpp - args.mpp) / args.mpp * 100
     print(f'  mpp_gt={args.mpp:.4f}  mpp_est={result.estimated_mpp:.4f}  '
-         f'error={err_pct:.1f}%')
-    return result.estimated_mpp, est.encoder
+         f'error={err_pct:.1f}%  level {result.chosen_level}')
+    return result
 
 
-def run_stage2(wsi, encoder, mask, query_np, mpp_est, args):
-    retriever = GigaPathSlidingWinSimRot(
-        wsi, encoder=encoder, mask=mask, mpp=mpp_est,
-        tile_size=args.tile, overlap=args.overlap)
-    retriever.build_wsi_features()
-    retriever.build_query_features(query_np)
-    retriever.compute_sim_maps()
-    result = retriever.find_best()
-    print(f'  best=({result.best_x0}, {result.best_y0})  '
-         f'score={result.best_score:.4f}  rotation={result.best_rotation}  '
-         f'region={result.best_region_index}')
-    return retriever, result
+def run_stage2(wsi, mask, query_np, estimate, args, device):
+    """Stage 2 on stage 1's output (or its ground-truth substitute). Builds
+    its own encoder, as stage 1 does."""
+    retriever = SlidingWinSimRot(
+        SlidingWinSimRotConfig(stage2_encoder_cfg(args), tile_size=args.tile,
+                                       overlap=args.overlap),
+        device).build(wsi, mask)
+    cs = retriever.retrieve(query_np, estimate)
+    best = cs.best
+    x0, y0 = cs.origin_l0(best)
+    print(f'  best=({x0}, {y0})  score={best.score:.4f}  rotation={best.rotation}  '
+         f'region={best.region_index} {best.lattice}  level {cs.level}')
+    return retriever, cs
 
 
-def run_stage3(retriever, query_qc, retrieval_result, args):
+def run_stage3(wsi, query_qc, cs, args):
+    """Stage 3 on stage 2's output."""
     localizer = SiftRansacLocalizer(
-        retriever.reader, retriever.grids, retriever.level, query_qc,
-        retrieval_result,
-        min_inliers=args.min_inliers, padding=args.padding)
-    localizer.read_wsi_crop()
-    localizer.detect_and_match()
-    result = localizer.estimate_homography()
+        min_inliers=args.min_inliers, padding=args.padding).build(wsi)
+    result = localizer.localize(query_qc, cs)
     print(f'  success={result.success}  matches={result.match_count}  '
          f'inliers={result.inlier_count}')
     return result
@@ -162,14 +191,26 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stages', type=parse_stages, default=(1, 2, 3))
-    ap.add_argument('--wsi',
-                    default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
-                            'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs')
-    ap.add_argument('--x',       type=int,   default=31700)
-    ap.add_argument('--y',       type=int,   default=33600)
-    ap.add_argument('--mpp',     type=float, default=0.252,
-                    help='ground truth. Also the STAGE-1 SUBSTITUTE when '
-                         '--stages starts at 2 -- see this module\'s docstring')
+    # The slide comes from a recorded split whose masks are already cached, and
+    # the query from a TileSampler draw on it -- the way Stage1MppBench picks
+    # both -- so the test segments nothing and its ground truth is a placed FoV.
+    ap.add_argument('--dataset', default='bracs/test#val',
+                    help='<dataset>#<split>; every val slide of bracs/test and '
+                         'ki67_with_photo has a mask in the MppRoutingHead cache')
+    ap.add_argument('--slide', default=None,
+                    help='a name in --dataset; default: one picked by --pick-seed')
+    ap.add_argument('--rung', type=float, default=1.0,
+                    help='the ds the FoV is drawn at. Its mpp is the ground '
+                         'truth, and the STAGE-1 SUBSTITUTE when --stages '
+                         'starts at 2 -- see this module\'s docstring')
+    ap.add_argument('--pick-seed', type=int, default=0,
+                    help='which slide (when --slide is not given) and which FoV')
+    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+                    help='whose mask cache is read')
+    ap.add_argument('--sampler-cache-job', default=None,
+                    help="whose sampler cache the FoV draw goes in; default this job's")
+    ap.add_argument('--split-cache-job', default=None,
+                    help='whose recorded split --dataset is read from; default MakeSplit')
     ap.add_argument('--ratio',   default='45:32')
     ap.add_argument('--mpixels', type=float, default=1.475)
     ap.add_argument('--tile',    type=int,   default=256)
@@ -177,7 +218,7 @@ def main() -> int:
     ap.add_argument('--filter', action=argparse.BooleanOptionalAction, default=True,
                     help="the recipe's region prep (filtered + merged); "
                          '--no-filter hands the stages the raw components')
-    add_mask_args(ap, default='hsv')
+    add_mask_args(ap, default='hest')
     ap.add_argument('--batch',   type=int,   default=1024)
     ap.add_argument('--encoder', default='gigapath', choices=encoder_names())
     ap.add_argument('--head',    default='')
@@ -188,15 +229,14 @@ def main() -> int:
     ap.add_argument('--min-inliers', type=int, default=10)
     args = ap.parse_args()
 
-    if not os.path.exists(args.wsi):
-        print(f'[SKIP] WSI not found: {args.wsi}')
-        return 0
-
-    print(f'WSI    : {args.wsi}')
-    print(f'GT     : x={args.x}  y={args.y}  mpp={args.mpp}')
-    print(f'Stages : {args.stages}')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     timings: dict = {}
+    masks = MaskMaker(mask_cfg_from_args(args),
+                      cache_root(args.mask_cache_job, 'mask'), device)
+    pick_fov(args, masks)
+    print(f'WSI    : {args.wsi}')
+    print(f'GT     : x={args.x}  y={args.y}  mpp={args.mpp:.4f}  (rung {args.rung:g})')
+    print(f'Stages : {args.stages}')
 
     print('\n[crop] cropping query...')
     t0 = time.perf_counter()
@@ -204,17 +244,23 @@ def main() -> int:
     base_mpp = wsi.base_mpp
     timings['crop'] = time.perf_counter() - t0
 
-    encoder = None
-    mpp_est = args.mpp   # ground-truth substitute unless stage 1 runs below
+    # Stage 1's output, or its ground-truth substitute when stage 1 is skipped:
+    # the true mpp, routed by the rule KnnEstMpp routes by.
+    estimate = SimpleNamespace(
+        estimated_mpp=args.mpp,
+        chosen_level=wsi.coarser_level_for_downsample(args.mpp / base_mpp))
     ok = True
 
     # ONE mask, built once, whichever stages run -- stage 1's own reference
     # bank and stage 2's retriever have to agree on what counts as tissue,
     # the same reason `LocaScopePipeline.build()` builds it once and hands it
     # to both rather than letting each stage segment its own.
-    print('\n[mask] building tissue mask...')
+    print('\n[mask] reading the tissue mask...')
     t0 = time.perf_counter()
-    mask = mask_cfg_from_args(args).build(wsi, device)
+    mask, hit = masks.mask(wsi)
+    masks.close()
+    print(f'  {"cache hit" if hit else "segmented (cache miss)"}: '
+          f'{cache_root(args.mask_cache_job, "mask")}')
     before = len(mask.raw())
     if not args.filter:
         mask = mask.raw()
@@ -226,23 +272,19 @@ def main() -> int:
     if 1 in args.stages:
         print('\n[1] KnnEstMpp...')
         t0 = time.perf_counter()
-        mpp_est, encoder = run_stage1(wsi, mask, query_qc, args, device)
+        estimate = run_stage1(wsi, mask, query_qc, args, device)
         timings['1. estimate mpp'] = time.perf_counter() - t0
-        ok &= abs(mpp_est - args.mpp) / args.mpp < 0.20
+        ok &= abs(estimate.estimated_mpp - args.mpp) / args.mpp < 0.20
     else:
         print('\n[1] SKIPPED -- using ground-truth mpp as the stage-1 substitute')
 
     if 2 in args.stages:
-        if encoder is None:
-            print('\n[encoder] loading (no stage 1 to reuse one from)...')
-            encoder = load_encoder(args, device)
-
-        print('\n[2] GigaPathSlidingWinSimRot...')
+        print('\n[2] SlidingWinSimRot...')
         t0 = time.perf_counter()
         retriever, retrieval_result = run_stage2(
-            wsi, encoder, mask, query_np, mpp_est, args)
+            wsi, mask, query_np, estimate, args, device)
         timings['2. retrieval'] = time.perf_counter() - t0
-        ret_err = dist_um(retrieval_result.best_x0, retrieval_result.best_y0,
+        ret_err = dist_um(*retrieval_result.origin_l0(retrieval_result.best),
                           args, base_mpp)
         tol_um = args.tile * retrieval_result.ds * base_mpp
         print(f'  distance to GT: {ret_err:.1f} um  (tolerance {tol_um:.1f} um)')
@@ -251,7 +293,7 @@ def main() -> int:
     if 3 in args.stages:
         print('\n[3] SIFT + RANSAC...')
         t0 = time.perf_counter()
-        sift_result = run_stage3(retriever, query_qc, retrieval_result, args)
+        sift_result = run_stage3(wsi, query_qc, retrieval_result, args)
         timings['3. sift ransac'] = time.perf_counter() - t0
         if sift_result.success:
             sift_err = dist_um(sift_result.x0, sift_result.y0, args, base_mpp)

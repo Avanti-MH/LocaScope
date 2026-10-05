@@ -48,6 +48,7 @@ import random
 import os
 import resource
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -155,7 +156,7 @@ def _overlap_cfg(enabled: bool) -> OverlapConfig:
 
 def _method_specs(args) -> list:
     """`[{'kind', 'encoder', 'classifier', 'reduction', 'weights',
-    'weights_path', 'needs_mask'}, ...]` -- DESCRIPTORS only, nothing built.
+    'weights_path'}, ...]` -- DESCRIPTORS only, nothing built.
 
     Building is deferred to `_instantiate` and happens ONE METHOD AT A TIME
     in `run_stage1_compare`, not all up front: every method here loads a
@@ -174,8 +175,7 @@ def _method_specs(args) -> list:
     specs = []
     for name in args.knn_encoder:
         specs.append(dict(kind='knn', encoder=name, classifier='',
-                          reduction='', loss='', read_level='', weights='', weights_path=None,
-                          needs_mask=True))
+                          reduction='', loss='', read_level='', weights='', weights_path=None))
     for weights in args.classifier_weights:
         try:
             ckpt = torch.load(weights, map_location='cpu')
@@ -215,8 +215,7 @@ def _method_specs(args) -> list:
             # would share a label. `read_label_of` reads `pyramid` off a
             # checkpoint saved before the read mode existed.
             read_level=read_label_of(ckpt.get('args')),
-            weights=os.path.basename(weights), weights_path=weights,
-            needs_mask=False))
+            weights=os.path.basename(weights), weights_path=weights))
     for weights in args.prototype_weights:
         try:
             ckpt = torch.load(weights, map_location='cpu')
@@ -233,12 +232,11 @@ def _method_specs(args) -> list:
         specs.append(dict(
             kind='prototype', encoder=ckpt['encoder'],
             classifier=f'proto:{arm}', reduction='', loss='', read_level='',
-            weights=os.path.basename(weights), weights_path=weights,
-            needs_mask=True))
+            weights=os.path.basename(weights), weights_path=weights))
     if args.classic:
         specs.append(dict(kind='classic', encoder='classic', classifier='',
                           reduction='', loss='', read_level='', weights='',
-                          weights_path=None, needs_mask=True))
+                          weights_path=None))
     if not specs:
         raise ValueError(
             'stage1_compare needs at least one method: pass --knn-encoder, '
@@ -427,6 +425,11 @@ def run_stage1_compare(args, out_dir: Path) -> int:
         # accuracies are not results.
         test_names = list_names(dataset=f'{dataset_id}#{args.split}',
                                 split_job=args.split_cache_job)
+        if args.n_wsi > len(test_names):
+            raise ValueError(
+                f'--n-wsi {args.n_wsi} but {dataset_id}#{args.split} holds '
+                f'{len(test_names)} slide(s); a shorter list than asked for '
+                f"would be read as the run's size")
         slides_by_dataset[dataset_id] = test_names[:args.n_wsi]
         print(f'{dataset_id}: {len(slides_by_dataset[dataset_id])} slide(s) '
              f'from the recorded {args.split} split '
@@ -495,6 +498,11 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             print(f'  [SKIP] failed to build: {type(exc).__name__}: {exc}  '
                  f'[{_mem_snapshot(device)}]')
             continue
+        # Where a method's time goes, summed over its FoVs. Read and simulate do
+        # not depend on the method, so if they dominate, they are repeated
+        # work the method-outer loop could do once.
+        t_build = t_read = t_sim = t_fwd = t_vote = 0.0
+        n_fov = 0
 
         for dataset_id, names in slides_by_dataset.items():
             for wsi_name in names:
@@ -506,10 +514,9 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                 reader = SlideReader(wsi)
                 photo = ReadSpec(*sensor_size(args.ratio, args.mpixels))
 
-                if spec['needs_mask']:
-                    estimator.build(wsi, mask=mask)
-                else:
-                    estimator.build(wsi)
+                t0 = time.perf_counter()
+                estimator.build(wsi, mask=mask)
+                t_build += time.perf_counter() - t0
 
                 for pos in positions:
                     gt_ds = pos['rung']
@@ -524,7 +531,9 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                     # value for mpp_error_relative.
                     rung = min(DEFAULT_RUNGS,
                               key=lambda r: abs(np.log(gt_ds) - np.log(r)))
+                    t0 = time.perf_counter()
                     image = reader.read(pos['x'], pos['y'], photo, gt_ds)
+                    t_read += time.perf_counter() - t0
                     if image is None:
                         continue
                     # The rng is the FoV's own, so every method is shown the
@@ -532,8 +541,11 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                     # each method then got its own augmentation and rotation
                     # of one FoV, and the comparison was paired on the
                     # position only.
+                    t0 = time.perf_counter()
                     query = simulate_microscope_photo(
                         image, rng=fov_rng(args.seed, dataset_id, wsi_name, pos))
+                    t_sim += time.perf_counter() - t0
+                    n_fov += 1
                     fov = dict(
                         dataset=dataset_id, wsi_name=wsi_name,
                         x=pos['x'], y=pos['y'],
@@ -547,11 +559,18 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                         weights=spec['weights'])
 
                     if spec['kind'] not in VOTING_KINDS:
+                        t0 = time.perf_counter()
                         rows.append(result_row(fov, estimator.estimate(query), ''))
+                        t_fwd += time.perf_counter() - t0
                         continue
                     # One forward pass, every vote rule over it.
+                    t0 = time.perf_counter()
                     patches = estimator.query_patches(query)
                     probs = estimator.patch_probs(query)
+                    if device.type == 'cuda':
+                        torch.cuda.synchronize()
+                    t_fwd += time.perf_counter() - t0
+                    t0 = time.perf_counter()
                     classes = [float(d) for d in estimator.classes_ds]
                     stats = fov_stats(probs, classes, gt_ds)
                     weights = {name: QUALITY_SIGNALS[name](probs, patches)
@@ -579,11 +598,16 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                         fov, classes_ds=classes,
                         probs=[[round(float(v), 5) for v in row]
                                for row in probs.detach().float().cpu()])) + '\n')
+                    t_vote += time.perf_counter() - t0
                 wsi.close()
 
         # Freed before the NEXT spec's build -- this is the whole point of
         # the method-outer loop: only one method's encoder(s) are ever
         # resident at once.
+        total = t_read + t_sim + t_fwd + t_vote
+        print(f'  [time] build {t_build:.0f}s (all slides)  {n_fov} FoVs  read {t_read:.0f}s  simulate {t_sim:.0f}s  '
+              f'forward {t_fwd:.0f}s  vote+write {t_vote:.0f}s  '
+              f'({total / max(n_fov, 1):.2f} s/FoV)', flush=True)
         del estimator
         if device.type == 'cuda':
             torch.cuda.empty_cache()

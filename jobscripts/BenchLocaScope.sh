@@ -57,14 +57,14 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 GT_CSV="$RESULT_ROOT"/MultiBatch1440/gt.csv
 IMAGES="$RESULT_ROOT"/MultiBatch1440/images
 
-TOPK=20               # candidates enumerated per shot (free)
-SIFT_TOPK=5           # candidates SIFT actually verifies (K passes per shot)
-LIMIT=0               # 0 = every shot; set 30 for a costing run first
+TOPK="${TOPK:-20}"               # candidates enumerated per shot (free)
+SIFT_TOPK="${SIFT_TOPK:-5}"           # candidates SIFT actually verifies (K passes per shot)
+LIMIT="${LIMIT:-0}"               # 0 = every shot; set 30 for a costing run first
 RESUME=1              # 1 = keep the existing metrics.csv and skip what is in it
                       # RESUME=0 DELETES an existing metrics.csv, it does not
                       # append to it. A resumed run is the only way to keep the
                       # rows a walltime kill left behind.
-DRAW_FIGURES=0        # 4-panel diagnostics for the first N shots, -1 = all.
+DRAW_FIGURES="${DRAW_FIGURES:-0}"        # 4-panel diagnostics for the first N shots, -1 = all.
                       # -1 on a 2500-shot corpus is ~6 GB of png; prefer
                       # DRAW_FAILURES below, which draws only what went wrong.
 DRAW_FAILURES="confident-wrong wrong no-recall"
@@ -99,10 +99,10 @@ echo
 # result/cache/ rather than result/<job>/ because it is shared across jobs and
 # `make clean-job JOB=cache` is then the one obvious way to purge it.
 #
-# A HIT SKIPS THE ENCODE, NOT THE READ. Stage 3 reads pixels back out of the
-# container (stage3_localization/SIFT_RANSAC.py:150), so the container is built
-# either way: 278s read + 285s encode on BRACS_1228 L0, so roughly half. The
-# other half needs lazy per-region reads; see log/TODO.log.
+# A HIT SKIPS THE ENCODE AND THE READ: stage 3 reads its own crop on demand
+# (SiftRansacLocalizer.read_wsi_crop), so no region is held in memory and a
+# cached level costs no slide read at all. Before 2026-10-05 the whole region
+# was read either way, 278 s of a 563 s BRACS_1228 L0 build.
 #
 # Addressed by the mask recipe (seg_id / region_id) and the grid, under
 # result/cache/<job>_features/<encoder>/; the encoder's full identity (config +

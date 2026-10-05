@@ -62,6 +62,9 @@ from dump_function._sift_plot import (draw_localization_row,            # noqa: 
 from dump_function._locascope_plots import (append_metrics_row,         # noqa: E402
                                             load_metrics_csv, render_all)
 from LocaScopePipeline import LocaScopePipeline, LocaScopeQueryResult    # noqa: E402
+from stage1_estimation.KnnEstMpp import knn_estimator                     # noqa: E402
+from stage2_retrieval.SlidingWinSimRot import (                   # noqa: E402
+    SlidingWinSimRot, SlidingWinSimRotConfig)
 from TissueMaskConfig import add_mask_args, mask_cfg_from_args           # noqa: E402
 from stage3_localization.SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names             # noqa: E402
@@ -157,17 +160,14 @@ def verify_candidates(pl, retriever, qc, candidates: list, n: int,
         'sift_best_inliers':  None,
         'sift_best_rank':     None,
     }
-    for c in candidates[:n]:
+    # A localizer of its own, sharing the pipeline's reader: pl.localizer still
+    # holds rank 1's crop and keypoints, which the shot figure draws afterwards.
+    loc = SiftRansacLocalizer(min_inliers=pl.localizer.min_inliers,
+                              padding=pl.localizer.padding).build(pl.localizer.reader)
+    for i in range(min(n, len(candidates))):
+        rank = i + 1
         try:
-            loc = SiftRansacLocalizer(
-                reader=retriever.reader, grids=retriever.grids,
-                level=retriever.level,
-                query=qc, location=c,
-                min_inliers=pl.refiner_min_inliers, padding=pl.refiner_padding,
-            )
-            loc.read_wsi_crop()
-            loc.detect_and_match()
-            rf = loc.estimate_homography()
+            rf = loc.localize(qc, candidates, rank=i)
         except Exception:
             # A candidate whose crop is empty or whose match set is degenerate
             # is simply a candidate that failed verification, which is the same
@@ -181,12 +181,12 @@ def verify_candidates(pl, retriever, qc, candidates: list, n: int,
             # the first candidate that clears min_inliers. Neither is obviously
             # right and both are free to evaluate once this is here.
             out['sift_best_inliers'] = inl
-            out['sift_best_rank']    = c.rank
+            out['sift_best_rank']    = rank
         if out['sift_verified_rank'] is None and rf.success:
-            out['sift_verified_rank'] = c.rank
+            out['sift_verified_rank'] = rank
         if out['sift_hit_rank'] is None and \
                 _dist_px(rf.center_x0, rf.center_y0, gt_cx, gt_cy) <= hit_tol_px:
-            out['sift_hit_rank'] = c.rank
+            out['sift_hit_rank'] = rank
     return out
 
 
@@ -208,7 +208,7 @@ def compute_metrics(row: dict, result: LocaScopeQueryResult, base_mpp: float,
                     about its own centre, so this is comparable for every
                     orientation. Prefer this one when reading results.
 
-    `candidates` is the retriever's top-K (retriever.top_k()). It turns one
+    `candidates` is the retriever's top-K (retriever.candidate_set(k=...)). It turns one
     number, did the winner land, into the rank at which the truth first
     appears, which is the difference between a ranking that can be rescued by
     verifying K candidates and features that never scored the right window at
@@ -298,21 +298,23 @@ def compute_metrics(row: dict, result: LocaScopeQueryResult, base_mpp: float,
     if result.est_mpp is not None:
         m['mpp_err_rel'] = abs(result.est_mpp - effective) / effective
     if result.retrieval is not None:
-        r = result.retrieval
-        m['retr_rotation'] = int(r.best_rotation)
-        m['rot_correct']   = (int(r.best_rotation) == m['gt_rot_deg'])
-        m['retr_x0']    = int(r.best_x0)
-        m['retr_y0']    = int(r.best_y0)
-        m['retr_score'] = float(r.best_score)
-        d = _dist_px(r.best_x0, r.best_y0, gt_x, gt_y)
+        cs = result.retrieval
+        best = cs.best
+        bx0, by0 = cs.origin_l0(best)
+        m['retr_rotation'] = int(best.rotation)
+        m['rot_correct']   = (int(best.rotation) == m['gt_rot_deg'])
+        m['retr_x0']    = int(bx0)
+        m['retr_y0']    = int(by0)
+        m['retr_score'] = float(best.score)
+        d = _dist_px(bx0, by0, gt_x, gt_y)
         m['retr_err_px'] = d
         m['retr_err_um'] = d * base_mpp
         # Retrieval centre: the matched window holds the ROTATED query, so the
         # footprint's width/height swap for the 90/270 steps.
-        w_l0, h_l0 = ((rect_h_l0, rect_w_l0) if r.best_rotation in (90, 270)
+        w_l0, h_l0 = ((rect_h_l0, rect_w_l0) if best.rotation in (90, 270)
                       else (rect_w_l0, rect_h_l0))
-        rcx = r.best_x0 + w_l0 / 2.0
-        rcy = r.best_y0 + h_l0 / 2.0
+        rcx = bx0 + w_l0 / 2.0
+        rcy = by0 + h_l0 / 2.0
         dc = _dist_px(rcx, rcy, gt_cx, gt_cy)
         m['retr_center_x']      = round(rcx, 1)
         m['retr_center_y']      = round(rcy, 1)
@@ -322,14 +324,15 @@ def compute_metrics(row: dict, result: LocaScopeQueryResult, base_mpp: float,
         if candidates:
             m['retr_topk_n']     = len(candidates)
             m['retr_hit_tol_px'] = round(hit_tol_px, 1)
-            for c in candidates:
+            for rank, c in enumerate(candidates, 1):
                 cw, ch = ((rect_h_l0, rect_w_l0) if c.rotation in (90, 270)
                           else (rect_w_l0, rect_h_l0))
-                d = _dist_px(c.x0 + cw / 2.0, c.y0 + ch / 2.0, gt_cx, gt_cy)
+                cx0, cy0 = candidates.origin_l0(c)
+                d = _dist_px(cx0 + cw / 2.0, cy0 + ch / 2.0, gt_cx, gt_cy)
                 if m['retr_hit_rank'] is None and d <= hit_tol_px:
-                    m['retr_hit_rank'] = c.rank
+                    m['retr_hit_rank'] = rank
                 if m['retr_hit_rank_strict'] is None and d <= hit_tol_strict_px:
-                    m['retr_hit_rank_strict'] = c.rank
+                    m['retr_hit_rank_strict'] = rank
                 if m['retr_hit_rank'] and m['retr_hit_rank_strict']:
                     break
         if sift_topk:
@@ -368,10 +371,9 @@ def draw_shot_figure(
         return None
 
     loc       = result.localizer
-    retriever = result.retriever
-    # Query grid dims come from the WINNING rotation's container
-    qc_win = retriever.qc_by_rot[result.retrieval.best_rotation]
-    q_rows, q_cols = qc_win.grid.grid_rows, qc_win.grid.grid_cols
+    # The best window's tile grid: the query's, turned to the winning rotation
+    q_rows, q_cols = result.retrieval.window_tiles(result.retrieval.best,
+                                                   result.query_qc)
 
     crop_img, crop_x0, crop_y0, crop_ds = read_zoom_crop(
         pl.wsi, result.retrieval, pl.tile_size, q_rows, q_cols, zoom_pad=zoom_pad,
@@ -386,6 +388,7 @@ def draw_shot_figure(
         crop_kps      = loc.crop_kps,
         good_matches  = loc.good_matches,
         retrieval     = result.retrieval,
+        query_qc      = result.query_qc,
         sift          = result.refine,
         gt_x          = int(row['gt_x']),
         gt_y          = int(row['gt_y']),
@@ -395,8 +398,7 @@ def draw_shot_figure(
         crop_y0       = crop_y0,  crop_ds = crop_ds,
         zoom_pad      = zoom_pad,
         query_rows    = q_rows, query_cols = q_cols,
-        crop_origin_x = loc.crop_origin_x or 0,
-        crop_origin_y = loc.crop_origin_y or 0,
+        crop_origin_l0 = loc.crop_origin_l0,
         gt_center     = ((metrics['gt_center_x'], metrics['gt_center_y'])
                          if metrics else None),
         retr_center   = ((metrics['retr_center_x'], metrics['retr_center_y'])
@@ -406,7 +408,7 @@ def draw_shot_figure(
     )
     fig.suptitle(
         f'{row["filename"]}   L{row["level"]} -> routed L{result.routed_level}   '
-        f'gt_rot={row["rot_deg"]} deg  retr_rot={result.retrieval.best_rotation} deg   '
+        f'gt_rot={row["rot_deg"]} deg  retr_rot={result.retrieval.best.rotation} deg   '
         f'est_mpp={result.est_mpp:.4f}  effective_mpp={float(row["effective_mpp"]):.4f}',
         fontsize=11,
     )
@@ -472,14 +474,14 @@ def draw_recall_figure(
     panels are directly comparable; anchoring both through read_anchored_crop
     keeps that arithmetic in one place.
     """
-    if result.retrieval is None or result.retriever is None:
+    if result.retrieval is None or result.query_qc is None:
         return None
     gt_cx, gt_cy = m.get('gt_center_x'), m.get('gt_center_y')
     if gt_cx is None or gt_cy is None:
         return None
 
-    qc_win = result.retriever.qc_by_rot[result.retrieval.best_rotation]
-    q_rows, q_cols = qc_win.grid.grid_rows, qc_win.grid.grid_cols
+    q_rows, q_cols = result.retrieval.window_tiles(result.retrieval.best,
+                                                   result.query_qc)
     ds = result.retrieval.ds
     w_l0, h_l0 = _gt_footprint_wh(row, pl.base_mpp)
 
@@ -487,11 +489,10 @@ def draw_recall_figure(
         pl.wsi, gt_cx - w_l0 / 2.0, gt_cy - h_l0 / 2.0, ds,
         pl.tile_size, q_rows, q_cols, zoom_pad)
     pk_crop, px0, py0, pds = read_anchored_crop(
-        pl.wsi, result.retrieval.best_x0, result.retrieval.best_y0, ds,
+        pl.wsi, *result.retrieval.origin_l0(result.retrieval.best), ds,
         pl.tile_size, q_rows, q_cols, zoom_pad)
 
     d_um = m.get('retr_center_err_um')
-    scores = getattr(result.retrieval, 'scores_by_rotation', None)
     summary = [
         f'{row["filename"]}',
         '',
@@ -500,9 +501,10 @@ def draw_recall_figure(
         f'est_mpp         {result.est_mpp:.4f}',
         f'nominal_mpp     {float(row["nominal_mpp"]):.4f}',
         '',
-        f'retr_score      {result.retrieval.best_score:.4f}',
-        f'retr_region     {result.retrieval.best_region_index}',
-        f'retr_rot        {result.retrieval.best_rotation} deg'
+        f'retr_score      {result.retrieval.best.score:.4f}',
+        f'retr_region     {result.retrieval.best.region_index} '
+        f'{result.retrieval.best.lattice} r{result.retrieval.best.row} c{result.retrieval.best.col}',
+        f'retr_rot        {result.retrieval.best.rotation} deg'
         f'   (gt {row["rot_deg"]} deg)',
         f'top-K enumerated {m.get("retr_topk_n")}',
         f'truth rank      {m.get("retr_hit_rank") or "NOT IN ANY CANDIDATE"}',
@@ -511,9 +513,6 @@ def draw_recall_figure(
         f'FoV footprint   {w_l0:.0f} x {h_l0:.0f} px @L0',
         f'one tile        {pl.tile_size * ds:.0f} px @L0',
     ]
-    if scores:
-        summary += ['', 'score by rotation'] + [
-            f'  {k:>3} deg      {v:.4f}' for k, v in sorted(scores.items())]
 
     fig, axes = plt.subplots(1, 4, figsize=(30, 7))
     draw_recall_row(
@@ -682,9 +681,15 @@ def main():
     # Passed only when given, so gigapath and uni2 build byte-identical configs
     # to before this option existed and their identity_id does not move.
     over = {'head': args.head} if args.head else {}
-    encoder = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
-        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')\
-        .build(device, multi_gpu=args.multi_gpu)
+    encoder_cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
+        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')
+    # Stage 2 builds its encoder from that config; stage 1 builds its own
+    # (fp32, one card) from the registry name. All three stages are built once
+    # here and bound to each slide by its pipeline's build().
+    retriever = SlidingWinSimRot(
+        SlidingWinSimRotConfig(encoder_cfg), device,
+        multi_gpu=args.multi_gpu)
+    encoder = retriever.encoder
     if args.multi_gpu:
         import torch as _t
         print(f'  DataParallel over {_t.cuda.device_count()} GPU(s)', flush=True)
@@ -693,6 +698,8 @@ def main():
     mask_cfg = mask_cfg_from_args(args)
     print(f'Mask       : {args.seg}   seg_id {mask_cfg.seg_id()}   region_id '
           f'{mask_cfg.region_id()}', flush=True)
+    estimator = knn_estimator(args.encoder, mask_cfg, device=device)
+    localizer = SiftRansacLocalizer()
 
     all_metrics: List[dict] = []
     metrics_path = os.path.join(out_dir, 'metrics.csv')
@@ -751,7 +758,7 @@ def main():
         print(f'== {wsi_tag}  n_shots={len(wsi_rows)}  path={wsi_path}', flush=True)
         try:
             pl = LocaScopePipeline(
-                wsi_path, encoder, mask_cfg=mask_cfg,
+                wsi_path, estimator, retriever, localizer, mask_cfg=mask_cfg,
                 feature_store_root=(
                     None if not args.features_cache_job else
                     Cache.cache_root(args.features_cache_job, 'features') / enc_tag),
@@ -781,7 +788,7 @@ def main():
             want_fig = (args.draw_figures == -1
                         or n_drawn < args.draw_figures)
             t0 = time.time()
-            # top_k reads the retriever's similarity maps, which only live on
+            # candidate_set reads the retriever's similarity maps, which only live on
             # the retriever object and only until the next shot overwrites
             # them, so it has to be kept and read here rather than later.
             # --draw-failures only knows the shot failed after the metrics
@@ -796,12 +803,13 @@ def main():
             tile_l0 = strict_tol = hit_tol = None
             if result.retrieval is not None:
                 tile_l0 = strict_tol = pl.tile_size * result.retrieval.ds
-                hit_tol = pl.refiner_padding * strict_tol
+                hit_tol = pl.localizer.padding * strict_tol
 
             cands = None
             if args.topk > 0 and result.retriever is not None and tile_l0:
                 try:
-                    cands = result.retriever.top_k(args.topk)
+                    # the maps of THIS shot are still on the retriever
+                    cands = result.retriever.candidate_set(k=args.topk)
                 except Exception as e:
                     print(f'      [topk failed] {type(e).__name__}: {e}', flush=True)
 

@@ -120,7 +120,7 @@ from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMask import TissueRegion                                  # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
-from stage2_retrieval.GigaPathSlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
+from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
 from camera import Render                                           # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
@@ -144,7 +144,7 @@ MARGIN_TILES = 1
 #:     q_grid = qFeatureMap.main_feature_grid()   # fixed: always main kernel
 #:
 #: and scores BOTH the WSI main grid and the WSI overlap grid against that one
-#: kernel ("combinations 1+3", GigaPathSlidingWinSimRot.SlidingWindowSimilarity).
+#: kernel ("combinations 1+3", SlidingWinSimRot.SlidingWindowSimilarity).
 #: `qFeatureMap.overlap_feature_grid()` is never called. Cutting them anyway
 #: encoded 12 tiles per FoV -- 37.5% of every forward pass -- and threw the
 #: result away. The WSI side keeps overlap=True, because its overlap grid IS

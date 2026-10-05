@@ -254,10 +254,12 @@ class ClassifierEstMpp(IdentifiedBuild):
 
         self.wsi = None
 
-    def build(self, wsi: Union[openslide.OpenSlide, str]) -> 'ClassifierEstMpp':
+    def build(self, wsi: Union[openslide.OpenSlide, str],
+              mask=None) -> 'ClassifierEstMpp':
         '''Bind the WSI queries will be routed against. Cheap -- see this
         module's docstring for why, in contrast to a KNN estimator's own
-        `build_samples`/`build_ref_features`.'''
+        `build_samples`/`build_ref_features`. `mask` is accepted and unused:
+        nothing is sampled from the slide (StageInterface.MppEstimator).'''
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi = wsi
