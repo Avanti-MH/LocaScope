@@ -2080,48 +2080,6 @@ class TileSampler:
                     out.append((i, j, r))
         return out
 
-    def drop_holes(self, reader=None, min_valid: float = 0.95
-                   ) -> Dict[float, int]:
-        """Discard tiles the scanner never photographed. READS PIXELS.
-
-        A separate pass and not part of `sample()`, deliberately: everything
-        `sample` does is geometry over the mask, which is what makes
-        `preflight` able to say whether a corpus can be cut before a single
-        pixel is read. Folding a read into it would cost that property for a
-        check most callers do not need.
-
-        Whether a tile was photographed is a property of (location, LEVEL) and
-        cannot be answered from a mask or shared between rungs -- a corrupt
-        stored tile at level 0 says nothing about level 3. So this runs per
-        tile, and a chain is re-checked at every rung: the retired
-        `ReferenceSampler` called that out for the same reason ("a correspondence with holes in it is not
-        a correspondence").
-
-        Returns how many went, per rung. Chains that lose a member become
-        incomplete rather than silently short, which `stacks()` then drops and
-        `incomplete()` names.
-        """
-        r = reader if reader is not None else self.wsi
-        if not hasattr(r, 'read_region_valid'):
-            raise TypeError(
-                f'{type(r).__name__} has no read_region_valid, so it cannot '
-                f'say which pixels were photographed. SafeSlide does; a plain '
-                f'OpenSlide reports a hole as transparent and every RGB '
-                f'conversion then paints it black, which is indistinguishable '
-                f'from densely stained tissue by area alone')
-        gone: Dict[float, int] = {}
-        keep = []
-        for sample in self.samples:
-            m = sample.meta
-            valid = r.read_region_valid((m.x, m.y), m.level,
-                                        (m.read_size, m.read_size))
-            if float(np.asarray(valid).mean()) < min_valid:
-                gone[m.ds] = gone.get(m.ds, 0) + 1
-                continue
-            keep.append(sample)
-        self.samples = keep
-        return gone
-
     # ── persistence ─────────────────────────────────────────────────────────
 
     #: `index.csv` columns. The three axes join the coordinates, so every
