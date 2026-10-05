@@ -120,7 +120,13 @@ def _sampling_recipe_id(args) -> str:
         f'native_only={args.native_only}', f'tile={args.tile}',
         f'n_per_rung={args.n_per_rung}', f'seed={args.seed}',
         f'mpixels={args.mpixels}', f'ratio={args.ratio}',
-        f'datasets={",".join(sorted(args.datasets))}', f'n_wsi={args.n_wsi}'])
+        f'datasets={",".join(sorted(args.datasets))}', f'n_wsi={args.n_wsi}']
+        # --overlap draws other FoVs (jitter top-up at the coarse rungs), so it
+        # is part of "which FoVs". Missing until 2026-10-05: a val run without
+        # it and a test run with it shared one name, and the test analysis
+        # read thresholds fitted on another draw. Appended only when set, so
+        # a run without it keeps the name it always had.
+        + (['overlap=True'] if args.overlap else []))
     sampler_id = hashlib.sha256(parts.encode()).hexdigest()[:8]
     mask_cfg = MASK_RECIPES[args.seg]
     # split last and outside the hash: a val and a test run of one recipe

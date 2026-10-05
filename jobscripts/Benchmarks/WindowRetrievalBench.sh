@@ -136,7 +136,8 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # Nothing of a slide's tile features is kept: the reference is streamed one tile
 # row at a time and scored as it goes, so memory does not grow with the slide.
 #
-# The masks are read from MASK_CACHE_JOB's cache; unset, THIS job's own.
+# The masks are read from MASK_CACHE_JOB's cache, MppRoutingHead by default
+# (it holds every #val slide); MASK_CACHE_JOB="" uses this job's own.
 
 # --encoder is always passed: it names the output directory (TAG) above, so the
 # script and the bench have to agree on it.
@@ -156,7 +157,8 @@ COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
 [ "${GATES_ONLY:-0}" = "1" ] && COMMON="$COMMON --gates-only"   # the seconds-long checks, then stop
 [ -n "${ARMS:-}" ] && COMMON="$COMMON --arms $ARMS"
 [ -n "${SEG:-}" ] && COMMON="$COMMON --seg $SEG"
-[ -n "${MASK_CACHE_JOB:-}" ] && COMMON="$COMMON --mask-cache-job $MASK_CACHE_JOB"
+MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # "" = this job's own
+[ -n "$MASK_CACHE_JOB" ] && COMMON="$COMMON --mask-cache-job $MASK_CACHE_JOB"
 [ -n "${SPLIT_CACHE_JOB:-}" ] && COMMON="$COMMON --split-cache-job $SPLIT_CACHE_JOB"
 [ -n "${EXTRA_ARGS:-}" ] && COMMON="$COMMON $EXTRA_ARGS"
 

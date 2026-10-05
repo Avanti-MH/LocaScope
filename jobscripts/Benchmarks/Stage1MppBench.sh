@@ -69,14 +69,14 @@ else:
 # CACHES: masks and draws go to result/cache/Stage1MppBench_{mask,sampler}/.
 # To reuse another job's instead (say the masks ExtractPreTiles already made):
 #   MASK_CACHE_JOB=ExtractPreTiles SAMPLER_CACHE_JOB=ExtractPreTiles sbatch ...
-MASK_CACHE_JOB="${MASK_CACHE_JOB:-}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # its masks cover every val slide and the first test slides; "" = this job's own
 SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB:-}"
 TILE="${TILE:-256}"
 MPIXELS="${MPIXELS:-1.475}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
 
 DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
-N_WSI="${N_WSI:-9}"
+N_WSI="${N_WSI:-5}"   # per dataset; val and test must match, n_wsi is in the file name the test run finds the val thresholds by
 STAGE1_N_PER_RUNG="${STAGE1_N_PER_RUNG:-20}"
 RATIO="${RATIO:-45:32}"
 # SEG: hsv (free, no model) / hest (DeepLabV3+ResNet-50) / uni2 (fits a PCA
