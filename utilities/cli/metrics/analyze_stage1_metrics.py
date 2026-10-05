@@ -39,6 +39,19 @@ question here needs it -- not the other way round.
                                               distribution, on voting rows
                                               (bench_stage1_mpp.fov_stats)
 
+        split                                 -- val / test (2026-10-05)
+        risk_*                                -- FoVVote.diagnose: the raw
+                                              quantities FoV_Vote.md's danger
+                                              section names for the row's rule
+
+View 3 carries a 95% FoV-bootstrap interval (resampled inside each rung) and
+the log2-rung MAE. Section 6 is FoV_Vote.md's risk flags: prevalence,
+accuracy flagged / unflagged and the risk ratio, overall and per GT rung.
+Their thresholds are fitted on a VAL run (`--fit-thresholds`, which refuses a
+test file) and read back for test (`--thresholds auto` finds the val file of
+the same recipe). Section 7 is risk-coverage per rule; `*_confusion.csv`
+holds every method's confusion matrix.
+
 Section 5 is the vote diagnosis: which rule wins, where two rules disagree
 which is right, how much any rule could gain (some-rule-right vs best rule),
 and every rule's accuracy inside strata of the FoV distribution -- so the
@@ -169,7 +182,9 @@ def head_recipe_of(classifier: str, reduction: str) -> str:
 
 
 def encoder_of(method: str) -> str:
-    return method.split('+', 1)[0]
+    """The encoder a method label runs on: `knn:uni2` and `uni2+mlp+fixed`
+    are both uni2, so the figure draws them in one subplot."""
+    return method.split("+", 1)[0].split(":")[-1]
 
 #: The rung vocabulary every row's `rung` column is drawn from -- DsLadder's
 #: own default, duplicated here (not imported) because DsLadder.py has no
@@ -218,7 +233,10 @@ def method_of(row: dict) -> str:
     `head_name` already fixed once for the mlp variants (see the module
     docstring's csv columns note).
     """
-    parts = [cell(row, 'encoder') or '?']
+    # KnnEstMpp has no head, so its label was the bare encoder name and read
+    # like the encoder itself; 'knn:' says which method it is (2026-10-05)
+    encoder = cell(row, 'encoder') or '?'
+    parts = [f'knn:{encoder}' if kind_of(row) == 'knn' else encoder]
     for k in ('classifier', 'reduction'):
         v = cell(row, k)
         if v:
@@ -276,6 +294,15 @@ def is_correct(row: dict) -> bool:
     return ds is not None and rung is not None and nearest_rung(ds) == rung
 
 
+def log2_rung_error(row: dict) -> float:
+    """How many octaves the estimate's rung is from the true one -- 0 when
+    right, 1 one rung off on the 2x ladder, 2 for ds 4 called 16."""
+    ds, rung = num(row, 'estimated_ds'), num(row, 'rung')
+    if ds is None or rung is None:
+        return float('nan')
+    return abs(math.log2(nearest_rung(ds)) - math.log2(rung))
+
+
 def mpp_error_relative(row: dict):
     est, gt = num(row, 'estimated_mpp'), num(row, 'gt_mpp')
     return None if not est or not gt else abs(est - gt) / gt
@@ -298,7 +325,9 @@ def score_group(rows: list) -> dict:
     native = [boolean(r, 'native') for r in rows]
     out = dict(n=len(rows),
               level_accuracy=sum(correct) / len(rows) if rows else float('nan'),
-              mpp_error_relative_p50=pctl(err, 50))
+              mpp_error_relative_p50=pctl(err, 50),
+              log2_rung_mae=(sum(log2_rung_error(r) for r in rows) / len(rows)
+                             if rows else float('nan')))
     for label, keep in (('native', [n is True for n in native]),
                         ('resampled', [n is False for n in native])):
         sub = [c for c, k in zip(correct, keep) if k]
@@ -361,15 +390,49 @@ def overall(rows: list) -> list:
     g = collections.defaultdict(list)
     for r in by_rung:
         g[(r['dataset'], r['method'])].append(r)
+    ci = bootstrap_ci(rows)
+
+    def mean_of(grp, key):
+        v = [r[key] for r in grp if not math.isnan(r[key])]
+        return sum(v) / len(v) if v else float('nan')
+
     out = []
     for (dataset, method), grp in sorted(g.items()):
-        accs = [r['level_accuracy'] for r in grp if not math.isnan(r['level_accuracy'])]
-        errs = [r['mpp_error_relative_p50'] for r in grp
-               if not math.isnan(r['mpp_error_relative_p50'])]
+        lo, hi = ci.get((dataset, method), (float('nan'), float('nan')))
         out.append(dict(
             dataset=dataset, method=method, n_rungs=len(grp),
-            mean_level_accuracy=sum(accs) / len(accs) if accs else float('nan'),
-            mean_mpp_error_relative_p50=sum(errs) / len(errs) if errs else float('nan')))
+            mean_level_accuracy=mean_of(grp, 'level_accuracy'),
+            ci95_lo=lo, ci95_hi=hi,
+            mean_log2_rung_mae=mean_of(grp, 'log2_rung_mae'),
+            mean_mpp_error_relative_p50=mean_of(grp, 'mpp_error_relative_p50')))
+    return out
+
+
+#: Bootstrap resamples, and the seed, for every interval this file reports.
+BOOTSTRAP_N = 1000
+BOOTSTRAP_SEED = 0
+
+
+def bootstrap_ci(rows: list) -> dict:
+    """{(dataset, method): (lo, hi)} -- 95% interval of the equal-rung
+    accuracy, resampling FoVs with replacement INSIDE each rung so every
+    resample keeps the per-rung weighting the point estimate has. FoV is the
+    unit, as FoV_Vote.md asks: one FoV's rows of one method are one draw."""
+    import numpy as np                                            # noqa: PLC0415
+    g = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in rows:
+        g[(cell(r, 'dataset'), method_of(r))][num(r, 'rung')].append(
+            1.0 if is_correct(r) else 0.0)
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    out = {}
+    for key, by_rung in g.items():
+        per_rung = []
+        for vals in by_rung.values():
+            v = np.asarray(vals)
+            idx = rng.integers(0, len(v), size=(BOOTSTRAP_N, len(v)))
+            per_rung.append(v[idx].mean(axis=1))
+        means = np.mean(np.stack(per_rung), axis=0)
+        out[key] = (float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5)))
     return out
 
 
@@ -436,10 +499,12 @@ def print_overall(rows: list) -> None:
     dw = _col_width(rows, 'dataset', 10)
     mw = _col_width(rows, 'method', 10)
     print(f'  {"dataset":{dw}s}{"method":{mw}s}{"n_rungs":>8s}'
-         f'{"mean_acc":>10s}{"mean_mpp_err_p50":>18s}')
+         f'{"mean_acc":>10s}{"ci95":>16s}{"log2_mae":>10s}{"mean_mpp_err_p50":>18s}')
     for r in rows:
         print(f'  {r["dataset"] or "":{dw}s}{r["method"]:{mw}s}{r["n_rungs"]:>8d}'
-             f'{r["mean_level_accuracy"]:>10.3f}{r["mean_mpp_error_relative_p50"]:>18.3f}')
+             f'{r["mean_level_accuracy"]:>10.3f}'
+             f'{"[%.3f, %.3f]" % (r["ci95_lo"], r["ci95_hi"]):>16s}'
+             f'{r["mean_log2_rung_mae"]:>10.3f}{r["mean_mpp_error_relative_p50"]:>18.3f}')
 
 
 # ── 5. vote diagnosis ────────────────────────────────────────────────────────
@@ -463,6 +528,10 @@ STRATA = (
                             ('0.5-0.75', 0.5, 0.75), ('>=0.75', 0.75, 9.0)]),
     ('fov_argmax_log2_spread', [('=0', 0.0, 0.0), ('0-0.5', 1e-9, 0.5),
                                 ('0.5-1', 0.5, 1.0), ('>=1', 1.0, 99.0)]),
+    # the share of patches backing the chosen class -- FoV_Vote.md #1 asks
+    # for the error rate against it
+    ('risk_winner_support', [('<0.25', 0.0, 0.25), ('0.25-0.5', 0.25, 0.5),
+                             ('0.5-0.75', 0.5, 0.75), ('>=0.75', 0.75, 9.0)]),
     ('fov_pooled_margin', [('<0.1', 0.0, 0.1), ('0.1-0.3', 0.1, 0.3),
                            ('0.3-0.6', 0.3, 0.6), ('>=0.6', 0.6, 9.0)]),
 )
@@ -541,25 +610,42 @@ def vote_summary(acc_rows: list) -> list:
     return out
 
 
-def vote_pairwise(paired: dict) -> list:
-    """(dataset, kind, a, b): on the FoVs where rule a and rule b answer
-    differently, how often each one was the right one."""
-    g = collections.defaultdict(lambda: [0, 0, 0, 0])
-    for (dataset, kind, _, _), by_vote in paired.items():
+def sign_test_p(wins: int, losses: int) -> float:
+    """Two-sided exact sign test on the discordant pairs (McNemar exact):
+    the chance of a split at least this lopsided if both rules were equally
+    good. Ties (both right, both wrong) carry no information and are out."""
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    k = min(wins, losses)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def vote_pairwise(paired: dict, by_method: bool = False) -> list:
+    """(dataset, kind, a, b) -- or per checkpoint when `by_method` -- paired
+    on the FoV: both right, only a, only b, both wrong; how often the two
+    answer differently at all; and the sign test on only-a vs only-b."""
+    g = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
+    for (dataset, kind, base, _), by_vote in paired.items():
         votes = sorted(by_vote)
         for i, a in enumerate(votes):
             for b in votes[i + 1:]:
                 ra, rb = by_vote[a], by_vote[b]
-                s = g[(dataset, kind, a, b)]
-                s[0] += 1
-                if nearest_rung(num(ra, 'estimated_ds')) != nearest_rung(num(rb, 'estimated_ds')):
-                    s[1] += 1
-                    s[2] += is_correct(ra)
-                    s[3] += is_correct(rb)
-    return [dict(dataset=d, kind=k, vote_a=a, vote_b=b, n_fov=n, n_disagree=nd,
-                 a_right=ar, b_right=br,
-                 disagree_rate=nd / n if n else float('nan'))
-            for (d, k, a, b), (n, nd, ar, br) in sorted(g.items())]
+                ca, cb = is_correct(ra), is_correct(rb)
+                s = g[(dataset, kind, base if by_method else '', a, b)]
+                s[0 if ca and cb else 1 if ca else 2 if cb else 3] += 1
+                s[4] += (nearest_rung(num(ra, 'estimated_ds'))
+                         != nearest_rung(num(rb, 'estimated_ds')))
+    out = []
+    for (d, k, m, a, b), (both, a_only, b_only, neither, differ) in sorted(g.items()):
+        n = both + a_only + b_only + neither
+        out.append(dict(dataset=d, kind=k, method=m, vote_a=a, vote_b=b, n_fov=n,
+                        both_right=both, a_only=a_only, b_only=b_only,
+                        both_wrong=neither, n_disagree=differ,
+                        disagree_rate=differ / n if n else float('nan'),
+                        sign_p=sign_test_p(a_only, b_only)))
+    return out
 
 
 def vote_oracle(paired: dict) -> list:
@@ -663,20 +749,14 @@ def print_vote_diagnosis(summary, pairwise, oracle, strata, distribution) -> Non
         print(f'  {r["dataset"]:18s}{r["kind"]:11s}{r["vote"]:{vw}s}'
               f'n={r["n_methods"]:<4d}acc {r["mean_acc"]:.3f}   best on '
               f'{r["n_best"]:>3d}   mean rank {r["mean_rank"]:.2f}')
-    mismatch = [p for p in pairwise
-                if {p['vote_a'], p['vote_b']} == {'mean_probability', 'quality_weighted'}
-                and p['n_disagree']]
-    if mismatch:
-        print('\n  [FAIL] quality_weighted differs from mean_probability on '
-              f'{sum(p["n_disagree"] for p in mismatch)} FoVs -- with no quality '
-              'signal they are one rule, so the dispatch is broken')
-    print('\n  5b. where two rules disagree, which one is right   (pooled per kind)')
+    print('\n  5b. paired, per FoV: only a right / only b right, how often they '
+          'answer differently, sign test   (pooled per kind; per checkpoint in the csv)')
     for p in pairwise:
         if not p['n_disagree']:
             continue
-        print(f'  {p["dataset"]:18s}{p["kind"]:11s}{p["vote_a"]:>20s} vs '
-              f'{p["vote_b"]:<20s} disagree {p["disagree_rate"]:6.1%} '
-              f'({p["n_disagree"]})   right: {p["a_right"]:>5d} / {p["b_right"]:<5d}')
+        print(f'  {p["dataset"]:18s}{p["kind"]:11s}{p["vote_a"]:>24s} vs '
+              f'{p["vote_b"]:<24s} only {p["a_only"]:>5d} / {p["b_only"]:<5d}  '
+              f'differ {p["disagree_rate"]:6.1%}  p={p["sign_p"]:.3g}')
     print('\n  5c. headroom per checkpoint: some rule right / every rule right / '
           'best single rule')
     mw = _col_width(oracle, 'method', 10, cap=60)
@@ -705,6 +785,214 @@ def print_vote_diagnosis(summary, pairwise, oracle, strata, distribution) -> Non
               f'margin {d["fov_pooled_margin_p50"]:.2f}  '
               f'spread {d["fov_argmax_log2_spread_p50"]:.2f}  '
               f'gt_p {d["fov_gt_prob_p50"]:.2f}  reachable {d["gt_reachable_share"]:.2f}')
+
+
+# ── 6. risk flags (FoV_Vote.md, 危險分布) ─────────────────────────────────────
+#
+# One flag per rule, the doc's own definition, over the raw `risk_*` columns
+# FoVVote.diagnose wrote. Every threshold is FITTED ON VAL and read back for
+# test: the doc forbids choosing one after looking at test. The quantile each
+# is fitted at is fixed here, before either split is scored -- moving it
+# after seeing test is the same mistake one step removed.
+
+def rule_of(row: dict) -> str:
+    """The FoVVote rule of a row's vote label: 'patch_class_median:upper' ->
+    'patch_class_median'."""
+    return (cell(row, 'vote') or '').split(':', 1)[0]
+
+
+#: tau name -> (rule, column, quantile in percent, fit on |value|)
+THRESHOLD_SPECS = {
+    'hm_margin_majority_low': ('hard_majority', 'risk_margin_majority_p50', 25, False),
+    'hm_margin_dissent_high': ('hard_majority', 'risk_margin_dissent_p50', 75, False),
+    'pcm_top1_low':           ('patch_class_median', 'risk_top1_p50', 25, False),
+    'mlr_support_low':        ('median_log_rung', 'risk_winner_prob', 25, False),
+    'slp_veto':               ('sum_log_probability', 'risk_min_p_winner', 10, False),
+    'qw_corr_high':           ('quality_weighted', 'risk_corr_w_e', 75, True),
+    'qw_ess_low':             ('quality_weighted', 'risk_ess_frac', 25, False),
+}
+
+
+def _finite(v) -> bool:
+    return v is not None and not math.isnan(v)
+
+
+def fit_thresholds(rows: list, source: str) -> dict:
+    """Every tau of THRESHOLD_SPECS, per (kind, vote label) -- a prototype's
+    near-uniform probabilities and a classifier's sharp ones are different
+    scales, so one tau across both would flag one of them almost always.
+    Refuses a file with test rows in it."""
+    splits = {cell(r, 'split') for r in rows}
+    if 'test' in splits or None in splits:
+        sys.exit(f'--fit-thresholds needs a val run (bench --split val); this file '
+                 f'has split {sorted(s or "unrecorded" for s in splits)}')
+    groups = collections.defaultdict(list)
+    for r in rows:
+        if cell(r, 'vote'):
+            groups[(kind_of(r), cell(r, 'vote'))].append(r)
+    values = {}
+    for (kind, label), grp in sorted(groups.items()):
+        for tau, (rule, column, q, use_abs) in THRESHOLD_SPECS.items():
+            if rule_of(grp[0]) != rule:
+                continue
+            v = [num(r, column) for r in grp]
+            v = [abs(x) if use_abs else x for x in v if _finite(x)]
+            if v:
+                values[f'{kind}|{label}|{tau}'] = dict(value=pctl(v, q), n=len(v))
+    return dict(source=os.path.abspath(source),
+                specs={k: dict(rule=r, column=c, quantile=q, abs=a)
+                       for k, (r, c, q, a) in THRESHOLD_SPECS.items()},
+                values=values)
+
+
+def flags_of(row: dict, taus: dict) -> dict:
+    """{flag name: True/False} for this row's rule; a flag whose tau was not
+    fitted is left out, never guessed."""
+    rule, v = rule_of(row), (lambda c: num(row, c))
+    key = f'{kind_of(row)}|{cell(row, "vote")}|'
+    tau = lambda name: (taus.get(key + name) or {}).get('value')     # noqa: E731
+    out = {}
+    if rule == 'mean_probability':
+        out['few_confident_decide'] = (v('risk_mean_not_mode') == 1
+                                       and (v('risk_winner_support') or 0) < 0.5)
+    elif rule == 'hard_majority':
+        out['vote_tie'] = v('risk_vote_tie') == 1
+        lo, hi = tau('hm_margin_majority_low'), tau('hm_margin_dissent_high')
+        if lo is not None and hi is not None:
+            a, b = v('risk_margin_majority_p50'), v('risk_margin_dissent_p50')
+            out['weak_majority_strong_dissent'] = (_finite(a) and _finite(b)
+                                                   and a < lo and b > hi)
+    elif rule == 'patch_class_median':
+        out['median_split'] = (v('risk_median_split') or 0) >= 1
+        t = tau('pcm_top1_low')
+        if t is not None:
+            out['unsure_median_or_split'] = (out['median_split']
+                                             or (v('risk_top1_p50') or 0) < t)
+    elif rule == 'median_log_rung':
+        out['unsupported_snap'] = v('risk_support_count') == 0
+        t = tau('mlr_support_low')
+        if t is not None:
+            out['weak_or_unsupported_snap'] = (out['unsupported_snap']
+                                               or (v('risk_winner_prob') or 0) < t)
+    elif rule == 'sum_log_probability':
+        out['loo_unstable'] = v('risk_loo_unstable') == 1
+        t = tau('slp_veto')
+        if t is not None:
+            out['single_patch_veto'] = (out['loo_unstable']
+                                        and (v('risk_min_p_winner') or 0) < t)
+    elif rule == 'quality_weighted':
+        out['weighting_flipped'] = v('risk_flip') == 1
+        c, e = tau('qw_corr_high'), tau('qw_ess_low')
+        if c is not None and e is not None:
+            corr = v('risk_corr_w_e')
+            out['weight_tracks_scale_or_collapses'] = (
+                (_finite(corr) and abs(corr) > c) or (v('risk_ess_frac') or 1) < e)
+    return out
+
+
+def flag_report(rows: list, taus: dict) -> list:
+    """Per (dataset, kind, rule label, flag) overall and per GT rung: n,
+    prevalence, accuracy flagged / unflagged, and the error risk ratio
+    (error rate flagged / unflagged) -- the doc's five numbers."""
+    g = collections.defaultdict(lambda: [0, 0, 0, 0])     # n_f, right_f, n_u, right_u
+    for r in rows:
+        if not cell(r, 'vote'):
+            continue
+        right = is_correct(r)
+        for name, hit in flags_of(r, taus).items():
+            for rung in ('all', num(r, 'rung')):
+                s = g[(cell(r, 'dataset'), kind_of(r), cell(r, 'vote'), name, rung)]
+                if hit:
+                    s[0] += 1
+                    s[1] += right
+                else:
+                    s[2] += 1
+                    s[3] += right
+    out = []
+    for (d, k, label, name, rung), (nf, rf, nu, ru) in g.items():
+        acc_f = rf / nf if nf else float('nan')
+        acc_u = ru / nu if nu else float('nan')
+        err_u = 1 - acc_u
+        out.append(dict(dataset=d, kind=k, vote=label, flag=name, rung=rung,
+                        n=nf + nu, n_flagged=nf, prevalence=nf / (nf + nu),
+                        acc_flagged=acc_f, acc_unflagged=acc_u,
+                        risk_ratio=((1 - acc_f) / err_u) if nf and nu and err_u > 0
+                        else float('nan')))
+    return sorted(out, key=lambda r: (r['dataset'] or '', r['kind'], r['vote'], r['flag'],
+                                      -1 if r['rung'] == 'all' else r['rung']))
+
+
+def print_flags(report: list, have_taus: bool) -> None:
+    print('\n' + BAR)
+    print('6. RISK FLAGS   (FoV_Vote.md; pooled over checkpoints of a kind, '
+          'all rungs -- per rung in the csv)')
+    print(BAR)
+    if not have_taus:
+        print('  thresholds not loaded: only the flags that need none are shown. '
+              'Fit them on a val run (--fit-thresholds), then pass --thresholds.')
+    for r in report:
+        if r['rung'] != 'all':
+            continue
+        print(f'  {r["dataset"]:18s}{r["kind"]:11s}{r["vote"]:26s}{r["flag"]:34s}'
+              f'prev {r["prevalence"]:6.1%}  acc flagged {r["acc_flagged"]:.3f} '
+              f'/ unflagged {r["acc_unflagged"]:.3f}  risk x{r["risk_ratio"]:.2f}')
+
+
+# ── 7. risk-coverage and confusion ───────────────────────────────────────────
+
+def risk_coverage(rows: list) -> list:
+    """Per (dataset, method label) of a voting method: answer only the most
+    confident share of FoVs and report the error among those. Confidence is
+    `risk_winner_prob` (mean probability on the chosen class), the one score
+    every rule has. AURC is the mean error over every coverage -- lower is
+    better; pooled over rungs, unlike the equal-rung accuracy."""
+    g = collections.defaultdict(list)
+    for r in rows:
+        conf = num(r, 'risk_winner_prob')
+        if cell(r, 'vote') and _finite(conf):
+            g[(cell(r, 'dataset'), kind_of(r), base_method_of(r),
+               cell(r, 'vote'))].append((conf, not is_correct(r)))
+    out = []
+    for (d, k, m, label), pts in sorted(g.items()):
+        pts.sort(key=lambda p: -p[0])
+        errs, cum = [], 0
+        for i, (_, wrong) in enumerate(pts, 1):
+            cum += wrong
+            errs.append(cum / i)
+        row = dict(dataset=d, kind=k, method=m, vote=label, n=len(pts),
+                   aurc=sum(errs) / len(errs))
+        for cov in (25, 50, 75, 100):
+            row[f'err_at_{cov}'] = errs[max(0, math.ceil(len(errs) * cov / 100) - 1)]
+        out.append(row)
+    return out
+
+
+def print_risk_coverage(rc: list) -> None:
+    print('\n' + BAR)
+    print('7. RISK-COVERAGE   (mean over checkpoints of a kind; AURC lower is '
+          'better; per checkpoint in the csv)')
+    print(BAR)
+    g = collections.defaultdict(list)
+    for r in rc:
+        g[(r['dataset'], r['kind'], r['vote'])].append(r)
+    for (d, k, label), grp in sorted(g.items()):
+        mean = lambda key: sum(r[key] for r in grp) / len(grp)       # noqa: E731
+        print(f'  {d:18s}{k:11s}{label:26s}n={len(grp):<4d}AURC {mean("aurc"):.3f}   '
+              f'error at 25/50/75/100% coverage  {mean("err_at_25"):.3f} '
+              f'{mean("err_at_50"):.3f} {mean("err_at_75"):.3f} {mean("err_at_100"):.3f}')
+
+
+def confusion(rows: list) -> list:
+    """Per (dataset, method label): how many FoVs of true rung X were called
+    rung Y. Long format, one row per non-empty cell."""
+    g = collections.Counter()
+    for r in rows:
+        ds = num(r, 'estimated_ds')
+        if ds is not None:
+            g[(cell(r, 'dataset'), method_of(r), num(r, 'rung'), nearest_rung(ds))] += 1
+    return [dict(dataset=d, method=m, gt_rung=gt, pred_rung=pr, n=n)
+            for (d, m, gt, pr), n in sorted(g.items(), key=lambda kv: (
+                kv[0][0] or '', kv[0][1], kv[0][2] or 0, kv[0][3] or 0))]
 
 
 # ── plotting ─────────────────────────────────────────────────────────────────
@@ -817,6 +1105,13 @@ def main() -> int:
     ap.add_argument('--all-votes', action='store_true',
                     help='views 1-2 and the figure for every vote rule, not '
                          f'only {DEFAULT_VOTE}')
+    ap.add_argument('--fit-thresholds', action='store_true',
+                    help='fit every risk threshold on THIS file, which must be '
+                         'a val run, and write <csv stem>_thresholds.json')
+    ap.add_argument('--thresholds', default=None,
+                    help="a thresholds json fitted on val, or 'auto' for the "
+                         "val file of this same recipe (<..>_test.csv -> "
+                         "<..>_val_thresholds.json)")
     args = ap.parse_args()
 
     with open(args.csv_path, newline='') as f:
@@ -859,6 +1154,38 @@ def main() -> int:
                             ('vote_strata_per_method', vote_strata(rows, by_method=True)),
                             ('fov_distribution', distribution)):
             write_rows(table, os.path.join(csv_dir, f'{csv_stem}_{name}.csv'))
+        taus = {}
+        if args.fit_thresholds:
+            fitted = fit_thresholds(rows, args.csv_path)
+            out = os.path.join(csv_dir, f'{csv_stem}_thresholds.json')
+            with open(out, 'w') as fh:
+                json.dump(fitted, fh, indent=1)
+            print(f'\n  thresholds fitted on this val file: {out}  '
+                  f'({len(fitted["values"])} values)')
+            taus = fitted['values']
+        elif args.thresholds:
+            path = args.thresholds
+            if path == 'auto':
+                path = (args.csv_path[:-len('_test.csv')] + '_val_thresholds.json'
+                        if args.csv_path.endswith('_test.csv') else '')
+            if path and os.path.exists(path):
+                with open(path) as fh:
+                    taus = json.load(fh)['values']
+                print(f'\n  thresholds from {path}')
+            else:
+                print(f'\n  [warn] no thresholds file ({path or "not a _test.csv"}); '
+                      f'run the val split with --fit-thresholds first')
+        flags = flag_report(rows, taus)
+        print_flags(flags, bool(taus))
+        rc = risk_coverage(rows)
+        print_risk_coverage(rc)
+        print()
+        write_rows(flags, os.path.join(csv_dir, f'{csv_stem}_risk_flags.csv'))
+        write_rows(rc, os.path.join(csv_dir, f'{csv_stem}_risk_coverage.csv'))
+        write_rows(vote_pairwise(paired, by_method=True),
+                   os.path.join(csv_dir, f'{csv_stem}_vote_pairwise_per_method.csv'))
+    write_rows(confusion(rows), os.path.join(csv_dir, f'{csv_stem}_confusion.csv'))
+    write_rows(view3, os.path.join(csv_dir, f'{csv_stem}_overall.csv'))
 
     print('\n' + BAR)
     print('4. PNG (accuracy vs rung, one file per dataset -- see plot_dataset)')

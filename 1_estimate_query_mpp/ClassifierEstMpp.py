@@ -52,7 +52,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import openslide
@@ -271,6 +271,15 @@ class ClassifierEstMpp(IdentifiedBuild):
         '''The ds each class of `patch_probs` stands for, in column order.'''
         return self.rungs
 
+    def query_patches(self, query: np.ndarray) -> list:
+        '''The patches the vote is over: the query's MAIN tiles only -- the
+        overlap corners exist for coverage, not for this vote. Same
+        convention as `KnnEstMpp.estimate`. Public so a caller weighting
+        patches (FoVVote.QUALITY_SIGNALS) weights these very tiles.'''
+        qc = QueryPatchContainer(query)
+        qc.extract_all(self.cfg.tile_size, overlap=True)
+        return list(qc.iter_main())
+
     def patch_probs(self, query: np.ndarray) -> torch.Tensor:
         '''`[M, num_classes]`: each main patch's softmax over `classes_ds`.
         The half of `estimate` that runs the model -- a caller comparing vote
@@ -280,21 +289,20 @@ class ClassifierEstMpp(IdentifiedBuild):
                 'call build(wsi) before estimate() -- chosen_ds/chosen_mpp '
                 'need the target WSI\'s own pyramid and base_mpp')
 
-        qc = QueryPatchContainer(query)
-        qc.extract_all(self.cfg.tile_size, overlap=True)
-        # MAIN patches only -- the overlap corners extracted above exist for
-        # coverage, not for this vote. Same convention as `KnnEstMpp.estimate`.
-        patches = torch.from_numpy(np.stack(list(qc.iter_main())))
+        patches = torch.from_numpy(np.stack(self.query_patches(query)))
 
         with torch.no_grad():
             raw = self._raw_of(patches)
             logits = self.head(raw, self._num_prefix)      # [M, num_classes]
             return torch.softmax(logits, dim=1)              # [M, num_classes]
 
-    def from_probs(self, probs: torch.Tensor, vote: str) -> ClassifierEstMppResult:
+    def from_probs(self, probs: torch.Tensor, vote: str, *,
+                   weights: Optional[torch.Tensor] = None,
+                   tie_rule: str = 'lower') -> ClassifierEstMppResult:
         '''The other half: one `FoVVote` rule over `patch_probs`, then the
         snap to this WSI's pyramid.'''
-        predicted_class, vote_extra = fov_vote(vote, probs, rungs=self.rungs)
+        predicted_class, vote_extra = fov_vote(vote, probs, rungs=self.rungs,
+                                               weights=weights, tie_rule=tie_rule)
 
         base_mpp = self.wsi.base_mpp
         estimated_ds = self.rungs[predicted_class]

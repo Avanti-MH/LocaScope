@@ -399,6 +399,15 @@ class PrototypeEstMpp(IdentifiedBuild):
         this WSI's own native levels, set by `build`.'''
         return self.level_ds
 
+    def query_patches(self, query: np.ndarray) -> list:
+        '''The patches the vote is over: the query's MAIN tiles only, the
+        convention ClassifierEstMpp/KnnEstMpp both use. Public so a caller
+        weighting patches (FoVVote.QUALITY_SIGNALS) weights these very
+        tiles.'''
+        qc = QueryPatchContainer(query)
+        qc.extract_all(self.cfg.tile_size, overlap=True)
+        return list(qc.iter_main())
+
     def patch_probs(self, query: np.ndarray) -> torch.Tensor:
         '''`[N, K]`: each main patch's softmax over `classes_ds`. The half of
         `estimate` that runs the model -- a caller comparing vote rules
@@ -408,12 +417,7 @@ class PrototypeEstMpp(IdentifiedBuild):
                 'call build(wsi) before estimate() -- the reference bank '
                 'and chosen_ds/chosen_mpp both need the target WSI')
 
-        qc = QueryPatchContainer(query)
-        qc.extract_all(self.cfg.tile_size, overlap=True)
-        # MAIN patches only -- the overlap corners extracted above exist for
-        # coverage, not for this vote. Same convention ClassifierEstMpp/
-        # KnnEstMpp both use.
-        images = list(qc.iter_main())
+        images = self.query_patches(query)
 
         with torch.no_grad():
             query_vecs = self._encode_pool(images)                    # [N, D]
@@ -422,10 +426,13 @@ class PrototypeEstMpp(IdentifiedBuild):
             logits = self.head(query_vecs, support)                    # [N, K]
             return torch.softmax(logits, dim=1)
 
-    def from_probs(self, probs: torch.Tensor, vote: str) -> PrototypeEstMppResult:
+    def from_probs(self, probs: torch.Tensor, vote: str, *,
+                   weights: Optional[torch.Tensor] = None,
+                   tie_rule: str = 'lower') -> PrototypeEstMppResult:
         '''The other half: one `FoVVote` rule over `patch_probs`, then the
         snap to this WSI's pyramid.'''
-        predicted_idx, vote_extra = fov_vote(vote, probs, rungs=self.level_ds)
+        predicted_idx, vote_extra = fov_vote(vote, probs, rungs=self.level_ds,
+                                             weights=weights, tie_rule=tie_rule)
 
         base_mpp = self.wsi.base_mpp
         estimated_ds = self.level_ds[predicted_idx]

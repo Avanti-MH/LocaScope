@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 
 
@@ -141,12 +142,18 @@ def quality_weighted(probs: torch.Tensor,
     '''
     if weights is None:
         weights = torch.ones(probs.shape[0], dtype=probs.dtype, device=probs.device)
-    w = weights.clamp_min(0)
-    total_w = w.sum().clamp_min(1e-12)
-    weighted = (probs * w.unsqueeze(1)).sum(dim=0) / total_w  # [C]
+    w = weights.to(probs.device, probs.dtype).clamp_min(0)
+    # Every patch weighted out (a FoV of blank glass, or patches that all
+    # disagree) leaves nothing to average; argmax of a zero vector would
+    # silently answer class 0. Fall back to equal weights, and say so.
+    all_zero = bool(w.sum() <= 0)
+    if all_zero:
+        w = torch.ones_like(w)
+    weighted = (probs * w.unsqueeze(1)).sum(dim=0) / w.sum()  # [C]
     c = int(weighted.argmax())
     ess = float((w.sum() ** 2) / (w ** 2).sum().clamp_min(1e-12))
-    return c, dict(confidence=float(weighted[c]), effective_sample_size=ess)
+    return c, dict(confidence=float(weighted[c]), effective_sample_size=ess,
+                   all_zero_weights=float(all_zero))
 
 
 #: `--vote`'s registry, same idiom `Runtime.GENERATOR_CHOICES`/
@@ -181,3 +188,123 @@ def vote(name: str, probs: torch.Tensor, *, rungs: Optional[Sequence[float]] = N
     if name == 'median_log_rung' and rungs is None:
         raise ValueError('vote: median_log_rung needs rungs=')
     return VOTE_CHOICES[name](probs, rungs=rungs, weights=weights, tie_rule=tie_rule)
+
+
+# ── quality signals for `quality_weighted` (FoV_Vote.md #6) ──────────────────
+#
+# `quality_weighted` consumes a weight per patch and has no opinion on where
+# it came from; these are the two sources measured so far. Each takes the
+# patches AND their probabilities, so one call shape serves both.
+
+def tissue_weights(probs: torch.Tensor, patches: Sequence) -> torch.Tensor:
+    '''Share of each patch's pixels that are tissue, by `TissueSegFunc.
+    mask_hsv` -- the `hsv` mask recipe's own per-pixel rule, so no threshold
+    is invented here. A patch of blank glass weighs 0.
+
+    The doc's warning applies: a coarse-rung patch spans more slide and
+    meets more background, so this weight can correlate with scale.
+    `diagnose` reports corr(w, expected log-rung) to show whether it does.'''
+    from TissueSegFunc import mask_hsv                       # noqa: PLC0415
+    w = [float(mask_hsv(np.ascontiguousarray(p)).mean()) for p in patches]
+    return torch.tensor(w, dtype=probs.dtype, device=probs.device)
+
+
+def agreement_weights(probs: torch.Tensor, patches=None) -> torch.Tensor:
+    '''Share of the OTHER patches whose argmax equals this patch's: 1 when
+    every other patch picked the same class, 0 when none did. Leave-one-out
+    so a patch does not vote for itself.
+
+    Not an independent quality measure: it is computed from the same
+    probabilities it then weights, so it leans the mean toward the plurality
+    -- between mean_probability and hard_majority, not a cleaner signal.'''
+    m = probs.shape[0]
+    if m < 2:
+        return torch.ones(m, dtype=probs.dtype, device=probs.device)
+    z = probs.argmax(dim=1)
+    counts = torch.bincount(z, minlength=probs.shape[1])
+    return ((counts[z] - 1).to(probs.dtype) / (m - 1))
+
+
+QUALITY_SIGNALS: Dict[str, Callable[..., torch.Tensor]] = {
+    'tissue': tissue_weights,
+    'agree': agreement_weights,
+}
+
+
+# ── what each rule's danger looks like on one FoV (FoV_Vote.md, 危險分布) ──
+#
+# RAW quantities only. Every flag in the doc compares one of these to a
+# threshold, and the doc requires the thresholds to be fixed on validation
+# before test is looked at -- so the comparison happens in
+# analyze_stage1_metrics.py against a thresholds file fitted on val, never
+# here.
+
+def _margins(probs: torch.Tensor) -> torch.Tensor:
+    top = probs.topk(min(2, probs.shape[1]), dim=1).values
+    return top[:, 0] - top[:, 1] if top.shape[1] > 1 else top[:, 0]
+
+
+def _median_or_nan(x: torch.Tensor) -> float:
+    return float(x.median()) if x.numel() else float('nan')
+
+
+def diagnose(name: str, probs: torch.Tensor, c: int, *,
+             rungs: Optional[Sequence[float]] = None,
+             weights: Optional[torch.Tensor] = None) -> Dict[str, float]:
+    '''The quantities FoV_Vote.md's danger section names for rule `name`,
+    which chose class `c` on this FoV. Two are common to every rule --
+    `risk_winner_support` (share of patches whose argmax is `c`) and
+    `risk_winner_prob` (mean probability on `c`) -- because the risk-coverage
+    curve needs one confidence every rule has.'''
+    p = probs.detach().float().cpu()
+    m, n_cls = p.shape
+    z = p.argmax(dim=1)
+    counts = torch.bincount(z, minlength=n_cls)
+    out = dict(risk_winner_support=float(counts[c]) / m,
+               risk_winner_prob=float(p[:, c].mean()))
+    log_r = (torch.log2(torch.tensor([float(r) for r in rungs]))
+             if rungs is not None else None)
+
+    if name == 'mean_probability':
+        # #1: the mean winner is not the argmax mode, and fewer than half
+        # the patches back it -- a few confident patches decided
+        out['risk_mean_not_mode'] = float(c != int(counts.argmax()))
+    elif name == 'hard_majority':
+        # #2: weak majority, strong dissent; and plain ties
+        margin = _margins(p)
+        out['risk_margin_majority_p50'] = _median_or_nan(margin[z == c])
+        out['risk_margin_dissent_p50'] = _median_or_nan(margin[z != c])
+        top2 = counts.topk(min(2, n_cls)).values
+        out['risk_vote_tie'] = float(top2.shape[0] > 1 and top2[0] == top2[1])
+    elif name == 'patch_class_median':
+        # #3: the median patch is unsure, or the two middle values split
+        out['risk_top1_p50'] = float(p.max(dim=1).values.median())
+        zs = torch.sort(z).values
+        out['risk_median_split'] = (float(abs(int(zs[m // 2]) - int(zs[m // 2 - 1])))
+                                    if m % 2 == 0 else 0.0)
+    elif name == 'median_log_rung' and log_r is not None:
+        # #4: the snapped class has little probability and no patch picked it
+        e = (p * log_r).sum(dim=1)
+        out['risk_support_count'] = float(counts[c])
+        out['risk_snap_gap'] = abs(float(e.median()) - float(log_r[c]))
+        q = torch.quantile(e, torch.tensor([0.25, 0.75]))
+        out['risk_e_iqr'] = float(q[1] - q[0])
+    elif name == 'sum_log_probability':
+        # #5: one patch vetoes -- the winner's lowest patch probability, and
+        # whether leaving any single patch out changes the answer
+        logp = torch.log(p.clamp_min(1e-12))
+        s = logp.sum(dim=0)
+        out['risk_min_p_winner'] = float(p[:, c].min())
+        out['risk_loo_unstable'] = float(any(int((s - logp[i]).argmax()) != c
+                                             for i in range(m)) if m > 1 else 0.0)
+    elif name == 'quality_weighted' and weights is not None:
+        # #6: the weight follows scale, or collapses onto few patches; and
+        # whether weighting changed the answer at all
+        w = weights.detach().float().cpu()
+        out['risk_ess_frac'] = float((w.sum() ** 2) / (w ** 2).sum().clamp_min(1e-12)) / m
+        out['risk_flip'] = float(c != int(p.mean(dim=0).argmax()))
+        if log_r is not None and m > 1 and float(w.std()) > 0:
+            e = (p * log_r).sum(dim=1)
+            if float(e.std()) > 0:
+                out['risk_corr_w_e'] = float(torch.corrcoef(torch.stack([w, e]))[0, 1])
+    return out

@@ -17,11 +17,11 @@ slide, from the RECORDED test split) across --n-wsi slides of every
     ClassicEstMpp      --classic, the fingerprint baseline
 
 The two that vote over per-patch probabilities (classifier, prototype) run
-once per FoV and are scored under every --votes rule (FoVVote), one row per
+once per FoV and are scored under every --rules rule (RULES), one row per
 rule, with the FoV's distribution statistics (`fov_stats`) on each row. Writes
 
-    result/<SLURM_JOB_NAME or Stage1MppBench>/<sampler_id>_<seg_id>_<region_id>.csv
-    result/<...>/<sampler_id>_<seg_id>_<region_id>_probs.jsonl
+    result/<SLURM_JOB_NAME or Stage1MppBench>/<sampler_id>_<seg_id>_<region_id>_<split>.csv
+    result/<...>/<sampler_id>_<seg_id>_<region_id>_<split>_probs.jsonl
 
 -- one row per (FoV, method, vote), and the raw per-patch probabilities once
 per (FoV, voting method). utilities/cli/metrics/analyze_stage1_metrics.py
@@ -63,7 +63,7 @@ from KnnEstMpp import (KnnEstMpp, KnnEstMppConfig,                  # noqa: E402
 from ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
 from PrototypeEstMpp import PrototypeEstMpp, PrototypeEstMppConfig  # noqa: E402
 from estimate_mpp_classic import ClassicEstMpp, ClassicEstMppConfig  # noqa: E402
-from FoVVote import VOTE_CHOICES                                    # noqa: E402
+from FoVVote import QUALITY_SIGNALS, diagnose                      # noqa: E402
 from StageInterface import EstMppResult                             # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
@@ -123,7 +123,10 @@ def _sampling_recipe_id(args) -> str:
         f'datasets={",".join(sorted(args.datasets))}', f'n_wsi={args.n_wsi}'])
     sampler_id = hashlib.sha256(parts.encode()).hexdigest()[:8]
     mask_cfg = MASK_RECIPES[args.seg]
-    return f'{sampler_id}_{mask_cfg.seg_id()}_{mask_cfg.region_id()}'
+    # split last and outside the hash: a val and a test run of one recipe
+    # differ only in it, which is how analyze_stage1_metrics finds the val
+    # thresholds for a test file
+    return f'{sampler_id}_{mask_cfg.seg_id()}_{mask_cfg.region_id()}_{args.split}'
 
 
 def _overlap_cfg(enabled: bool) -> OverlapConfig:
@@ -262,8 +265,31 @@ def _instantiate(spec: dict, args, device):
 
 
 #: Methods whose answer is a vote over per-patch class probabilities, so every
-#: `--votes` rule can be applied to ONE forward pass (`patch_probs`).
+#: `--rules` rule can be applied to ONE forward pass (`patch_probs`).
 VOTING_KINDS = ('classifier', 'prototype')
+
+#: The rules compared, FoV_Vote.md's six with the variants it asks for: both
+#: tie rules of the patch class median ("分別報告 lower／upper tie rule"), and
+#: the quality-weighted mean under each quality signal in
+#: `FoVVote.QUALITY_SIGNALS`. label -> (FoVVote rule, doc section, options).
+#: Plain `quality_weighted` (no signal) is not a rule here: it IS
+#: mean_probability, and is used only as a check on every FoV.
+RULES = {
+    'mean_probability':         ('mean_probability', 1, {}),
+    'hard_majority':            ('hard_majority', 2, {}),
+    'patch_class_median:lower': ('patch_class_median', 3, {'tie_rule': 'lower'}),
+    'patch_class_median:upper': ('patch_class_median', 3, {'tie_rule': 'upper'}),
+    'median_log_rung':          ('median_log_rung', 4, {}),
+    'sum_log_probability':      ('sum_log_probability', 5, {}),
+    'quality_weighted:tissue':  ('quality_weighted', 6, {'signal': 'tissue'}),
+    'quality_weighted:agree':   ('quality_weighted', 6, {'signal': 'agree'}),
+}
+
+
+def _class_of(result, classes) -> int:
+    """The class index a result chose -- `estimated_ds` is classes[i] exactly."""
+    return min(range(len(classes)),
+               key=lambda i: abs(math.log(classes[i] / result.estimated_ds)))
 
 
 def fov_stats(probs: torch.Tensor, classes_ds, gt_ds: float) -> dict:
@@ -389,13 +415,15 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     for dataset_id in args.datasets:
         # READ, never written: the split make_split.py recorded
         # (--split-cache-job, default MakeSplit) -- the same file the
-        # checkpoints were selected on, so this bench never scores on a slide
-        # a checkpoint saw in val.
-        test_names = list_names(dataset=f'{dataset_id}#test',
+        # checkpoints were selected on. Under --split test this never scores
+        # on a slide a checkpoint saw in val; under --split val it does, on
+        # purpose: val is where the risk thresholds are fixed, and its
+        # accuracies are not results.
+        test_names = list_names(dataset=f'{dataset_id}#{args.split}',
                                 split_job=args.split_cache_job)
         slides_by_dataset[dataset_id] = test_names[:args.n_wsi]
         print(f'{dataset_id}: {len(slides_by_dataset[dataset_id])} slide(s) '
-             f'from the recorded test split '
+             f'from the recorded {args.split} split '
              f'({", ".join(slides_by_dataset[dataset_id])})')
 
     # Segmentation + position sampling, ONCE per slide, shared by every
@@ -506,7 +534,7 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                         h=query.shape[0], w=query.shape[1],
                         rung=rung, native=pos['native'],
                         gt_mpp=gt_mpp, gt_ds=gt_ds,
-                        kind=spec['kind'],
+                        split=args.split, kind=spec['kind'],
                         encoder=spec['encoder'], classifier=spec['classifier'],
                         reduction=spec['reduction'], loss=spec['loss'],
                         read_level=spec['read_level'],
@@ -516,19 +544,30 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                         rows.append(result_row(fov, estimator.estimate(query), ''))
                         continue
                     # One forward pass, every vote rule over it.
+                    patches = estimator.query_patches(query)
                     probs = estimator.patch_probs(query)
                     classes = [float(d) for d in estimator.classes_ds]
                     stats = fov_stats(probs, classes, gt_ds)
-                    picked = {}
-                    for vote_name in args.votes:
-                        result = estimator.from_probs(probs, vote_name)
-                        picked[vote_name] = result.estimated_ds
-                        rows.append({**result_row(fov, result, vote_name), **stats})
-                    # quality_weighted with no quality signal IS
-                    # mean_probability; a disagreement means the dispatch is
-                    # broken, not that one rule is better.
-                    if ('quality_weighted' in picked and 'mean_probability' in picked
-                            and picked['quality_weighted'] != picked['mean_probability']):
+                    weights = {name: QUALITY_SIGNALS[name](probs, patches)
+                               for name in {RULES[r][2]['signal'] for r in args.rules
+                                            if 'signal' in RULES[r][2]}}
+                    for label in args.rules:
+                        vote_name, _, opts = RULES[label]
+                        w = weights.get(opts.get('signal'))
+                        result = estimator.from_probs(
+                            probs, vote_name, weights=w,
+                            tie_rule=opts.get('tie_rule', 'lower'))
+                        risk = diagnose(vote_name, probs, _class_of(result, classes),
+                                        rungs=classes, weights=w)
+                        if w is not None:
+                            risk['risk_w_mean'] = float(w.float().mean())
+                        rows.append({**result_row(fov, result, label), **stats, **risk})
+                    # quality_weighted with NO signal is mean_probability by
+                    # construction; a disagreement means the dispatch is
+                    # broken, not that one rule is better. Checked on every
+                    # FoV, never written as a row.
+                    if (estimator.from_probs(probs, 'quality_weighted').estimated_ds
+                            != estimator.from_probs(probs, 'mean_probability').estimated_ds):
                         n_vote_mismatch += 1
                     probs_out.write(json.dumps(dict(
                         fov, classes_ds=classes,
@@ -626,11 +665,16 @@ def main() -> int:
                         help='also run ClassicEstMpp, the fingerprint baseline '
                              '(--knn-samples tiles per level, --classic-k)')
     parser.add_argument('--classic-k', type=int, default=3)
-    parser.add_argument('--votes', nargs='+', default=list(VOTE_CHOICES),
-                        choices=list(VOTE_CHOICES),
-                        help='FoVVote rules applied to every classifier and '
+    parser.add_argument('--rules', nargs='+', default=list(RULES),
+                        choices=list(RULES),
+                        help='vote rules applied to every classifier and '
                              'prototype method, all from one forward pass; '
-                             'one row per rule. Default: every rule')
+                             'one row per rule. Default: every rule (RULES)')
+    parser.add_argument('--split', choices=('val', 'test'), default='test',
+                        help='which recorded split to draw slides from. '
+                             'FoV_Vote.md fixes every risk threshold on val '
+                             'before test is looked at: run val first, '
+                             'analyze it with --fit-thresholds, then test')
 
     parser.add_argument(
         '--out', default=None,

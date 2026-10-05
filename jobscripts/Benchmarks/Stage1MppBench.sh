@@ -133,9 +133,13 @@ fi
 # CLASSIC=1 (default) runs the fingerprint baseline ClassicEstMpp; 0 skips it.
 CLASSIC="${CLASSIC:-1}"
 CLASSIC_K="${CLASSIC_K:-3}"
-# VOTES: FoVVote rules every classifier and prototype method is scored under,
-# all from one forward pass. Empty (default) = every rule.
-VOTES="${VOTES:-}"
+# RULES: vote rules (bench_stage1_mpp.RULES) every classifier and prototype
+# method is scored under, all from one forward pass. Empty (default) = all.
+# SPLIT: val or test (default). FoV_Vote.md fixes every risk threshold on val
+# before test is looked at, so run SPLIT=val first: its analysis writes the
+# thresholds, and the test run of the same recipe picks them up by name.
+RULES="${RULES:-}"
+SPLIT="${SPLIT:-test}"
 
 STAGE1_ARGS=(--seg "$SEG")
 [ -n "$MASK_CACHE_JOB" ] && STAGE1_ARGS+=(--mask-cache-job "$MASK_CACHE_JOB")
@@ -147,7 +151,8 @@ STAGE1_ARGS=(--seg "$SEG")
 [ -n "$CLASSIFIER_WEIGHTS" ] && STAGE1_ARGS+=(--classifier-weights $CLASSIFIER_WEIGHTS)
 [ -n "$PROTOTYPE_WEIGHTS" ] && STAGE1_ARGS+=(--prototype-weights $PROTOTYPE_WEIGHTS)
 [ "$CLASSIC" = "1" ] && STAGE1_ARGS+=(--classic --classic-k "$CLASSIC_K")
-[ -n "$VOTES" ] && STAGE1_ARGS+=(--votes $VOTES)
+[ -n "$RULES" ] && STAGE1_ARGS+=(--rules $RULES)
+STAGE1_ARGS+=(--split "$SPLIT")
 
 # Real numbers before the real run, not a guess: params memory (exact) +
 # one measured forward pass's peak, per method -- "one at a time" is what
@@ -196,7 +201,11 @@ STAGE1_CSV=$(grep -F ' -- read with utilities/cli/metrics/analyze_stage1_metrics
 if [ -n "$STAGE1_CSV" ] && [ -f "$STAGE1_CSV" ]; then
   echo ""
   echo "======== [analysis] ========"
-  python utilities/cli/metrics/analyze_stage1_metrics.py "$STAGE1_CSV"
+  if [ "$SPLIT" = "val" ]; then
+    python utilities/cli/metrics/analyze_stage1_metrics.py "$STAGE1_CSV" --fit-thresholds
+  else
+    python utilities/cli/metrics/analyze_stage1_metrics.py "$STAGE1_CSV" --thresholds auto
+  fi
 else
   echo ""
   echo "[warn] could not recover the CSV path from this run's own output -- skipping auto-analysis"
@@ -210,9 +219,11 @@ echo "    python utilities/cli/metrics/analyze_stage1_metrics.py <that csv>"
 echo ""
 echo "  Runs EVERYTHING by default -- KnnEstMpp(gigapath), KnnEstMpp(uni2), ClassicEstMpp,"
 echo "  and every *_best.pt under result/MppRoutingHead/weights/ and"
-echo "  result/PrototypicalRoutingHead/weights/ under every vote rule, on the same FoVs:"
+echo "  result/PrototypicalRoutingHead/weights/ under every vote rule, on the same FoVs."
+echo "  Val first (fixes the risk thresholds), then test:"
+echo "    SPLIT=val sbatch jobscripts/Benchmarks/Stage1MppBench.sh"
 echo "    sbatch jobscripts/Benchmarks/Stage1MppBench.sh"
-echo "  Narrow it with KNN_ENCODER= CLASSIFIER_WEIGHTS= PROTOTYPE_WEIGHTS= CLASSIC=0 VOTES=, e.g.:"
+echo "  Narrow it with KNN_ENCODER= CLASSIFIER_WEIGHTS= PROTOTYPE_WEIGHTS= CLASSIC=0 RULES=, e.g.:"
 echo "    KNN_ENCODER= PROTOTYPE_WEIGHTS= CLASSIC=0 \\"
 echo "      CLASSIFIER_WEIGHTS=/work/u26130998/result/MppRoutingHead/weights/gigapath_frozen_arcface_best.pt \\"
 echo "      sbatch jobscripts/Benchmarks/Stage1MppBench.sh"
