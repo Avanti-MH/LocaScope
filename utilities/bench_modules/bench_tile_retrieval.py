@@ -151,11 +151,6 @@ def nearest_in(centres: np.ndarray, pts: np.ndarray, chunk: int = 4096):
 
 # ── one (slide, level) ────────────────────────────────────────────────────────
 
-#: Below this share of photographed pixels a distractor is dropped: SafeSlide
-#: fills a hole with a flat colour, and a flat tile encodes to the same vector
-#: at every level -- a pool slot that can never outrank anything.
-MIN_VALID = 0.95
-
 #: 0 grid, 1 jitter, 2 inherit -- TileSampler's `origin`, as a column.
 ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
 
@@ -340,28 +335,20 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
     print(f'      sampler {base_cfg.sampler_id()}   '
           + '  '.join(f'{b}={int(c)}' for b, c in zip(names, counts)), flush=True)
 
-    # Read the reference tiles, dropping the distractors the scanner never
-    # photographed. An ANSWER is kept whatever its validity -- dropping it
-    # would make that query unanswerable -- and its valid_frac is recorded so
-    # the eval can decide.
-    answer_coords = {(int(grid_xy[i, 0]), int(grid_xy[i, 1])) for i in ans_all}
+    # Read the reference tiles. Every one is on tissue: the answers are grid
+    # tiles of a mask region and the distractors a TileSampler draw on the same
+    # mask, and an unscanned block is glass to the mask -- so nothing is
+    # filtered after the read (2026-10-05, log/TODO.log).
+    from ReadGeometry import ReadSpec                             # noqa: PLC0415
+    reader = SlideReader(slide)
     t0 = time.time()
-    ref_imgs, kept = [], []
-    n_rejected = n_bad_answers = 0
+    ref_imgs, kept = [], rows
     for row in rows:
-        image, valid = slide.read_region_valid((row['x'], row['y']), level, (TILE, TILE))
-        row['valid'] = float(valid.mean())
-        is_answer = (row['x'], row['y']) in answer_coords
-        if row['valid'] < MIN_VALID and not is_answer:
-            n_rejected += 1
-            continue
-        n_bad_answers += int(row['valid'] < MIN_VALID)
+        image = reader.read(row['x'], row['y'], ReadSpec(TILE, TILE), ds, level=level)
+        if image is None:
+            raise RuntimeError(f'{row} runs off the slide')
         ref_imgs.append(image)
-        kept.append(row)
     t_read = time.time() - t0
-    if n_rejected or n_bad_answers:
-        print(f'      holes: {n_rejected} distractors below valid {MIN_VALID:.2f} '
-              f'dropped, {n_bad_answers} answers kept anyway', flush=True)
 
     def column(name, dtype):
         return np.array([r[name] for r in kept], dtype=dtype)
@@ -405,7 +392,6 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
                 'origin': torch.from_numpy(column('origin', np.int8)),
                 'parent_x': torch.from_numpy(column('parent_x', np.int64)),
                 'parent_y': torch.from_numpy(column('parent_y', np.int64)),
-                'valid_frac': torch.from_numpy(column('valid', np.float32)),
             }
             pooling = 'tokens'
         else:

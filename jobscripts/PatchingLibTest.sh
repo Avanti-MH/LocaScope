@@ -20,7 +20,7 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# ---------------- PatchingLib, all four sections ----------------------------
+# ---------------- PatchingLib, all three sections ---------------------------
 #
 # One script for what used to be four. PatchGridIndexTest, PatchInfoCoordsTest
 # and TissuePatchContainerTest all invoked THIS SAME test_patching_lib.py with
@@ -31,13 +31,14 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #
 #   grid        PatchGrid.from_size indexing -- synthetic, seconds
 #   coords      PatchInfo coordinate round-trips -- synthetic, seconds
-#   containers  the real-data path: query BMP, RoI PNG, WSI at --level
-#   scale       cross-level scaling; never had a jobscript of its own
+#   containers  QueryPatchContainer, synthetic and real (query BMP, RoI PNG)
 #
-# ONLY picks a subset; the default is all four. The names are checked by
+# `scale` and the WSI arguments tested WsiTissuesContainer, retired 2026-10-06.
+#
+# ONLY picks a subset; the default is all three. The names are checked by
 # argparse, so a typo fails at parse time rather than silently running nothing:
 #
-#   sbatch jobscripts/PatchingLibTest.sh                        # all four
+#   sbatch jobscripts/PatchingLibTest.sh                        # all three
 #   ONLY=grid sbatch jobscripts/PatchingLibTest.sh              # was PatchGridIndexTest
 #   ONLY=coords sbatch jobscripts/PatchingLibTest.sh            # was PatchInfoCoordsTest
 #   ONLY=containers sbatch jobscripts/PatchingLibTest.sh        # was TissuePatchContainerTest
@@ -54,15 +55,12 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # the containers section. grid and coords are synthetic and finish in seconds;
 # asking for 24 h only makes them queue longer.
 
-ONLY="${ONLY:-grid coords containers scale}"
+ONLY="${ONLY:-grid coords containers}"
 
 SIZE=128
 RSIZE=256
 QUERY=/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037_ki67/2.bmp
 ROI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png
-WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs
-LEVEL=3
-OPENSLIDE_LEVEL=9
 
 echo "======== PatchingLibTest  sections: $ONLY ========"
 echo ""
@@ -71,7 +69,7 @@ echo ""
 # to word-split into two arguments. Everything else is quoted.
 #
 # Every section gets every argument, including the ones it ignores -- coords
-# never opens the WSI. That is cheaper than four argument lists to keep in
+# never reads the query. That is cheaper than three argument lists to keep in
 # agreement, and keeping them in agreement is exactly what the split versions
 # failed to do.
 python utilities/test_modules/test_patching_lib.py \
@@ -80,12 +78,9 @@ python utilities/test_modules/test_patching_lib.py \
   --tile $SIZE \
   --rsize $RSIZE \
   --query "$QUERY" \
-  --roi "$ROI" \
-  --wsi "$WSI" \
-  --level $LEVEL \
-  --openslide-level $OPENSLIDE_LEVEL
+  --roi "$ROI"
 
 echo ""
 echo "======== done ========"
 echo "  figures -> result/\$SLURM_JOB_NAME/  (patch_grid__index.png,"
-echo "             patch_info__coords.png, and the container/scale figures)"
+echo "             patch_info__coords.png, and the two container figures)"

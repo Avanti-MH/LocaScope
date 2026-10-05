@@ -193,7 +193,8 @@ def read_block(slide, level: int, grid, tile: int, row0: int,
 
 def read_region_whole(slide, region, ds: float, level: int) -> np.ndarray:
     """The whole region in ONE read, at its level-0 origin and size --
-    `WsiTissuesContainer`'s call, so a tile cut from it is the container's."""
+    the retired `WsiTissuesContainer`'s call, so a tile cut from it is what
+    the container cut -- the reference read_grid is tested against."""
     size = (int(region.w / ds), int(region.h / ds))
     return slide.read_region_rgb((region.x, region.y), level, size)
 

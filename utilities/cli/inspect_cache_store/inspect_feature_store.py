@@ -328,7 +328,7 @@ def sampling_row(path: Path) -> dict:
     meta = FS.load_meta(path)
     with safe_open(str(path), framework='pt') as f:
         present = set(f.keys())
-        wanted = {'white_frac', 'origin', 'bucket', 'valid_frac'}
+        wanted = {'white_frac', 'origin', 'bucket'}
         got = {k: f.get_tensor(k).numpy() for k in sorted(wanted & present)}
 
     row = dict(name='/'.join(path.parts[-4:]), wsi=meta.wsi_stem, level=meta.level,

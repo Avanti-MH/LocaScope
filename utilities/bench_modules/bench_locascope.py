@@ -609,9 +609,11 @@ def main():
     # rectangle. A window on blank glass loses on its own mean-cosine, so the
     # mask is an optimisation there -- and its cost is the size bias: find_best
     # takes a global maximum, so a region with more placements wins on sample
-    # count alone. CAUTION: WsiTissuesContainer reads a region in one
-    # read_region call, so at a routed level of 0 the single region is the
-    # whole plane and the read is tens to hundreds of GB; see log/TODO.log. A
+    # count alone. At a routed level of 0 that single region is the whole
+    # plane: stage 2 reads it block by block (SlideReader.read_grid), so it no
+    # longer costs one read of tens to hundreds of GB, but every tile of the
+    # plane is still encoded: the first BRACS_1228 shot of the smoke run took
+    # 627 s with that build inside it. A
     # model recipe costs a mask build per WSI before any shot runs and shares
     # the GPUs with the tile encoder, so watch VRAM alongside --batch-size.
     add_mask_args(ap)

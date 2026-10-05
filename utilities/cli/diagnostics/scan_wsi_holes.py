@@ -18,8 +18,9 @@ one block, no sampling -- reads each block in full, and reports which fail.
 Two things make the numbers mean something:
 
   * A block is read in FULL, so it is broken exactly when a read of that block
-    would fail. That is the question the pipeline asks: WsiTissuesContainer
-    reads a whole region in one call, and one bad tile inside takes the lot.
+    would fail. That was the question the retired WsiTissuesContainer asked:
+    it read a whole region in one call, and one bad tile inside took the lot.
+    SlideReader.read_grid now reads a region in blocks of tile rows.
 
   * --block is in LEVEL-0 pixels, so every level is cut on the same grid over
     the same physical area. Maps line up across a row and the percentages are

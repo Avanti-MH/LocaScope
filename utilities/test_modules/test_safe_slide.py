@@ -227,7 +227,7 @@ def validate_shared(path, good, bad):
 
     This is what a helper function returning a fresh OpenSlide could not do,
     and it is what lets LocaScopePipeline pass one slide to TissueMask,
-    TileSampler and WsiTissuesContainer at once.
+    TileSampler and SlideReader at once.
     """
     w = SafeSlide(path)
     alias = w                       # stands in for another stage holding it

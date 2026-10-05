@@ -15,7 +15,7 @@ Two properties of that failure make it worse than an ordinary exception.
    though they read no pixels. There is no API to clear it. Reopening is the
    only recovery, which is what makes this a class rather than a try/except at
    each call site: the pipeline hands ONE slide object to TissueMask,
-   TileSampler and WsiTissuesContainer, so healing has to happen inside the
+   TileSampler and SlideReader, so healing has to happen inside the
    object they all share, not in a helper that would hand back a new one and
    leave every existing holder pointing at the corpse.
 
@@ -29,8 +29,8 @@ Two properties of that failure make it worse than an ordinary exception.
    does the same, and exists so that callers stop reaching for .convert('RGB').
 
 3. A FAILED READ USED TO COST THE WHOLE RECTANGLE. openslide fails the entire
-   requested rect when any tile inside it is missing, and WsiTissuesContainer
-   reads one rect per tissue region. On S1137178 that blanked a 32500x15232 px
+   requested rect when any tile inside it is missing, and the retired
+   WsiTissuesContainer read one rect per tissue region. On S1137178 that blanked a 32500x15232 px
    region -- 7.9 x 3.7 mm of tissue -- at both level 0 and level 1, and since
    retrieval scores windows on those features, it could never propose anywhere
    inside it. None of that slide's 189 predictions land in that rectangle.
@@ -271,7 +271,7 @@ class SafeSlide(openslide.OpenSlide):
             (and resolve_scale was about to add a fourth)
 
         All seven slides in use have mpp-x != mpp-y, so `QueryFromWSI` and
-        `WsiTissuesContainer` have been disagreeing about the slide's scale
+        `WsiTissuesContainer` had been disagreeing about the slide's scale
         everywhere -- and ds = mpp / base_mpp, so a disagreement here becomes a
         disagreement in ds, which `int(w / ds)` turns into a whole missing tile
         at a region boundary. That is the same mechanism behind three separate
@@ -281,7 +281,7 @@ class SafeSlide(openslide.OpenSlide):
         and the query is the thing whose physical field of view everything else
         exists to match -- so the container is aligned to the query rather than
         the other way round. And a single number is already an approximation
-        when the pixel is not square: WsiTissuesContainer sizes both axes with
+        when the pixel is not square: WsiTissuesContainer sized both axes with
         one ds, `int(w / ds)` and `int(h / ds)`. Under that approximation the
         mean is the honest choice; mpp-x is one axis pretending to be both.
 

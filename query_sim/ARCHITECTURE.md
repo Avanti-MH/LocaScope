@@ -269,8 +269,8 @@ Step 9  刪除 synth_fov_generator.py（若存在於 repo 內）
    iterator 省記憶體、可以 pipeline 串接；list 簡單直觀。batch 場景兩者都 OK。
 
 2. **`source/wsi_query.py` 要不要跟 `PatchingLib.WsiTissuesContainer` 整合？**
-   後者已有完整 WSI 讀取 + patching 邏輯，可能重複實作 WSI region 讀取。
-   風險：兩邊 use case 不同（一個要 raw crop、一個要 grid patches），強行整合可能反而複雜。
+   已不成立：`source/` 於 2026-10-03 刪除，`WsiTissuesContainer` 於 2026-10-06 淘汰，
+   兩邊的讀圖都改由 `SlideReader` 負責。
 
 3. **`--seed` 統一入口**
    `random.seed / np.random.seed / torch.manual_seed` 統一設定，方便 reproduce。

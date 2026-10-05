@@ -249,7 +249,7 @@ stage 3           候選    → reader.read（臨時 ReadSpec） → 無      �
 | 合併 | `CameraTest.sh` 併入 `ReadPathTest.sh`；`diag_read_exp.py` 改成讀取路徑的速度量測 |
 | 小改（呼叫端） | 訓練 CameraBank、KnnEstMpp、PrototypeEstMpp、extract_pretiles、ChainStack、FewShotEoMT、generator、multi_batch、demo、各 bench、diag、相關測試 |
 | 不動 | TileSampler（只拿掉 degrade 的再匯出）、DsLadder、PatchGrid、TissueMask、ReadGeometry 的規則、augment、TileEncoder、CpuBudget、Store |
-| 之後才改 | WsiTissuesContainer、WsiTileLoader、SlideWinSift 改用 SlideReader；A 的命名（TileSampler、SampleMeta、FovSupply） |
+| 之後才改 | WsiTileLoader、SlideWinSift 改用 SlideReader（WsiTissuesContainer 已於 2026-10-06 淘汰）；A 的命名（TileSampler、SampleMeta、FovSupply） |
 
 讀取模組從 Camera、QueryFromWSI、轉接檔、Render.py、GridReader、SlideContext 六個減為 Render、SlideReader 兩個。
 被刪掉的檔案在本次 session 的 scratchpad 有備份（`removed_2026-10-03/`），scratchpad 不是永久的。
@@ -315,10 +315,11 @@ window bench
        → row_cosines → WindowAccumulator（GPU）
     parts 目錄的 config_id 加上 fov_reserve，舊 FoV 的 parts 不會被續跑
 
-正式 pipeline（目前，尚未改用新的讀取）
-├─ build：KnnEstMpp + mask
-├─ 第一次用到某個 level：WsiTissuesContainer（整個區域一次讀）→ features()
-└─ 每張照片：stage 1 → stage 2（4 個旋轉）→ stage 3（從 container 讀像素）
+正式 pipeline（LocaScopePipeline）
+├─ build：mask，三個 stage 綁定 slide（每個 stage 自己建 encoder）
+├─ 第一次用到某個 level：SlideReader.read_grid（N 列一塊）→ WsiFeaturesMap.from_grid_read
+│    （feature cache 命中就不讀圖）
+└─ 每張照片：stage 1 → stage 2（4 個旋轉）→ stage 3（SlideReader 讀候選窗的 crop，level-0 記帳）
 ```
 
 ## 量測依據（`diag_render_reads.py`，2026-10-03 已刪除；之後的量測用 `diag_read_exp.py`）

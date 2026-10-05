@@ -295,7 +295,7 @@ import Cache                                                     # noqa: E402
 from AccessDatasets import (SPLIT_SEP, list_names, locate,      # noqa: E402
                             pick_wsi_names)
 from PatchingLib import (FeaturesMap, PatchGrid, region_grids,  # noqa: E402
-                         QueryPatchContainer, WsiTissuesContainer)
+                         QueryPatchContainer)
 from CpuBudget import CpuBudget                                  # noqa: E402
 from SlideReader import SlideReader                              # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
@@ -771,8 +771,8 @@ def gate_tiles(path: str, n: int = 32, mask=None) -> list:
 
     The gates need pixels the encoder will actually see, and on a slide whose
     tissue is sparse the middle can be blank glass. They must not pay for them
-    either: building a WsiTissuesContainer would read a whole tissue region,
-    which on a level-0 BRACS slide is the 4083-second case in log/TODO.log. One
+    either: reading a whole tissue region, as the retired WsiTissuesContainer
+    did, is on a level-0 BRACS slide the 4083-second case in log/TODO.log. One
     2048x1024 read is enough and costs nothing.
     """
     slide = SafeSlide(path)

@@ -24,14 +24,13 @@ Two passes, and the first one is free
                 tile. Answers "will this level fall short, and of what" in the
                 time it takes to segment the slide.
 
-    full        the draw, the reads, the encode. A level that keeps fewer than
-                --min-useful tiles after the reads is skipped, not fatal: a deep
+    full        the draw, the reads, the encode. A level the sampler fills with
+                fewer than --min-useful tiles is skipped, not fatal: a deep
                 level running out of positions is a fact about the slide.
 
-Holes: a tile below --min-valid photographed pixels is dropped -- SafeSlide
-fills a hole with a flat colour, and a flat tile encodes to the same vector at
-every level. It is not replaced, so a level's count can come in under its
-target; the per-level CSV says by how much.
+Every drawn tile is read and kept: the sampler places tiles on the mask, and an
+unscanned block is glass to the mask, so nothing is filtered after the read
+(2026-10-05, log/TODO.log).
 
 Cost note: --pooling tokens keeps all 197 tokens, roughly 605 KB per tile;
 --pooling cls keeps one vector, about 61 MB per slide.
@@ -60,6 +59,8 @@ import torch                                                        # noqa: E402
 import Cache                                                        # noqa: E402
 from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
+from ReadGeometry import ReadSpec                                   # noqa: E402
+from SlideReader import SlideReader                                 # noqa: E402
 from Store import FeatureStore as FS                                # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names           # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,              # noqa: E402
@@ -86,6 +87,7 @@ def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
     were too thin to build."""
     stem = Cache.wsi_stem_of(wsi_path)
     slide = SafeSlide(str(wsi_path))
+    reader = SlideReader(slide)
     thin = []
     try:
         t0 = time.time()
@@ -115,20 +117,13 @@ def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
         for rung in rungs:
             metas = [s.meta for s in sampler if s.meta.ds == rung.rung_ds]
             t0 = time.time()
-            imgs, kept = [], []
-            for m in metas:
-                image, valid = slide.read_region_valid((m.x, m.y), m.level,
-                                                       (m.read_size, m.read_size))
-                fraction = float(valid.mean())
-                if fraction >= args.min_valid:
-                    imgs.append(image)
-                    kept.append((m, fraction))
+            kept = metas
+            imgs = reader.read_samples(metas, ReadSpec(args.tile, args.tile))
             t_read = time.time() - t0
             row = dict(wsi_stem=stem, level=rung.level, ds=rung.rung_ds,
-                       n_target=cfg.n_per_rung, drawn=len(metas), kept=len(kept),
-                       rejected=len(metas) - len(kept))
+                       n_target=cfg.n_per_rung, kept=len(kept))
             if len(kept) < args.min_useful:
-                print(f'    L{rung.level}: {len(kept)} tiles after the reads, '
+                print(f'    L{rung.level}: {len(kept)} tiles drawn, '
                       f'below --min-useful {args.min_useful} -- level skipped',
                       flush=True)
                 rows.append(dict(row, verdict='UNUSABLE'))
@@ -138,7 +133,7 @@ def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
             feats = encoder.pooled(imgs, args.pooling)
             fs = encoder.pooled_spec(feats, args.pooling)
             column = lambda f, dtype: torch.from_numpy(                   # noqa: E731
-                np.array([f(m, v) for m, v in kept], dtype=dtype))
+                np.array([f(m) for m in kept], dtype=dtype))
             meta = FS.Meta(
                 wsi_stem=stem, wsi_path=str(wsi_path), level=rung.level,
                 ds=float(rung.rung_ds), mpp=base_mpp * rung.rung_ds,
@@ -153,23 +148,22 @@ def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
                 sample_seed=cfg.seed, buckets=tuple(names))
             path = FS.save(
                 out_root, meta=meta, features=feats.to(torch.float16),
-                x=column(lambda m, v: m.x, np.int32),
-                y=column(lambda m, v: m.y, np.int32),
-                extra={'bucket': column(lambda m, v: names.index(m.bucket), np.int8),
-                       'white_frac': column(lambda m, v: m.score, np.float32),
-                       'origin': column(lambda m, v: ORIGIN_CODE[m.origin], np.int8),
-                       'parent_x': column(lambda m, v: m.parent_x, np.int64),
-                       'parent_y': column(lambda m, v: m.parent_y, np.int64),
-                       'inherit_id': column(lambda m, v: m.inherit_id, np.int32),
-                       'valid_frac': column(lambda m, v: v, np.float32)})
-            origins = [m.origin for m, _ in kept]
+                x=column(lambda m: m.x, np.int32),
+                y=column(lambda m: m.y, np.int32),
+                extra={'bucket': column(lambda m: names.index(m.bucket), np.int8),
+                       'white_frac': column(lambda m: m.score, np.float32),
+                       'origin': column(lambda m: ORIGIN_CODE[m.origin], np.int8),
+                       'parent_x': column(lambda m: m.parent_x, np.int64),
+                       'parent_y': column(lambda m: m.parent_y, np.int64),
+                       'inherit_id': column(lambda m: m.inherit_id, np.int32)})
+            origins = [m.origin for m in kept]
             print(f'    L{rung.level}: {len(kept)}/{cfg.n_per_rung} tiles   '
                   f'read {t_read:.0f}s  encode {time.time() - t0 - t_read:.0f}s   '
                   f'grid={origins.count("grid")} jitter={origins.count("jitter")} '
                   f'inherit={origins.count("inherit")}   -> {path}', flush=True)
             rows.append(dict(row, verdict='SHORT' if len(kept) < cfg.n_per_rung else 'OK',
                              inherited=origins.count('inherit'),
-                             **{f'n_{b}': sum(1 for m, _ in kept if m.bucket == b)
+                             **{f'n_{b}': sum(1 for m in kept if m.bucket == b)
                                 for b in names}))
         return thin
     finally:
@@ -208,8 +202,6 @@ def main() -> int:
     ap.add_argument('--inherit-share', type=float, default=0.50,
                     help='share of each level carried by chains -- the same '
                          'level-0 centre at every level')
-    ap.add_argument('--min-valid', type=float, default=0.95,
-                    help='least share of a tile the scanner photographed')
     ap.add_argument('--min-useful', type=int, default=200,
                     help='a level keeping fewer than this is skipped. Falling '
                          'SHORT of --n-target is not a failure')

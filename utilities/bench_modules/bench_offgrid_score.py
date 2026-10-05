@@ -44,13 +44,12 @@ are wrong and no score in the output means anything.
 
 Reading one tile at a time, not the region
 ------------------------------------------
-`WsiTissuesContainer` reads a whole tissue region in one call, which is correct
-for production (it needs every window) and catastrophic here (an unsegmented L0
-region is 18.7 Gpx; one such read took 4083 s, see TODO 2026-08-13). This needs
-only (R+2) x (C+2) tiles around each grid point, so it reads exactly that
-window and builds the same `TissuePatchContainer` over it -- the identical three
-lines `WsiTissuesContainer.__init__` runs, handed a region that covers the
-expanded footprint instead of the slide.
+Reading a whole tissue region in one call -- what the retired
+`WsiTissuesContainer` did -- is catastrophic here (an unsegmented L0 region is
+18.7 Gpx; one such read took 4083 s, see TODO 2026-08-13). This needs only
+(R+2) x (C+2) tiles around each grid point, so it reads exactly that window,
+one native `SlideReader.read`, and cuts its main and offset tiles from the
+window's own (0, 0).
 
 The one-tile margin is what makes the scan legal: at (dx, dy) = (128, 128) the
 query footprint and the overlap window both extend half a tile past the main
@@ -114,10 +113,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                     # noqa: E402
 from mpl_toolkits.mplot3d import Axes3D                             # noqa: E402,F401
 
-from PatchingLib import (PatchGrid, QueryPatchContainer,            # noqa: E402
-                         TissuePatchContainer)
+from PatchingLib import PatchGrid, QueryPatchContainer             # noqa: E402
+from ReadGeometry import ReadSpec                                   # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from TissueMask import TissueRegion                                  # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
@@ -286,10 +284,10 @@ def pick_points(mask, level, ds, camera, n_points, white_max, rng):
 def reference_windows(slide, x, y, level, ds, query_rows, query_cols, encoders):
     """The two windows the query is scored against, encoded once PER preprocess.
 
-    Reads the FoV footprint expanded by MARGIN_TILES on every side and builds a
-    TissuePatchContainer over exactly that -- the same construction
-    WsiTissuesContainer performs per region, handed a region that is this
-    window rather than the whole tissue.
+    Reads the FoV footprint expanded by MARGIN_TILES on every side -- one
+    native read at `level`, its top-left the level-0 integer `origin` -- and
+    cuts it into main and offset tiles from the image's own (0, 0). None when
+    the window runs off the slide.
 
     Returns {preprocess: FeaturesMap}. The tiles are read ONCE and encoded once
     per preprocess -- reading dominates, and the same pixels answer both. Which
@@ -301,17 +299,13 @@ def reference_windows(slide, x, y, level, ds, query_rows, query_cols, encoders):
     origin_y = int(round(y - margin_l0))
     window_cols = query_cols + 2 * MARGIN_TILES
     window_rows = query_rows + 2 * MARGIN_TILES
-    width_l0 = int(round(window_cols * TILE * ds))
-    height_l0 = int(round(window_rows * TILE * ds))
 
-    image, _ = slide.read_region_valid(
-        (origin_x, origin_y), level,
-        (int(window_cols * TILE), int(window_rows * TILE)))
-
-    region = TissueRegion(x=origin_x, y=origin_y, w=width_l0, h=height_l0,
-                          index=0)
-    container = TissuePatchContainer(image, region=region, img_ds=ds,
-                                     is_crop=True, at_level=level)
+    image = SlideReader(slide).read(
+        origin_x, origin_y, ReadSpec(window_cols * TILE, window_rows * TILE),
+        ds, level=level)
+    if image is None:
+        return None
+    container = QueryPatchContainer(image)
     container.extract_all(tile_size=TILE, overlap=True)
     return {name: container.to_features(encode)
             for name, encode in encoders.items()}
@@ -396,6 +390,8 @@ def scan_point(slide, camera, encoders, x, y, level, ds, anchor_white,
 
     reference = reference_windows(slide, x, y, level, ds,
                                   query_rows, query_cols, encoders)
+    if reference is None:
+        return []
 
     # Background over the whole footprint, recorded rather than filtered on:
     # the anchor tile passing --white-max says nothing about the other 19.

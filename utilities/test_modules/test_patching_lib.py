@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Comprehensive tests for utilities/PatchingLib (PatchGrid, PatchInfo, containers).
+"""Comprehensive tests for utilities/PatchingLib (PatchGrid, PatchInfo, QueryPatchContainer).
 
 Merged from test_patchgrid_index.py, test_patch_info_coords.py, and
 test_tissue_patch_container.py.
@@ -7,9 +7,11 @@ test_tissue_patch_container.py.
 Sections:
   1. PatchGrid — layout counts, flat/unified indexing, offset metadata
   2. PatchInfo — for_query/for_wsi, grid offset coordinates
-  3. Containers — QueryPatchContainer & TissuePatchContainer extraction, real data
-  4. Scale — from_ds: which level, which downsample, which
-     regions survive it. No model needed; the first two checks need no WSI.
+  3. Containers — QueryPatchContainer extraction, synthetic and real data
+
+TissuePatchContainer and WsiTissuesContainer were retired on 2026-10-06; their
+tests (cases 1-3, the from_ds scale contract) went with them. A slide's tiles
+are read by SlideReader.read_grid, tested in test_slide_reader.
 
 Usage:
   python utilities/test_modules/test_patching_lib.py
@@ -45,7 +47,7 @@ from _paths import job_result_dir, setup_import_paths
 
 setup_import_paths()
 
-from PatchingLib import PatchGrid, PatchInfo, QueryPatchContainer, TissuePatchContainer
+from PatchingLib import PatchGrid, PatchInfo, QueryPatchContainer
 from TissueMask import TissueRegion
 
 
@@ -387,45 +389,6 @@ def validate_grid_offset(size: int):
     return grid, ox, oy, rw, rh
 
 
-def validate_grid_offset_pixels(size: int):
-    """
-    TissuePatchContainer (full + region): patches from full image with region offset
-    must equal direct numpy slicing.
-    """
-    W, H = 512, 512
-    img = np.zeros((H, W, 3), dtype=np.uint8)
-    # Unique pixel values: encode (y, x) in R and G channels
-    ys = np.arange(H, dtype=np.uint8)[:, None] * np.ones(W, dtype=np.uint8)[None, :]
-    xs = np.ones(H, dtype=np.uint8)[:, None] * np.arange(W, dtype=np.uint8)[None, :]
-    img[:, :, 0] = ys
-    img[:, :, 1] = xs
-    img[:, :, 2] = 128
-
-    region = TissueRegion(x=128, y=64, w=256, h=384, index=0)
-    ds = 1.0
-    rx, ry = int(region.x / ds), int(region.y / ds)
-    rw, rh = int(region.w / ds), int(region.h / ds)
-
-    tc = TissuePatchContainer(img.copy(), region=region, img_ds=ds, is_crop=False)
-    tc.extract_all(size, overlap=False)
-
-    main_patches = list(tc.iter_main())
-    row_starts = [i for i in range(0, rh, size) if i + size <= rh]
-    col_starts = [j for j in range(0, rw, size) if j + size <= rw]
-
-    idx = 0
-    for i in row_starts:
-        for j in col_starts:
-            expected = img[ry + i:ry + i + size, rx + j:rx + j + size]
-            assert np.array_equal(main_patches[idx], expected), (
-                f'pixel mismatch at region-local ({i},{j})'
-            )
-            idx += 1
-
-    print(f'[PASS] PatchGrid offset pixel correctness: {idx} patches verified')
-    return img, region, ds
-
-
 # ── Figure ────────────────────────────────────────────────────────────────────
 
 def draw_info_rects(ax, infos, size, color, lw=1.2):
@@ -438,7 +401,7 @@ def draw_info_rects(ax, infos, size, color, lw=1.2):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. QueryPatchContainer / TissuePatchContainer
+# 3. QueryPatchContainer
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -633,204 +596,6 @@ def validate_qpc_errors(img: np.ndarray, size: int):
     print('[PASS] QPC errors: RuntimeError / OOB IndexError / mixed-parity IndexError')
 
 
-# ── TissuePatchContainer ─────────────────────────────────────────────────────
-
-def validate_tpc_case1(tc: TissuePatchContainer, img: np.ndarray, size: int):
-    origins = main_origins(tc.width, tc.height, size)
-    patches = list(tc.iter_main())
-    assert len(patches) == len(origins)
-    for idx, (y, x) in enumerate(origins):
-        assert np.array_equal(patches[idx], img[y:y+size, x:x+size]), (
-            f'case1 mismatch at ({y},{x})')
-    print(f'[PASS] TPC case1 (full, no region): {len(origins)} patches')
-
-
-def validate_tpc_case2(tc: TissuePatchContainer, img: np.ndarray,
-                        region: TissueRegion, size: int, ds: float):
-    rx, ry = int(region.x / ds), int(region.y / ds)
-    rw, rh = int(region.w / ds), int(region.h / ds)
-    origins = main_origins(rw, rh, size)
-    patches = list(tc.iter_main())
-    assert len(patches) == len(origins)
-    for idx, (y, x) in enumerate(origins):
-        expected = img[ry+y:ry+y+size, rx+x:rx+x+size]
-        assert np.array_equal(patches[idx], expected), (
-            f'case2 mismatch at global ({ry+y},{rx+x})')
-    print(f'[PASS] TPC case2 (full + region): {len(origins)} patches, offset verified')
-    return patches
-
-
-def validate_tpc_case3(tc: TissuePatchContainer, size: int, ref: list):
-    patches = list(tc.iter_main())
-    assert len(patches) == len(ref)
-    for i, (p3, p2) in enumerate(zip(patches, ref)):
-        assert np.array_equal(p3, p2), f'case3 main[{i}] differs from case2'
-    print(f'[PASS] TPC case3 (is_crop + region): {len(patches)} main patches match case2')
-    return patches
-
-
-def validate_tpc_case3_overlap(tc2: TissuePatchContainer, tc3: TissuePatchContainer):
-    """Overlap patches from is_crop must be pixel-identical to full-image + region."""
-    ovl2 = list(tc2.iter_overlap())
-    ovl3 = list(tc3.iter_overlap())
-    assert len(ovl2) == len(ovl3), (
-        f'overlap count: case2={len(ovl2)}, case3={len(ovl3)}')
-    for i, (p2, p3) in enumerate(zip(ovl2, ovl3)):
-        assert np.array_equal(p2, p3), f'case3 overlap[{i}] differs from case2'
-    print(f'[PASS] TPC case3 overlap: {len(ovl2)} overlap patches match case2')
-
-
-def validate_tpc_ds_not_1(size: int):
-    """
-    img_ds=4.0 (level-2 equivalent): verify both x and y region offsets are
-    correctly divided by ds, and that at_level / ds are forwarded to PatchInfo.
-
-    Synthetic image: 512×512 at level-N (ds=4), representing a 2048×2048 level-0 WSI.
-    Region (level-0): x=256, y=384, w=1024, h=768
-    → level-N:        x=64,  y=96,  w=256,  h=192
-    """
-    W, H = 512, 512
-    img   = make_gradient_image(W, H)
-    ds    = 4.0
-    level = 2
-    # Level-0 region coords
-    region = TissueRegion(x=256, y=384, w=1024, h=768)
-
-    tc = TissuePatchContainer(img.copy(), region=region, img_ds=ds,
-                              is_crop=False, at_level=level)
-    tc.extract_all(size, overlap=False)
-
-    rx_n = int(region.x / ds)   # 64
-    ry_n = int(region.y / ds)   # 96
-    rw_n = int(region.w / ds)   # 256
-    rh_n = int(region.h / ds)   # 192
-
-    origins = main_origins(rw_n, rh_n, size)
-    patches = list(tc.iter_main())
-    assert len(patches) == len(origins), (
-        f'ds=4 patch count {len(patches)} != {len(origins)}')
-    for idx, (y, x) in enumerate(origins):
-        expected = img[ry_n+y:ry_n+y+size, rx_n+x:rx_n+x+size]
-        assert np.array_equal(patches[idx], expected), (
-            f'ds=4 mismatch at level-N ({ry_n+y},{rx_n+x})')
-
-    # PatchInfo metadata must reflect the constructor arguments
-    for info in tc.grid.main_patch_infos:
-        assert info.ds    == ds,    f'PatchInfo.ds={info.ds}'
-        assert info.level == level, f'PatchInfo.level={info.level}'
-        # x/y in PatchInfo are level-N global coords (include grid offset)
-        assert info.x >= rx_n, f'PatchInfo.x={info.x} < rx_n={rx_n}'
-        assert info.y >= ry_n, f'PatchInfo.y={info.y} < ry_n={ry_n}'
-
-    print(f'[PASS] TPC ds=4.0 level={level}: {len(origins)} patches, '
-          f'x/y offset ({rx_n},{ry_n}), ds/level in PatchInfo verified')
-
-
-def validate_tpc_region_y_offset(img: np.ndarray, size: int):
-    """Region with non-zero y: both x and y offsets must be applied."""
-    H, W = img.shape[:2]
-    ds = 1.0
-    region = TissueRegion(x=W // 2, y=H // 2, w=W // 2, h=H // 2)
-    tc = TissuePatchContainer(img.copy(), region=region, img_ds=ds, is_crop=False)
-    tc.extract_all(size, overlap=False)
-
-    rx, ry = W // 2, H // 2
-    rw, rh = W // 2, H // 2
-    origins = main_origins(rw, rh, size)
-    patches = list(tc.iter_main())
-    assert len(patches) == len(origins)
-    for idx, (y, x) in enumerate(origins):
-        expected = img[ry+y:ry+y+size, rx+x:rx+x+size]
-        assert np.array_equal(patches[idx], expected), (
-            f'y-offset mismatch at global ({ry+y},{rx+x})')
-
-    print(f'[PASS] TPC region y_offset={H//2}: {len(origins)} patches verified')
-
-
-def validate_tpc_patchinfo_meta(img: np.ndarray, size: int):
-    """at_level must be forwarded to every PatchInfo in the grid."""
-    ds, lv = 4.0, 2
-    tc = TissuePatchContainer(img.copy(), img_ds=ds, at_level=lv)
-    tc.extract_all(size, overlap=True)
-    for info in tc.grid.iter_infos():
-        assert info.ds    == ds,  f'PatchInfo.ds={info.ds}, expected {ds}'
-        assert info.level == lv,  f'PatchInfo.level={info.level}, expected {lv}'
-    print(f'[PASS] TPC PatchInfo meta: ds/level forwarded to all {len(tc.grid)} patches')
-
-
-def validate_tpc_no_overlap(img: np.ndarray, region: TissueRegion, ds: float, size: int):
-    tc = TissuePatchContainer(img.copy(), region=region, img_ds=ds, is_crop=False)
-    tc.extract_all(size, overlap=False)
-    assert not tc.grid.has_overlap
-    assert list(tc.iter_overlap()) == []
-    assert len(tc) == len(list(tc.iter_main()))
-    print(f'[PASS] TPC overlap=False: {len(tc)} main patches, no overlap')
-
-
-def validate_tpc_factory_methods(img: np.ndarray, size: int):
-    ref = TissuePatchContainer(img.copy())
-    ref.extract_all(size, overlap=True)
-    ref_patches = list(ref)
-
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-        tmppath = f.name
-    try:
-        PILImage.fromarray(img).save(tmppath)
-        cases = [
-            ('from_path',  TissuePatchContainer.from_path(tmppath)),
-            ('from_pil',   TissuePatchContainer.from_pil(PILImage.open(tmppath).convert('RGB'))),
-            ('from_array', TissuePatchContainer.from_array(img.copy())),
-        ]
-        for label, tc in cases:
-            tc.extract_all(size, overlap=True)
-            for i, (p, r) in enumerate(zip(tc, ref_patches)):
-                assert np.array_equal(p, r), f'TPC {label}: patch[{i}] differs'
-            print(f'[PASS] TPC {label}: identical to direct constructor')
-    finally:
-        os.unlink(tmppath)
-
-
-def validate_tpc_overlap_corner(tc: TissuePatchContainer, size: int, label: str = 'TPC '):
-    grid = tc.grid
-    if not grid.has_overlap:
-        print(f'[SKIP] {label}overlap corner: grid too small for overlap')
-        return
-    half = size // 2
-    for info in grid.overlap_patch_infos:
-        r, c = info.row, info.col
-        p = tc[2*r+1, 2*c+1]
-        assert np.array_equal(p[:half, :half],  tc[2*r,   2*c  ][half:, half:])
-        assert np.array_equal(p[:half, half:],  tc[2*r,   2*c+2][half:, :half])
-        assert np.array_equal(p[half:, :half],  tc[2*r+2, 2*c  ][:half, half:])
-        assert np.array_equal(p[half:, half:],  tc[2*r+2, 2*c+2][:half, :half])
-    print(f'[PASS] {label}overlap corner-pixel: {len(grid.overlap_patch_infos)} patches verified')
-
-
-def validate_tpc_errors(img: np.ndarray, size: int):
-    try:
-        TissuePatchContainer(img.copy(), is_crop=True, region=None)
-        raise AssertionError('expected ValueError for is_crop without region')
-    except ValueError:
-        pass
-
-    fresh = TissuePatchContainer(img.copy())
-    try:
-        _ = fresh[0]
-        raise AssertionError('expected RuntimeError before extract_all')
-    except RuntimeError:
-        pass
-
-    tc = TissuePatchContainer(img.copy())
-    tc.extract_all(size, overlap=True)
-    try:
-        _ = tc[len(tc)]
-        raise AssertionError('expected IndexError for OOB flat')
-    except IndexError:
-        pass
-
-    print('[PASS] TPC errors: ValueError / RuntimeError / OOB IndexError')
-
-
 # ── Real data tests ───────────────────────────────────────────────────────────
 
 def test_real_query(path: str, size: int) -> QueryPatchContainer:
@@ -863,60 +628,6 @@ def test_real_roi_as_query(path: str, size: int) -> QueryPatchContainer:
     print(f'[PASS] RoI as query {os.path.basename(path)}: {qc.width}x{qc.height}, '
           f'{len(qc)} patches (size={size})')
     return qc
-
-
-def test_real_roi(path: str, size: int) -> TissuePatchContainer:
-    tc = TissuePatchContainer(path)
-    tc.extract_all(size, overlap=True)
-    validate_patch_shapes(tc, size, 'real-roi ')
-    validate_iterators(tc, 'real-roi ')
-    validate_tpc_overlap_corner(tc, size, 'real-roi ')
-    print(f'[PASS] Real RoI {os.path.basename(path)}: {tc.width}x{tc.height}, '
-          f'{len(tc)} patches (size={size})')
-    return tc
-
-
-def test_real_wsi(path: str, level: int, size: int) -> TissuePatchContainer:
-    """Load the full WSI level image."""
-    # SafeSlide, not a plain OpenSlide. A hole read through `.convert('RGB')`
-    # is a pure black rectangle, and this test then asserts things about the
-    # patches extracted from it -- so the fixture would be testing the bug.
-    from SafeSlide import SafeSlide
-    wsi = SafeSlide(path)
-    W_l, H_l = wsi.level_dimensions[level]
-    ds = wsi.level_downsamples[level]
-    arr = wsi.read_region_rgb((0, 0), level, (W_l, H_l))
-    wsi.close()
-
-    tc = TissuePatchContainer(arr, img_ds=ds)
-    tc.extract_all(size, overlap=True)
-    validate_patch_shapes(tc, size, 'real-wsi-full ')
-    validate_iterators(tc, 'real-wsi-full ')
-    validate_tpc_overlap_corner(tc, size, 'real-wsi-full ')
-    print(f'[PASS] Real WSI {os.path.basename(path)} level={level} (ds={ds:.0f}) '
-          f'{W_l}x{H_l}: {len(tc)} patches (size={size})')
-    return tc
-
-
-def test_real_wsi_from_openslide(path: str, level: int, size: int) -> TissuePatchContainer:
-    """Test from_openslide factory method.
-
-    SafeSlide rather than a plain OpenSlide, so the container's slide branch
-    takes its `read_region_rgb` path -- which is the path production uses and
-    therefore the one worth testing.
-    """
-    from SafeSlide import SafeSlide
-    wsi = SafeSlide(path)
-    level = min(level, wsi.level_count - 1)
-    W_l, H_l = wsi.level_dimensions[level]
-    tc = TissuePatchContainer.from_openslide(wsi, at_level=level)
-    wsi.close()
-    tc.extract_all(size, overlap=True)
-    validate_patch_shapes(tc, size, 'from_openslide ')
-    validate_iterators(tc, 'from_openslide ')
-    validate_tpc_overlap_corner(tc, size, 'from_openslide ')
-    print(f'[PASS] from_openslide level={level} ({W_l}x{H_l}): {len(tc)} patches')
-    return tc
 
 
 # ── Reconstruction ────────────────────────────────────────────────────────────
@@ -1033,14 +744,6 @@ def draw_rects(ax, origins, size, color, lw=1.2, linestyle='-'):
         ))
 
 
-def draw_region_bbox(ax, region: TissueRegion, ds: float, color='yellow'):
-    rx, ry = int(region.x / ds), int(region.y / ds)
-    rw, rh = int(region.w / ds), int(region.h / ds)
-    ax.add_patch(mpatches.Rectangle(
-        (rx, ry), rw, rh, fill=False, edgecolor=color, linewidth=2,
-    ))
-
-
 def show_patch_grid(ax, patches, n_cols: int = 4, title: str = ''):
     n = len(patches)
     if n == 0:
@@ -1099,7 +802,7 @@ def run_patchinfo_section(size: int, out_dir: str) -> None:
     validate_for_query()
     validate_for_wsi()
     grid, ox, oy, rw, rh = validate_grid_offset(size)
-    img, region, ds = validate_grid_offset_pixels(size)
+    region, ds = TissueRegion(x=128, y=64, w=256, h=384, index=0), 1.0
     W, H = 512, 512
     bg = np.zeros((H, W, 3), dtype=np.uint8)
     bg[:, :, 0] = np.linspace(30, 200, W, dtype=np.uint8)[None, :]
@@ -1110,11 +813,10 @@ def run_patchinfo_section(size: int, out_dir: str) -> None:
     rw_n, rh_n = int(region.w / ds), int(region.h / ds)
     axes[0].add_patch(mpatches.Rectangle((rx_n, ry_n), rw_n, rh_n,
                                          fill=False, edgecolor='yellow', linewidth=2))
-    tc_vis = TissuePatchContainer(bg.copy(), region=region, img_ds=ds, is_crop=False)
-    tc_vis.extract_all(size, overlap=False)
-    draw_info_rects(axes[0], tc_vis.grid.main_patch_infos, size, color='cyan')
+    grid_vis = PatchGrid.for_region(region, ds, size, overlap=False)
+    draw_info_rects(axes[0], grid_vis.main_patch_infos, size, color='cyan')
     axes[0].set_title(f'PatchGrid with offset ({rx_n},{ry_n})\n'
-                      f'{len(tc_vis.grid.main_patch_infos)} patches inside region')
+                      f'{len(grid_vis.main_patch_infos)} patches inside region')
     ds_vals = [1.0, 2.0, 4.0]
     colors = ['lime', 'orange', 'red']
     x_before = [50, 50, 50]
@@ -1149,146 +851,8 @@ def run_patchinfo_section(size: int, out_dir: str) -> None:
     print(f'Saved {out}')
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  4. Scale resolution — which level, and which regions survive it
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# `WsiTissuesContainer.from_ds` answers two questions that used to be answered
-# by whoever called it, in three places, differently:
-#
-#     which level does this ds mean, and what is that level's OWN downsample
-#     which regions can host a tile at that downsample
-#
-# Getting either wrong is quiet. A ds that is 0.04% off the level's real one --
-# BRACS_1228 level 1 reports 4.00003 -- turns `int(w / ds)` into one missing
-# tile for a region sized near a multiple of 256, and the region then reaches
-# the encoder with an empty batch and dies inside torch.cat naming neither the
-# region nor the level. Skipping the filter entirely does the same thing.
-#
-# None of the checks below need a model, and the first three need no WSI at
-# all, so the whole section runs in about a second.
-
-
-def _mask_with_regions(regions_wh, slide_w, slide_h):
-    """A mask whose regions are placed by hand, with a token raster.
-
-    Regions from the raster would need one mask pixel per level-0 pixel of the
-    slide -- 40 GB for a 200k x 200k canvas. Here only `tissue_regions` is
-    read, so a 16x16 token raster carries them and `_with` places the regions
-    by hand. That views share the raster and cannot leak into their source is
-    tested where it belongs, in test_tissue_mask.t_mask_views_do_not_leak.
-    """
-    from types import SimpleNamespace
-    from TissueMask import SlideMask, TissueMask
-    regions, x = [], 0
-    for i, (w, h) in enumerate(regions_wh):
-        regions.append(TissueRegion(x=x, y=0, w=w, h=h, index=i))
-        x += w + 1000
-    wsi = SimpleNamespace(level_dimensions=[(slide_w, slide_h)],
-                          level_downsamples=[1.0, 4.0, 16.0],
-                          properties={'openslide.mpp-x': '0.25',
-                                      'openslide.mpp-y': '0.25'})
-    return TissueMask(wsi, SlideMask(np.ones((16, 16), dtype=bool), (0, 0),
-                                     (slide_w, slide_h), slide_w / 16))._with(regions)
-
-
-def validate_ds_gate(wsi) -> None:
-    """A ds that is on no level must be refused, level given or not."""
-    print('\n[scale] constructor rejects a ds no level has')
-    from PatchingLib import WsiTissuesContainer
-
-    downsamples = sorted(float(d) for d in wsi.level_downsamples)
-    bogus = (downsamples[0] + downsamples[1]) / 2 if len(downsamples) > 1 else 3.7
-    for kwargs in ({'ds': bogus}, {'ds': bogus, 'level': 0}):
-        try:
-            WsiTissuesContainer(wsi, tile_size=256, overlap=True, **kwargs)
-        except ValueError:
-            continue
-        raise AssertionError(
-            f'WsiTissuesContainer({kwargs}) was accepted; ds {bogus} is on no '
-            f'level, and with `level` given this used to pass silently because '
-            f'the two were only compared when _find_level found something')
-    print(f'  ok   ds={bogus:g} refused both with and without an explicit level')
-
-
-def validate_container_contract(wsi, tile: int, level: int) -> None:
-    """What from_ds promises: a real level, its own ds, and usable regions."""
-    from PatchingLib import WsiTissuesContainer
-
-    ds = float(wsi.level_downsamples[level])
-    width, height = wsi.level_dimensions[0]
-    # One region comfortably above the tile, one just below it, one far below.
-    big = int(min(width, height, tile * ds * 6))
-    mask = _mask_with_regions(
-        [(big, big), (int(tile * ds) - 1, int(tile * ds) - 1), (16, 16)],
-        slide_w=width, slide_h=height)
-    kept_before = len(mask.tissue_regions)
-
-    container = WsiTissuesContainer.from_ds(
-        wsi, ds * 1.0004, tile_size=tile, overlap=True, mask=mask)
-
-    assert container.level == level, (
-        f'from_ds picked level {container.level}, expected {level}')
-    assert container.ds == ds, (
-        f'container.ds is {container.ds!r}, not the level\'s own {ds!r}')
-    assert len(container.tissue_patches) == len(container.tissue_regions), (
-        f'{len(container.tissue_patches)} patch containers against '
-        f'{len(container.tissue_regions)} regions -- callers zip these')
-    for i, (region, patches) in enumerate(
-            zip(container.tissue_regions, container.tissue_patches)):
-        assert int(region.w / container.ds) >= tile, (
-            f'region {i} is {region.w} level-0 px, which is '
-            f'{int(region.w / container.ds)} px at ds {container.ds} -- under '
-            f'one {tile} px tile, so it should have been filtered out')
-        assert len(patches) > 0, (
-            f'region {i} survived the filter and still yielded no patches; '
-            f'this is what reaches the encoder as an empty batch')
-    assert len(mask.tissue_regions) == kept_before, (
-        'from_ds narrowed the caller\'s mask instead of a view of it')
-    print(f'  ok   level {container.level}  ds {container.ds:<9.4g}  '
-          f'{len(container.tissue_regions)}/{kept_before} regions kept, '
-          f'all patchable')
-
-
-def validate_container_contract_every_level(wsi, tile: int) -> None:
-    """The contract at every level the slide has, not at one chosen number.
-
-    It used to take `--openslide-level`, whose default of 9 belongs to
-    test_real_wsi_from_openslide and is off the end of a 4-level SVS. Sweeping
-    instead removes the argument rather than picking a safer constant: the
-    number of levels is a property of the slide, and 2x and 4x pyramids do not
-    have the same ones -- BRACS steps 4x per level and Ki67 MRXS 2x, which is
-    the difference that made ds_target != ds_actual matter in the first place.
-
-    Bounded whatever the level. The big region is `tile * ds * 6` in level-0
-    units, so the container reads `6 * tile` px per side at every level; the
-    coarse end is not the expensive end here.
-    """
-    print(f'\n[scale] from_ds contract, all {wsi.level_count} levels')
-    for level in range(wsi.level_count):
-        validate_container_contract(wsi, tile, level)
-
-
-def run_scale_section(args, out_dir: str) -> None:
-    # The mask-side half of this -- view isolation and the fine/coarse/fine
-    # round trip -- lives in test_tissue_mask.py, since it is about
-    # `patchable` rather than anything about a container.
-    print('\n=== Scale resolution ===')
-    if not os.path.exists(args.wsi):
-        print(f'  [SKIP] WSI not found, container checks skipped: {args.wsi}')
-        return
-    from SafeSlide import SafeSlide
-    wsi = SafeSlide(args.wsi)
-    try:
-        print(f'  {os.path.basename(args.wsi)}  {wsi.mpp_summary()}')
-        validate_ds_gate(wsi)
-        validate_container_contract_every_level(wsi, args.rsize)
-    finally:
-        wsi.close()
-
-
 def run_containers_section(args, out_dir: str) -> None:
-    print('\n=== QueryPatchContainer / TissuePatchContainer ===')
+    print('\n=== QueryPatchContainer ===')
     size = args.size
     W, H = 512, 512
     img = make_gradient_image(W, H)
@@ -1302,52 +866,19 @@ def run_containers_section(args, out_dir: str) -> None:
     validate_qpc_factory_methods(img, size)
     validate_qpc_multichannel(size)
     validate_qpc_errors(img, size)
-    region = TissueRegion(x=W // 2, y=0, w=W // 2, h=H, index=0)
-    ds = 1.0
-    tc1 = TissuePatchContainer(img.copy(), img_ds=ds, is_crop=False)
-    tc1.extract_all(size, overlap=True)
-    validate_tpc_case1(tc1, img, size)
-    validate_iterators(tc1, 'TPC-case1 ')
-    validate_patch_shapes(tc1, size, 'TPC-case1 ')
-    validate_tpc_overlap_corner(tc1, size, 'TPC-case1 ')
-    tc2 = TissuePatchContainer(img.copy(), region=region, img_ds=ds, is_crop=False)
-    tc2.extract_all(size, overlap=True)
-    case2_patches = validate_tpc_case2(tc2, img, region, size, ds)
-    validate_iterators(tc2, 'TPC-case2 ')
-    validate_patch_shapes(tc2, size, 'TPC-case2 ')
-    validate_tpc_overlap_corner(tc2, size, 'TPC-case2 ')
-    rx = int(region.x / ds)
-    crop_img = img[:, rx:].copy()
-    tc3 = TissuePatchContainer(crop_img, region=region, img_ds=ds, is_crop=True)
-    tc3.extract_all(size, overlap=True)
-    validate_tpc_case3(tc3, size, case2_patches)
-    validate_tpc_case3_overlap(tc2, tc3)
-    validate_patch_shapes(tc3, size, 'TPC-case3 ')
-    validate_tpc_ds_not_1(size)
-    validate_tpc_region_y_offset(img, size)
-    validate_tpc_patchinfo_meta(img, size)
-    validate_tpc_no_overlap(img, region, ds, size)
-    validate_tpc_factory_methods(img, size)
-    validate_tpc_errors(img, size)
     rsize = args.rsize
-    real_qc = real_roi_qc = real_roi_tc = real_wsi_tc = None
+    real_qc = real_roi_qc = None
     if args.query and os.path.exists(args.query):
         real_qc = test_real_query(args.query, rsize)
     elif args.query:
         print(f'[SKIP] query not found: {args.query}')
     if args.roi and os.path.exists(args.roi):
         real_roi_qc = test_real_roi_as_query(args.roi, rsize)
-        real_roi_tc = test_real_roi(args.roi, rsize)
     elif args.roi:
         print(f'[SKIP] roi not found: {args.roi}')
-    if args.wsi and os.path.exists(args.wsi):
-        real_wsi_tc = test_real_wsi(args.wsi, args.level, rsize)
-        test_real_wsi_from_openslide(args.wsi, args.openslide_level, rsize)
-    elif args.wsi:
-        print(f'[SKIP] wsi not found: {args.wsi}')
-    has_real = any(x is not None for x in [real_qc, real_roi_qc, real_roi_tc, real_wsi_tc])
-    nrows = 3 if has_real else 2
-    fig, axes = plt.subplots(nrows, 4, figsize=(24, 6 * nrows))
+    has_real = real_qc is not None or real_roi_qc is not None
+    nrows = 2 if has_real else 1
+    fig, axes = plt.subplots(nrows, 4, figsize=(24, 6 * nrows), squeeze=False)
     axes[0, 0].imshow(img)
     axes[0, 0].set_title(f'QPC original\n{W}x{H}')
     axes[0, 1].imshow(img)
@@ -1364,41 +895,14 @@ def run_containers_section(args, out_dir: str) -> None:
     ], loc='upper right', fontsize=7)
     show_patch_grid(axes[0, 3], list(qc.iter_main())[:8], n_cols=4,
                     title=f'QPC first 8 main patches (size={size})')
-    axes[1, 0].imshow(img)
-    draw_rects(axes[1, 0], main_origins(W, H, size), size, 'lime')
-    axes[1, 0].set_title(f'TPC case1: full, no region\n{len(list(tc1.iter_main()))} patches')
-    axes[1, 1].imshow(img)
-    draw_region_bbox(axes[1, 1], region, ds)
-    rw_n, rh_n = int(region.w / ds), int(region.h / ds)
-    glob_orig = [(y, rx + x) for y, x in main_origins(rw_n, rh_n, size)]
-    draw_rects(axes[1, 1], glob_orig, size, 'cyan')
-    axes[1, 1].set_title(f'TPC case2: full + region\n{len(case2_patches)} patches')
-    axes[1, 1].legend(handles=[
-        mpatches.Patch(edgecolor='yellow', facecolor='none', label='region bbox'),
-        mpatches.Patch(edgecolor='cyan', facecolor='none', label='region grid'),
-    ], loc='upper left', fontsize=7)
-    axes[1, 2].imshow(crop_img)
-    draw_rects(axes[1, 2], main_origins(rw_n, rh_n, size), size, 'cyan')
-    axes[1, 2].set_title('TPC case3: is_crop + region\n(same pixels as case2)')
-    diffs = [np.abs(p2.astype(int) - p3.astype(int)).max()
-             for p2, p3 in zip(case2_patches, list(tc3.iter_main()))]
-    max_diff = max(diffs) if diffs else 0
-    axes[1, 3].imshow(np.zeros((size, size, 3), dtype=np.uint8))
-    axes[1, 3].text(size // 2, size // 2, f'case2 vs case3\nmax diff={max_diff}\n(expect 0)',
-                    ha='center', va='center', fontsize=13,
-                    color='lime' if max_diff == 0 else 'red')
-    axes[1, 3].set_title('Pixel diff panel')
     if has_real:
         real_items = [
             (real_qc, args.query, 'Real query (QPC)'),
             (real_roi_qc, args.roi, 'RoI as query (QPC)'),
-            (real_roi_tc, args.roi, 'Real RoI (TPC)'),
-            (real_wsi_tc, args.wsi, 'Real WSI crop (TPC)'),
         ]
         for col, (container, path, label) in enumerate(real_items):
-            ax = axes[2, col]
+            ax = axes[1, col]
             if container is None:
-                ax.axis('off')
                 continue
             patches = list(container.iter_main())
             show_patch_grid(ax, patches[:8], n_cols=4,
@@ -1415,18 +919,9 @@ def run_containers_section(args, out_dir: str) -> None:
     fig.savefig(out, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f'Saved {out}')
-    recon_cases = [
-        (qc, img, 'QPC synthetic'),
-        (tc1, img, 'TPC case1 (full, no region)'),
-        (tc2, img, 'TPC case2 (full + region)'),
-        (tc3, crop_img, 'TPC case3 (is_crop + region)'),
-    ]
-    for container, _, lbl in [
-        (real_qc, None, 'Real query (QPC)'),
-        (real_roi_qc, None, 'RoI as query (QPC)'),
-        (real_roi_tc, None, 'Real RoI (TPC)'),
-        (real_wsi_tc, None, 'Real WSI crop (TPC)'),
-    ]:
+    recon_cases = [(qc, img, 'QPC synthetic')]
+    for container, lbl in [(real_qc, 'Real query (QPC)'),
+                           (real_roi_qc, 'RoI as query (QPC)')]:
         if container is not None:
             recon_cases.append((container, container.img, lbl))
     fig2, axes2 = plt.subplots(len(recon_cases), 4, figsize=(24, 6 * len(recon_cases)))
@@ -1445,8 +940,8 @@ def run_containers_section(args, out_dir: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description='PatchingLib comprehensive tests')
     ap.add_argument('--only', nargs='+',
-                    choices=['grid', 'coords', 'containers', 'scale'],
-                    default=['grid', 'coords', 'containers', 'scale'],
+                    choices=['grid', 'coords', 'containers'],
+                    default=['grid', 'coords', 'containers'],
                     help='which sections to run (default: all)')
     ap.add_argument('--size', type=int, default=128, help='tile size (synthetic + coords)')
     ap.add_argument('--tile', type=int, default=None, help='PatchGrid tile size (default: --size)')
@@ -1455,14 +950,6 @@ def main() -> int:
     ap.add_argument('--roi',
                     default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
                             'BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png')
-    # PatchingLibTest.sh's own slide and level. `test_real_wsi` reads the whole
-    # level in one call, so a default of a Ki67 MRXS at level 2 -- ds 4 on a 2x
-    # pyramid -- is a whole-canvas read that OOMs a 2-CPU job.
-    ap.add_argument('--wsi',
-                    default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
-                            'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs')
-    ap.add_argument('--level', type=int, default=3)
-    ap.add_argument('--openslide-level', type=int, default=9)
     ap.add_argument('--out-dir', default=None, help='figure output directory')
     args = ap.parse_args()
     tile = args.tile if args.tile is not None else args.size
@@ -1474,8 +961,6 @@ def main() -> int:
         run_patchinfo_section(args.size, out_dir)
     if 'containers' in sections:
         run_containers_section(args, out_dir)
-    if 'scale' in sections:
-        run_scale_section(args, out_dir)
     print('\nAll checks passed.')
     return 0
 

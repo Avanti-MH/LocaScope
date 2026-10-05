@@ -2918,6 +2918,14 @@ front of whoever flips it.
          KnnEstMpp、PrototypeEstMpp 建參考庫的寫法一樣），併在淘汰
          WsiTissuesContainer 那一步做。bench_tile_retrieval 的答案 tile 本來
          就無條件保留。
+       - 2026-10-06 做完：兩處改走 SlideReader（build_reference_store 用
+         read_samples，bench_tile_retrieval 用 read），--min-valid、MIN_VALID 與
+         valid_frac 欄位拿掉；舊的 store 檔仍帶這一欄，inspect_feature_store 不再
+         讀它。WsiTissuesContainer / TissuePatchContainer 同時刪除：
+         bench_offgrid_score 的參考窗改成一次 SlideReader.read 加
+         QueryPatchContainer，bench_gigapath_configs 的速度模式改走 read_grid，
+         test_patching_lib 的 container 與 scale 段、diag_container_retire 的
+         pixels / crops / localize 段隨之刪除。
 
     4. 這段怎麼走歪的（記下來免得再走一次）
        - 起點只是「這三處繞過 SlideReader」。提了讓 SlideReader 回傳有效比例，
@@ -2970,3 +2978,19 @@ front of whoever flips it.
          量級。
        - crop：整數 ds 逐像素相同；非整數 ds 中位數差 0.3-0.4 灰階，符合兩次讀取
          相位差 <= 0.125 px。
+
+    6. stage 3 的記帳，舊的對新的（localize 段）
+       - 在已知的 level-0 點 P 讀一塊當 query，用含 P 的視窗跑 stage 3，中心的
+         真值是 P + (w/2) * ds。region 依 frac(region/ds) 由大到小挑，偏差才會
+         真的出現。誤差單位是該層的 level 像素：
+             BRACS_1404    L1  frac (1.00, 1.00)  舊 (-1.00, -0.99)  新 <= 0.023
+             BRACS_1003699 L1  frac (0.98, 0.98)  舊 (-0.92, -1.01)  新 <= 0.015
+             BRACS_1003671 L2  frac (0.97, 0.71)  舊 (-0.97, -0.72)  新 <= 0.015
+             BRACS_1003700 L2  frac (0.97, 0.73)  舊 (-0.97, -0.73)  新 <= 0.011
+             BRACS_1780    L2  frac (0.98, 0.48)  舊 (-0.98, -0.49)  新 <= 0.011
+             BRACS_1003699 L2  frac (0.74, 0.24)  舊 (-0.76, -0.23)  新 <= 0.022
+             Ki67 S1130983 L3  frac (0.00, 0.50)  舊 ( 0.00, -0.51)  新 <= 0.012
+       - 舊記帳的誤差就是預測的 -frac（差 <= 0.07），新的都在 0.025 以內。修正
+         在 9c92d98（CandidateSet 以 level-0 記帳）。
+       - pixels / crops / localize 三段要用舊 container 當對照，container 淘汰
+         時一起從 diag_container_retire.py 刪掉，只留 phase 與 origins。

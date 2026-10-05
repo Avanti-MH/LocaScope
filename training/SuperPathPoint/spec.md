@@ -73,7 +73,7 @@ retrieval 選出的 ds 也可能差一層。一個「在 ±1 層 ds 都還在」
 | **relative rung** | 相對於本 tile 自己的 ds 的位移，記作 `j`。`j=+1` 是「再粗一倍」 |
 
 `ds` 一律指相對於該片 slide 的 level-0 的降採樣倍率，和 `PatchInfo.ds`、
-`WsiTissuesContainer.from_ds` 同義。**注意它跨 slide 不可比**：BRACS 的 SVS 每層
+`SlideReader` 的 ds 同義。**注意它跨 slide 不可比**：BRACS 的 SVS 每層
 4x、Ki67 的 MRXS 每層 2x，而且兩者的 level-0 mpp 本來就不同。第 3.4 節說明這為
 什麼在這裡不構成問題。
 

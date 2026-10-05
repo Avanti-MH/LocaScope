@@ -86,7 +86,7 @@ from _paths import setup_import_paths, RESULT_DIR, job_result_dir
 setup_import_paths()
 
 from SafeSlide import SafeSlide                                     # noqa: E402
-from PatchingLib import WsiTissuesContainer                          # noqa: E402
+from PatchingLib import region_grids                                 # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileSampler import OverlapConfig, SamplerConfig, TileSampler, native_plans  # noqa: E402
 from ReadGeometry import ReadSpec                                                # noqa: E402
@@ -141,6 +141,23 @@ def _tissue_mask(wsi, mask_cfg, device):
     '''Speed mode needs real tissue tiles, so blank glass has to be excluded;
     `--seg` names the recipe (`--seg hsv` for a model-free one).'''
     return mask_cfg.build(wsi, device)
+
+
+def read_region_tiles(wsi, mask, ds, level, overlap, tile=256):
+    '''Every tile of every patchable region at a level's own ds, main and
+    offset lattice, as one list of uint8 arrays per region -- through
+    `SlideReader.read_grid`, the read stage 2's build uses, in blocks rather
+    than one whole-region read. The order inside a region is block by block,
+    which a timing does not care about.'''
+    regions = mask.patchable(tile * ds).tissue_regions
+    grids = region_grids(regions, ds=ds, level=level, tile_size=tile,
+                         overlap=overlap)
+    per_region = [[] for _ in regions]
+    for block in SlideReader(wsi).read_grid(regions, grids, ds, tile=tile,
+                                            offset=overlap, level=level):
+        per_region[block.region].extend(t.numpy() for t in block.main)
+        per_region[block.region].extend(t.numpy() for t in block.offset)
+    return per_region
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -536,18 +553,16 @@ def bench_wsi_compare(device, wsi_path, batch_sizes, level, overlap, warmup,
     wsi = SafeSlide(wsi_path)
     ds = wsi.level_downsamples[level]
     mask = _tissue_mask(wsi, mask_cfg, device)
-    wtc = WsiTissuesContainer(wsi, ds=ds, level=level, tile_size=256,
-                              overlap=overlap, mask=mask)
-    n_patches = sum(len(tp) for tp in wtc)
-    print(f'  n_patches={n_patches}  regions={len(wtc)}  ds={ds:.2f}')
+    tiles = read_region_tiles(wsi, mask, ds, level, overlap)
+    n_patches = sum(len(tp) for tp in tiles)
+    print(f'  n_patches={n_patches}  regions={len(tiles)}  ds={ds:.2f}')
 
     def encode_fn(encoder, bs):
         for _ in range(warmup):
-            encoder(list(wtc[0])[:bs])
+            encoder(tiles[0][:bs])
         reset_peak(device)
         t_encode = 0.0
-        for tp in wtc:
-            tp_patches = list(tp)
+        for tp_patches in tiles:
             if not tp_patches:
                 continue
             t0 = time.perf_counter()
@@ -633,18 +648,17 @@ def bench_wsi(base, device, wsi_path, levels, overlaps, batch_sizes, dtypes, war
                  + (f'  mpp~{base_mpp * ds:.3f}' if base_mpp else '')
                  + f'  overlap={overlap} --')
             t0 = time.perf_counter()
-            wtc = WsiTissuesContainer(wsi, ds=ds, level=level, tile_size=256,
-                                      overlap=overlap, mask=mask)
+            tiles = read_region_tiles(wsi, mask, ds, level, overlap)
             t_extract = time.perf_counter() - t0
-            n_patches = sum(len(tp) for tp in wtc)
-            print(f'  Extract: {t_extract:.1f}s   patches={n_patches}  regions={len(wtc)}')
+            n_patches = sum(len(tp) for tp in tiles)
+            print(f'  Extract: {t_extract:.1f}s   patches={n_patches}  regions={len(tiles)}')
             print(f'  {"batch":>5}  {"dtype":>5}  {"encode_s":>9}  {"total_s":>8}'
                  f'  {"patches/s":>10}  {"cpu_s":>6}  {"gpu_s":>6}  {"ratio":>6}'
                  f'  {"note":<28}  {"GPU MB":>8}')
             sep('.')
 
             wsi_results = []
-            warmup_patches = list(wtc[0])[:max(batch_sizes)]
+            warmup_patches = tiles[0][:max(batch_sizes)]
             for dtype in dtypes:
                 encoder = base.variant(batch_size=max(batch_sizes), dtype=_dt(dtype))
                 for _ in range(warmup):
@@ -652,8 +666,7 @@ def bench_wsi(base, device, wsi_path, levels, overlaps, batch_sizes, dtypes, war
                 for bs in batch_sizes:
                     reset_peak(device)
                     t_cpu_total = t_gpu_total = 0.0
-                    for tp in wtc:
-                        patches_tp = list(tp)
+                    for patches_tp in tiles:
                         if not patches_tp:
                             continue
                         tc, tg = run_encode_timed(base, device, bs, dtype, patches_tp)

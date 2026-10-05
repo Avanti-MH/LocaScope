@@ -32,9 +32,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # bucket what the pool has. A level that will come in thin says so there, in
 # seconds, instead of an hour into encoding.
 #
-# What the dry run cannot cover: holes. Whether a tile was photographed is a
-# property of (location, level), so it only surfaces on read; a tile below
-# --min-valid is dropped (not replaced), and refstore_levels.csv says how many.
+# Holes need no check after the read: an unscanned block is glass to the mask,
+# so the sampler never places a tile there (2026-10-05, log/TODO.log).
 #
 # --pooling cls keeps one vector per tile, about 61 MB per slide; --pooling
 # tokens keeps all 197 and costs about 6 GB.

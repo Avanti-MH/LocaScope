@@ -5,9 +5,12 @@ PatchingLib — shared patch grid layout for query and WSI pipelines.
     PatchGrid            — layout + indexing only
     PatchContainerBase   — shared patch-container API (ABC)
     FeaturesMap          — feature vectors aligned to PatchGrid
+    QueryPatchContainer  — a query image cut into a PatchGrid
+    WsiFeaturesMap       — every region's FeaturesMap at one scale
 
-Later:
-    QueryPatchContainer / WsiPatchContainer
+A slide's tiles are read by SlideReader.read_grid, block by block; the
+containers that read a whole region image (WsiTissuesContainer,
+TissuePatchContainer) were retired on 2026-10-06.
 """
 
 from __future__ import annotations
@@ -25,7 +28,6 @@ import numpy as np
 from PIL import Image
 import openslide
 
-from TissueMask import TissueRegion
 
 PatchIndex = Union[int, Tuple[int, int]]
 EncodeFn = Callable[List[Any], Any]
@@ -286,10 +288,9 @@ class PatchGrid:
                    level: Optional[int] = None,
                    size: Optional[Tuple[int, int]] = None) -> PatchGrid:
         '''The grid of one tissue region at downsample `ds` -- THE one place the
-        region's level-0 box becomes level-n size and offset. `region_grids`,
-        `TissuePatchContainer.extract_all` and every reader of a slide's tiles
-        go through here, so the stored grid, the container's grid and the
-        reader's grid cannot drift apart.
+        region's level-0 box becomes level-n size and offset. `region_grids`
+        and every reader of a slide's tiles go through here, so the stored
+        grid and the reader's grid cannot drift apart.
 
         `size` overrides the level-n (w, h) when the pixels in hand are not
         exactly int(w / ds) x int(h / ds) -- a pre-cut crop. Also records
@@ -702,11 +703,9 @@ class FeaturesMap:
 class WsiFeaturesMap:
     '''Every tissue region's FeaturesMap for ONE slide at ONE scale.
 
-    The WSI-level counterpart of FeaturesMap, and the missing half of a pair
-    that already exists one level down:
-
-        TissuePatchContainer.to_features(encoder) -> FeaturesMap
-        WsiTissuesContainer .to_features(encoder) -> WsiFeaturesMap
+    The WSI-level counterpart of FeaturesMap: one FeaturesMap per region, with
+    the regions they belong to. Built by `from_grid_read` from what
+    `SlideReader.read_grid` yields, or loaded from the feature cache.
 
     What it is for is a bug this repo has paid for more than once. A bare
     `list[FeaturesMap]` does not carry which regions it belongs to, so the
@@ -762,7 +761,7 @@ class WsiFeaturesMap:
                        tile_size: int, overlap: bool) -> 'WsiFeaturesMap':
         '''Encode what `SlideReader.read_grid` yields, block by block, into
         every region's FeaturesMap -- the slide never held whole, which is
-        what WsiTissuesContainer did.
+        what the retired WsiTissuesContainer did.
 
         A block carries main rows `row0 ..` and the offset rows between
         them, each row-major; tile (r, c) of a lattice goes to the flat slot
@@ -970,324 +969,3 @@ class QueryPatchContainer(PatchContainerBase):
         grid = PatchGrid.from_size(self.width, self.height, tile_size, overlap=overlap)
         patches = [self._cut_patch(info) for info in grid.iter_infos()]
         return self._bind(grid, patches)
-
-
-class TissuePatchContainer(PatchContainerBase):
-    '''
-    Patch container for tissue regions from a WSI level image.
-
-    Three usage patterns — patch pixels are identical in case 2 and 3:
-
-    Case 1 — full image, no region:
-        img[0,0] = level-N (0, 0); grid covers entire image.
-        TissuePatchContainer(arr, img_ds=ds)
-
-    Case 2 — full image + region (is_crop=False):
-        img is the complete level-N image; region is a sub-bbox within it.
-        img_origin = (0, 0); grid starts at (region.x/ds, region.y/ds).
-        TissuePatchContainer(arr, region=r, img_ds=ds, is_crop=False)
-
-    Case 3 — pre-cropped image + region (is_crop=True):
-        img is already cropped to the region bbox (memory-efficient WSI path).
-        img_origin = (region.x/ds, region.y/ds); grid starts at same point.
-        TissuePatchContainer(crop, region=r, img_ds=ds, is_crop=True)
-
-    PatchInfo.x/y always holds level-N global coordinates in all three cases.
-    '''
-    def __init__(self, source: Optional[Union[str, openslide.OpenSlide, Image.Image, np.ndarray]] = None,
-                 region: Optional[TissueRegion] = None,
-                 img_ds: float = 1.0,
-                 is_crop: bool = False,
-                 at_level: Optional[int] = None,
-                 ):
-        super().__init__(source)
-
-        if is_crop and region is None:
-            raise ValueError('region must be provided when is_crop=True')
-
-        self.tissue_region = region
-        self.img_ds   = img_ds
-        self.is_crop  = is_crop
-        self.at_level = at_level
-
-        if isinstance(source, str):
-            self.img = as_rgb_uint8(np.array(Image.open(source).convert('RGB')))
-        elif isinstance(source, Image.Image):
-            self.img = as_rgb_uint8(np.array(source.convert('RGB')))
-        elif isinstance(source, np.ndarray):
-            self.img = as_rgb_uint8(source)
-        elif isinstance(source, openslide.OpenSlide):
-            if at_level is None:
-                raise ValueError('at_level must be provided when source is openslide.OpenSlide')
-            # read_region_rgb when the handle offers it. This branch never
-            # wrote `.convert('RGB')` -- it hands the RGBA array straight to
-            # as_rgb_uint8, which slices `[..., :3]` -- but that is the SAME
-            # bug spelled differently: dropping the alpha leaves unphotographed
-            # pixels at RGB 0, so every scanner hole is a pure black rectangle
-            # in the patches this container then extracts.
-            size = source.level_dimensions[at_level]
-            if hasattr(source, 'read_region_rgb'):
-                self.img = as_rgb_uint8(source.read_region_rgb((0, 0), at_level,
-                                                               size))
-            else:
-                self.img = as_rgb_uint8(np.array(
-                    source.read_region((0, 0), at_level, size)))
-        else:
-            raise ValueError(f'Unsupported source type: {type(source)}')
-
-        self.height, self.width = self.img.shape[:2]
-
-        # img_origin: where self.img[0,0] is in level-N global space
-        # local crop: crop starts at region position → origin = region.x / img_ds
-        # full image: image starts at (0, 0) globally → base default (0, 0) applies
-        if self.is_crop and self.tissue_region is not None:
-            self.img_origin_x = int(self.tissue_region.x / self.img_ds)
-            self.img_origin_y = int(self.tissue_region.y / self.img_ds)
-
-    @property
-    def source_type(self) -> str:
-        return 'tissue'
-
-    @classmethod
-    def from_path(cls, source: str, region: Optional[TissueRegion] = None,
-                  img_ds: float = 1.0, is_crop: bool = False,
-                  at_level: Optional[int] = None) -> TissuePatchContainer:
-        return cls(source, region, img_ds, is_crop, at_level)
-
-    @classmethod
-    def from_openslide(cls, source: openslide.OpenSlide, at_level: int,
-                       region: Optional[TissueRegion] = None) -> TissuePatchContainer:
-        img_ds = source.level_downsamples[at_level]
-        return cls(source, region, img_ds, False, at_level)
-
-    @classmethod
-    def from_pil(cls, image: Image.Image, region: Optional[TissueRegion] = None,
-                 img_ds: float = 1.0, is_crop: bool = False,
-                 at_level: Optional[int] = None) -> TissuePatchContainer:
-        return cls(image, region, img_ds, is_crop, at_level)
-
-    @classmethod
-    def from_array(cls, array: np.ndarray, region: Optional[TissueRegion] = None,
-                   img_ds: float = 1.0, is_crop: bool = False,
-                   at_level: Optional[int] = None) -> TissuePatchContainer:
-        return cls(array, region, img_ds, is_crop, at_level)
-
-    def _cut_patch(self, info: PatchInfo) -> np.ndarray:
-        lx = info.x - self.img_origin_x
-        ly = info.y - self.img_origin_y
-        s  = info.size_px
-        return self.img[ly:ly+s, lx:lx+s].copy()
-
-    def extract_all(self, tile_size: int, overlap: bool = True) -> TissuePatchContainer:
-        # grid_x/y_offset: where PatchGrid starts in level-N global space
-        # separate from img_origin_x/y (where self.img[0,0] is)
-        if self.tissue_region is not None:
-            # A crop is sized by the pixels it holds, not by the region: a
-            # caller that derives the region from the read (bench_offgrid_score
-            # rounds cols * T * ds to level 0) gets back int(w / ds) one short
-            # at a non-integer ds, and the image is what tiles are cut from.
-            grid = PatchGrid.for_region(
-                self.tissue_region, self.img_ds, tile_size, overlap=overlap,
-                level=self.at_level,
-                size=(self.width, self.height) if self.is_crop else None)
-        else:
-            grid = PatchGrid.from_size(
-                self.width, self.height, tile_size, overlap=overlap,
-                ds=self.img_ds, level=self.at_level)
-        patches = [self._cut_patch(info) for info in grid.iter_infos()]
-        return self._bind(grid, patches)
-
-
-class WsiTissuesContainer():
-    '''Every tile of every usable tissue region, at ONE pyramid level.
-
-    What a finished container guarantees, and what callers may rely on:
-
-        .level            a level that exists on this slide
-        .ds               == float(wsi.level_downsamples[level]), the level's
-                             OWN downsample, never the one that was requested
-        .tissue_regions   every one can host at least one tile at .ds
-        .tissue_patches   parallel to .tissue_regions, same order
-
-    The third line is the one that moved. "Which regions are usable at this
-    scale" used to be the caller's job, and three callers got it wrong in
-    three different ways -- filtering at the estimated ds while building at the
-    ground-truth one, copying the filter's logic out of TissueMask, or
-    forgetting it entirely and dying inside torch.cat on an empty batch. It is
-    answered here now, by `from_ds`, because this is the only object that knows
-    the ds for certain.
-
-    CURRENT LIMITATION: `ds` must be a level that exists on the slide. There is
-    no resampling, so a request between levels is snapped to the nearest one
-    (and said so in the log). `from_mpp_continuous` in log/TODO.log is the plan
-    for lifting this; it changes what a tile IS, so it is deliberately not part
-    of the scale work.
-    '''
-
-    def __init__(self, wsi: openslide.OpenSlide, ds: float = 1.0, level: int = None, tile_size: int = 256, overlap: bool = True, mask: Optional[TissueMask] = None):
-        self.wsi: openslide.OpenSlide = wsi
-        self.ds: float = ds
-        self.mask: Optional[TissueMask] = mask
-        self.tile_size: int = tile_size
-        #: Kept because it is part of the scale, not just an argument: the same
-        #: regions at the same ds hold a different number of patches with the
-        #: overlap grid than without, so anything comparing a built container
-        #: against a stored one has to know which it was.
-        self.overlap: bool = overlap
-
-        if level is not None:
-            self.level = level
-            found = WsiTissuesContainer._find_level(wsi, ds)
-            # `found is None` means the ds matches no level at all. That used to
-            # pass silently whenever `level` was given -- the two were only
-            # compared when both existed -- and then every size below was
-            # computed as int(region.w / ds) against a scale the slide does not
-            # have. Both halves of the contract are checked now.
-            if found is None:
-                raise ValueError(
-                    f'DS {ds} matches no level on this slide '
-                    f'(downsamples: {[float(d) for d in wsi.level_downsamples]}). '
-                    f'Use from_ds / from_mpp, which snap to a real level.')
-            if found != level:
-                raise ValueError(f'Level {level} does not match DS {ds} (found level {found})')
-        else:
-            found = WsiTissuesContainer._find_level(wsi, ds)
-            if found is None:
-                raise ValueError(f'No level found for the given DS: {ds}')
-            self.level = found
-
-        self.tissue_regions: list[TissueRegion] = []
-        if mask is None:
-            self.tissue_regions = [
-                TissueRegion(x=0, y=0, w=wsi.level_dimensions[0][0], h=wsi.level_dimensions[0][1], index=0)
-            ]
-        else:
-            self.tissue_regions = mask.tissue_regions
-        
-        self.tissue_patches: list[TissuePatchContainer] = []
-        for i, region in enumerate(self.tissue_regions):
-            size = (int(region.w / self.ds), int(region.h / self.ds))
-            try:
-                # read_region_rgb when the handle offers it. This is the
-                # main tiling path -- every patch the retrieval stages encode
-                # comes through here -- and it never wrote `.convert('RGB')`
-                # itself, so the defect was invisible to a grep: the RGBA image
-                # goes to `from_pil`, which converts, drops the alpha, and
-                # leaves every unphotographed pixel at RGB 0. A scanner hole
-                # then reaches the encoder as a pure black rectangle with two
-                # right-angled corners.
-                if hasattr(wsi, 'read_region_rgb'):
-                    tissue_img = wsi.read_region_rgb((region.x, region.y),
-                                                     self.level, size)
-                else:
-                    tissue_img = wsi.read_region((region.x, region.y),
-                                                 self.level, size)
-            except Exception as e:
-                # One read covers a whole region bbox, so a single MIRAX tile the
-                # scanner never acquired takes the entire region -- and openslide
-                # names neither the region nor the offset ("Not a JPEG file:
-                # starts with 0x00 0x00"). Say which of the N regions it was.
-                raise RuntimeError(
-                    f'{type(e).__name__}: {e} '
-                    f'[region {i + 1}/{len(self.tissue_regions)} '
-                    f'index={region.index} x={region.x} y={region.y} '
-                    f'w={region.w} h={region.h} level={self.level} '
-                    f'read_size={size[0]}x{size[1]}]'
-                ) from e
-            # from_array or from_pil, by what the read returned. The two take
-            # the same keywords and land in the same __init__ branch table.
-            # comparable with the runs already recorded under it.
-            make = (TissuePatchContainer.from_array
-                    if isinstance(tissue_img, np.ndarray)
-                    else TissuePatchContainer.from_pil)
-            tpc = make(tissue_img, region=region, img_ds=self.ds, is_crop=True, at_level=self.level)
-            self.tissue_patches.append(tpc.extract_all(tile_size=self.tile_size, overlap=overlap))
-
-    @staticmethod
-    def _find_level(wsi: openslide.OpenSlide, ds: float, tol: float = 1e-3) -> Optional[int]:
-        for i, d in enumerate(wsi.level_downsamples):
-            if abs(d - ds) / max(d, 1e-9) < tol:
-                return i
-        return None
-
-    @classmethod
-    def from_ds(cls, wsi: openslide.OpenSlide, ds: float, tile_size: int = 256,
-                overlap: bool = True,
-                mask: Optional[TissueMask] = None,
-                verbose: bool = True):
-        '''Build at the level nearest `ds`, keeping only regions usable there.
-
-        The one place a requested scale turns into a level AND a region list,
-        so the two cannot disagree. Two things happen that a direct call to the
-        constructor does not do:
-
-          the level's OWN downsample replaces the requested one. They differ by
-          up to the 1e-3 that `_find_level` calls "close enough" -- BRACS_1228
-          level 1 reports 4.00003 -- and `int(w / ds)` turns that into a whole
-          missing tile for a region sized near a multiple of the tile.
-
-          the mask is narrowed to regions that can host a tile at that ds --
-          `mask.patchable(...)`, a view, so the caller's mask is untouched. Callers used to do
-          this themselves; when they filtered at a different ds the answer was a
-          region with zero patches, and the encoder dies on an empty batch
-          inside torch.cat naming neither the region nor the level.
-
-        `filtered` and `merged` are NOT applied. They depend on geometry alone,
-        not on ds, so they belong to the mask's recipe (TissueMaskConfig) --
-        and merging must happen BEFORE this filter, since two fragments that are
-        each too small can merge into one region that is not.
-        '''
-        from SlideReader import SlideReader                         # noqa: PLC0415
-        level, ds_actual = SlideReader(wsi).native_scale(ds=ds)
-        if verbose and ds_actual != ds:
-            print(f'  [WsiTissues] ds {ds:.5f} -> level {level} '
-                  f'(ds {ds_actual:.5f})', flush=True)
-        view = mask.patchable(tile_size * ds_actual) if mask is not None else None
-        return cls(wsi, ds=ds_actual, level=level, tile_size=tile_size,
-                   overlap=overlap, mask=view)
-
-    @classmethod
-    def from_mpp(cls, wsi: openslide.OpenSlide, mpp: float, tile_size: int = 256, overlap: bool = True, mask: Optional[TissueMask] = None):
-        '''`from_ds` with the scale given in micrometres per pixel.
-
-        mpp and ds are the same statement in different units, so this converts
-        and delegates rather than repeating the resolution. `wsi.base_mpp` is
-        the conversion -- the mean of mpp-x and mpp-y, which used to be written
-        out here as mpp-x alone and disagreed with QueryFromWSI on every slide
-        in this project.
-        '''
-        from SlideReader import SlideReader                         # noqa: PLC0415
-        level, ds_actual = SlideReader(wsi).native_scale(mpp=mpp)
-        return cls.from_ds(wsi, ds_actual, tile_size=tile_size,
-                           overlap=overlap, mask=mask)
-
-
-    
-    def __len__(self):
-        return len(self.tissue_patches)
-
-    def __getitem__(self, index):
-        return self.tissue_patches[index]
-
-    def __iter__(self):
-        return iter(self.tissue_patches)
-
-    def to_features(self, encoder: EncodeFn) -> WsiFeaturesMap:
-        '''Encode every region, keeping the regions attached to the result.
-
-        The line this replaces was written out at each call site:
-
-            [tp.to_features(encoder) for tp in container]
-
-        which produces a list that has forgotten which regions it came from.
-        Every caller then had to remember that the answer pairs with
-        `container.tissue_regions` and not with `mask.tissue_regions` -- the two
-        differ, because from_ds narrows the mask to what can host a tile, and
-        pairing them the wrong way puts every window on a neighbouring region's
-        coordinates without raising.
-        '''
-        return WsiFeaturesMap(
-            self.tissue_regions,
-            [tp.to_features(encoder) for tp in self.tissue_patches],
-            ds=self.ds, level=self.level,
-            tile_size=self.tile_size, overlap=self.overlap)

@@ -10,7 +10,7 @@ Run through `jobscripts/ReadPathTest.sh`. Needs a slide; no GPU, no model.
            (sensor + margin, or the bounding square); `stack='R'` is the ds 1
            read degraded; `read_samples` refuses a sample off the slide. The
            decoy for "untouched" is the same read one level px over.
-    grid   `read_grid` against what `WsiTissuesContainer` does -- ONE
+    grid   `read_grid` against what the retired `WsiTissuesContainer` did -- ONE
            `read_region_rgb` of the region, main tile (r, c) cut at
            (c*T, r*T), offset tile at (c*T + T/2, r*T + T/2). Blocks at an
            integer ds, one read per region otherwise; every tile must equal
