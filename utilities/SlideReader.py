@@ -130,14 +130,6 @@ class GridBlock:
     offset: torch.Tensor        # uint8 [offset_rows * (cols - 1), T, T, 3]
 
 
-def lattice_dims(grid, lattice: str) -> Tuple[int, int]:
-    """(rows, cols) of one lattice of a region's `PatchGrid`. The offset lattice
-    is one row and one column smaller: its tiles sit between the main ones."""
-    if lattice == 'main':
-        return grid.grid_rows, grid.grid_cols
-    return grid.overlap_rows, grid.overlap_cols
-
-
 def integer_downsample(ds: float) -> bool:
     """Does every block read at this downsample land on the same sub-pixel
     phase as the whole-region read? Only when level-0 rows map to whole level
@@ -149,43 +141,52 @@ def _offset_rows(grid, row0: int, main_rows: int, offset: bool) -> int:
     """Offset rows starting at `row0` that a block of `main_rows` main rows holds."""
     if not offset:
         return 0
-    off_rows_total, off_cols = lattice_dims(grid, 'offset')
+    off_rows_total, off_cols = grid.lattice_dims('offset')
     return max(0, min(main_rows, off_rows_total - row0)) if off_cols else 0
+
+
+def _first_tile(grid, lattice: str) -> Tuple[int, int]:
+    """Where a lattice's tile (0, 0) sits, in level px from the region's own
+    origin -- `PatchGrid.tile_origin` with the grid's offset taken off."""
+    x, y = grid.tile_origin(lattice, 0, 0)
+    return x - grid.x_offset, y - grid.y_offset
 
 
 def _cut(arr: np.ndarray, y0: int, grid, tile: int, main_rows: int,
          n_off: int) -> Tuple[np.ndarray, np.ndarray]:
     """Main and offset tiles of `main_rows` rows whose first row starts `y0`
-    level px down `arr`, which starts at the region's left edge. Tile (r, c)
-    of the main lattice sits at (c * T, r * T) level px from the region's
-    origin, the offset lattice half a tile further on both axes --
-    `PatchGrid`'s placement, and `WsiTissuesContainer`'s cut."""
-    half = tile // 2
-    _, cols = lattice_dims(grid, 'main')
-    _, off_cols = lattice_dims(grid, 'offset')
-    main = (arr[y0:y0 + main_rows * tile, :cols * tile]
+    level px down `arr`, which starts at the region's left edge. Where each
+    lattice starts is the grid's (`PatchGrid.tile_origin`); the reshape then
+    steps by `tile`, which holds because `PatchGrid._full_grid_starts` is
+    range(0, L, T) -- tiles abut, by construction."""
+    _, cols = grid.lattice_dims('main')
+    mx, my = _first_tile(grid, 'main')
+    main = (arr[y0 + my:y0 + my + main_rows * tile, mx:mx + cols * tile]
             .reshape(main_rows, tile, cols, tile, 3)
             .transpose(0, 2, 1, 3, 4)
             .reshape(main_rows * cols, tile, tile, 3))
     if not n_off:
         return np.ascontiguousarray(main), np.zeros((0, tile, tile, 3), np.uint8)
-    off = (arr[y0 + half:y0 + half + n_off * tile, half:half + off_cols * tile]
+    _, off_cols = grid.lattice_dims('offset')
+    ox, oy = _first_tile(grid, 'offset')
+    off = (arr[y0 + oy:y0 + oy + n_off * tile, ox:ox + off_cols * tile]
            .reshape(n_off, tile, off_cols, tile, 3)
            .transpose(0, 2, 1, 3, 4)
            .reshape(n_off * off_cols, tile, tile, 3))
     return np.ascontiguousarray(main), np.ascontiguousarray(off)
 
 
-def read_block(slide, region, ds: float, level: int, grid, tile: int, row0: int,
+def read_block(slide, level: int, grid, tile: int, row0: int,
                main_rows: int, offset: bool) -> Tuple[np.ndarray, np.ndarray]:
     """One region's rows `row0 .. row0 + main_rows - 1` in one level read, with
-    the offset rows the read covers (it is made tall enough for them)."""
+    the offset rows the read covers (it is made tall enough for them). The
+    read starts at main tile (row0, 0)'s level-0 origin, `tile_origin_l0`, so
+    `grid` must come from `PatchGrid.for_region`."""
     half = tile // 2
-    _, cols = lattice_dims(grid, 'main')
+    _, cols = grid.lattice_dims('main')
     n_off = _offset_rows(grid, row0, main_rows, offset)
     height = max(main_rows * tile, n_off * tile + half if n_off else 0)
-    x_l0 = int(round(region.x))
-    y_l0 = int(round(region.y + (row0 * tile) * ds))
+    x_l0, y_l0 = grid.tile_origin_l0('main', row0, 0)
     arr = slide.read_region_rgb((x_l0, y_l0), level, (cols * tile, height))
     return _cut(arr, 0, grid, tile, main_rows, n_off)
 
@@ -210,7 +211,7 @@ class _Blocks(torch.utils.data.Dataset):
         self.whole = not integer_downsample(self.ds)
         self.plan: List[Tuple[int, int, int]] = []      # every block, in order
         for r, grid in enumerate(self.grids):
-            rows, cols = lattice_dims(grid, 'main')
+            rows, cols = grid.lattice_dims('main')
             if rows == 0 or cols == 0:
                 continue
             for row0 in range(0, rows, block_rows):
@@ -226,7 +227,7 @@ class _Blocks(torch.utils.data.Dataset):
         return len(self.items)
 
     def _block(self, r, row0, n, main, off) -> GridBlock:
-        cols = lattice_dims(self.grids[r], 'main')[1]
+        cols = self.grids[r].lattice_dims('main')[1]
         return GridBlock(region=r, row0=row0, cols=cols, main_rows=n,
                          offset_rows=len(off) // max(1, cols - 1) if len(off) else 0,
                          main=torch.from_numpy(main), offset=torch.from_numpy(off))
@@ -239,7 +240,7 @@ class _Blocks(torch.utils.data.Dataset):
         grid = self.grids[r]
         if not self.whole:
             _, row0, n = blocks[0]
-            main, off = read_block(self._slide, self.regions[r], self.ds, self.level,
+            main, off = read_block(self._slide, self.level,
                                    grid, self.tile, row0, n, self.offset)
             return [self._block(r, row0, n, main, off)]
         img = read_region_whole(self._slide, self.regions[r], self.ds, self.level)
@@ -276,7 +277,7 @@ class GridRead:
         n = 0
         for r, row0, rows in self._blocks.plan:
             grid = self._blocks.grids[r]
-            cols = lattice_dims(grid, 'main')[1]
+            cols = grid.lattice_dims('main')[1]
             n += rows * cols
             n += _offset_rows(grid, row0, rows, self._blocks.offset) * max(0, cols - 1)
         return n
@@ -315,6 +316,28 @@ class SlideReader:
         self.level_downsamples = [float(d) for d in slide.level_downsamples]
 
     # ── the level ──────────────────────────────────────────────────────────
+
+    def native_scale(self, *, mpp: Optional[float] = None,
+                     ds: Optional[float] = None) -> Tuple[int, float]:
+        """A requested scale -> (level, that level's own downsample): the
+        level nearest by ratio (`SafeSlide.nearest_level_for_downsample`).
+
+        Not `level_of`, and the two answer different questions. `level_of`
+        keeps `ds` and picks where to read it from. This REPLACES `ds` with a
+        pyramid level's, for a caller that only works at native scales --
+        retrieval, whose stored features are one level's tiles. The result
+        is native, so `level_of` of it returns the same level.
+
+        Exactly one of `mpp` / `ds`. Accepting both would mean deciding which
+        wins, and a caller who passes two is telling you they are not sure --
+        that is a bug to surface, not an ambiguity to resolve. No I/O. Was
+        `WsiTissuesContainer.resolve_scale`."""
+        if (mpp is None) == (ds is None):
+            raise ValueError('give exactly one of mpp / ds')
+        if ds is None:
+            ds = mpp / self.base_mpp
+        level = self.slide.nearest_level_for_downsample(ds)
+        return level, self.level_downsamples[level]
 
     def level_of(self, ds: float, level: Optional[int] = None) -> int:
         """`level_for(ds)`, or `level` checked: a forced level must not be
@@ -412,7 +435,7 @@ class SlideReader:
     def read_grid(self, regions: Sequence, grids: Sequence, ds: float, *,
                   tile: int, offset: bool = True, block_rows: int = 8,
                   level: Optional[int] = None) -> GridRead:
-        """Every tile of the regions' `PatchGrid`s (`Store.region_grids`), in
+        """Every tile of the regions' `PatchGrid`s (`PatchingLib.region_grids`), in
         blocks. A grid tile is `tile` LEVEL px, so `ds` must be its level's
         own: a grid at a ds the pyramid does not have would need a resample
         per tile, which is what a block read exists to avoid. `offset=False`

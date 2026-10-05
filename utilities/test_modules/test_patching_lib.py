@@ -8,7 +8,7 @@ Sections:
   1. PatchGrid — layout counts, flat/unified indexing, offset metadata
   2. PatchInfo — for_query/for_wsi, to_level0(), grid offset coordinates
   3. Containers — QueryPatchContainer & TissuePatchContainer extraction, crop, real data
-  4. Scale — resolve_scale / from_ds: which level, which downsample, which
+  4. Scale — from_ds: which level, which downsample, which
      regions survive it. No model needed; the first two checks need no WSI.
 
 Usage:
@@ -1334,34 +1334,6 @@ def _mask_with_regions(regions_wh, slide_w, slide_h):
                                      (slide_w, slide_h), slide_w / 16))._with(regions)
 
 
-def validate_resolve_scale(wsi) -> None:
-    """resolve_scale must return a real level and THAT level's own downsample."""
-    print('\n[scale] resolve_scale')
-    from PatchingLib import WsiTissuesContainer
-
-    for bad in ({}, {'mpp': 0.5, 'ds': 2.0}):
-        try:
-            WsiTissuesContainer.resolve_scale(wsi, **bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f'resolve_scale({bad}) should have raised')
-
-    downsamples = [float(d) for d in wsi.level_downsamples]
-    for level, ds_true in enumerate(downsamples):
-        # Ask for something 0.04% off -- the size of the gap that broke
-        # the patchable filter against from_mpp -- and demand the level's own value.
-        got_level, got_ds = WsiTissuesContainer.resolve_scale(
-            wsi, ds=ds_true * 1.0004)
-        assert got_level == level, (
-            f'ds {ds_true * 1.0004:.5f} resolved to level {got_level}, '
-            f'expected {level}')
-        assert got_ds == ds_true, (
-            f'level {level} reported ds {got_ds!r}, expected the slide\'s own '
-            f'{ds_true!r}')
-    print(f'  ok   {len(downsamples)} levels, each returns its own downsample')
-
-
 def validate_ds_gate(wsi) -> None:
     """A ds that is on no level must be refused, level given or not."""
     print('\n[scale] constructor rejects a ds no level has')
@@ -1451,7 +1423,6 @@ def run_scale_section(args, out_dir: str) -> None:
     wsi = SafeSlide(args.wsi)
     try:
         print(f'  {os.path.basename(args.wsi)}  {wsi.mpp_summary()}')
-        validate_resolve_scale(wsi)
         validate_ds_gate(wsi)
         validate_container_contract_every_level(wsi, args.rsize)
     finally:

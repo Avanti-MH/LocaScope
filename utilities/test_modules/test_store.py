@@ -57,7 +57,8 @@ from PatchingLib import FeaturesMap, WsiFeaturesMap              # noqa: E402
 from Store import (FeatureMapCache, FeatureStore as FS,          # noqa: E402
                    PooledFeatures, PreTileCorpus, PreTileStore, StoreMismatch,
                    from_store_tensors, geometry_mismatch, raw_layout,
-                   region_grids, to_store_tensors)
+                   to_store_tensors)
+from PatchingLib import region_grids                             # noqa: E402
 from TissueMask import TissueRegion                              # noqa: E402
 
 _RESULTS = []

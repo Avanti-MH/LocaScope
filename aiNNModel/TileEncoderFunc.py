@@ -1210,7 +1210,7 @@ class TileEncoder(IdentifiedBuild):
 
         Unwrapped, so this runs on a single card even under DataParallel:
         forward_intermediates is not forward, and DataParallel replicates only
-        the latter. The same trade GigaPathFunc_old records for its token dump.
+        the latter. The free-function token dump (GigaPathFunc_old, removed) made the same trade.
         """
         m = getattr(self.model, 'module', self.model)
         return m.forward_intermediates(batch, indices=1, norm=True,

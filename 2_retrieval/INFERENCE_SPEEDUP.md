@@ -109,8 +109,8 @@ model = timm.create_model(
 > `patch_embed.grid_size`，所以 `model_spec` 會宣稱 197 個 token 而輸出只有
 > 101 個。在 `features()` 還是 `raw[:, 0]` 的年代沒有任何東西會發現這件事。
 >
-> `aiNNModel/GigaPathFunc.py` 裡的實作已刪除；`GigaPathFunc_old.py` 保留舊
-> API 供等效測試使用。下面這段留著，是為了記錄「當初為什麼想用」——
+> `aiNNModel/GigaPathFunc.py` 裡的實作已刪除；`GigaPathFunc_old.py` 與等效測試已於
+> 2026-10-05 移除。下面這段留著，是為了記錄「當初為什麼想用」——
 > `MILESTONE.log` 記的是失敗過程，不是動機。
 
 ViT 各層合併相似 token，減少 30–50% 計算量，對病理圖影響小。

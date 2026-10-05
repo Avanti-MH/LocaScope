@@ -16,6 +16,9 @@ Run through `jobscripts/ReadPathTest.sh`. Needs a slide; no GPU, no model.
            integer ds, one read per region otherwise; every tile must equal
            the container's to the pixel. The decoy is the reference read one
            level px to the right: it must differ, or the region is blank glass.
+    scale  `native_scale`: each level, asked 0.04% off, gives back itself and
+           its own downsample, which `level_of` maps to the same level; neither
+           or both of mpp / ds is refused.
 
 (Was test_grid_reader.py, the grid half alone, until GridReader became
 SlideReader on 2026-10-03. The geometry is test_read_geometry.py.)
@@ -40,9 +43,8 @@ import numpy as np                                               # noqa: E402
 
 from ReadGeometry import ReadSpec                                # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
-from SlideReader import (SlideReader, degrade_resolution,        # noqa: E402
-                         lattice_dims)
-from Store import region_grids                                   # noqa: E402
+from SlideReader import SlideReader, degrade_resolution          # noqa: E402
+from PatchingLib import region_grids                             # noqa: E402
 
 TILE = 256
 TEXTURE = 2.0       # the decoy's mean |diff| that says "not blank glass"
@@ -155,7 +157,7 @@ def reference_tiles(slide, region, ds, level, grid, shift=0):
     img = slide.read_region_rgb((int(region.x + shift * ds), int(region.y)), level, size)
     out = {}
     for lattice, off in (('main', 0), ('offset', TILE // 2)):
-        rows, cols = lattice_dims(grid, lattice)
+        rows, cols = grid.lattice_dims(lattice)
         for r in range(rows):
             for c in range(cols):
                 y, x = r * TILE + off, c * TILE + off
@@ -179,7 +181,7 @@ def run_grid(slide, level, workers) -> list:
         if far >= TEXTURE:
             break
     print(f'  level {level} (ds {ds:g}) region at ({fx:g}, {fy:g}), '
-          f'{lattice_dims(grid, "main")} main, {lattice_dims(grid, "offset")} offset')
+          f'{grid.lattice_dims("main")} main, {grid.lattice_dims("offset")} offset')
     got = {}
     read = SlideReader(slide, workers=workers).read_grid(
         [region], [grid], ds, tile=TILE, block_rows=2, level=level)
@@ -209,7 +211,35 @@ def run_grid(slide, level, workers) -> list:
     return failures
 
 
-SECTIONS = ('read', 'grid')
+# ── scale ────────────────────────────────────────────────────────────────────
+
+def run_scale(slide) -> list:
+    """native_scale must return a real level and THAT level's own downsample,
+    and refuse a call that gives neither or both of mpp / ds. (Was
+    test_patching_lib's validate_resolve_scale, when this was
+    WsiTissuesContainer.resolve_scale.)"""
+    failures = []
+    reader = SlideReader(slide)
+    for bad in ({}, {'mpp': 0.5, 'ds': 2.0}):
+        try:
+            reader.native_scale(**bad)
+            _expect(failures, False, f'native_scale({bad}) refused')
+        except ValueError:
+            _expect(failures, True, f'native_scale({bad}) refused')
+    for level, ds_true in enumerate(reader.level_downsamples):
+        # 0.04% off -- the size of the gap that broke the patchable filter
+        # against from_mpp -- and the level's own value must come back.
+        got_level, got_ds = reader.native_scale(ds=ds_true * 1.0004)
+        _expect(failures, got_level == level and got_ds == ds_true,
+                f'ds {ds_true * 1.0004:.5f} -> level {got_level} ds {got_ds!r} '
+                f'(want {level}, {ds_true!r})')
+        # native means level_of agrees, so retrieval reads the level it chose
+        _expect(failures, reader.level_of(got_ds) == got_level,
+                f'level_of({got_ds:.5f}) == {got_level}')
+    return failures
+
+
+SECTIONS = ('read', 'grid', 'scale')
 
 
 def main() -> int:
@@ -227,7 +257,8 @@ def main() -> int:
     failures = []
     for name in (args.only or SECTIONS):
         print(f'\n[{name}]', flush=True)
-        failures += (run_read(slide, level) if name == 'read'
+        failures += (run_read(slide, level) if name == 'read' else
+                     run_scale(slide) if name == 'scale'
                      else run_grid(slide, level, args.workers))
     slide.close()
     print(f'\n{"PASS" if not failures else f"{len(failures)} FAILED"}')

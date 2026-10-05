@@ -255,7 +255,7 @@ window, which must sit at 0.50. If the coordinate mapping is wrong the truth
 window is effectively random, and this is what says so.
 
 Rotation defaults to 0. `SlidingWindowSimilarity` scores both grids against the
-MAIN query kernel only (GigaPathSlidingWinSim.py:54); a rotated FoV fails for
+MAIN query kernel only (GigaPathSlidingWinSimRot.SlidingWindowSimilarity); a rotated FoV fails for
 reasons that have nothing to do with pooling, and rotation has its own test in
 test_gigapath_slide_win_sim.py step 5.
 """
@@ -294,12 +294,11 @@ import torch.nn.functional as F                                 # noqa: E402
 import Cache                                                     # noqa: E402
 from AccessDatasets import (SPLIT_SEP, list_names, locate,      # noqa: E402
                             pick_wsi_names)
-from PatchingLib import (FeaturesMap, PatchGrid,                # noqa: E402
+from PatchingLib import (FeaturesMap, PatchGrid, region_grids,  # noqa: E402
                          QueryPatchContainer, WsiTissuesContainer)
 from CpuBudget import CpuBudget                                  # noqa: E402
-from SlideReader import SlideReader, lattice_dims                # noqa: E402
+from SlideReader import SlideReader                              # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
-from Store import region_grids                                   # noqa: E402
 from TissueMaskConfig import (MASK_RECIPES, MaskMaker, TissueMaskConfig,  # noqa: E402
                               add_mask_args, mask_cfg_from_args)
 from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E402
@@ -317,7 +316,7 @@ from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F
                                            attach_baseline, frac_label, grid_table,
                                            group_by, group_levels, k_at, pct,
                                            print_level_heading, report, truth_rank)
-from GigaPathSlidingWinSim import SlidingWindowSimilarity        # noqa: E402
+from GigaPathSlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
 from camera import Render                                        # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
 from _paths import encoder_tag, job_result_dir                   # noqa: E402
@@ -795,36 +794,16 @@ def gate_tiles(path: str, n: int = 32, mask=None) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Reference tiles, one row at a time
+#  Reference tiles
 #
-#  A level-0 region is tens of GB of pixels, and cutting every tile out of it
-#  copies them again, so the reference is read ONE TILE ROW at a time: a strip
-#  `cols * TILE` wide and TILE high, cut into its tiles, encoded, dropped. The
-#  geometry is `PatchGrid`'s and nothing else's -- `lattice_origin` is checked
-#  against it, and `read_tile_row` against a read of the same rows in one piece.
+#  Read by `SlideReader.read_grid` in blocks of rows, never a whole level-0
+#  region (tens of GB). Where every tile sits is `PatchGrid`'s alone --
+#  `lattice_dims` and `tile_origin` are its methods, checked below against
+#  the PatchInfo it makes, and `gate_row_reads` checks that a strip read from
+#  a level-0 origin agrees with the same rows read in one piece.
 # ══════════════════════════════════════════════════════════════════════════════
 
 LATTICES = ('main', 'offset')
-# lattice_dims is SlideReader's: the reader and the scorer must agree on it.
-
-
-def lattice_origin(grid, lattice: str, row: int, col: int) -> tuple:
-    """Level-n (x, y) of a tile's top-left, as `PatchGrid` places it."""
-    half = HALF_TILE if lattice == 'offset' else 0
-    return (grid.x_offset + col * TILE + half, grid.y_offset + row * TILE + half)
-
-
-def read_tile_row(slide, region, ds: float, level: int, grid, lattice: str,
-                  row: int) -> list:
-    """The `cols` tiles of one row of one lattice, `[TILE, TILE, 3]` uint8 each,
-    read as one strip. Located from the region's level-0 origin the way the
-    whole-region read is, so the two agree to what `gate_row_reads` measures."""
-    half = HALF_TILE if lattice == 'offset' else 0
-    _, cols = lattice_dims(grid, lattice)
-    x_l0 = int(round(region.x + half * ds))
-    y_l0 = int(round(region.y + (row * TILE + half) * ds))
-    strip = slide.read_region_rgb((x_l0, y_l0), level, (cols * TILE, TILE))
-    return [strip[:, c * TILE:(c + 1) * TILE] for c in range(cols)]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -959,7 +938,7 @@ def stream_windows(slide, regions, grids, ds: float, level: int, arm_specs,
              for lat in lattices}
     for region, grid in zip(regions, grids):
         for lattice in lattices:
-            rows, cols = lattice_dims(grid, lattice)
+            rows, cols = grid.lattice_dims(lattice)
             for b, g in users[lattice]:
                 acc[token_name(b, g)].setdefault(lattice, []).append(
                     WindowAccumulator(rows, cols, n_shots, rows_q, cols_q, device))
@@ -1060,7 +1039,7 @@ def gate_window_stream(seed: int = 0) -> tuple:
 
 
 def gate_lattice_geometry() -> tuple:
-    """`lattice_dims` and `lattice_origin` against every `PatchInfo` the grid
+    """`PatchGrid.lattice_dims` and `.tile_origin` against every `PatchInfo` the grid
     makes, at the downsamples the bench meets (2x and 4x pyramids, a slightly
     off 4, a coarse one). Pure geometry, no slide."""
     checked = 0
@@ -1071,11 +1050,11 @@ def gate_lattice_geometry() -> tuple:
                                overlap=True)
         for lattice, infos in (('main', grid.main_patch_infos),
                                ('offset', grid.overlap_patch_infos)):
-            rows, cols = lattice_dims(grid, lattice)
+            rows, cols = grid.lattice_dims(lattice)
             if rows * cols != len(infos):
                 return f'ds {ds:g} {lattice}: {rows}x{cols} != {len(infos)} tiles', False
             for info in infos:
-                if (info.x, info.y) != lattice_origin(grid, lattice, info.row,
+                if (info.x, info.y) != grid.tile_origin(lattice, info.row,
                                                       info.col):
                     return (f'ds {ds:g} {lattice} ({info.row},{info.col}): '
                             f'PatchGrid says {(info.x, info.y)}'), False
@@ -1399,7 +1378,7 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
 
     # The regions and their grids come from geometry alone. Which FoVs have an
     # answer window is decided here, before any tile is encoded.
-    lv, ds = WsiTissuesContainer.resolve_scale(slide, ds=ds)
+    lv, ds = SlideReader(slide).native_scale(ds=ds)
     regions = mask.patchable(TILE * ds).tissue_regions
     grids = region_grids(regions, ds=ds, level=lv, tile_size=TILE, overlap=True)
     valid, n_no_region, n_no_window = [], 0, 0

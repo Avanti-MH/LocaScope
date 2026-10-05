@@ -190,6 +190,11 @@ class PatchGrid:
         self.overlap_patch_infos = overlap_patch_infos  # list of PatchInfo for overlap patches
         self._main_row_starts = main_row_starts  # list of row starts for main patches
         self._main_col_starts = main_col_starts  # list of column starts for main patches
+        #: The region's level-0 top-left and the grid's downsample, set by
+        #: `for_region` and None otherwise. x_offset is int(x / ds), truncated,
+        #: so it cannot give back the level-0 point a read is anchored at.
+        self.origin_l0: Optional[Tuple[float, float]] = None
+        self.ds: Optional[float] = None
     # ── Factory ───────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -277,6 +282,64 @@ class PatchGrid:
             x_offset=x_offset,
             y_offset=y_offset,
         )
+
+    @classmethod
+    def for_region(cls, region, ds: float, tile_size: int, overlap: bool = True,
+                   level: Optional[int] = None,
+                   size: Optional[Tuple[int, int]] = None) -> PatchGrid:
+        '''The grid of one tissue region at downsample `ds` -- THE one place the
+        region's level-0 box becomes level-n size and offset. `region_grids`,
+        `TissuePatchContainer.extract_all` and every reader of a slide's tiles
+        go through here, so the stored grid, the container's grid and the
+        reader's grid cannot drift apart.
+
+        `size` overrides the level-n (w, h) when the pixels in hand are not
+        exactly int(w / ds) x int(h / ds) -- a pre-cut crop. Also records
+        `origin_l0` and `ds`, which `tile_origin_l0` needs.'''
+        w, h = size if size is not None else (int(region.w / ds), int(region.h / ds))
+        grid = cls.from_size(w, h, tile_size,
+                             overlap=overlap, x_offset=int(region.x / ds),
+                             y_offset=int(region.y / ds), ds=ds, level=level)
+        grid.origin_l0 = (region.x, region.y)
+        grid.ds = float(ds)
+        return grid
+
+    # ── Lattices ──────────────────────────────────────────────────────────────
+    #
+    # 'main' and 'offset' name the two lattices for the readers and the window
+    # scorers; 'offset' is what PatchInfo calls kind='overlap'.
+
+    def _half(self, lattice: str) -> int:
+        if lattice == 'main':
+            return 0
+        if lattice == 'offset':
+            return self.tile_size // 2
+        raise ValueError(f"lattice must be 'main' or 'offset', got {lattice!r}")
+
+    def lattice_dims(self, lattice: str) -> Tuple[int, int]:
+        '''(rows, cols) of one lattice. The offset lattice is one row and one
+        column smaller: its tiles sit between the main ones.'''
+        self._half(lattice)
+        if lattice == 'main':
+            return self.grid_rows, self.grid_cols
+        return self.overlap_rows, self.overlap_cols
+
+    def tile_origin(self, lattice: str, row: int, col: int) -> Tuple[int, int]:
+        '''Level-n (x, y) of a tile's top-left -- the PatchInfo it would get.'''
+        half = self._half(lattice)
+        return (self.x_offset + self._main_col_starts[col] + half,
+                self.y_offset + self._main_row_starts[row] + half)
+
+    def tile_origin_l0(self, lattice: str, row: int, col: int) -> Tuple[int, int]:
+        '''Level-0 (x, y) a read of this tile starts at: the region's level-0
+        origin plus the tile's level-n offset inside the region, times ds.
+        Not `tile_origin * ds` -- that carries x_offset's truncation, a whole
+        level pixel off the phase the region's own read has.'''
+        if self.origin_l0 is None:
+            raise ValueError('tile_origin_l0 needs a grid made by for_region')
+        half = self._half(lattice)
+        return (int(round(self.origin_l0[0] + (self._main_col_starts[col] + half) * self.ds)),
+                int(round(self.origin_l0[1] + (self._main_row_starts[row] + half) * self.ds)))
 
     # ── Properties ────────────────────────────────────────────────────────────
 
@@ -528,6 +591,14 @@ class PatchGrid:
         return self
 
 
+def region_grids(regions, *, ds: float, level: int, tile_size: int,
+                 overlap: bool) -> List[PatchGrid]:
+    '''One `PatchGrid.for_region` per region, from geometry alone. `regions`
+    must already be the `patchable` view at this ds.'''
+    return [PatchGrid.for_region(r, ds, tile_size, overlap=overlap, level=level)
+            for r in regions]
+
+
 class FeaturesMap:
     '''
     Feature vectors aligned to a PatchGrid.
@@ -635,7 +706,7 @@ class WsiFeaturesMap:
     `list[FeaturesMap]` does not carry which regions it belongs to, so the
     pairing lives in whichever variable a caller happened to zip it with:
 
-        GigaPathSlidingWinSim.py     zipped mask.tissue_regions (unfiltered)
+        GigaPathSlidingWinSim.py     (since removed) zipped mask.tissue_regions (unfiltered)
                                      with sim_maps (filtered). Every window
                                      landed on a neighbouring region's
                                      coordinates. Nothing raised.
@@ -1097,24 +1168,18 @@ class TissuePatchContainer(PatchContainerBase):
         # grid_x/y_offset: where PatchGrid starts in level-N global space
         # separate from img_origin_x/y (where self.img[0,0] is)
         if self.tissue_region is not None:
-            grid_x_offset = int(self.tissue_region.x / self.img_ds)
-            grid_y_offset = int(self.tissue_region.y / self.img_ds)
-            if self.is_crop:
-                w, h = self.width, self.height
-            else:
-                w = int(self.tissue_region.w / self.img_ds)
-                h = int(self.tissue_region.h / self.img_ds)
+            # A crop is sized by the pixels it holds, not by the region: a
+            # caller that derives the region from the read (bench_offgrid_score
+            # rounds cols * T * ds to level 0) gets back int(w / ds) one short
+            # at a non-integer ds, and the image is what tiles are cut from.
+            grid = PatchGrid.for_region(
+                self.tissue_region, self.img_ds, tile_size, overlap=overlap,
+                level=self.at_level,
+                size=(self.width, self.height) if self.is_crop else None)
         else:
-            grid_x_offset = 0
-            grid_y_offset = 0
-            w, h = self.width, self.height
-
-        grid = PatchGrid.from_size(
-            w, h, tile_size, overlap=overlap,
-            x_offset=grid_x_offset,
-            y_offset=grid_y_offset,
-            ds=self.img_ds, level=self.at_level
-        )
+            grid = PatchGrid.from_size(
+                self.width, self.height, tile_size, overlap=overlap,
+                ds=self.img_ds, level=self.at_level)
         patches = [self._cut_patch(info) for info in grid.iter_infos()]
         return self._bind(grid, patches)
 
@@ -1144,29 +1209,6 @@ class WsiTissuesContainer():
     for lifting this; it changes what a tile IS, so it is deliberately not part
     of the scale work.
     '''
-
-    @staticmethod
-    def resolve_scale(wsi, *, mpp: Optional[float] = None,
-                      ds: Optional[float] = None) -> Tuple[int, float]:
-        '''A requested scale -> (level, that level's own downsample).
-
-        Exactly one of `mpp` / `ds`. Accepting both would mean deciding which
-        wins, and a caller who passes two is telling you they are not sure --
-        that is a bug to surface, not an ambiguity to resolve.
-
-        No I/O, so a caller who wants the level before deciding whether to
-        build -- a features cache keyed on ds, say -- can ask cheaply.
-
-        Needs a SafeSlide: `nearest_level_for_downsample` and `base_mpp` are
-        both defined there, and both are things this project has previously
-        written out by hand in several places with several different answers.
-        '''
-        if (mpp is None) == (ds is None):
-            raise ValueError('give exactly one of mpp / ds')
-        if ds is None:
-            ds = mpp / wsi.base_mpp
-        level = wsi.nearest_level_for_downsample(ds)
-        return level, float(wsi.level_downsamples[level])
 
     def __init__(self, wsi: openslide.OpenSlide, ds: float = 1.0, level: int = None, tile_size: int = 256, overlap: bool = True, mask: Optional[TissueMask] = None):
         self.wsi: openslide.OpenSlide = wsi
@@ -1281,7 +1323,8 @@ class WsiTissuesContainer():
         and merging must happen BEFORE this filter, since two fragments that are
         each too small can merge into one region that is not.
         '''
-        level, ds_actual = cls.resolve_scale(wsi, ds=ds)
+        from SlideReader import SlideReader                         # noqa: PLC0415
+        level, ds_actual = SlideReader(wsi).native_scale(ds=ds)
         if verbose and ds_actual != ds:
             print(f'  [WsiTissues] ds {ds:.5f} -> level {level} '
                   f'(ds {ds_actual:.5f})', flush=True)
@@ -1299,7 +1342,8 @@ class WsiTissuesContainer():
         out here as mpp-x alone and disagreed with QueryFromWSI on every slide
         in this project.
         '''
-        level, ds_actual = cls.resolve_scale(wsi, mpp=mpp)
+        from SlideReader import SlideReader                         # noqa: PLC0415
+        level, ds_actual = SlideReader(wsi).native_scale(mpp=mpp)
         return cls.from_ds(wsi, ds_actual, tile_size=tile_size,
                            overlap=overlap, mask=mask)
 

@@ -15,8 +15,8 @@ Token Merging used to live here and is gone. It was rejected on the numbers
 simply be left in place: it merged tokens without changing patch_embed.grid_size,
 so model_spec claimed 197 tokens over an output that carried 101. Nothing
 noticed while features() was raw[:, 0], which does not care how many tokens
-follow. pooling_kinds does care, and said so. GigaPathFunc_old.py keeps the code
-for the equivalence tests that compare the two APIs.
+follow. pooling_kinds does care, and said so. GigaPathFunc_old.py, which kept the
+free functions for the test comparing the two APIs, was removed on 2026-10-05.
 
 _GIGAPATH_BASELINE is the zero point every id is measured against. Its transform
 is 256 -> 224, which is crop_pct 0.875 and NOT what the checkpoint declares:
@@ -30,9 +30,9 @@ their own metadata, in four places and consistently --
 
 all four Resize(256) then CenterCrop(224), and the demo then asserts its output
 against a stored tensor. So 256/224 is the preprocessing those weights were
-validated with and crop_pct is an upstream slip. test_gigapath_equivalence holds
-the baseline down against that same stored tensor, so a changed default fails
-there rather than in a number nobody can trace.
+validated with and crop_pct is an upstream slip. test_gigapath_equivalence held
+the baseline down against that same stored tensor until it was removed on
+2026-10-05; nothing checks it now, so a changed default goes unnoticed.
 
 flash-attn is auto-detected by timm; no extra code needed.
 '''
@@ -217,7 +217,7 @@ class GigaPathEncoder(TileEncoder):
 
     That the empty setting returns exactly what this module used to assemble by
     hand -- fc_norm(forward_features(x)) -- is measured, not assumed:
-    test_gigapath_equivalence checks it at max|delta| == 0 and asserts the four
+    test_gigapath_equivalence (removed 2026-10-05) checked it at max|delta| == 0 and the four
     preconditions the equality rests on. Going through model() rather than
     around it is what lets DataParallel work and removes the private attribute
     reach.

@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / 'utilities'))
 sys.path.insert(0, str(ROOT / '2_retrieval'))
 
 from PatchingLib import QueryPatchContainer, WsiTissuesContainer
-from GigaPathSlidingWinSim import SlideWinSimResult
+from GigaPathSlidingWinSimRot import SlideWinSimRotResult
 
 
 # ── homography predicate ──────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ class SiftRansacLocalizer:
         self,
         wsi_container: WsiTissuesContainer,
         query: QueryPatchContainer,
-        location: SlideWinSimResult,
+        location: SlideWinSimRotResult,
         min_inliers: int = 10,
         padding: int = 2,
     ):

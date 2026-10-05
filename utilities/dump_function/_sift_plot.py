@@ -7,10 +7,9 @@
     [2] Zoomed +-N tiles  green--=GT  yellow=main  orange=overlap  blue=SIFT
     [3] Homography        query boundary + patch grid + translation arrow
 
-Works with either SlideWinSimResult (2_retrieval/GigaPathSlidingWinSim) or
-SlideWinSimRotResult (GigaPathSlidingWinSimRot) — both expose the
-best_*/main_*/overlap_* fields this module reads. When the result carries a
-`best_rotation`, it is shown in the summary panel.
+Works with SlideWinSimRotResult (2_retrieval/GigaPathSlidingWinSimRot), which
+exposes the best_*/main_*/overlap_* fields this module reads. When the result
+carries a `best_rotation`, it is shown in the summary panel.
 """
 
 from __future__ import annotations
@@ -195,7 +194,7 @@ def draw_localization_row(
     wsi_crop:    Optional[np.ndarray],
     crop_kps,
     good_matches,
-    retrieval,                  # SlideWinSimResult | SlideWinSimRotResult
+    retrieval,                  # SlideWinSimRotResult
     sift,                       # SiftRansacResult
     gt_x: int, gt_y: int,
     base_mpp: float,

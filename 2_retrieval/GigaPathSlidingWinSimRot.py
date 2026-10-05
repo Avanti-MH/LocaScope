@@ -1,9 +1,14 @@
-"""Rotation-aware GigaPath sliding-window retrieval.
+"""Rotation-aware sliding-window retrieval, and the window kernel it runs on.
 
-Same staged API as GigaPathSlidingWinSim but tries all 4 cardinal rotations
-(0, 90, 180, 270 deg) of the query image and picks the one with the highest
-similarity score. Downstream refinement (SIFT+RANSAC) can read
-`result.best_rotation` and rotate the query image for alignment.
+Tries all 4 cardinal rotations (0, 90, 180, 270 deg) of the query image and
+picks the one with the highest similarity score. Downstream refinement
+(SIFT+RANSAC) can read `result.best_rotation` and rotate the query image for
+alignment.
+
+`SlidingWindowSimilarity` (the per-window cosine kernel) lives here too. It
+came from GigaPathSlidingWinSim.py, whose non-rotating retriever this class
+replaced; that module was folded in on 2026-10-05 and removed, so the window
+bench, the off-grid bench and this class import the kernel from one place.
 
 Cost:
     4x query patch extraction + encoding + sim-map computation.
@@ -40,8 +45,111 @@ import openslide                                                            # no
 from PatchingLib          import (QueryPatchContainer, WsiTissuesContainer,   # noqa: E402
                                   FeaturesMap, WsiFeaturesMap)
 from SafeSlide            import SafeSlide                                                # noqa: E402
+from SlideReader          import SlideReader                                              # noqa: E402
 from TissueMask   import TissueRegion, TissueMask            # noqa: E402
-from GigaPathSlidingWinSim  import SlidingWindowSimilarity                   # noqa: E402
+
+
+# ── the window kernel ─────────────────────────────────────────────────────────
+
+def _sim_tensors_unfold(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
+    '''The original implementation, kept as the reference the fast one is
+    measured against. Not called in production -- see `_sim_tensors` for why.'''
+    R_q, C_q, _ = q_grid.shape
+    R_w, C_w, _ = wsi_grid.shape
+    if R_w < R_q or C_w < C_q:
+        return torch.empty(0)
+    wsi     = wsi_grid.permute(2, 0, 1)
+    windows = wsi.unfold(1, R_q, 1).unfold(2, C_q, 1)        # [D, H_out, W_out, R_q, C_q]
+    q       = q_grid.permute(2, 0, 1)
+    return (windows * q[:, None, None, :, :]).sum(dim=0)      # [H_out, W_out, R_q, C_q]
+
+
+def _sim_tensors(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
+    '''
+    Core unfold similarity: [R_q, C_q, D] x [R_w, C_w, D] -> [H_out, W_out, R_q, C_q].
+    Returns empty tensor when wsi is smaller than query.
+
+    out[h, w, r, c] = the cosine between query tile (r, c) and WSI tile
+    (h + r, w + c). Which is a dot product over D, and D is contracted FIRST
+    here -- that is the whole difference from `_sim_tensors_unfold`.
+
+    That version writes `windows * q` before summing. `unfold` is a view and
+    costs nothing, but the multiply materialises [D, H, W, R_q, C_q]: each WSI
+    tile appears in up to R_q*C_q windows, and every copy still carries all D
+    channels. On BRACS_1228 L0 region 0, 145x147 windows against a 4x5 query
+    kernel, that is 2.62 GB for an output of 1.71 MB -- 1536x, and 7680x for
+    the concatenated multi-slot descriptors bench_window_retrieval builds.
+
+    Contracting D first gives every (WSI tile, query tile) dot product once,
+    which is R_w*C_w*R_q*C_q numbers -- 1.79 MB for the same case. The windows
+    are then pure indexing: no arithmetic, R_q*C_q slice copies.
+
+    NOT bit-identical. einsum dispatches to a matmul, whose reduction order
+    differs from an elementwise multiply-then-sum; fp32 puts the gap around
+    1e-7. On CUDA it also depends on `torch.backends.cuda.matmul.allow_tf32`,
+    which nothing in this project sets: TF32 keeps 10 mantissa bits, so with it
+    enabled the gap is ~1e-3 instead.
+    '''
+    R_q, C_q, _ = q_grid.shape
+    R_w, C_w, _ = wsi_grid.shape
+    if R_w < R_q or C_w < C_q:
+        return torch.empty(0)
+    H_out, W_out = R_w - R_q + 1, C_w - C_q + 1
+
+    # [R_w, C_w, R_q, C_q]: every WSI tile against every query tile, once.
+    sims = torch.einsum('rcd,ijd->rcij', wsi_grid, q_grid)
+    out = torch.empty(H_out, W_out, R_q, C_q,
+                      dtype=sims.dtype, device=sims.device)
+    for r in range(R_q):
+        for c in range(C_q):
+            # Window (h, w) puts query tile (r, c) over WSI tile (h+r, w+c),
+            # so one query tile's whole heat map is a shifted view of `sims`.
+            out[:, :, r, c] = sims[r:r + H_out, c:c + W_out, r, c]
+    return out
+
+
+def SlidingWindowSimilarity(
+    qFeatureMap: FeaturesMap,
+    WsiFeatureMap: FeaturesMap,
+    device=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    '''
+    Slide qFeatureMap (kernel) over WsiFeatureMap (input), computing per-patch cosine similarity.
+
+    Features must be L2-normalized. Uses combinations 1+3: both searches use the main query
+    kernel so scores are directly comparable across grids.
+
+    Returns (main_sim, overlap_sim):
+      main_sim    shape [H_out,   W_out,   R_q, C_q]  WSI main grid,    origin (region.x, region.y)
+      overlap_sim shape [H_out-1, W_out-1, R_q, C_q]  WSI overlap grid, origin (region.x + tile/2*ds, ...)
+                        (empty tensor when WSI has no overlap patches)
+      H_out = R_wsi - R_q + 1,  W_out = C_wsi - C_q + 1
+
+    `device` moves the three grids before the similarity runs, so the einsum and
+    the window slicing happen there. None leaves them where the FeaturesMap put
+    them. The retrieval path (`GigaPathSlidingWinSimRot.compute_sim_maps`)
+    passes one unconditionally.
+
+    ORDER MATTERS, and not for style. The grid builders are Python double
+    loops -- one `out[r, c] = self[idx]` per cell in PatchingLib -- so they are
+    built on whatever device the features already live on and moved
+    AFTERWARDS, in one transfer each. Building them on a GPU instead would turn
+    a few thousand memory copies into a few thousand kernel launches, per call.
+    '''
+    q_grid  = qFeatureMap.main_feature_grid()       # fixed: always main query kernel
+    wsi_main = WsiFeatureMap.main_feature_grid()
+    wsi_ov  = WsiFeatureMap.overlap_feature_grid()
+
+    if device is not None:
+        q_grid   = q_grid.to(device)
+        wsi_main = wsi_main.to(device)
+        wsi_ov   = wsi_ov.to(device)
+
+    main_sim = _sim_tensors(q_grid, wsi_main)
+    overlap_sim = _sim_tensors(q_grid, wsi_ov) if wsi_ov.numel() > 0 \
+                  else torch.empty(0)
+
+    return main_sim, overlap_sim
 
 
 # ── Result dataclass (adds best_rotation vs the base module's result) ─────────
@@ -128,9 +236,9 @@ class SlideWinSimCandidate:
 # ── Pipeline class ────────────────────────────────────────────────────────────
 
 class GigaPathSlidingWinSimRot:
-    """Rotation-aware version of GigaPathSlidingWinSim.
+    """Rotation-aware sliding-window retrieval.
 
-    Stages (same shape as base class):
+    Stages:
         1. build_wsi_features(mpp)   — tile WSI → encode  (once)
         2. build_query_features()    — extract patches from 4 rotations → encode 4x
         3. compute_sim_maps()        — 4 sim-map sets
@@ -216,7 +324,7 @@ class GigaPathSlidingWinSimRot:
         0.25 -> 1.0 -> 0.25 must return the same regions as a fresh 0.25.
 
         `ds` must land on a level the slide actually has; a request between
-        levels is snapped to the nearest and reported (WsiTissuesContainer).
+        levels is snapped to the nearest (SlideReader.native_scale).
         """
         if mpp is None and ds is None:
             mpp = self.mpp
@@ -225,8 +333,8 @@ class GigaPathSlidingWinSimRot:
 
         # Resolve first: it is free, and it gives the cache key before anything
         # is read or encoded.
-        self.level, self.ds = WsiTissuesContainer.resolve_scale(
-            self.wsi, mpp=mpp, ds=ds)
+        self.level, self.ds = SlideReader(self.wsi).native_scale(
+            mpp=mpp, ds=ds)
         self.mpp = self.wsi.base_mpp * self.ds   # mpp/ds/level now say one thing
 
 

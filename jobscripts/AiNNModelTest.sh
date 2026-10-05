@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=AiNNModelTest                  # Job name
 #SBATCH --partition=dev                        # Partition
-#SBATCH --time=00:30:00                           # three real encoders + GigaPath, weights loaded once each
+#SBATCH --time=00:30:00                           # three real encoders, weights loaded once each
 #SBATCH --account=MST114560                       # Account
 #SBATCH --nodes=1                                 # Number of nodes
 #SBATCH --gpus-per-node=1                         # GPUs per node (不要設0)
@@ -34,27 +34,22 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #    resume        Resume.py: crash-resume state, a toy model, bit for bit. No GPU
 #    encoders      the three real encoders (GigaPath, UNI2, CONCH) against the
 #                  weights they actually load. GPU
-#    gigapath      GigaPath's current path against the free functions it replaced
-#                  (GigaPathFunc_old.py). GPU. Delete it when the old file goes
 #
 #  Knobs (environment):
-#    ONLY          which of the four, space separated; default all
+#    ONLY          which of the three, space separated; default all
 #    ENCODER       encoders to check, space separated (uni2 gigapath conch_vit);
 #                  default all three
 #    NO_DUAL_LOAD  1 skips the check that loads a second copy (4.5 GB)
 #    DTYPE         fp16 or fp32 for the encoders check; default per encoder
-#    TILES         tiles per check in the GigaPath equivalence test; default 8
 # =============================================================================
 
 TESTS=utilities/test_modules/AiNNModelTest
-ONLY="${ONLY:-tile_encoder resume encoders gigapath}"
+ONLY="${ONLY:-tile_encoder resume encoders}"
 
 ENCODERS_ARGS=""
 [ -n "${ENCODER:-}" ] && ENCODERS_ARGS="$ENCODERS_ARGS --encoder $ENCODER"
 [ "${NO_DUAL_LOAD:-0}" = "1" ] && ENCODERS_ARGS="$ENCODERS_ARGS --no-dual-load"
 [ -n "${DTYPE:-}" ] && ENCODERS_ARGS="$ENCODERS_ARGS --dtype $DTYPE"
-GIGAPATH_ARGS=""
-[ -n "${TILES:-}" ] && GIGAPATH_ARGS="--tiles $TILES"
 
 status=0
 run () {   # run <label> <command...>
@@ -74,9 +69,7 @@ for t in $ONLY; do
                     python "$TESTS"/test_resume.py ;;
     encoders)     run "encoders  (the real weights)${ENCODERS_ARGS}" \
                     python "$TESTS"/test_encoders.py $ENCODERS_ARGS ;;
-    gigapath)     run "gigapath  (against GigaPathFunc_old)${GIGAPATH_ARGS:+  $GIGAPATH_ARGS}" \
-                    python "$TESTS"/test_gigapath_equivalence.py $GIGAPATH_ARGS ;;
-    *) echo "unknown test '$t' -- one of: tile_encoder resume encoders gigapath"
+    *) echo "unknown test '$t' -- one of: tile_encoder resume encoders"
        status=1 ;;
   esac
 done

@@ -51,7 +51,7 @@ from CpuBudget import CpuBudget                                       # noqa: E4
 from ReadGeometry import ReadSpec                                     # noqa: E402
 from SafeSlide import SafeSlide                                       # noqa: E402
 from SlideReader import SlideReader                                   # noqa: E402
-from Store import region_grids                                        # noqa: E402
+from PatchingLib import region_grids                                  # noqa: E402
 from TileSampler import PlanSpec, SamplerConfig, TileSampler          # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                  # noqa: E402
 from camera import Render, render_spec                                # noqa: E402

@@ -490,7 +490,7 @@ def _validate(features, x, y, region, grid_rc, meta: FeatureMeta, extra) -> None
 #
 # THE CHECK IS GEOMETRIC. The address names the mask by seg_id / region_id, and
 # a region_id is exactly as good as the recipe that made it. So nothing trusts
-# it alone: `region_grids` recomputes what the mask implies at this scale and
+# it alone: `PatchingLib.region_grids` recomputes what the mask implies at this scale and
 # `geometry_mismatch` compares that with the stored columns -- milliseconds,
 # no slide opened, in front of minutes of reading and encoding.
 #
@@ -500,18 +500,6 @@ def _validate(features, x, y, region, grid_rc, meta: FeatureMeta, extra) -> None
 
 #: region is int16: a slide has hundreds of regions (2,988 unfiltered, once).
 _MAX_REGIONS = 32767
-
-
-def region_grids(regions, *, ds: float, level: int, tile_size: int,
-                 overlap: bool) -> list:
-    """One PatchGrid per region, from geometry alone -- the same call
-    WsiTissuesContainer makes when it builds for real. `regions` must already
-    be the `patchable` view at this ds."""
-    from PatchingLib import PatchGrid                             # noqa: PLC0415
-    return [PatchGrid.from_size(int(r.w / ds), int(r.h / ds), tile_size,
-                                overlap=overlap, x_offset=int(r.x / ds),
-                                y_offset=int(r.y / ds), ds=ds, level=level)
-            for r in regions]
 
 
 def _columns(grids) -> dict:
@@ -552,7 +540,7 @@ def from_store_tensors(tensors: dict, regions, *, ds: float, level: int,
     """Split the flat features back into one FeaturesMap per grid -- by the
     grids' own lengths, which agree with the stored `region` column only if
     the geometry check passed; if they disagree this raises."""
-    from PatchingLib import FeaturesMap, WsiFeaturesMap          # noqa: PLC0415
+    from PatchingLib import FeaturesMap, WsiFeaturesMap, region_grids  # noqa: PLC0415
     features = tensors['features']
     if features.ndim != 3 or features.shape[1] != 1:
         raise ValueError(f'expected [N, 1, D] features, got {tuple(features.shape)}')
@@ -691,6 +679,7 @@ class FeatureMapCache:
                         for k, (w, g) in sorted(differs.items())])
             return None
         tensors, _ = FeatureStore.load(path)
+        from PatchingLib import region_grids                      # noqa: PLC0415
         grids = region_grids(container.tissue_regions, ds=container.ds,
                              level=container.level, tile_size=container.tile_size,
                              overlap=container.overlap)
@@ -737,6 +726,7 @@ class FeatureMapCache:
     # encoder's identity, and the geometry against the mask in hand).
 
     def _grid_columns(self, container) -> dict:
+        from PatchingLib import region_grids                      # noqa: PLC0415
         grids = region_grids(container.tissue_regions, ds=container.ds,
                              level=container.level, tile_size=container.tile_size,
                              overlap=container.overlap)
@@ -801,6 +791,7 @@ class FeatureMapCache:
                         for k, (w, g) in sorted(differs.items())])
             return None
         columns, _ = FeatureStore.load(path, keys=('x', 'y', 'region', 'grid_rc'))
+        from PatchingLib import region_grids                      # noqa: PLC0415
         bad = geometry_mismatch(columns, region_grids(
             container.tissue_regions, ds=container.ds, level=container.level,
             tile_size=container.tile_size, overlap=container.overlap))

@@ -124,7 +124,7 @@ setup_import_paths()
 
 from Cache import cache_root, find, read_meta, wsi_stem_of      # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
-from Store import region_grids                                   # noqa: E402
+from PatchingLib import region_grids                             # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from TileSampler import (PRE_TILE_FACTOR, OverlapConfig,      # noqa: E402
                          SamplerConfig, TileSampler)
@@ -336,7 +336,7 @@ class TileYieldProbe:
         levels = [lv for lv, d in enumerate(wsi.level_downsamples)
                   if float(d) <= top * (1 + 1e-3)]
         # One aligned table per slide. The tile counts are `len` of the PatchGrid
-        # `region_grids` builds (PatchingLib.PatchGrid.from_size, geometry only);
+        # `region_grids` builds (PatchingLib.PatchGrid.for_region, geometry only);
         # the GB columns are the OVERLAP grid, which is what FeatureMapCache
         # stores with overlap=True. The tissue columns split the mask grid.
         self.per_tile_bytes()          # prints its own line: before the table, not in it
