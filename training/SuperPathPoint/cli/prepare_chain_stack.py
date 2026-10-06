@@ -126,7 +126,7 @@ def axis_corpus(axis: str, args) -> PreTileCorpus:
 def _extract_own(axis: str, corpus: PreTileCorpus, wsi_path: str, args,
                  masks: MaskMaker, rows: list = None) -> None:
     """Sample `axis`'s own corpus for one slide, in process, with the recipe's
-    own config -- the object whose `sampler_id()` is in `corpus`'s address,
+    own config -- the object whose `identity_id()` is in `corpus`'s address,
     not a reconstruction of it.
 
     `rows`, if given, is EXTENDED with the rows `_extract_slide` returns: a
@@ -134,10 +134,10 @@ def _extract_own(axis: str, corpus: PreTileCorpus, wsi_path: str, args,
     CSV is the one reader.
     """
     cfg = recipe_config(AXIS_RECIPE[axis])
-    if cfg.sampler_id() != corpus.sampler_id:
+    if cfg.identity_id() != corpus.sampler_id:
         raise RuntimeError(
             f'{axis}: --{axis.lower()}-corpus names sampler {corpus.sampler_id}, '
-            f'but the {AXIS_RECIPE[axis]} recipe is {cfg.sampler_id()}. An '
+            f'but the {AXIS_RECIPE[axis]} recipe is {cfg.identity_id()}. An '
             f'explicit corpus is read, not extracted -- it has to exist')
     print(f'[{AXIS_RECIPE[axis]}] no finished rung yet -- sampling directly '
           f'into {corpus.key} ...', flush=True)

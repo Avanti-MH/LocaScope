@@ -94,20 +94,17 @@ class Keypoints:
         return int(len(self.xy))
 
 
-#: The zero point. Nested configs take theirs from here, so the values below are
-#: the ones that reproduce upstream (spec.md 9). ConfigIdentity rule 1: adding a
-#: field needs a baseline entry that reproduces the existing behaviour, or every
-#: checkpoint identity re-hashes -- a recompute, not a wrong answer, but one to
-#: know you are paying for.
+#: The zero point (ConfigIdentity rule 2). Nested configs are named by class
+#: and measured against their own baselines.
 _NET_BASELINE = {
     'method': 'superpathpoint',
-    'backbone': VggBackboneConfig(),
-    'detector': DepthToSpaceDecoderConfig(),
-    'descriptor': DescriptorHeadConfig(),
+    'backbone': 'VggBackboneConfig',
+    'detector': 'DepthToSpaceDecoderConfig',
+    'descriptor': 'DescriptorHeadConfig',
     'nms_radius': 4,
-    'detection_threshold': 0.005,
+    'detection_threshold': 0.015,
     'border': 4,
-    'max_keypoints': 0,
+    'max_keypoints': 420,
 }
 
 
@@ -186,6 +183,7 @@ class KeypointNetConfig(IdentifiedConfig):
     #: measurable range is 1.10. 420 buys a
     #: ceiling of 2.47 while still capping nothing the teacher actually did.
     max_keypoints: int = 420
+    BASELINE = _NET_BASELINE
 
     @classmethod
     def wired(cls, *, in_channels: int = 1, cell: int = 8,
@@ -273,8 +271,6 @@ def load_upstream(net: 'KeypointNet', state: Dict[str, torch.Tensor]) -> None:
 
 class KeypointNet(nn.Module, IdentifiedBuild):
     """The model. `nn.Module` first, so `to()`, `train()` and `parameters()` win."""
-
-    BASELINE = _NET_BASELINE
 
     def __init__(self, cfg: KeypointNetConfig, device=None):
         super().__init__()

@@ -72,8 +72,7 @@ import torch.nn as nn                                            # noqa: E402
 from ConfigIdentity import ModelConfig, register                 # noqa: E402
 from common.Interfaces import Backbone, ShapeMismatch            # noqa: E402
 from SuperPoint.EncoderBackbone import (TileEncoderBackbone,     # noqa: E402
-                                        TileEncoderBackboneConfig,
-                                        _TILE_ENCODER_BASELINE)
+                                        TileEncoderBackboneConfig)
 from TileEncoderFunc import (ModelOutputSpec, TileEncoder,       # noqa: E402
                              TileEncoderConfig, TransformConfig)
 
@@ -513,13 +512,11 @@ def t_identity_moves_with_what_changes_the_features():
     does not.
     """
     base = TileEncoderBackboneConfig()
-    assert base.identity_parts(_TILE_ENCODER_BASELINE) == [], \
-        base.identity_parts(_TILE_ENCODER_BASELINE)
+    assert base.identity_parts() == [], base.identity_parts()
     for fieldname, value in (('encoder', 'uni2'), ('head', 'trunk'),
                              ('dtype', 'fp32'), ('preprocess', 'grey'),
                              ('tile_size', 512)):
-        parts = replace(base, **{fieldname: value}).identity_parts(
-            _TILE_ENCODER_BASELINE)
+        parts = replace(base, **{fieldname: value}).identity_parts()
         assert any(p.startswith(f'{fieldname}=') for p in parts), \
             f'{fieldname} changed and the identity did not move: {parts}'
 

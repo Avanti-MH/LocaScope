@@ -212,7 +212,7 @@ class FeatureMeta:
     coverage:    str                        # 'grid' | 'sample'
     n_available: int                        # grid: tiles the grid offers
     n_tiles:     int                        # N
-    sampler_id:  str = ''                   # sample: SamplerConfig.sampler_id()
+    sampler_id:  str = ''                   # sample: SamplerConfig.identity_id()
     plan:        str = ''                   # sample: PlanSpec.key()
     sample_seed: Optional[int] = None
     #: sample: the richness bucket names, in the order an int8 `bucket` extra
@@ -887,7 +887,7 @@ class PreTileCorpus:
            ) -> 'PreTileCorpus':
         """From the objects that made it -- `plan` is a `TileSampler.PlanSpec`."""
         return cls(Path(root), mask_cfg.seg_id(), mask_cfg.region_id(),
-                   sampler_cfg.sampler_id(), plan.key(), int(factor))
+                   sampler_cfg.identity_id(), plan.key(), int(factor))
 
     @property
     def key(self) -> str:

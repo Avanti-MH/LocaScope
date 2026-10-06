@@ -63,25 +63,23 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register
+from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, enc, register
 
 from common.Homography import erode_valid, invert, sample_homography, warp_image
-from common.HomographyConfig import HOMOGRAPHY_BASELINE, HomographyConfig
+from common.HomographyConfig import HomographyConfig
 from TileSampler import centre_crop, centre_margin
 from common.Homography import pretile_valid_mask, warp_from_pretile
 
-#: The zero point. ConfigIdentity rule 1: editing this re-hashes every label
-#: ever written; editing a dataclass default splits new from old.
-#:
-#: Every value is upstream's, from `configs/magic-point_coco_export.yaml:12-26`
-#: and `models/homographies.py:117-230` -- the table in spec.md 9.
+#: The zero point (ConfigIdentity rule 2). Every value is upstream's, from
+#: `configs/magic-point_coco_export.yaml:12-26` and
+#: `models/homographies.py:117-230` -- the table in spec.md 9.
 _HA_BASELINE = {
     'method': 'ha-superpoint',
     'num': 100,
     'aggregation': 'mean',
     'valid_border_margin': 3,
     'filter_counts': 0,
-    'homography': HOMOGRAPHY_BASELINE,
+    'homography': 'HomographyConfig',
 }
 
 @register('ha-superpoint')
@@ -90,7 +88,7 @@ class HaConfig(IdentifiedConfig):
     """Upstream's HA config, spelled out field by field.
 
     Flat rather than a nested dict because these ARE the identity of a label:
-    `parts_against` walks fields, and a dict field would hash as whatever
+    `parts_of` walks fields, and a dict field would hash as whatever
     `str(dict)` happens to produce -- insertion order included. Twelve fields is
     also the spec.md 9 table, so the two can be diffed by eye.
     """
@@ -128,6 +126,7 @@ class HaConfig(IdentifiedConfig):
     batch: int = 16
 
     NOT_IDENTITY = ('batch',)
+    BASELINE = _HA_BASELINE
 
     def homography_kwargs(self) -> Dict[str, object]:
         """Kept as a method on this config so callers do not have to know the
@@ -175,8 +174,6 @@ class HaResult:
 class HomographicAdaptation(IdentifiedBuild):
     """The loop. One instance per (teacher, config); `run` is per tile."""
 
-    BASELINE = _HA_BASELINE
-
     def __init__(self, cfg: HaConfig, teacher):
         self.cfg = cfg
         self.teacher = teacher
@@ -194,8 +191,8 @@ class HomographicAdaptation(IdentifiedBuild):
         `identity_id()` already folds both, and using it keeps one definition of
         what a teacher is.
         """
-        return (self.cfg.identity_parts(self.BASELINE) +
-                [f'teacher={self.teacher.identity_id()}'])
+        return (self.cfg.identity_parts() +
+                [f'teacher={enc(self.teacher.identity_id())}'])
 
     # ── one tile ──
 

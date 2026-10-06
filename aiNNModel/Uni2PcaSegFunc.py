@@ -146,7 +146,7 @@ import numpy as np                                          # noqa: E402
 import torch                                                # noqa: E402
 from PIL import Image                                       # noqa: E402
 
-from ConfigIdentity import register                         # noqa: E402
+from ConfigIdentity import enc, register                    # noqa: E402
 from ReadGeometry import ReadSpec, level_for                # noqa: E402
 from SlideReader import SlideReader                         # noqa: E402
 from TissueMask import SlideMask                    # noqa: E402
@@ -173,29 +173,6 @@ from TissueSegFunc import (TissueSegConfig, TissueSegmenter,  # noqa: E402
 #: choice -- `slide_pca_mask`'s own words: "nothing here chooses a resolution,
 #: the patch grid does".
 LEVEL = 0
-
-#: The zero point. Editing this invalidates every mask id ever written, on
-#: purpose; editing a dataclass DEFAULT does not -- it splits new from old.
-#: ConfigIdentity rule 1.
-_UNI2_PCA_BASELINE = {
-    'method': 'uni2-pca-seg',
-    'encoder': 'uni2',
-    'tile': 224,
-    'components': 16,
-    'background_threshold': 0.5,
-    'larger_pca_as_fg': False,
-    'morph_kernel': 7,
-    'feature_norm': False,
-    'fp16': True,
-    'fit_tiles': 1000,
-    'fit_bins': 10,
-    'fit_seed': 0,
-    'fit_ds': 32.0,
-    # the zero point is openslide's level rule, which the thumbnail used; the
-    # default 'level_for' differs from it, so it is in every seg_id
-    'fit_read': 'openslide',
-    'limit_bounds': True,
-}
 
 
 # ── reading the slide ─────────────────────────────────────────────────────────
@@ -338,7 +315,7 @@ class Uni2PcaSegConfig(TissueSegConfig):
     segmenter has no weights of its own, so `weights_id` covers only the
     ENCODER, and two fits differing in `fit_tiles` or `background_threshold`
     produce different masks. A field left out of the hash would give them one
-    name -- the single failure ConfigIdentity rule 1 calls silent.
+    name over different masks (ConfigIdentity rule 1).
     """
 
     method: str = 'uni2-pca-seg'
@@ -421,16 +398,13 @@ class Uni2PcaSegConfig(TissueSegConfig):
 
     #: The fit sample: how many tile positions, over how many saturation
     #: quantiles, with which seed, and the downsample the saturation thumbnail
-    #: is read at. `fit_seed` also seeds sklearn's randomized SVD -- see
+    #: is read at (`ReadGeometry.level_for`, the coarsest level not coarser
+    #: than `fit_ds`). `fit_seed` also seeds sklearn's randomized SVD -- see
     #: `Uni2PcaSegmenter.fit`.
     fit_tiles: int = 1000
     fit_bins: int = 10
     fit_seed: int = 0
     fit_ds: float = 32.0
-    #: How the thumbnail's level is picked: `ReadGeometry.level_for`, the
-    #: coarsest not coarser than `fit_ds`. The only rule there is; named so the
-    #: rule is part of `seg_id`, since it decides which tiles the PCA sees.
-    fit_read: str = 'level_for'
 
     #: Restrict everything to `openslide.bounds-*`. See `scanned_rect`.
     limit_bounds: bool = True
@@ -446,6 +420,12 @@ class Uni2PcaSegConfig(TissueSegConfig):
     #: 0 reads in the parent, which is what a test wants.
     workers: int = 8
 
+    BASELINE = {'method': 'uni2-pca-seg', 'encoder': 'uni2', 'tile': 224,
+                'components': 16, 'background_threshold': 0.5,
+                'larger_pca_as_fg': True, 'morph_kernel': 7,
+                'feature_norm': False, 'fp16': True, 'fit_tiles': 1000,
+                'fit_bins': 10, 'fit_seed': 0, 'fit_ds': 32.0,
+                'limit_bounds': True}
     NOT_IDENTITY = ('batch_tiles', 'workers')
 
     def build(self, device: Optional[torch.device] = None) -> 'Uni2PcaSegmenter':
@@ -491,8 +471,6 @@ class Uni2PcaSegmenter(TissueSegmenter):
         seg.fit(wsi)                       # the escape hatch: fit once, then
         mask = seg(rgb_plane)              # one plane -> [H, W] uint8
     """
-
-    BASELINE = _UNI2_PCA_BASELINE
 
     def __init__(self, cfg: Uni2PcaSegConfig, device: torch.device):
         self.cfg = cfg
@@ -557,7 +535,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
         field this module has never heard of.
         """
         return super().identity_parts() + [
-            f'encoder_identity={self.encoder.identity_id()}']
+            f'encoder_identity={enc(self.encoder.identity_id())}']
 
     # ── what the mask's resolution really is ────────────────────────────────
 
@@ -631,8 +609,6 @@ class Uni2PcaSegmenter(TissueSegmenter):
         # The tile side in LEVEL-0 pixels, so positions can be addressed in the
         # coordinate system read_region actually takes.
         tile_l0 = int(round(cfg.tile * level_ds))
-        if cfg.fit_read != 'level_for':
-            raise ValueError(f'fit_read {cfg.fit_read!r}: the only rule is level_for')
         saturation = tile_saturation(wsi, origin, span, tile_l0, cfg.fit_ds)
         positions = stratified_positions(saturation, cfg.fit_tiles,
                                          cfg.fit_bins, cfg.fit_seed)

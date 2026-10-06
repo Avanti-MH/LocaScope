@@ -31,8 +31,7 @@ from PIL import Image                                       # noqa: E402
 from torchvision import transforms                          # noqa: E402
 
 from ConfigIdentity import ModelConfig, file_fingerprint, register  # noqa: E402
-from TissueSegFunc import (PlaneSegConfig, PlaneSegmenter,  # noqa: E402
-                           _PLANE_BASELINE)
+from TissueSegFunc import PlaneSegConfig, PlaneSegmenter    # noqa: E402
 
 
 _CKPT_DIR = _HERE / 'ckpt'
@@ -52,15 +51,6 @@ _TRANSFORM = transforms.Compose([
     transforms.Normalize(mean=(0.485, 0.456, 0.406),
                          std=(0.229, 0.224, 0.225)),
 ])
-
-
-#: The zero point. Editing this invalidates every mask id ever written, on
-#: purpose; editing a dataclass DEFAULT does not -- it splits new from old.
-_HEST_BASELINE = {
-    **_PLANE_BASELINE,
-    'method': 'hest',
-    'model': ModelConfig(source='torchvision', arch=HEST_ARCH, dtype='fp32'),
-}
 
 
 def _download_ckpt() -> Path:
@@ -87,6 +77,10 @@ class HestSegConfig(PlaneSegConfig):
         default_factory=lambda: ModelConfig(source='torchvision',
                                             arch=HEST_ARCH, dtype='fp32'))
 
+    BASELINE = {'method': 'hest', 'limit_bounds': True, 'ds': 4.0,
+                'seg_chunk_px': 4_000_000, 'read_chunk_px': 4_000_000,
+                'stitch_overlap': 128, 'model': 'ModelConfig'}
+
     def build(self, device: Optional[torch.device] = None) -> 'HestSegmenter':
         return HestSegmenter(self, device or torch.device('cpu'))
 
@@ -102,8 +96,6 @@ class HestSegConfig(PlaneSegConfig):
 
 
 class HestSegmenter(PlaneSegmenter):
-    BASELINE = _HEST_BASELINE
-
     def __init__(self, cfg: HestSegConfig, device: torch.device):
         self.cfg = cfg
         self.device = device

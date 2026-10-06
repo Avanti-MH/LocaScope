@@ -50,7 +50,6 @@ of two conventions. `common/` is the layer both stages already depend on.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import os
 import time
 from dataclasses import dataclass
@@ -61,6 +60,8 @@ import numpy as np
 import torch
 from safetensors.numpy import save_file
 from safetensors import safe_open
+
+from ConfigIdentity import enc, short_id
 
 #: Bumped when a field changes MEANING. Adding one with a default does not need
 #: it. ConfigIdentity's first rule.
@@ -302,12 +303,11 @@ class LabelMeta:
             n_tiles=len(batch), cap=batch.cap, n_at_cap=batch.at_cap,
             mean_n_kp=float(np.mean(batch.n_kp)) if len(batch) else 0.0)
 
-    def cfg_hash(self) -> str:
-        parts = [f'{n}={getattr(self, n)}' for n in sorted(_IDENTITY_FIELDS)]
-        return hashlib.sha256('|'.join(parts).encode()).hexdigest()[:8]
+    def identity_id(self) -> str:
+        return short_id([f'{n}={enc(getattr(self, n))}' for n in sorted(_IDENTITY_FIELDS)])
 
     def filename(self) -> str:
-        return f'{self.wsi_stem}__ds{self.ds:g}__{self.cfg_hash()}.safetensors'
+        return f'{self.wsi_stem}__ds{self.ds:g}__{self.identity_id()}.safetensors'
 
     def to_strings(self) -> Dict[str, str]:
         return {f.name: str(getattr(self, f.name))

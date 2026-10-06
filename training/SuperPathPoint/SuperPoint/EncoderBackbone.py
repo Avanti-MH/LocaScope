@@ -207,12 +207,7 @@ from TileEncoderFunc import TileEncoder, encoder_config, encoder_names
 from common.Interfaces import check_shapes
 
 
-#: The zero point, written out the way `Backbones._VGG_BASELINE` is: the
-#: BASELINE attribute belongs to the IdentifiedBuild that holds this config --
-#: `KeypointNet._NET_BASELINE` -- not to the config itself, so what this dict
-#: does is state the values that entry has to reproduce. ConfigIdentity rule 1:
-#: editing one re-hashes every identity ever written against it; adding a field
-#: splits new from old.
+#: The zero point (ConfigIdentity rule 2).
 _TILE_ENCODER_BASELINE = {
     'method': 'tile_encoder',
     'encoder': 'conch_vit',
@@ -266,6 +261,7 @@ class TileEncoderBackboneConfig(IdentifiedConfig):
     #: docstring. Present because `Backbone`'s callers read it off the config
     #: the way they read `VggBackboneConfig.in_channels`.
     in_channels = 3
+    BASELINE = _TILE_ENCODER_BASELINE
 
     def build(self, device=None) -> 'TileEncoderBackbone':
         if self.encoder not in encoder_names():

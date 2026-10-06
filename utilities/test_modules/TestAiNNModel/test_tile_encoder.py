@@ -134,6 +134,9 @@ class FakeConfig(TileEncoderConfig):
     transform: TransformConfig = field(
         default_factory=lambda: TransformConfig(scale_size=8, crop_size=8))
 
+    BASELINE = {'kind': 'vector', 'model': 'ModelConfig',
+                'transform': 'TransformConfig', 'head': '', 'pooling': ''}
+
     #: '' is NOT mapped, and that is the fake's job here: it stands for a config
     #: whose author never said what their model's own answer is. feature_pooling
     #: raises for it, which is what t_features_refuses_to_guess_for_tokens
@@ -146,11 +149,6 @@ class FakeConfig(TileEncoderConfig):
 
 
 class FakeEncoder(TileEncoder):
-    BASELINE = {'kind': 'vector',
-                'model': ModelConfig(source='local', arch='x:Y', dtype='fp32'),
-                'transform': TransformConfig(scale_size=8, crop_size=8),
-                'head': '', 'pooling': ''}
-
     def __init__(self, cfg, device):
         self.cfg, self.device = cfg, device
         self._set_model({'vector': _Vector, 'tokens': _Tokens,
@@ -921,33 +919,33 @@ def t_weights_field_is_actually_loaded():
 
 def t_identity_moves_only_where_it_should():
     """Which fields reach the hash, checked without loading anything."""
-    from GigaPathFunc import GigaPathEncoderConfig, _GIGAPATH_BASELINE
+    from GigaPathFunc import GigaPathEncoderConfig
 
-    B = _GIGAPATH_BASELINE
-    base = GigaPathEncoderConfig().identity_parts(B)
-    assert base == [], f'a default config should be all-baseline, got {base}'
-
-    M = B['model']
     import dataclasses as _dc
+    default = GigaPathEncoderConfig()
+    base = default.identity_id()
+    M, T = default.model, default.transform
     for over, why in ((dict(batch_size=999), 'batch_size'),
                       (dict(compile=True), 'compile'),
                       (dict(model=_dc.replace(M, weights='/tmp/x.ckpt')), 'weights'),
-                      (dict(pooling='cls'), "pooling at its baseline, spelled")):
-        assert GigaPathEncoderConfig(**over).identity_parts(B) == [], \
+                      (dict(pooling='cls'), "pooling at its baseline, spelled"),
+                      (dict(pooling=''), "pooling as the model's own answer")):
+        assert GigaPathEncoderConfig(**over).identity_id() == base, \
             f'{why} must not reach the hash: ' \
-            f'{GigaPathEncoderConfig(**over).identity_parts(B)}'
+            f'{GigaPathEncoderConfig(**over).identity_parts()}'
 
     for over, why in ((dict(pooling='grid2x2'), 'pooling away from baseline'),
                       (dict(model=_dc.replace(M, dtype='fp32')), 'dtype'),
                       (dict(model=_dc.replace(M, arch='timm:other')), 'arch')):
-        assert GigaPathEncoderConfig(**over).identity_parts(B) != [], \
+        assert GigaPathEncoderConfig(**over).identity_id() != base, \
             f'{why} must reach the hash'
 
-    # The transform rides in under its own prefix, and only when it differs.
-    assert GigaPathEncoderConfig(transform=B['transform']).identity_parts(B) == []
-    grey = GigaPathEncoderConfig(
-        transform=_dc.replace(B['transform'], preprocess='grey')).identity_parts(B)
-    assert grey == ['transform.preprocess=grey'], grey
+    # The transform rides in under its own prefix, and only when it differs
+    # from TransformConfig's own baseline.
+    assert not any(p.startswith('transform.') for p in default.identity_parts())
+    grey = GigaPathEncoderConfig(transform=_dc.replace(T, preprocess='grey'))
+    added = set(grey.identity_parts()) - set(default.identity_parts())
+    assert added == {'transform.preprocess="grey"'}, added
 
 
 # ── the transform on a uint8 batch (build_tensor) against PIL (build) ────────

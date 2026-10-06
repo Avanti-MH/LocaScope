@@ -264,7 +264,6 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
-import hashlib
 import json
 import math
 import os
@@ -306,7 +305,7 @@ from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E40
 from FovSupply import FovSupply                                  # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR, levels_up_to         # noqa: E402
 from ConfigArgs import add_config_args, config_from_args, describe  # noqa: E402
-from ConfigIdentity import ModelConfig                           # noqa: E402
+from ConfigIdentity import ModelConfig, enc, short_id             # noqa: E402
 from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
                          PlanSpec, RichnessConfig, SamplerConfig, add_sampler_args,
@@ -1534,31 +1533,29 @@ def read_rows(paths, quiet: bool = False) -> list:
     return rows
 
 
+#: The code that turns configs into a row (ConfigIdentity rule 3); bump it when
+#: the same configs would produce other numbers, and say why in TODO.log.
+ROW_VERSION = 0
+
+
 def config_id(args, arm_specs, configs: dict) -> str:
-    """Eight hex characters naming everything that decides a row's numbers. The
-    parts of a run live under `parts-<this>/`, so a resume can only ever pick up
-    parts made with the same arms, FoVs, slides, seed, camera, mask and encoder;
-    a different setting gets a different directory rather than being mixed in.
+    """The id of everything that decides a row's numbers. The parts of a run
+    live under `parts-<this>/`, so a resume can only ever pick up parts made
+    with the same arms, FoVs, slides, seed, camera, mask and encoder; a
+    different setting gets a different directory rather than being mixed in.
 
     `configs` maps a name to each resolved config (sampler, camera, mask,
-    encoder): every field of them is in the id, so no value can change a number
-    without also changing where the parts go."""
-    keys = {'arms': sorted(f'{b}/{g}' for b, g in arm_specs),
-            'datasets': list(args.datasets), 'n_wsi': args.n_wsi,
-            'wsi_names': list(args.wsi_names or []), 'max_ds': args.max_ds,
-            'wsi_seed': args.wsi_seed, 'split_job': args.split_cache_job,
-            # Where the FoVs may sit: the sampler reserves exactly what the
-            # camera reads (ReadGeometry). Parts drawn under another reserve
-            # are other FoVs and must not be resumed into.
-            'fov_reserve': 'camera-read',
-            # The level's rung is its own ds through a PlanSpec, and the photo
-            # rng's key names it: parts under another rung are other photos
-            # and must not be resumed into.
-            'fov_plan': 'ladder-level-ds', 'sensor': list(SENSOR),
-            'configs': {name: dataclasses.asdict(cfg)
-                        for name, cfg in sorted(configs.items())}}
-    return hashlib.sha1(json.dumps(keys, sort_keys=True, default=str)
-                        .encode()).hexdigest()[:8]
+    encoder); each enters by its own `identity_id`, so its NOT_IDENTITY fields
+    do not split a run and every identity field does."""
+    parts = [f'{name}={enc(cfg.identity_id())}'
+             for name, cfg in sorted(configs.items())]
+    parts += [f'arms={enc(sorted(f"{b}/{g}" for b, g in arm_specs))}',
+              f'datasets={enc(list(args.datasets))}', f'n_wsi={enc(args.n_wsi)}',
+              f'wsi_names={enc(list(args.wsi_names or []))}',
+              f'max_ds={enc(args.max_ds)}', f'wsi_seed={enc(args.wsi_seed)}',
+              f'split_job={enc(args.split_cache_job)}',
+              f'sensor={enc(list(SENSOR))}', f'version={enc(ROW_VERSION)}']
+    return short_id(parts)
 
 
 def part_path(parts_dir: Path, stem: str, level: int) -> Path:

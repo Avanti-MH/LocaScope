@@ -57,7 +57,7 @@ import torch.nn.functional as F
 
 from ConfigIdentity import IdentifiedConfig, register
 
-#: The zero point. Every value is upstream's (`configs/superpoint_coco.yaml:
+#: The zero point (ConfigIdentity rule 2). Every value is upstream's (`configs/superpoint_coco.yaml:
 #: 42-45`, `super_point.py:73-92`), spec.md 9.
 _LOSS_BASELINE = {
     'method': 'superpoint-loss',
@@ -94,6 +94,7 @@ class SuperPointLossConfig(IdentifiedConfig):
 
     #: Amplitude of the argmax tie-break. 0.1 against a gap of 1.
     tie_break: float = 0.1
+    BASELINE = _LOSS_BASELINE
 
     def build(self) -> 'SuperPointLoss':
         return SuperPointLoss(self)

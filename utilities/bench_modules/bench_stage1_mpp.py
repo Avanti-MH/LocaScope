@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import math
 import os
@@ -70,6 +69,7 @@ from training.MppRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, open_caches, read_label_of)
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
+from ConfigIdentity import enc, short_id                            # noqa: E402
 from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
                          SamplerConfig)
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
@@ -115,34 +115,38 @@ def write_csv(rows, path) -> None:
 # not here: this part's only job is to produce rows in the shape that file
 # expects.
 
+#: The code that turns a draw into FoV rows (ConfigIdentity rule 3); bump it
+#: when the same configs would produce other rows, and say why in TODO.log.
+FOV_VERSION = 0
+
+
+def _fov_sampler_cfg(args) -> SamplerConfig:
+    """Where the FoVs are drawn. `--overlap` draws other FoVs (jitter top-up
+    at the coarse rungs), so it is part of the draw's identity."""
+    return SamplerConfig(n_per_rung=args.n_per_rung, seed=args.seed,
+                         richness=RichnessConfig(),
+                         overlap=_overlap_cfg(args.overlap))
+
+
 def _sampling_recipe_id(args) -> str:
-    """`<sampler_id>_<seg_id>` -- the filename analyze_stage1_metrics.py's
-    own docstring names. Two hashes because they answer two different
-    questions: sampler_id is "which FoVs, from which slides, how"; seg_id is
-    "what counted as tissue" -- a caller who only changed the mask recipe
-    should not silently collide with a run that sampled different FoVs, and
-    the reverse.
-    """
-    import hashlib
-    parts = '|'.join([
-        f'native_only={args.native_only}', f'tile={args.tile}',
-        f'n_per_rung={args.n_per_rung}', f'seed={args.seed}',
-        f'sensor={args.sensor[0]}x{args.sensor[1]}',
-        f'datasets={",".join(sorted(args.datasets))}', f'n_wsi={args.n_wsi}']
-        # --overlap draws other FoVs (jitter top-up at the coarse rungs), so it
-        # is part of "which FoVs": without it a val run and a test run would
-        # share one name. Appended only when set.
-        + (['overlap=True'] if args.overlap else [])
-        # A subset of the same draw: the first k positions of every rung.
-        + ([f'fov_per_rung={args.fov_per_rung}'] if args.fov_per_rung else [])
-        # The photos are `Render`'s, placed for its rotated read.
-        + ['photo=render'])
-    sampler_id = hashlib.sha256(parts.encode()).hexdigest()[:8]
+    """`<fov id>_<seg_id>_<region_id>_<split>` -- the filename
+    analyze_stage1_metrics.py's own docstring names. The fov id is composed
+    from the ids of what decides which photos there are: the draw
+    (`SamplerConfig`), the domain gap (`PHOTO_GAP`), the sensor, the plan and
+    the slides asked for. The mask is its own two ids, so a caller who only
+    changed the mask recipe cannot collide with a run that drew other FoVs.
+    The split is last and outside the hash: a val and a test run of one recipe
+    differ only in it, which is how analyze_stage1_metrics pairs them."""
+    fov_id = short_id([
+        f'sampler={enc(_fov_sampler_cfg(args).identity_id())}',
+        f'gap={enc(PHOTO_GAP.identity_id())}',
+        f'sensor={enc(tuple(args.sensor))}',
+        f'plan={enc("native" if args.native_only else "ladder")}',
+        f'tile={enc(args.tile)}', f'datasets={enc(sorted(args.datasets))}',
+        f'n_wsi={enc(args.n_wsi)}', f'fov_per_rung={enc(args.fov_per_rung)}',
+        f'version={enc(FOV_VERSION)}'])
     mask_cfg = MASK_RECIPES[args.seg]
-    # split last and outside the hash: a val and a test run of one recipe
-    # differ only in it, which is how analyze_stage1_metrics finds the val
-    # thresholds for a test file
-    return f'{sampler_id}_{mask_cfg.seg_id()}_{mask_cfg.region_id()}_{args.split}'
+    return f'{fov_id}_{mask_cfg.seg_id()}_{mask_cfg.region_id()}_{args.split}'
 
 
 def _overlap_cfg(enabled: bool) -> OverlapConfig:
@@ -436,9 +440,7 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     # released before any method is built.
     print(f'\n======== segmenting ({args.seg}) + sampling every slide once ========')
     caches = open_caches(args, JOB_NAME, device)
-    sampler_cfg = SamplerConfig(n_per_rung=args.n_per_rung,
-                                seed=args.seed, richness=RichnessConfig(),
-                                overlap=_overlap_cfg(args.overlap))
+    sampler_cfg = _fov_sampler_cfg(args)
     # The positions are placed for the camera that photographs them
     # (`PHOTO_GAP` on --sensor): its sensor, and -- since it rotates -- the
     # bounding square and sensor margin it reads, so the rotated read stays on the

@@ -7,10 +7,8 @@ WHY THIS IS NOT IN common/Homography.py
 -----------------------------------------
 That module is deliberately torch-free at import: `warp_image_torch` imports
 torch inside itself so that `cli/demo_homography.py` and the geometry half of
-`test_homography` stay runnable without it. `ConfigIdentity` imports torch at
-module level, so putting an `IdentifiedConfig` next to `HOMOGRAPHY_DEFAULTS`
-would quietly take that property away -- and the way it would be noticed is a
-login-node demo failing to import.
+`test_homography` stay runnable without it, and this module is where the
+identity machinery comes in.
 
 WHY IT IS NOT THIRTEEN FIELDS IN EACH CONFIG
 ----------------------------------------------
@@ -21,7 +19,7 @@ they must NOT drift for one specific reason: a student trained on pairs drawn
 from a wider distribution than the one that produced its labels is being asked
 to be invariant to transforms its teacher never voted on.
 
-`ConfigIdentity.parts_against` recurses into a nested config and prefixes its
+`ConfigIdentity.parts_of` recurses into a nested config and prefixes its
 parts (`homography.patch_ratio=...`), so embedding it keeps every option in the
 identity and keeps them distinguishable from the outer config's own fields.
 
@@ -42,6 +40,15 @@ import numpy as np
 from ConfigIdentity import IdentifiedConfig
 
 from common.Homography import HOMOGRAPHY_DEFAULTS
+
+#: The zero point (ConfigIdentity rule 2): upstream's export values, which are
+#: also the field defaults below.
+HOMOGRAPHY_BASELINE = {
+    'perspective': True, 'scaling': True, 'rotation': True, 'translation': True,
+    'n_scales': 5, 'n_angles': 25, 'scaling_amplitude': 0.2,
+    'perspective_amplitude_x': 0.2, 'perspective_amplitude_y': 0.2,
+    'patch_ratio': 0.85, 'max_angle': 3.141592653589793,
+    'allow_artifacts': True, 'translation_overflow': 0.0}
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,7 @@ class HomographyConfig(IdentifiedConfig):
 
     allow_artifacts: bool = True
     translation_overflow: float = 0.0
+    BASELINE = HOMOGRAPHY_BASELINE
 
     def kwargs(self) -> Dict[str, object]:
         """Exactly what `sample_homography` takes, and nothing else."""
@@ -89,9 +97,3 @@ if _FIELDS != set(HOMOGRAPHY_DEFAULTS):
         f'a mismatch here means the sampler silently runs on a default the '
         f'config does not know about')
 
-#: The values above, as the dict a BASELINE wants. Derived rather than typed
-#: again: a baseline that restated them could disagree with the defaults, and
-#: then every config would hash as "differs from baseline" in a field nobody
-#: changed. ConfigIdentity's zero point still cannot MOVE -- these defaults are
-#: upstream's and are not ours to edit -- but it is spelled once.
-HOMOGRAPHY_BASELINE = HomographyConfig()

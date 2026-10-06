@@ -502,7 +502,7 @@ class TileYieldProbe:
         alt_rep = alt.reports[plan.rung_ds]
 
         return {'wsi_stem': wsi_stem_of(wsi),
-                'sampler_id': cfg.sampler_id(),
+                'sampler_id': cfg.identity_id(),
                 'floor_frame': rich.floor_frame,
                 'n_goal': rep_.n_goal,
                 f'n_got_if_{alt_frame}': alt_rep.n_taken,

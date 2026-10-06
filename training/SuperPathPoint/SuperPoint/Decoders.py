@@ -104,6 +104,7 @@ class DepthToSpaceDecoderConfig(IdentifiedConfig):
     cell: int = 8
     hidden: int = 256
     in_channels: int = 128
+    BASELINE = _D2S_BASELINE
 
     def build(self) -> 'DepthToSpaceDecoder':
         return DepthToSpaceDecoder(self)
@@ -171,6 +172,7 @@ class UpsampleDecoderConfig(IdentifiedConfig):
     hidden: int = 256
     in_channels: int = 1536
     norm_groups: int = 8
+    BASELINE = _UPSAMPLE_BASELINE
 
     def build(self) -> 'UpsampleDecoder':
         return UpsampleDecoder(self)

@@ -21,9 +21,10 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # =============================================================================
-# utilities/test_modules/test_tissue_mask.py: the synthetic tests first (they
-# must pass before any figure is drawn), then one figure of what each --seg
-# recipe makes of $WSI.
+# utilities/test_modules/test_uni2_pca_seg.py without a slide (config,
+# helpers), then utilities/test_modules/test_tissue_mask.py: the synthetic
+# tests first (they must pass before any figure is drawn), then one figure of
+# what each --seg recipe makes of $WSI.
 #
 #   SEG          recipes, one mask + backdrop each (MASK_RECIPES). uni2_pca
 #                fits a PCA on --pca-fit-tiles tiles (PCA_FIT_TILES, 1000 =
@@ -70,6 +71,12 @@ BBOX_LW="${BBOX_LW:-0.5}"
 REGION_IDX="${REGION_IDX:---no-region-index}"   # alternative: --region-index
 
 # ---------------- Run ----------------
+# test_uni2_pca_seg's slide-free tier first: config, helpers. Seconds.
+echo "======== test_uni2_pca_seg ========"
+python utilities/test_modules/test_uni2_pca_seg.py
+status=$?
+echo ""
+echo "======== test_tissue_mask ========"
 python utilities/test_modules/test_tissue_mask.py \
   --wsi "$WSI" \
   --seg $SEG --pca-fit-tiles $PCA_FIT_TILES \
@@ -79,3 +86,7 @@ python utilities/test_modules/test_tissue_mask.py \
           --tiling-overlap $TILING_OVERLAP \
   --per-row $PER_ROW --dpi $DPI --figure-scale "$FIGURE_SCALE" \
   $REGION_IDX --bbox-lw $BBOX_LW
+rc=$?
+[ $rc -ne 0 ] && status=$rc
+echo "======== done (exit $status) ========"
+exit $status

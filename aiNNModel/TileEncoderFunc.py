@@ -423,10 +423,9 @@ class TransformConfig(IdentifiedConfig):
     division is where the mistakes live. crop_pct() reports it for comparison
     with other people's configs; nothing here consumes it.
 
-    No defaults that mean anything: the numbers belong to whichever model was
-    validated with them, so an implementation puts them in ITS baseline. A
-    shared shape with a shared zero point would quietly impose one model's
-    preprocessing on every other.
+    The numbers belong to whichever model was validated with them: each
+    encoder config's default_factory sets its own, and its parts list how they
+    differ from the ImageNet ViT values below.
     """
     scale_size:    int = 256
     crop_size:     int = 224
@@ -439,6 +438,10 @@ class TransformConfig(IdentifiedConfig):
     #: problem entirely, and both sides of a comparison have to use it or the
     #: two are not describing the same thing.
     preprocess: str = 'none'
+
+    BASELINE = {'scale_size': 256, 'crop_size': 224, 'interpolation': 'bicubic',
+                'mean': (0.485, 0.456, 0.406), 'std': (0.229, 0.224, 0.225),
+                'preprocess': 'none'}
 
     def crop_pct(self) -> float:
         return self.crop_size / self.scale_size
@@ -530,11 +533,6 @@ class TileEncoderConfig(IdentifiedConfig):
     is why the field exists: its image tower is a ViT under an attentional
     pooler, and those are two vectors in two spaces, 768-d and 512-d.
 
-    It is on the base and not on the one config that needs it, because a field
-    added to the base LATER cannot be added compatibly -- parts_against emits a
-    field the baseline has no entry for ALWAYS, so every id would move. Adding
-    it now, with 'head': '' in every baseline, moves nothing.
-
     It is NOT in NOT_IDENTITY (two heads are two different vectors, usually of
     two different widths) and not in TileEncoder._VARIABLE (it decides what gets
     built, not how it is run).
@@ -543,13 +541,8 @@ class TileEncoderConfig(IdentifiedConfig):
     model's own answer -- 'cls' for a ViT, 'gap' for a CNN. It is a FIELD and
     not an argument to features(), and that is the whole point: what an encoder
     produces has to be a property of the encoder, or `encoder(patches)` cannot
-    honour it. Before it existed, a multi-slot pooling could reach retrieval
-    only by a caller assembling its own FeaturesMap, because to_features(encoder)
-    speaks EncodeFn and EncodeFn has nowhere to put a mode.
-
-    The rule it follows is the one Token Merging was added under and then
-    removed under: anything that changes the vectors is a field, because a
-    mutation performed after construction leaves nothing for an id to record.
+    honour it: anything that changes the vectors is a field, because a mutation
+    performed after construction leaves nothing for an id to record.
     """
     model:     ModelConfig     = field(default_factory=ModelConfig)
     transform: TransformConfig = field(default_factory=TransformConfig)
@@ -557,6 +550,8 @@ class TileEncoderConfig(IdentifiedConfig):
     head: str = ''
     pooling: str = ''
 
+    BASELINE = {'model': 'ModelConfig', 'transform': 'TransformConfig',
+                'head': '', 'pooling': ''}
     NOT_IDENTITY = ('batch_size',)
 
     #: Accepted spellings of `head` -> the value this config stores. A model
@@ -566,11 +561,9 @@ class TileEncoderConfig(IdentifiedConfig):
     #:
     #: No type annotation, and that is load-bearing rather than an omission: an
     #: annotated name with a default in a dataclass body is a FIELD. It would
-    #: reach dataclasses.fields(), no baseline would hold an entry for it, and
-    #: parts_against emits an absent-from-baseline field always -- re-hashing
-    #: every store in result/cache/. It would also be settable per instance,
-    #: which would let a caller widen the value domain from the outside.
-    #: NOT_IDENTITY above is unannotated for the same two reasons.
+    #: reach the identity parts, and it would be settable per instance, which
+    #: would let a caller widen the value domain from the outside. BASELINE and
+    #: NOT_IDENTITY above are unannotated for the same two reasons.
     HEADS = {'': ''}
 
     #: The same table for `pooling`, and closed for the same reason. It looked

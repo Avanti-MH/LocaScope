@@ -45,7 +45,7 @@ from ConfigIdentity import IdentifiedConfig, register
 
 from SuperPoint.Backbones import VggBlock
 
-#: The zero point. ConfigIdentity rule 1.
+#: The zero point (ConfigIdentity rule 2).
 _DESCRIPTOR_BASELINE = {
     'method': 'descriptor-vgg',
     'dim': 256,
@@ -69,6 +69,7 @@ class DescriptorHeadConfig(IdentifiedConfig):
     dim: int = 256
     hidden: int = 256
     in_channels: int = 128
+    BASELINE = _DESCRIPTOR_BASELINE
 
     def build(self) -> 'DescriptorHead':
         return DescriptorHead(self)

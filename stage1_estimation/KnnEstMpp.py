@@ -103,7 +103,7 @@ class KnnEstMppConfig(IdentifiedConfig):
 
     `sampler_cfg` is `TileSampler.SamplerConfig` -- n per rung, seed,
     richness caps/floors, overlap: everything that decides WHERE the
-    reference tiles are, already hashed by its own `sampler_id()`.
+    reference tiles are, already named by its own `identity_id()`.
 
     `tile_size` is the ONE size both sides are cut to: the reference bank's
     camera (a plain `tile_size` px tile) and the query's patches. Reference
@@ -119,6 +119,9 @@ class KnnEstMppConfig(IdentifiedConfig):
     sampler_cfg: SamplerConfig = field(default_factory=_default_sampler_cfg)
     k: int = 5
     tile_size: int = 256
+
+    BASELINE = {'mask_cfg': 'TissueMaskConfig', 'sampler_cfg': 'SamplerConfig',
+                'k': 5, 'tile_size': 256}
 
 
 # ── result ───────────────────────────────────────────────────────────────────
@@ -177,11 +180,6 @@ class KnnEstMpp(IdentifiedBuild):
     All intermediate state (`sampler`, `ref_feats`, `knn`, ...) is stored on
     self for debugging and visualisation.
     '''
-
-    #: Append-only zero point for `identity_id`/`identity_parts` -- empty
-    #: until a specific (encoder, mask_cfg, sampler_cfg, k) combination is
-    #: adopted as the project's own default, per `ConfigIdentity`'s rule 1.
-    BASELINE: Dict[str, Any] = {}
 
     def __init__(self, cfg: KnnEstMppConfig,
                 device: Union[str, torch.device] = 'cuda' if torch.cuda.is_available() else 'cpu'):

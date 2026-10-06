@@ -819,7 +819,7 @@ def t_bucket_frame_changes_what_a_chain_carries():
 def t_sampler_id_moves_with_every_axis():
     base = _cfg()
     same = _cfg()
-    assert base.sampler_id() == same.sampler_id(), 'the hash is not stable'
+    assert base.identity_id() == same.identity_id(), 'the hash is not stable'
     moves = {
         'n_per_rung': _cfg(n_per_rung=41),
         'seed':      _cfg(seed=1),
@@ -846,7 +846,7 @@ def t_sampler_id_moves_with_every_axis():
         'inherit.source_rung': _cfg(inherit=InheritConfig(source_rung=4.0)),
     }
     for name, cfg in moves.items():
-        assert cfg.sampler_id() != base.sampler_id(), (
+        assert cfg.identity_id() != base.identity_id(), (
             f'{name} changed and sampler_id did not; two corpora would share '
             f'a filename')
     return f'{len(moves)} fields, all move it'
@@ -858,8 +858,8 @@ def t_sampler_id_does_not_move_with_provenance():
     choice."""
     a = _cfg(inherit=InheritConfig(share=0.5, on_incomplete='drop'))
     b = _cfg(inherit=InheritConfig(share=0.5, on_incomplete='keep'))
-    assert a.sampler_id() == b.sampler_id(), (
-        'on_incomplete moved sampler_id; it is in _NOT_IDENTITY for a reason')
+    assert a.identity_id() == b.identity_id(), (
+        'on_incomplete moved the id; it is in NOT_IDENTITY for a reason')
     assert 'inherit.on_incomplete' in a.provenance()
     return 'on_incomplete recorded, not hashed'
 

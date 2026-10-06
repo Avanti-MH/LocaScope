@@ -62,7 +62,7 @@ two agree on everything else -- Resize(224) makes the shorter side 224 and the
 CenterCrop is then a no-op, so crop_pct is 1.0 either way -- and differ only in
 the resampling filter.
 
-The baseline takes the LIBRARY path, bilinear, for the reason GigaPathFunc
+The config takes the LIBRARY path, bilinear, for the reason GigaPathFunc
 gives for taking prov-gigapath's code over its config.json: the code is what
 produced the published numbers, and the metadata is a claim about the weights
 rather than a measurement of them. Pin it against the shipped pipeline before
@@ -240,35 +240,17 @@ def _recipe_parts(recipe: dict) -> list:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-#: The zero point. Editing this invalidates every id ever written, on purpose;
-#: editing a dataclass DEFAULT does not -- it splits new from old instead, which
-#: is why the two are separate. See ConfigIdentity for the four cases.
-_UNI2_BASELINE = {
-    'model': ModelConfig(source='timm', arch=UNI2_ARCH, dtype='fp16'),
-    # bilinear, not bicubic: torchvision's Resize default, which is what
-    # get_encoder.py:40 applies. See the module docstring -- upstream's two
-    # paths differ here and only here.
-    'transform': TransformConfig(scale_size=224, crop_size=224,
-                                 interpolation='bilinear',
-                                 mean=(0.485, 0.456, 0.406),
-                                 std=(0.229, 0.224, 0.225),
-                                 preprocess='none'),
-    # UNI2 has one output and '' is it. Present anyway: a baseline missing a
-    # field the config has is the one mistake in this scheme that costs a
-    # recompute, and a module that omits it teaches the omission.
-    'head': '',
-    # A baseline missing a field the config has is the one mistake in this
-    # scheme that costs a recompute; both new fields are here for that reason.
-    'pooling': 'cls',
-}
-
-
 @register('uni2')
 @dataclass(frozen=True)
 class Uni2EncoderConfig(TileEncoderConfig):
     model: ModelConfig = field(
         default_factory=lambda: ModelConfig(source='timm', arch=UNI2_ARCH,
                                             dtype='fp16'))
+    #: get_encoder.py:40, the library path: Resize(224) (torchvision's
+    #: default, bilinear) then CenterCrop(224). See the module docstring.
+    transform: TransformConfig = field(
+        default_factory=lambda: TransformConfig(
+            scale_size=224, crop_size=224, interpolation='bilinear'))
 
     #: Same reasoning as GigaPath's: torch.compile reorders reductions, worth
     #: about 1e-7, two orders below what fp16 storage in a FeatureStore already
@@ -276,6 +258,8 @@ class Uni2EncoderConfig(TileEncoderConfig):
     #: apart afterwards.
     compile: bool = False
 
+    BASELINE = {'model': 'ModelConfig', 'transform': 'TransformConfig',
+                'head': '', 'pooling': 'cls'}
     NOT_IDENTITY = ('batch_size', 'compile')
 
     #: Same as GigaPath's: UNI2-h is a bare ViT, so its own answer is the
@@ -362,8 +346,6 @@ class Uni2Encoder(TileEncoder):
     mistake that gave `model.head is Linear` the first time a second
     architecture was tried.
     '''
-
-    BASELINE = _UNI2_BASELINE
 
     def __init__(self, cfg: Uni2EncoderConfig, device: torch.device,
                  multi_gpu: bool = False):

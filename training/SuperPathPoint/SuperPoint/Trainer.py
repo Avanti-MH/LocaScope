@@ -57,11 +57,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ConfigIdentity import IdentifiedConfig, register
+from ConfigIdentity import IdentifiedConfig, record, register
 
 from common.KeypointLabelStore import points_from_prob
 
-#: The zero point. ConfigIdentity rule 1.
+#: The zero point (ConfigIdentity rule 2).
 _TRAINER_BASELINE = {
     'method': 'superpathpoint-trainer',
     'lr': 1e-4,
@@ -127,6 +127,7 @@ class TrainerConfig(IdentifiedConfig):
     #: (ConfigIdentity rule 1 -- a new hashed field re-hashes all of them).
     NOT_IDENTITY = ('workers', 'log_every', 'val_every', 'amp',
                     'wandb_project', 'wandb_mode', 'run_name', 'val_budget')
+    BASELINE = _TRAINER_BASELINE
 
     def build(self, net, loss, train_set, val_set=None, out_dir='.',
               extra_identity: Optional[Dict[str, str]] = None) -> 'Trainer':
@@ -368,7 +369,7 @@ class Trainer:
 
     def save_checkpoint(self, tag: str) -> str:
         path = os.path.join(self.out_dir, f'superpathpoint_{tag}.pt')
-        identity = {'net': self.net.identity_json(),
+        identity = {'net': record(self.net),
                     'trainer': json.dumps(
                         {f.name: getattr(self.cfg, f.name)
                          for f in dataclasses.fields(self.cfg)},
@@ -396,7 +397,7 @@ class Trainer:
             # store points at, so a run and the labels it produced can be lined
             # up afterwards without guessing from timestamps.
             config={'identity_id': self.net.identity_id(),
-                    'net': self.net.identity_json(),
+                    'net': record(self.net),
                     **self.extra_identity})
 
     def _log(self, row: Dict[str, float], *, step: int, epoch: int) -> None:

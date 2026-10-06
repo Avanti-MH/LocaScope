@@ -202,6 +202,8 @@ class PrototypeEstMppConfig(IdentifiedConfig):
     #: on the checkpoint, same reasoning `ClassifierEstMppConfig.vote` gives.
     vote: str = 'mean_probability'
 
+    BASELINE = {'mask_cfg': 'TissueMaskConfig', 'sampler_cfg': 'SamplerConfig',
+                'levels': None, 'vote': 'mean_probability'}
     NOT_IDENTITY = ('weights',)
 
     @classmethod
@@ -253,11 +255,6 @@ class PrototypeEstMpp(IdentifiedBuild):
     for the procedure and for why `build` is expensive here, unlike
     `ClassifierEstMpp.build`.
     '''
-
-    #: Append-only zero point for `identity_id`/`identity_parts` -- empty
-    #: until a specific combination is adopted as the project's own
-    #: default, per `ConfigIdentity`'s rule 1.
-    BASELINE: Dict[str, Any] = {}
 
     def __init__(self, cfg: PrototypeEstMppConfig,
                 device: Union[str, torch.device] = 'cuda' if torch.cuda.is_available() else 'cpu',

@@ -67,20 +67,20 @@ from ConfigIdentity import IdentifiedConfig, register
 from common import KeypointLabelStore
 from Store import PreTileStore
 from common.Homography import inside, points_input_to_output, sample_homography
-from common.HomographyConfig import HOMOGRAPHY_BASELINE, HomographyConfig
+from common.HomographyConfig import HomographyConfig
 from TileSampler import centre_crop, centre_margin
 from common.Homography import pretile_valid_mask, warp_from_pretile
 
 BALANCE_MODES = ('none', 'align-min', 'loss-weight')
 
-#: The zero point. ConfigIdentity rule 1.
+#: The zero point (ConfigIdentity rule 2).
 _PAIR_BASELINE = {
     'method': 'superpathpoint-pairs',
     'tile': 256,
     'in_channels': 1,
     'valid_border_margin': 3,
-    'balance': 'loss-weight',
-    'homography': HOMOGRAPHY_BASELINE,
+    'balance': 'none',
+    'homography': 'HomographyConfig',
 }
 
 
@@ -107,10 +107,6 @@ class PairDatasetConfig(IdentifiedConfig):
     #:
     #: Not 'loss-weight' either: the rung weights are a second decision. What
     #: would change it is more slides, not this switch.
-    #:
-    #: The DEFAULT moves with the decision and `_PAIR_BASELINE` does not. The
-    #: baseline is the zero point an identity is measured against and it is
-    #: append-only (ConfigIdentity rule 1); the default is what runs.
     balance: str = 'none'
 
     #: The same thirteen options Homographic Adaptation drew its views with.
@@ -124,6 +120,7 @@ class PairDatasetConfig(IdentifiedConfig):
     workers: int = 4
 
     NOT_IDENTITY = ('seed', 'workers')
+    BASELINE = _PAIR_BASELINE
 
     def build(self, corpus, labels_root, *, wsi_stems: Sequence[str],
               rungs: Optional[Sequence[float]] = None,

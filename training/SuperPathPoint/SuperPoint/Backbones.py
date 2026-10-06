@@ -81,9 +81,7 @@ class VggBlock(nn.Sequential):
         self.add_module('bn', nn.BatchNorm2d(c_out, eps=0.001))
 
 
-#: The zero point. ConfigIdentity rule 1: editing this re-hashes every
-#: checkpoint identity ever written; editing a dataclass default splits new from
-#: old. The values are upstream's (spec.md 9).
+#: The zero point (ConfigIdentity rule 2). The values are upstream's (spec.md 9).
 _VGG_BASELINE = {
     'method': 'vgg',
     'channels': (64, 64, 128, 128, 256),
@@ -109,6 +107,7 @@ class VggBackboneConfig(IdentifiedConfig):
     #: Ki67's DAB brown against a blue counterstain may not, and which of those
     #: dominates is a measurement nobody here has made.
     in_channels: int = 1
+    BASELINE = _VGG_BASELINE
 
     def build(self) -> 'VggBackbone':
         return VggBackbone(self)

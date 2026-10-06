@@ -550,7 +550,11 @@ def t_cfg_seg_has_no_default():
 
 
 def t_cfg_hest_is_the_baseline():
-    assert MASK_RECIPES['hest'].identity_parts() == [], MASK_RECIPES['hest'].identity_parts()
+    """The hest recipe is every baseline at once: the mask's own fields and
+    HestSegConfig's. Only its ModelConfig speaks, against ModelConfig's own
+    baseline (a timm encoder), because HEST is a torchvision network."""
+    parts = MASK_RECIPES['hest'].identity_parts()
+    assert all(p.startswith('seg.model.') for p in parts), parts
     assert MASK_RECIPES['hest'].seg_id().startswith('hest-')
     assert MASK_RECIPES['hsv'].seg_id().startswith('hsv-')
     assert MASK_RECIPES['none'].seg_id().startswith('none-')

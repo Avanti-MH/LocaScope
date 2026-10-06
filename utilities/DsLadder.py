@@ -26,13 +26,12 @@ coarse side (`ReadGeometry.coarser_level`, for routing a query)
 would reach ds 2 from ds 4 by UPSAMPLING, which creates interpolation texture
 a keypoint detector will happily learn to fire on.
 
-NOT AN IdentifiedConfig YET
-----------------------------
-`utilities/ConfigIdentity.py` imports torch at module scope. This file does
-arithmetic on `level_downsamples` and nothing else, and `test_ds_ladder` runs on
-a login node in under a second because of that. It grows an identity when the
-keypoint label store lands (spec.md 6.3) and needs to hash which ladder produced
-which labels -- not before.
+NOT AN IdentifiedConfig
+------------------------
+Its only state is the rung tuple, and where a draw depends on it the rungs are
+spelled out in the cache path by `PlanSpec.key` (`ladder-1-2-4-...`), readable
+and complete. This file does arithmetic on `level_downsamples` and nothing
+else, which is why `test_ds_ladder` runs on a login node in under a second.
 """
 
 from __future__ import annotations

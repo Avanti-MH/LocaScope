@@ -235,6 +235,8 @@ class TissueSegConfig(IdentifiedConfig):
     #: Restrict everything to `openslide.bounds-*`. See `scanned_rect`.
     limit_bounds: bool = True
 
+    BASELINE = {'method': '', 'limit_bounds': True}
+
     def build(self, device: Optional['torch.device'] = None) -> 'TissueSegmenter':
         raise TypeError(
             f'{type(self).__name__} is the base; build a PlaneSegConfig, '
@@ -269,6 +271,10 @@ class PlaneSegConfig(TissueSegConfig):
     read_chunk_px: Optional[int] = 4_000_000
     stitch_overlap: int = 128
 
+    BASELINE = {'method': 'hsv', 'limit_bounds': True, 'ds': 4.0,
+                'seg_chunk_px': 4_000_000, 'read_chunk_px': 4_000_000,
+                'stitch_overlap': 128}
+
     def __post_init__(self):
         # Refused rather than documented: a tiled otsu is a mask with seams that
         # looks like a slightly worse mask.
@@ -295,12 +301,6 @@ class TissueSegmenter(IdentifiedBuild):
         raise NotImplementedError
 
 
-#: The zero point for a built plane segmenter's identity.
-_PLANE_BASELINE = {'method': 'hsv', 'limit_bounds': True, 'ds': 4.0,
-                   'seg_chunk_px': 4_000_000, 'read_chunk_px': 4_000_000,
-                   'stitch_overlap': 128}
-
-
 class PlaneSegmenter(TissueSegmenter):
     """Reads one level of the slide and hands it to `__call__`, tile by tile.
 
@@ -308,8 +308,6 @@ class PlaneSegmenter(TissueSegmenter):
     a placeholder: weights_id comes out '' because there are no weights to
     record.
     """
-
-    BASELINE = _PLANE_BASELINE
 
     def __init__(self, cfg: PlaneSegConfig, device=None):
         self.cfg = cfg

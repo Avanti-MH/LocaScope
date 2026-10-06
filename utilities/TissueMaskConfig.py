@@ -41,22 +41,12 @@ for _d in (_HERE, _HERE.parent / 'aiNNModel'):
 
 from Cache import (check_source, read_meta, source_key,          # noqa: E402
                    wsi_stem_of, write_meta)
-from ConfigIdentity import (IdentifiedConfig, parts_against,     # noqa: E402
+from ConfigIdentity import (IdentifiedConfig, enc, parts_of,     # noqa: E402
                             register, short_id)
 from HestSegFunc import HestSegConfig                            # noqa: E402
 from TissueMask import SlideMask, TissueMask                     # noqa: E402
 from TissueSegFunc import PlaneSegConfig, TissueSegConfig        # noqa: E402
 from Uni2PcaSegFunc import Uni2PcaSegConfig                      # noqa: E402
-
-#: The zero point: the hest recipe, the one every job uses unless told
-#: otherwise, so its ids read "baseline" and anything else says how it differs.
-#: Editing this renames every mask on purpose; editing a dataclass DEFAULT does
-#: not -- it splits new from old instead.
-_MASK_BASELINE = {
-    'seg': HestSegConfig(),
-    'min_region_ratio': 0.01,
-    'merge': True,
-}
 
 
 @register('tissue-mask')
@@ -82,26 +72,26 @@ class TissueMaskConfig(IdentifiedConfig):
     min_region_ratio: float = 0.01
     merge: bool = True
 
-    def identity_parts(self, baseline=None) -> List[str]:
-        return parts_against(self, _MASK_BASELINE if baseline is None else baseline)
+    BASELINE = {'seg': 'HestSegConfig', 'min_region_ratio': 0.01, 'merge': True}
 
     def seg_parts(self) -> List[str]:
-        """What the segmentation depends on: the `seg.` parts, and the content
-        of any weights the config names by path (`TissueSegConfig.weights_key`)
-        -- a key has to see a finetune overwritten in place, and a cache hit is
-        exactly when no model is built to hash its parameters."""
-        parts = [p for p in self.identity_parts() if p.startswith('seg.')]
+        """What the segmentation depends on: the segmenter config's own parts,
+        and the content of any weights it names by path
+        (`TissueSegConfig.weights_key`) -- a key has to see a finetune
+        overwritten in place, and a cache hit is exactly when no model is
+        built to hash its parameters."""
         weights = self.seg.weights_key()
-        return parts + ([f'seg.weights_sha={weights}'] if weights else [])
+        return (self.seg.identity_parts()
+                + ([f'weights_sha={enc(weights)}'] if weights else []))
 
     def seg_id(self) -> str:
-        """`<method>-<hash>`: the directory a raw mask is cached under."""
+        """`<method>-<id>`: the directory a raw mask is cached under."""
         return f'{self.seg.method or "none"}-{short_id(self.seg_parts())}'
 
     def region_id(self) -> str:
-        """Hash of the region prep after the segmentation."""
-        return short_id([p for p in self.identity_parts()
-                         if not p.startswith('seg.')])
+        """The id of the region prep after the segmentation: this config's own
+        fields, the segmenter's left to `seg_id` one directory up."""
+        return short_id(parts_of(self, exclude=('seg',)))
 
     def regions(self, wsi, slide_mask: SlideMask) -> TissueMask:
         """Search, filter, merge -- in that order, once. The cheap half."""

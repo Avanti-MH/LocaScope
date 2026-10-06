@@ -111,7 +111,7 @@ if os.environ.get('HF_TOKEN_CONCH'):
 import torch  # noqa: E402
 from torch import nn  # noqa: E402
 
-from ConfigIdentity import ModelConfig, register, weights_id  # noqa: E402
+from ConfigIdentity import ModelConfig, enc, register, weights_id  # noqa: E402
 from TileEncoderFunc import (TileEncoder,  # noqa: E402
                              TileEncoderConfig, TransformConfig)
 
@@ -273,21 +273,6 @@ def _split(state: dict, prefix: str) -> dict:
 
 # ── configuration ─────────────────────────────────────────────────────────────
 
-#: The zero point. head is 'attn_pool' and not '' because that is what '' means
-#: for this model, and __post_init__ has already resolved it by the time
-#: identity is computed -- a baseline holding '' would never compare equal.
-_CONCHVIT_BASELINE = {
-    'model': ModelConfig(source='local', arch=CONCH_CLASS, dtype='fp16'),
-    'transform': TransformConfig(scale_size=448, crop_size=448,
-                                 interpolation='bicubic',
-                                 mean=_OPENAI_MEAN, std=_OPENAI_STD,
-                                 preprocess='none'),
-    'repo': CONCH_REPO,
-    'head': 'attn_pool',
-    'pooling': 'identity',
-}
-
-
 @register('conch_vit')
 @dataclass(frozen=True)
 class ConchVitEncoderConfig(TileEncoderConfig):
@@ -309,6 +294,12 @@ class ConchVitEncoderConfig(TileEncoderConfig):
     #: makes two finetunes distinguishable. It is what makes the id READABLE,
     #: the same role ModelConfig.arch plays for the other two encoders.
     repo: str = CONCH_REPO
+
+    #: head is 'attn_pool' and not '' because that is what '' means for this
+    #: model, and __post_init__ has resolved it before identity is computed.
+    BASELINE = {'model': 'ModelConfig', 'transform': 'TransformConfig',
+                'repo': 'MahmoodLab/conch', 'head': 'attn_pool',
+                'pooling': 'identity'}
 
     #: '' is the tower's own answer, which is the attentional pooler. Named
     #: rather than left blank: cfg.head then always points at a head that
@@ -398,8 +389,6 @@ class ConchVitEncoder(TileEncoder):
     what keeps weights_id from covering parameters that never run.
     '''
 
-    BASELINE = _CONCHVIT_BASELINE
-
     def __init__(self, cfg: ConchVitEncoderConfig, device: torch.device,
                  multi_gpu: bool = False):
         self.cfg = cfg
@@ -463,7 +452,7 @@ class ConchVitEncoder(TileEncoder):
         '''
         parts = super().identity_parts()
         if self.head is not None:
-            parts.append(f'head_weights={weights_id(self.head)}')
+            parts.append(f'head_weights={enc(weights_id(self.head))}')
         return parts
 
     def apply_head(self, raw: torch.Tensor) -> torch.Tensor:

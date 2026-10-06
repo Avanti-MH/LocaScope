@@ -286,7 +286,7 @@ def t_every_identity_field_changes_the_filename():
         f'this test covers {sorted(moved)} but the module identifies on '
         f'{sorted(KeypointLabelStore._IDENTITY_FIELDS)}')
     for field, value in moved.items():
-        assert _meta(**{field: value}).cfg_hash() != base.cfg_hash(), field
+        assert _meta(**{field: value}).identity_id() != base.identity_id(), field
     return f'{len(moved)} fields'
 
 
@@ -304,7 +304,7 @@ def t_provenance_does_not_change_the_filename():
     for field, value in (('wsi_path', '/other/mount.svs'), ('n_tiles', 500),
                          ('cap', 999), ('mean_n_kp', 12.5),
                          ('created_at', '2020-01-01T00:00:00')):
-        assert _meta(**{field: value}).cfg_hash() == base.cfg_hash(), field
+        assert _meta(**{field: value}).identity_id() == base.identity_id(), field
     return 'wsi_path, counts, created_at'
 
 
@@ -328,7 +328,7 @@ def t_write_then_read_returns_the_same_arrays():
 
         for name in ('tile_x', 'tile_y', 'kp_xy', 'kp_score', 'kp_count', 'n_kp'):
             assert np.array_equal(getattr(back, name), getattr(batch, name)), name
-        assert got.cfg_hash() == meta.cfg_hash()
+        assert got.identity_id() == meta.identity_id()
         # Pinned: `from __future__ import
         # annotations` makes every field annotation a STRING, so a decoder that
         # compares `field.type is float` hands back str and the first caller to

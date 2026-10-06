@@ -127,6 +127,7 @@ class ClassifierEstMppConfig(IdentifiedConfig):
     #: experiments, not the same one re-labelled.
     vote: str = 'mean_probability'
 
+    BASELINE = {'vote': 'mean_probability'}
     NOT_IDENTITY = ('weights',)
 
     @classmethod
@@ -186,12 +187,6 @@ class ClassifierEstMpp(IdentifiedBuild):
     per query (`estimate`) -- see this module's docstring for the procedure
     and for why `build` is cheap here specifically.
     '''
-
-    #: Append-only zero point for `identity_id`/`identity_parts` -- empty
-    #: until a specific (encoder, classifier, reduction, tile_size)
-    #: combination is adopted as the project's own default, per
-    #: `ConfigIdentity`'s rule 1.
-    BASELINE: Dict[str, Any] = {}
 
     def __init__(self, cfg: ClassifierEstMppConfig,
                 device: Union[str, torch.device] = 'cuda' if torch.cuda.is_available() else 'cpu',

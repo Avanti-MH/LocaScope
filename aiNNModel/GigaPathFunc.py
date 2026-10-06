@@ -6,12 +6,11 @@
     slots   = encoder.pooled(tiles, 'grid2x2')
 
 The contract, the batch loop, the identity surface, `variant`, the poolings and
-every exit are TileEncoderFunc's. What is left here is what is GigaPath's: the
-frozen baseline its numbers form, the CLS as the answer to "which token is the
-feature", and which poolings its 14x14 grid admits.
+every exit are TileEncoderFunc's. What is left here is what is GigaPath's: its
+numbers, the CLS as the answer to "which token is the feature", and which
+poolings its 14x14 grid admits.
 
-_GIGAPATH_BASELINE is the zero point every id is measured against. Its transform
-is 256 -> 224, which is crop_pct 0.875 and NOT what the checkpoint declares:
+The transform is 256 -> 224, which is crop_pct 0.875 and NOT what the checkpoint declares:
 prov-gigapath's config.json says "crop_pct": 1.0. Their own code disagrees with
 their own metadata, in four places and consistently --
 
@@ -99,28 +98,6 @@ GIGAPATH_ARCH = 'hf_hub:prov-gigapath/prov-gigapath'
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-#: The zero point. Editing this invalidates every id ever written, on purpose;
-#: editing a dataclass DEFAULT does not -- it splits new from old instead, which
-#: is why the two are separate. See ConfigIdentity for the four cases.
-_GIGAPATH_BASELINE = {
-    'model': ModelConfig(source='timm', arch=GIGAPATH_ARCH, dtype='fp16'),
-    'transform': TransformConfig(scale_size=256, crop_size=224,
-                                 interpolation='bicubic',
-                                 mean=(0.485, 0.456, 0.406),
-                                 std=(0.229, 0.224, 0.225),
-                                 preprocess='none'),
-    # '' is what this config already did before `head` existed, so every id
-    # written before it stays valid. Omitting this line is not the smaller
-    # change but the bigger one: parts_against always emits a field the baseline
-    # has no entry for, so all 73 stores under result/cache/ would take a new
-    # encoder_id and miss.
-    'head': '',
-    # Same reason as 'head' above: a field the baseline has no entry for is
-    # emitted always, so leaving it out would re-hash all 73 stores.
-    'pooling': 'cls',
-}
-
-
 @register('gigapath')
 @dataclass(frozen=True)
 class GigaPathEncoderConfig(TileEncoderConfig):
@@ -134,6 +111,8 @@ class GigaPathEncoderConfig(TileEncoderConfig):
     #: files nobody could tell apart afterwards.
     compile: bool = False
 
+    BASELINE = {'model': 'ModelConfig', 'transform': 'TransformConfig',
+                'head': '', 'pooling': 'cls'}
     NOT_IDENTITY = ('batch_size', 'compile')
 
     #: 'trunk' is not a second head here, it is a second name for the only one:
@@ -170,18 +149,9 @@ class GigaPathEncoderConfig(TileEncoderConfig):
 # The production feature keeps one vector per tile: pool(pool_type='token') is
 # `x[:, 0]` (timm/layers/pool1d.py:global_pool_nlc), so 196 of the 197 tokens are
 # discarded. `pooling_kinds` lets a caller keep them and try other reductions
-# offline, without re-encoding and without editing the model.
-#
-# It is defined in TileEncoderFunc and re-exported here. It reads a spec and a
-# tensor and nothing else, so it was never GigaPath's -- it only lived here
-# while GigaPath was the only encoder. UNI2 is what made that visible: reaching
-# these four names would have meant importing one implementation module from
-# another, dragging this file's HF_HOME default, its timm import and its Token
-# Merging patcher along for two functions about tensor shapes.
-#
-# The re-export is not a courtesy to old code, it is the point: every caller
-# spells `from GigaPathFunc import pooling_kinds` and the move was meant to change
-# where the definition lives, not what any of them import.
+# offline, without re-encoding and without editing the model. It is defined in
+# TileEncoderFunc, because it reads a spec and a tensor and nothing else, and
+# re-exported here for the callers that import it from GigaPathFunc.
 
 
 # ── Encoder ──────────────────────────────────────────────────────────────────
@@ -198,8 +168,6 @@ class GigaPathEncoder(TileEncoder):
     The empty setting returns fc_norm(forward_features(x)). Going through
     model() rather than around it is what lets DataParallel work.
     '''
-
-    BASELINE = _GIGAPATH_BASELINE
 
     def __init__(self, cfg: GigaPathEncoderConfig, device: torch.device,
                  multi_gpu: bool = False):

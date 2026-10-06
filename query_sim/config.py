@@ -8,12 +8,22 @@ NOT the sensor and NOT the magnification. Both are the camera's
 downsample, so the same gap can be put on any sensor at any objective.
 """
 
+import os
+import sys
 from dataclasses import dataclass
 from typing import Tuple
 
+_UTILITIES = os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
+                                          'utilities'))
+if _UTILITIES not in sys.path:
+    sys.path.insert(0, _UTILITIES)
 
-@dataclass
-class DomainGapConfig:
+from ConfigIdentity import IdentifiedConfig, register            # noqa: E402
+
+
+@register('domain-gap')
+@dataclass(frozen=True)
+class DomainGapConfig(IdentifiedConfig):
     # ── Geometry ──────────────────────────────────────────────────────────────
     rotation_choices: Tuple[int, ...] = (0, 90, 180, 270)
     angle_jitter_deg: float = 3.0
@@ -42,10 +52,8 @@ class DomainGapConfig:
 
     # ── Per-shot presence of the two FRAME-REFERENCED optics ──────────────────
     # Probability that the vignette / the distortion is applied AT ALL. 1.0 is
-    # "always", and is the default so that every existing config and every
-    # corpus already generated keeps its exact behaviour -- `_sample_params`
-    # does not even draw when the probability is 1.0, so the rng sequence is
-    # byte-identical to before this field existed.
+    # "always"; `_sample_params` does not draw when the probability is 1.0, so
+    # the default leaves the rng sequence of the other draws untouched.
     #
     # A probability rather than a wider range, because these two are not
     # continuous in the way brightness is. `apply_vignette`'s falloff and
@@ -68,6 +76,17 @@ class DomainGapConfig:
     # ── Mode toggles ──────────────────────────────────────────────────────────
     photometric: bool = True   # if False, skip color/vignette/lens/noise/jpeg
     geometric:   bool = True   # if False, skip rotation + scale
+
+    BASELINE = {
+        'rotation_choices': (0, 90, 180, 270), 'angle_jitter_deg': 3.0,
+        'scale_range': (0.90, 1.15), 'query_mpp_jitter': 0.0,
+        'brightness_range': (-0.08, 0.08), 'contrast_range': (-0.08, 0.08),
+        'saturation': 1.0, 'color_temp_range': (-0.12, 0.12),
+        'vignette_range': (0.15, 0.45), 'stage_shift_max': 3,
+        'distortion_k1_range': (-0.04, 0.04), 'distortion_k2': 0.0,
+        'vignette_p': 1.0, 'distortion_p': 1.0, 'defocus_radius': 2,
+        'chromatic_shift': 2, 'noise_sigma': 3.0, 'jpeg_quality': 85,
+        'photometric': True, 'geometric': True}
 
     def __post_init__(self):
         for name in (

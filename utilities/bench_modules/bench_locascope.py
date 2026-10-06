@@ -819,7 +819,7 @@ def main():
     camera_cfg = config_from_args(args, CAMERA, 'camera')
     print(f'shots      : {" ".join(args.datasets)}  #{args.split}  n_wsi={args.n_wsi}  '
           f'per level {sampler_cfg.n_per_rung}  seed {sampler_cfg.seed}  '
-          f'sampler {sampler_cfg.sampler_id()}')
+          f'sampler {sampler_cfg.identity_id()}')
     print(f'out        : {out_dir}')
 
     import torch

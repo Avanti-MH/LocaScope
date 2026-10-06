@@ -179,6 +179,8 @@ class SlidingWinSimRotConfig(IdentifiedConfig):
     k:             int   = 20
     min_sep_tiles: float = 1.0
 
+    BASELINE = {'tile_size': 256, 'overlap': True, 'k': 20, 'min_sep_tiles': 1.0}
+
 
 class SlidingWinSimRot(IdentifiedBuild):
     """Rotation-aware sliding-window retrieval: stage 2, first phase.
@@ -198,11 +200,6 @@ class SlidingWinSimRot(IdentifiedBuild):
     """
 
     ROTATIONS = ROTATIONS
-
-    #: Append-only zero point for `identity_id`/`identity_parts` -- empty
-    #: until a configuration is adopted as the project's own default, per
-    #: `ConfigIdentity`'s rule 1. Same as every stage-1 estimator's.
-    BASELINE: Dict[str, Any] = {}
 
     def __init__(
         self,

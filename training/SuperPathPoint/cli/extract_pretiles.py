@@ -376,7 +376,7 @@ def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
 
     chains = len({s.meta.inherit_id for s in sampler
                   if s.meta.inherit_id >= 0})
-    print(f'    sampler {cfg.sampler_id()}   {len(sampler)} tiles over '
+    print(f'    sampler {cfg.identity_id()}   {len(sampler)} tiles over '
           f'{len(plans)} rungs, {chains} chains', flush=True)
 
     rows = []

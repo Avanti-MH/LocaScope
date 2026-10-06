@@ -143,7 +143,7 @@ def build_slide(wsi_path, args, cfg, plan, encoder, spec, masks, out_root,
                 encoder_id=encoder.identity_id(), seg_id=masks.cfg.seg_id(),
                 region_id=masks.cfg.region_id(), coverage='sample',
                 n_available=sampler.reports[rung.rung_ds].n_admissible,
-                n_tiles=len(kept), sampler_id=cfg.sampler_id(), plan=plan,
+                n_tiles=len(kept), sampler_id=cfg.identity_id(), plan=plan,
                 sample_seed=cfg.seed, buckets=tuple(names))
             path = FS.save(
                 out_root, meta=meta, features=feats.to(torch.float16),
@@ -233,8 +233,8 @@ def main() -> int:
         spec = encoder.model_spec
 
     print(f'out       {out_root}')
-    print(f'draw      {FS.sample_key(cfg.sampler_id(), plan)}   '
-          f'(pass --draw {FS.sample_key(cfg.sampler_id(), plan)} to a reader)')
+    print(f'draw      {FS.sample_key(cfg.identity_id(), plan)}   '
+          f'(pass --draw {FS.sample_key(cfg.identity_id(), plan)} to a reader)')
     print(f'mask      {masks.cfg.seg_id()}/{masks.cfg.region_id()}   '
           f'target {cfg.n_per_rung}/level   pooling {args.pooling}\n')
 

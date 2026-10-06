@@ -325,7 +325,7 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
           f'ref={len(rows):,} (drawn {len(drawn)} + answers {len(answers_to_add)})  '
           f'queries={len(query_imgs):,} from {n_fov_made} FoV', flush=True)
     counts = np.bincount([r['bucket'] for r in rows], minlength=len(names))
-    print(f'      sampler {base_cfg.sampler_id()}   '
+    print(f'      sampler {base_cfg.identity_id()}   '
           + '  '.join(f'{b}={int(c)}' for b, c in zip(names, counts)), flush=True)
 
     # Read the reference tiles. Every one is on tissue: the answers are grid
@@ -369,7 +369,7 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
                   num_prefix=spec['num_prefix'], encoder_id=encoder_id,
                   seg_id=masks.cfg.seg_id(), region_id=masks.cfg.region_id(),
                   coverage='sample', sample_seed=seed,
-                  sampler_id=base_cfg.sampler_id(), plan=plan_label(k_floor))
+                  sampler_id=base_cfg.identity_id(), plan=plan_label(k_floor))
 
     written = {}
     for tag, tok in (('ref', ref_tokens), ('query', query_tokens)):
@@ -1123,7 +1123,7 @@ def main() -> int:
 
     masks = MaskMaker(mask_cfg_from_args(args), device=device,
                       cache_root=Cache.cache_root(args.mask_cache_job, 'mask'))
-    print(f'reference draw {reference_config(args.k, args.seed).sampler_id()}_'
+    print(f'reference draw {reference_config(args.k, args.seed).identity_id()}_'
           f'{plan_label(args.k_floor)}   mask {masks.cfg.seg_id()}/'
           f'{masks.cfg.region_id()}', flush=True)
 

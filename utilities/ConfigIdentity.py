@@ -1,48 +1,58 @@
-"""One implementation of "which configuration produced this".
+"""Which configuration produced an artifact, and the proof that a stored one is it.
 
-GigaPathFunc and HESTSegFunc grew the same machinery independently: a frozen
-baseline, an encoder for hashable strings, a walk over the non-baseline fields,
-a lazy sha256 of a state dict, a short id and a json of the fields behind it.
-The two copies of the string encoder were byte-identical, which is a bug with a
-delay on it -- fix float formatting in one and the encoder and the segmenter
-begin hashing by different rules, silently, in the one place this project has
-decided correctness depends on.
+An artifact -- a cache entry, a checkpoint, a row of results -- has two
+descriptions, kept apart on purpose:
 
-So the scheme lives here once. What each config MEANS stays with the thing it
-configures: this module holds no baseline of its own and knows nothing about
-GigaPath, HEST or any other model.
+    ADDRESS  `identity_id()`: 16 hex of the config's identity parts. It decides
+             where a cache entry lives, so only config values go into it.
+    RECORD   `record(obj, **upstream)`: the parts, every VERSION on the way,
+             the ids of the direct upstream artifacts and the environment.
+             Written beside the artifact and compared field by field on load
+             (`record_diff`). A difference means the stored thing is not the
+             asked-for thing: a cache recomputes, a checkpoint or a results
+             pairing refuses, and either way the message names the field.
 
-The three rules
----------------
-1. A BASELINE IS APPEND-ONLY AND A NAME IS NEVER REPURPOSED.
-   Adding a field re-hashes nothing if the baseline gains a value that
-   reproduces the previous behaviour; old stores stay valid and are RIGHT to,
-   because nothing about their vectors changed. Adding one WITHOUT a baseline
-   entry re-hashes everything, which is a recompute -- not a wrong answer.
-   Giving an existing name a new meaning is the only change that fails
-   silently: old and new hash the same and hold different things.
+What each config MEANS stays with the thing it configures; this module knows
+nothing about any model.
 
-2. ONLY QUANTITIES WHOSE DEFINITION IS STABLE.
-   The values vary freely; that is the point. What must not vary is what the
-   NAME means: a quantity whose definition changes gives every store a new
-   hash while the tiles and the vectors are unchanged.
+The rules
+---------
+1. Every dataclass field either changes the output -- identity -- or is named
+   in NOT_IDENTITY. The generic registry test changes each identity field of
+   every registered config and requires the id to move.
 
-3. THE HASH SEPARATES FILES; IT DOES NOT PROVE CORRECTNESS.
-   Every id here is built from strings a caller composed. Getting the hash
-   wrong costs a recompute, or at worst two configurations overwriting each
-   other's file in turn -- a cache that never hits, which is visible. Getting a
-   CHECK wrong costs a wrong answer. So the checks live with the domain and are
-   made of the thing itself: recomputed grid geometry against stored
-   coordinates, re-encoded tiles against stored vectors.
+2. Each config class owns its zero point: `BASELINE`, a dict of LITERALS equal
+   to the class's own defaults when it was frozen. A field equal to its
+   baseline is left out of the parts, so a field added with a baseline that
+   reproduces the old behaviour keeps every id; a field absent from the
+   baseline is always in. A nested config field's baseline entry is the NAME
+   of the class it holds, and the nested config contributes its own parts
+   against its own BASELINE. Never a config instance and never computed from
+   the defaults: a baseline that moves with the defaults lets a changed
+   default keep the id over different output. `parts_of` refuses one that is
+   not literal. Editing a baseline renames every id of that class, which is
+   what it is for; editing a default splits new from old.
 
-Why the baseline is not the field defaults
-------------------------------------------
-Hashing "fields that differ from their default" sounds equivalent and is not.
-A default is a moving reference: change one and every hash taken before it
-silently re-points. A store written when scale_size defaulted to 256 would
-collide with a config built after the default became 224 -- same hash,
-different vectors, no error. A frozen literal cannot move, so a changed default
-splits new from old instead of merging them.
+3. Code that changes an output without changing a config value bumps the
+   `VERSION` of the class that owns that code, and the reason goes in
+   log/TODO.log. Versions are in the record, not the address: the stale entry
+   is caught on load and recomputed in place. The fingerprint tests pin each
+   producer's output on synthetic input to its VERSION, so a behaviour change
+   that forgets the bump fails a test.
+
+4. The environment -- the versions of the libraries that make pixels and
+   vectors (`environment`) -- is in every record, so an upgraded conda env
+   recomputes instead of reading what the old one wrote.
+
+5. `enc` is injective (canonical JSON) and `short_id` hashes the JSON of the
+   parts list. Nothing else in the repo hashes for identity.
+
+Why not hash the source
+-----------------------
+A python function declares no dependency set: hashing its own file misses what
+it calls, hashing the repo invalidates every cache on every edit, and neither
+sees a library upgrade. Rule 3 measures the behaviour instead and rule 4 the
+libraries.
 """
 
 from __future__ import annotations
@@ -50,6 +60,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import numbers
+import sys
 import typing
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
@@ -64,91 +76,198 @@ if TYPE_CHECKING:
 
 # ── encoding ──────────────────────────────────────────────────────────────────
 
-def enc(value: Any) -> str:
-    """A value as the string a hash will see.
+#: Hex characters in every id: `short_id`, `weights_id`, `file_fingerprint`.
+ID_HEX = 16
 
-    Fixed precision for floats rather than repr(): repr is free to differ
-    between Python builds, and this feeds a digest that has to come out the
-    same on every machine. %.12g keeps the 0.04% between a requested ds and a
-    level's own (4.00003 against 4.0) while dropping the noise below it.
-    """
-    if isinstance(value, bool):
-        return '1' if value else '0'
-    if isinstance(value, float):
-        return f'{value:.12g}'
+
+def _canon(value: Any) -> Any:
+    """`value` as plain JSON data, two spellings of one value made one.
+
+    Numbers compare by value: ds 4 and ds 4.0 read the same pixels, so they
+    must be the same id. Floats are cut to 12 significant digits, which keeps
+    the 0.04% between a requested ds and a level's own (4.00003 against 4.0)
+    and drops the noise below it. Types stay apart where they are different
+    values: None, '' and 0, True and 1, ('a,b',) and ('a', 'b') are each two."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        x = float(f'{float(value):.12g}')
+        return int(x) if x.is_integer() and abs(x) < 2 ** 53 else x
+    if isinstance(value, str):
+        return value
     if isinstance(value, (tuple, list)):
-        return ','.join(enc(v) for v in value)
-    if value is None:
-        return ''
+        return [_canon(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _canon(v) for k, v in value.items()}
     return str(value)
+
+
+def enc(value: Any) -> str:
+    """A value as the string a hash will see: canonical JSON of `_canon`.
+    Injective, so two different values can never write the same part."""
+    return json.dumps(_canon(value), sort_keys=True, separators=(',', ':'))
 
 
 def _is_config(value: Any) -> bool:
     return isinstance(value, IdentifiedConfig) and dataclasses.is_dataclass(value)
 
 
-def parts_against(cfg, baseline: Dict[str, Any],
-                  skip: Optional[tuple] = None) -> List[str]:
-    """`name=value` for every field that differs from the frozen baseline.
+_LITERAL = (type(None), bool, int, float, str)
+_CHECKED: set = set()
 
-    Sorted, so where a field is declared cannot move a hash.
 
-    A field ABSENT from the baseline is always included. It was added after the
-    baseline was frozen, so there is nothing for it to equal, and dropping it
-    would let a new knob change the output without changing the name -- the
-    failure the whole scheme exists to prevent, arriving through the door
-    marked "backwards compatible".
+def _check_baseline(cls) -> Dict[str, Any]:
+    """`cls.BASELINE`, refused unless every value is a literal (rule 2)."""
+    baseline = getattr(cls, 'BASELINE', {})
+    if cls in _CHECKED:
+        return baseline
 
-    A field that is itself a config recurses and its parts are prefixed. Its
-    zero point comes from the OUTER baseline, so a nested config never carries
-    one of its own: the same TransformConfig can be baseline under one model and
-    not under another, which is what lets the shape be shared while the numbers
-    stay with whoever validated them.
-    """
-    # Read off the config when not told, because the nested branch below
-    # already does and two rules for the same thing is one rule too many. The
-    # test that found this called the free function directly and got a
-    # NOT_IDENTITY field back in the parts.
-    if skip is None:
-        skip = getattr(cfg, 'NOT_IDENTITY', ())
+    def literal(v) -> bool:
+        if isinstance(v, (tuple, list)):
+            return all(literal(x) for x in v)
+        if isinstance(v, dict):
+            return all(isinstance(k, str) and literal(x) for k, x in v.items())
+        return isinstance(v, _LITERAL)
 
+    if not isinstance(baseline, dict):
+        raise TypeError(f'{cls.__name__}.BASELINE must be a dict, got '
+                        f'{type(baseline).__name__}')
+    bad = sorted(k for k, v in baseline.items() if not literal(v))
+    if bad:
+        raise TypeError(
+            f'{cls.__name__}.BASELINE holds non-literal values for {bad}. A '
+            f'baseline is literals only; for a nested config write the NAME of '
+            f'its class, and the nested config is compared against its own '
+            f'BASELINE (ConfigIdentity rule 2)')
+    _CHECKED.add(cls)
+    return baseline
+
+
+_MISSING = object()
+
+
+def parts_of(cfg, exclude: tuple = ()) -> List[str]:
+    """`name=enc(value)` for every identity field of `cfg` that differs from
+    its class's BASELINE, sorted by name so declaration order cannot move an
+    id. A field absent from the baseline is always in.
+
+    A nested config writes `name=<class>` when its class is not the one the
+    baseline names, then its own parts prefixed `name.`, each against its own
+    class's BASELINE. `exclude` drops fields by name, for an id that covers
+    part of a config (`TissueMaskConfig.region_id`)."""
+    baseline = _check_baseline(type(cfg))
+    skip = set(getattr(cfg, 'NOT_IDENTITY', ())) | set(exclude)
     out: List[str] = []
     for f in sorted(dataclasses.fields(cfg), key=lambda f: f.name):
         if f.name in skip:
             continue
         value = getattr(cfg, f.name)
         want = baseline.get(f.name, _MISSING)
-
         if _is_config(value):
-            nested = want if _is_config(want) else None
-            inner = parts_against(
-                value,
-                {g.name: getattr(nested, g.name) for g in dataclasses.fields(nested)}
-                if nested is not None else {})
-            out.extend(f'{f.name}.{p}' for p in inner)
+            name = type(value).__name__
+            if want != name:
+                out.append(f'{f.name}={enc(name)}')
+            out.extend(f'{f.name}.{p}' for p in value.identity_parts())
             continue
-
-        if want is not _MISSING and value == want:
+        if want is not _MISSING and _canon(value) == _canon(want):
             continue
         out.append(f'{f.name}={enc(value)}')
     return out
 
 
-class _Missing:
-    def __repr__(self) -> str:
-        return '<missing>'
-
-
-_MISSING = _Missing()
-
-
 def short_id(parts: List[str]) -> str:
-    """The eight hex characters a store records.
+    """`ID_HEX` hex of the JSON of `parts`. The caller's order is kept:
+    `parts_of` already sorts, and re-sorting here would merge two orderings a
+    caller meant to be different."""
+    text = json.dumps([str(p) for p in parts], separators=(',', ':'))
+    return hashlib.sha256(text.encode()).hexdigest()[:ID_HEX]
 
-    The caller's order is kept. parts_against already sorts, and re-sorting here
-    would merge two genuinely different orderings.
-    """
-    return hashlib.sha256('|'.join(parts).encode()).hexdigest()[:8]
+
+def versions_of(obj) -> Dict[str, int]:
+    """Every nonzero VERSION `obj` depends on: each class in its MRO that sets
+    one itself, its `cfg` when it is a build, and every nested config field --
+    keyed by the class that owns the code (rule 3). An inherited VERSION is
+    the parent's code and is recorded under the parent's name, so a bump in a
+    base class reaches every subclass."""
+    out: Dict[str, int] = {}
+    for cls in type(obj).__mro__:
+        v = cls.__dict__.get('VERSION', 0)
+        if v:
+            out[cls.__qualname__] = int(v)
+    cfg = getattr(obj, 'cfg', None)
+    if _is_config(cfg):
+        out.update(versions_of(cfg))
+    if _is_config(obj):
+        for f in dataclasses.fields(obj):
+            value = getattr(obj, f.name)
+            if _is_config(value):
+                out.update(versions_of(value))
+    return dict(sorted(out.items()))
+
+
+#: Distributions whose versions decide pixels or vectors (rule 4). Absent ones
+#: are skipped; openslide's C library is read off the module.
+_ENV_DISTS = ('numpy', 'scipy', 'scikit-learn', 'opencv-python',
+              'opencv-python-headless', 'opencv-contrib-python', 'Pillow',
+              'openslide-python', 'openslide-bin', 'torch', 'torchvision',
+              'timm', 'safetensors')
+_ENV: Optional[Dict[str, str]] = None
+
+
+def environment() -> Dict[str, str]:
+    """`{name: version}` of the python and the libraries in `_ENV_DISTS`, read
+    from package metadata (nothing heavy is imported), once per process."""
+    global _ENV
+    if _ENV is None:
+        from importlib import metadata                              # noqa: PLC0415
+        env = {'python': '.'.join(str(v) for v in sys.version_info[:3])}
+        for name in _ENV_DISTS:
+            try:
+                env[name] = metadata.version(name)
+            except metadata.PackageNotFoundError:
+                pass
+        try:
+            import openslide                                        # noqa: PLC0415
+            env['libopenslide'] = str(openslide.__library_version__)
+        except Exception:                                           # noqa: BLE001
+            pass
+        _ENV = dict(sorted(env.items()))
+    return dict(_ENV)
+
+
+def record(obj, **upstream: str) -> Dict[str, Any]:
+    """What is written beside an artifact made by `obj` (a config or a build)
+    from the upstream artifacts named in `upstream` (`seg_id=...`)."""
+    return {'id': obj.identity_id(), 'parts': list(obj.identity_parts()),
+            'versions': versions_of(obj),
+            'upstream': {k: str(v) for k, v in sorted(upstream.items())},
+            'env': environment()}
+
+
+def record_diff(stored: Optional[Dict[str, Any]], want: Dict[str, Any]) -> List[str]:
+    """Why `stored` is not `want`, one line per difference; empty when it is.
+    A missing record is a difference: an artifact that cannot say what made
+    it is not the one asked for."""
+    if not stored:
+        return ['no identity record']
+    out = []
+    for key in ('id', 'upstream', 'versions', 'env'):
+        a, b = stored.get(key), want.get(key)
+        if a == b:
+            continue
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in sorted(set(a) | set(b)):
+                if a.get(k) != b.get(k):
+                    out.append(f'{key}.{k}: stored {a.get(k)!r}, now {b.get(k)!r}')
+        else:
+            out.append(f'{key}: stored {a!r}, now {b!r}')
+    if stored.get('parts') != want.get('parts'):
+        sa, sb = set(stored.get('parts') or ()), set(want.get('parts') or ())
+        out += [f'part only in stored: {p}' for p in sorted(sa - sb)]
+        out += [f'part only now: {p}' for p in sorted(sb - sa)]
+    return out
 
 
 def unwrapped(module: torch.nn.Module) -> torch.nn.Module:
@@ -205,14 +324,14 @@ def weights_id(module: Optional[torch.nn.Module]) -> str:
         h.update(str(tuple(t.shape)).encode())
         h.update(str(t.dtype).encode())
         h.update(memoryview(t.numpy()).cast('B'))
-    return h.hexdigest()[:16]
+    return h.hexdigest()[:ID_HEX]
 
 
 _FINGERPRINTS: Dict[tuple, str] = {}
 
 
 def file_fingerprint(path) -> str:
-    """sha256 of a file's bytes, first 16 hex -- for a key that has to see a
+    """sha256 of a file's bytes, `ID_HEX` hex -- for a key that has to see a
     checkpoint's CONTENT without building the model that would hash its
     parameters (`weights_id`).
 
@@ -228,60 +347,59 @@ def file_fingerprint(path) -> str:
         with open(path, 'rb') as handle:
             for chunk in iter(lambda: handle.read(1 << 24), b''):
                 h.update(chunk)
-        _FINGERPRINTS[key] = h.hexdigest()[:16]
+        _FINGERPRINTS[key] = h.hexdigest()[:ID_HEX]
     return _FINGERPRINTS[key]
-
-
-def cfg_json(parts: List[str], provenance: Dict[str, Any]) -> str:
-    """The fields behind an id, so a mismatch can name one.
-
-    An id is eight hex characters and can only say that two configurations
-    differ. Anything that falls back to recomputing has to be able to say WHICH
-    field moved, or a permanently cold cache reads exactly like a correctly
-    invalidated one.
-
-    `provenance` carries the non-identity fields. They cannot move a hash by
-    definition, so they cost nothing and answer what the hash cannot: a weights
-    hash says the parameters changed, a path says which file they came from.
-    """
-    return json.dumps({'parts': parts,
-                       'provenance': {k: enc(v) for k, v in provenance.items()}},
-                      sort_keys=True)
 
 
 # ── mixins ────────────────────────────────────────────────────────────────────
 
 class IdentifiedConfig:
-    """A frozen dataclass whose non-baseline fields form an identity.
+    """A frozen dataclass whose fields, against its class's BASELINE, form an
+    identity.
 
-    Subclasses declare NOT_IDENTITY -- fields that cannot change the output and
-    so must not split a cache. batch_size is the standing example: a ViT
-    normalises per sample, so batching cannot change a single vector, and it is
-    also the most-tuned knob in the repo.
+    A subclass sets, without annotations (an annotation would make them
+    dataclass fields):
 
-    No BASELINE attribute here on purpose. The zero point belongs to whoever
-    owns the top-level config, and a nested one takes its zero point from the
-    value the outer baseline holds.
+        BASELINE      literal dict, the class's defaults when frozen (rule 2)
+        NOT_IDENTITY  fields that cannot change the output and so must not
+                      split a cache -- batch_size: a ViT normalises per sample,
+                      so batching cannot change a single vector
+        VERSION       the behaviour of the code this config drives (rule 3)
     """
 
+    BASELINE: Dict[str, Any] = {}
     NOT_IDENTITY: tuple = ()
+    VERSION: int = 0
 
-    def identity_parts(self, baseline: Dict[str, Any]) -> List[str]:
-        return parts_against(self, baseline, skip=self.NOT_IDENTITY)
+    def identity_parts(self) -> List[str]:
+        return parts_of(self)
+
+    def identity_id(self) -> str:
+        return short_id(self.identity_parts())
 
     def provenance(self) -> Dict[str, Any]:
-        return {n: getattr(self, n) for n in self.NOT_IDENTITY}
+        """The NOT_IDENTITY values, nested configs' prefixed: what a run
+        records and an id must not see."""
+        out = {n: getattr(self, n) for n in self.NOT_IDENTITY}
+        for f in dataclasses.fields(self):
+            value = getattr(self, f.name)
+            if _is_config(value):
+                out.update({f'{f.name}.{k}': v
+                            for k, v in value.provenance().items()})
+        return out
 
 
 class IdentifiedBuild:
     """A built object: a config, a device, and possibly a loaded model.
 
-    Subclasses set `cfg`, `device`, `model` (which may be None) and BASELINE,
-    then get identity for free. `model` being None is a first-class state -- a
-    segmentation method with no network still has to be able to name itself.
+    Subclasses set `cfg`, `device` and `model` (which may be None) and get
+    identity for free: the config's parts plus the loaded weights. `model`
+    being None is a first-class state -- a segmentation method with no
+    network still has to be able to name itself. A VERSION on the build class
+    covers the code that runs the model.
     """
 
-    BASELINE: Dict[str, Any] = {}
+    VERSION: int = 0
 
     cfg: Any
     device: Any
@@ -298,9 +416,8 @@ class IdentifiedBuild:
         return cached
 
     def identity_parts(self) -> List[str]:
-        parts = self.cfg.identity_parts(self.BASELINE)
         wid = self.weights_id
-        return parts + ([f'weights={wid}'] if wid else [])
+        return self.cfg.identity_parts() + ([f'weights={enc(wid)}'] if wid else [])
 
     def identity_id(self) -> str:
         """Config plus loaded weights.
@@ -310,9 +427,6 @@ class IdentifiedBuild:
         two come apart.
         """
         return short_id(self.identity_parts())
-
-    def identity_json(self) -> str:
-        return cfg_json(self.identity_parts(), self.cfg.provenance())
 
 
 # ── the model half ────────────────────────────────────────────────────────────
@@ -348,6 +462,7 @@ class ModelConfig(IdentifiedConfig):
     dtype:   str = 'fp16'
     weights: Optional[str] = None
 
+    BASELINE = {'source': 'timm', 'arch': '', 'dtype': 'fp16'}
     NOT_IDENTITY = ('weights',)
 
     def torch_dtype(self) -> torch.dtype:

@@ -82,9 +82,7 @@ UPSTREAM_ENV = 'SUPERPOINT_ROOT'
 #: with strict=True below is a real check and not a formality.
 WEIGHTS_REL = os.path.join('weights', 'superpoint_v6_from_tf.pth')
 
-#: The zero point. Editing this invalidates every label id ever written, on
-#: purpose; editing a dataclass DEFAULT does not -- it splits new from old.
-#: ConfigIdentity rule 1.
+#: The zero point (ConfigIdentity rule 2).
 _TEACHER_BASELINE = {
     'method': 'superpoint-v6',
     'channels': (64, 64, 128, 128, 256),
@@ -129,6 +127,7 @@ class TeacherConfig(IdentifiedConfig):
     batch: int = 16
 
     NOT_IDENTITY = ('weights', 'root', 'batch')
+    BASELINE = _TEACHER_BASELINE
 
     def build(self, device) -> 'SuperPointTeacher':
         return SuperPointTeacher(self, device)
@@ -136,8 +135,6 @@ class TeacherConfig(IdentifiedConfig):
 
 class SuperPointTeacher(IdentifiedBuild):
     """Upstream's network, exposed as the two dense maps this project needs."""
-
-    BASELINE = _TEACHER_BASELINE
 
     @staticmethod
     def weights_state_dict(cfg: Optional['TeacherConfig'] = None

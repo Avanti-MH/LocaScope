@@ -63,7 +63,7 @@ setup_import_paths()
 
 from ConfigIdentity import config_from, registered              # noqa: E402
 from Uni2PcaSegFunc import (Uni2PcaSegConfig,                   # noqa: E402
-                            Uni2PcaSegmenter, _UNI2_PCA_BASELINE,
+                            Uni2PcaSegmenter,
                             stratified_positions, tile_saturation)
 from TissueSegFunc import scanned_rect                          # noqa: E402
 
@@ -151,19 +151,17 @@ def t_registered_under_its_name():
 def t_every_identity_field_is_in_the_baseline():
     """A field missing from BASELINE re-hashes every store ever written.
 
-    `parts_against` includes any field ABSENT from the baseline unconditionally
-    -- there is nothing for it to equal -- so forgetting an entry does not
-    silently drop the field, it silently invalidates every existing id.
-    ConfigIdentity's own docstring calls that "a recompute, not a wrong answer",
-    which is survivable and still worth catching before a 20 GB cache is
-    rebuilt for nothing.
+    `parts_of` includes any field ABSENT from the baseline unconditionally --
+    there is nothing for it to equal -- so forgetting an entry does not drop
+    the field, it renames every existing id: a recompute, worth catching
+    before a 20 GB cache is rebuilt for nothing.
 
     NOT_IDENTITY is the other side: those must NOT be in the baseline, or the
     zero point would name a field that is never compared against it.
     """
     fields = {f.name for f in dataclasses.fields(Uni2PcaSegConfig)}
     skipped = set(Uni2PcaSegConfig.NOT_IDENTITY)
-    baseline = set(_UNI2_PCA_BASELINE)
+    baseline = set(Uni2PcaSegConfig.BASELINE)
 
     missing = fields - skipped - baseline
     assert not missing, f'fields with no baseline entry: {sorted(missing)}'
@@ -186,7 +184,7 @@ def t_every_identity_field_moves_the_hash():
     run that only differs there must land on the same id.
     """
     base = Uni2PcaSegConfig()
-    reference = base.identity_parts(_UNI2_PCA_BASELINE)
+    reference = base.identity_parts()
 
     unmoved = []
     for field in dataclasses.fields(Uni2PcaSegConfig):
@@ -202,7 +200,7 @@ def t_every_identity_field_moves_the_hash():
         else:
             continue
         parts = dataclasses.replace(base, **{field.name: bumped}) \
-            .identity_parts(_UNI2_PCA_BASELINE)
+            .identity_parts()
         moved = parts != reference
         if field.name in Uni2PcaSegConfig.NOT_IDENTITY:
             assert not moved, (
@@ -213,7 +211,7 @@ def t_every_identity_field_moves_the_hash():
 
     assert not unmoved, (
         f'these fields do not reach the identity: {unmoved}. Either add them to '
-        f'NOT_IDENTITY with the reason, or find out why parts_against skips them')
+        f'NOT_IDENTITY with the reason, or find out why parts_of skips them')
     return f'{len(dataclasses.fields(Uni2PcaSegConfig))} fields, all accounted for'
 
 

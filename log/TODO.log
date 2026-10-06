@@ -3287,3 +3287,46 @@ front of whoever flips it.
       遍布每一列；level 0 為 0。是 openslide 在粗層合成的捨入，跟讀取框大小有關，不是邊緣
       濾波。所以平面分割器分塊讀在 MRXS 粗層上不會和整塊讀逐位元相同（差 ±1 灰階，只翻
       閾值邊上的像素）；合成的 tiled == whole 測試照樣成立。不改。
+
+[x] 2026-10-07 | Identity 一套規則（階段 4a：機制）
+    - 問題：
+      - baseline 有三種歸屬（Build 上、模組變數、外層決定巢狀零點）。
+      - `_MASK_BASELINE['seg'] = HestSegConfig()` 和 `HOMOGRAPHY_BASELINE = HomographyConfig()`
+        會跟著預設值移動：改 HestSegConfig 的預設 ds，hest 的 seg_id 不會變。
+      - 巢狀 baseline 會自動吸收新欄位的預設值，和頂層「沒有 entry 就一律進 hash」不一致。
+      - enc 不是一對一：None/''、True/1、('a,b',)/('a','b')、巢狀 tuple 攤平、'|' 可偽造。
+      - 程式行為改了只能靠假欄位讓 id 變：fit_read（唯一合法值 level_for，baseline 寫
+        openslide）、'photo=render'、fov_reserve、fov_plan。
+      - sampler、label store、stage 1 bench、window bench 各自 hash（window bench 用 sha1
+        整包 asdict，連 batch_size 也進 hash）。
+    - 改（規則寫在 ConfigIdentity docstring）：
+      - 地址 = config parts 的 short_id；紀錄 = parts + VERSION + 上游 id + 環境，讀取時比對
+        （record / record_diff；接上 cache 是 4b）。
+      - 每個 IdentifiedConfig class 自己的 BASELINE：字面值，凍結時等於自己的預設；巢狀欄位
+        寫 class 名稱，巢狀 config 對自己的 BASELINE 比；parts_of 拒絕非字面值。
+        IdentifiedBuild.BASELINE 刪除；所有 baseline 在這次重新凍結為當下預設值。
+      - VERSION 放在擁有那段程式的 class 上，沿 MRO 收集，只進紀錄。所有 VERSION 從 0 起算。
+      - enc = 正規化 JSON（數字依值相等，型別分開）；short_id hash parts 的 JSON；ID_HEX=16。
+      - SamplerConfig 與三個巢狀 config、DomainGapConfig（改 frozen）改繼承 IdentifiedConfig
+        並註冊（'sampler'、'domain-gap'）；sampler_id()、cfg_hash() 改名 identity_id()；
+        _config_parts 刪除。
+      - TissueMaskConfig：seg_id = seg 自己的 parts（+ 權重內容）、region_id = 自己除 seg 以外
+        的欄位；前綴過濾刪除。
+      - Uni2PcaSegConfig.fit_read 刪除。
+      - stage 1 bench 的 FoV id、window bench 的 config_id 改由元件的 identity_id 組成，假欄位
+        換成 FOV_VERSION / ROW_VERSION。
+    - 換名：所有 id 都換（16 hex、新編碼）。mask、sampler draw、feature store、reference
+      store、pre-tile、bench 結果目錄全部重建；SuperPathPoint 的 checkpoint / label 不再相容。
+    - 測試：test_config_identity 新增「every config」——匯入所有定義 IdentifiedConfig 的模組，
+      每個 class 要有自己的完整字面值 baseline、每個 identity 欄位改了 id 必動、NOT_IDENTITY
+      不動；lint：hashlib 只在 ConfigIdentity（及 photo_rng 的種子與其測試的凍結副本）。
+    - 不做（各自的理由）：
+      - 不 hash 原始碼：依賴範圍不可知，hash 自己的檔漏掉呼叫的，hash 全 repo 每次編輯都失效，
+        兩者都看不到套件升級。改用 VERSION + 指紋測試（4b）+ 環境版本。
+    - 順帶發現（未改，待決定）：Uni2EncoderConfig 從 923e9e6 起沒有設 transform，實際用的是
+      TransformConfig() 的 256->224 bicubic；模組 docstring 和舊 baseline 寫的是上游的
+      224/224 bilinear（get_encoder.py:40）。所有 UNI2 feature 與 uni2_pca mask 都是 256/bicubic
+      做的。這次保持現行行為。
+    - UNI2 的前處理改成上游的 library path：Uni2EncoderConfig.transform 預設
+      224/224 bilinear（get_encoder.py:40）。之前所有 UNI2 feature 與 uni2_pca mask 是
+      256->224 bicubic 做的；這次 id 本來就全換，一起重建。

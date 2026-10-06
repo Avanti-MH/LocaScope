@@ -214,7 +214,6 @@ from __future__ import annotations
 import collections
 import csv
 import dataclasses
-import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -226,6 +225,7 @@ import numpy as np
 # footprint) for a slide, and is the one place that knows ds 2 is native on a
 # 2x pyramid and a shrink on a 4x one.
 
+from ConfigIdentity import IdentifiedConfig, register             # noqa: E402
 from Cache import (atomic_dir, check_source, source_key,         # noqa: E402
                    wsi_stem_of)
 from DsLadder import DsLadder, RungPlan                          # noqa: E402
@@ -572,7 +572,7 @@ def spill_order(caps: Sequence[float], target: Sequence[float]) -> Tuple[int, ..
 # ── the three axes, as config ────────────────────────────────────────────────
 
 @dataclass(frozen=True)
-class RichnessConfig:
+class RichnessConfig(IdentifiedConfig):
     """What is in a tile, and how much of each kind is wanted.
 
     THE CONTRACT. Seven buckets on the background fraction,
@@ -648,6 +648,12 @@ class RichnessConfig:
     #: switch would move before anyone has to change it.
     floor_frame: str = 'ask'
 
+    BASELINE = {'scorer': 'background',
+                'edges': (0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+                'floors': (0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+                'caps': (0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+                'bucket_frame': 'per_rung', 'floor_frame': 'ask'}
+
     @property
     def names(self) -> Tuple[str, ...]:
         return bucket_names(self.edges)
@@ -700,7 +706,7 @@ class RichnessConfig:
 
 
 @dataclass(frozen=True)
-class OverlapConfig:
+class OverlapConfig(IdentifiedConfig):
     """How much two tiles of the same rung may share.
 
     THREE KNOBS, AND THEY CAN CONTRADICT EACH OTHER. `step` sets the lattice,
@@ -756,6 +762,11 @@ class OverlapConfig:
     #: something as soon as overlap is allowed.
     jitter_cap: float = 0.0
 
+    BASELINE = {'step': 1.0, 'max_overlap_ratio': 0.0, 'overlapping_share': 0.0,
+                'jitter_offsets': ((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                                   (1.0, 0.75), (1.25, 1.25)),
+                'jitter_cap': 0.0}
+
     def __post_init__(self):
         self.check()
 
@@ -774,7 +785,7 @@ class OverlapConfig:
                 f'{along:.0%} along an axis, and max_overlap_ratio is '
                 f'{self.max_overlap_ratio:.0%}. Every adjacent position is '
                 f'therefore illegal and the lattice degenerates to the disjoint '
-                f'one -- while sampler_id still records {self.step}. Set '
+                f'one -- while the id still records {self.step}. Set '
                 f'step=1.0 and mean it, or raise max_overlap_ratio to at least '
                 f'{along:.2f}')
         if self.jitter_cap > 0 and self.max_overlap_ratio <= 0.0:
@@ -802,7 +813,7 @@ class OverlapConfig:
 
 
 @dataclass(frozen=True)
-class InheritConfig:
+class InheritConfig(IdentifiedConfig):
     """A set of level-0 centres present at every rung.
 
     `share` is a fraction of a rung, not a count, so one number holds across
@@ -826,7 +837,8 @@ class InheritConfig:
     #: not which tiles were cut.
     on_incomplete: str = 'drop'
 
-    _NOT_IDENTITY = frozenset({'on_incomplete'})
+    BASELINE = {'stack_kind': 'F', 'share': 0.0, 'source_rung': None}
+    NOT_IDENTITY = ('on_incomplete',)
 
     def __post_init__(self):
         if self.stack_kind not in ('F', 'R'):
@@ -841,30 +853,11 @@ class InheritConfig:
                 f"{self.on_incomplete!r}")
 
 
-def _config_parts(cfg, prefix: str = '') -> List[str]:
-    """`name=value` for every identity field, nested configs recursed.
-
-    Recursion by hand rather than by `repr(cfg)`: a dataclass repr includes
-    fields listed in `_NOT_IDENTITY`, so hashing it would fork the corpus on
-    `on_incomplete` -- a field that decides what a reader is shown and not
-    which tiles were cut.
-    """
-    skip = getattr(type(cfg), '_NOT_IDENTITY', frozenset())
-    parts = []
-    for f in sorted(dataclasses.fields(cfg), key=lambda f: f.name):
-        if f.name in skip:
-            continue
-        value = getattr(cfg, f.name)
-        if dataclasses.is_dataclass(value):
-            parts += _config_parts(value, f'{prefix}{f.name}.')
-        else:
-            parts.append(f'{prefix}{f.name}={value!r}')
-    return parts
-
-
+@register('sampler')
 @dataclass(frozen=True)
-class SamplerConfig:
-    """Everything that decides WHICH tiles are chosen. Hashed into `sampler_id`.
+class SamplerConfig(IdentifiedConfig):
+    """Everything that decides WHICH tiles are chosen; its `identity_id` names
+    the draw.
 
     Two runs with different quotas or a different seed are two corpora, and
     the hash gives them two names.
@@ -893,26 +886,15 @@ class SamplerConfig:
     # No region prep here: it belongs to the mask's recipe
     # (`TissueMaskConfig.min_region_ratio` / `merge`, hashed into `region_id`).
 
+    BASELINE = {'n_per_rung': 500, 'seed': 0, 'richness': 'RichnessConfig',
+                'overlap': 'OverlapConfig', 'inherit': 'InheritConfig',
+                'candidates': 'lattice', 'max_tries_per_tile': 5}
+
     def __post_init__(self):
         if self.candidates not in ('lattice', 'random'):
             raise ValueError(
                 f"candidates must be 'lattice' or 'random', got "
                 f"{self.candidates!r}")
-
-    def sampler_id(self) -> str:
-        return hashlib.sha256(
-            '|'.join(_config_parts(self)).encode()).hexdigest()[:8]
-
-    def provenance(self) -> Dict[str, object]:
-        """The fields deliberately NOT in the identity, so a run can still
-        record them. Two corpora that differ only here are the same corpus."""
-        out = {}
-        for f in dataclasses.fields(self):
-            value = getattr(self, f.name)
-            if dataclasses.is_dataclass(value):
-                for name in getattr(type(value), '_NOT_IDENTITY', ()):
-                    out[f'{f.name}.{name}'] = getattr(value, name)
-        return out
 
 
 # ── one tile ─────────────────────────────────────────────────────────────────
@@ -1971,11 +1953,11 @@ class TileSampler:
                 writer.writerow([i] + [getattr(m, c) for c in self.COLUMNS[1:]])
 
         meta = {
-            'sampler_id': self.cfg.sampler_id(),
+            'sampler_id': self.cfg.identity_id(),
             'slide': self.slide,
             'n_samples': len(self.samples),
             'stack_kind': self.cfg.inherit.stack_kind,
-            'config': _config_parts(self.cfg),
+            'config': self.cfg.identity_parts(),
             'provenance': self.cfg.provenance(),
             'rungs': {f'{d:g}': dataclasses.asdict(r)
                       for d, r in self.reports.items()},
@@ -2032,10 +2014,10 @@ class TileSampler:
         out._inherit_bucket = {}
 
         stored = meta.get('sampler_id', '')
-        if cfg is not None and stored and stored != cfg.sampler_id():
+        if cfg is not None and stored and stored != cfg.identity_id():
             raise ValueError(
                 f'{folder} was cut with sampler_id {stored} and the config '
-                f'passed in hashes to {cfg.sampler_id()}. Loading it under the '
+                f'passed in hashes to {cfg.identity_id()}. Loading it under the '
                 f'wrong config would report the wrong axes for every row -- '
                 f'pass the right config, or none, and read the stored one')
         return out
@@ -2075,9 +2057,9 @@ class TileSampler:
         mask_cfg = masks.cfg
         slide = wsi_stem_of(wsi_path)
         folder = (Path(sampler_root) / mask_cfg.seg_id() / slide
-                  / f'{mask_cfg.region_id()}_{cfg.sampler_id()}_{plan.key()}')
+                  / f'{mask_cfg.region_id()}_{cfg.identity_id()}_{plan.key()}')
         info = dict(folder=str(folder), seg_id=mask_cfg.seg_id(),
-                    region_id=mask_cfg.region_id(), sampler_id=cfg.sampler_id(),
+                    region_id=mask_cfg.region_id(), sampler_id=cfg.identity_id(),
                     plan=plan.key(),
                     mask_parts=list(mask_cfg.identity_parts()))
         if (folder / 'meta.json').exists():
@@ -2143,7 +2125,7 @@ class TileSampler:
             lines += [f'- `{p}`' for p in info.get('mask_parts', [])] or ['- (baseline)']
             lines.append('')
         lines += ['## Sampler config', '']
-        lines += [f'- `{p}`' for p in _config_parts(self.cfg)]
+        lines += [f'- `{p}`' for p in self.cfg.identity_parts()]
         for k, v in self.cfg.provenance().items():
             lines.append(f'- `{k}={v!r}` (provenance, not identity)')
         lines += ['', f'## Distribution ({len(self.samples)} samples)', '',
@@ -2178,7 +2160,7 @@ class TileSampler:
 
     def summary(self) -> 'TileSampler':
         print(f'slide      : {self.slide}')
-        print(f'sampler_id : {self.cfg.sampler_id()}')
+        print(f'sampler_id : {self.cfg.identity_id()}')
         print(f'samples    : {len(self.samples)}')
         for ds in sorted(self.reports):
             print(self.reports[ds].line())

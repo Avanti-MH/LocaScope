@@ -99,31 +99,19 @@ CONVNEXTV2_ARCH = 'convnextv2_tiny.fcmae_ft_in22k_in1k'
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-#: The zero point. `scale_size=256, crop_size=224` is not copied from
-#: GigaPath's baseline by habit -- it is this checkpoint's OWN validated
-#: recipe: `timm.create_model(CONVNEXTV2_ARCH).pretrained_cfg['crop_pct']` is
-#: 0.875, and 224 / 0.875 = 256. mean/std are plain ImageNet stats (measured
-#: off the same `pretrained_cfg`), not CONCH's OpenAI-CLIP pair -- this
-#: checkpoint was never touched by CLIP's training run.
-_CONVNEXTV2_BASELINE = {
-    'model': ModelConfig(source='timm', arch=CONVNEXTV2_ARCH, dtype='fp16'),
-    'transform': TransformConfig(scale_size=256, crop_size=224,
-                                 interpolation='bicubic',
-                                 mean=(0.485, 0.456, 0.406),
-                                 std=(0.229, 0.224, 0.225),
-                                 preprocess='none'),
-    'head': '',
-    'pooling': 'gap',
-}
-
-
 @register('convnext_v2')
 @dataclass(frozen=True)
 class ConvNeXtV2EncoderConfig(TileEncoderConfig):
+    """The default TransformConfig (256 -> 224, bicubic, ImageNet mean/std) is
+    this checkpoint's OWN validated recipe:
+    `timm.create_model(CONVNEXTV2_ARCH).pretrained_cfg['crop_pct']` is 0.875,
+    and 224 / 0.875 = 256; mean/std are off the same `pretrained_cfg`."""
     model: ModelConfig = field(
         default_factory=lambda: ModelConfig(source='timm', arch=CONVNEXTV2_ARCH,
                                             dtype='fp16'))
 
+    BASELINE = {'model': 'ModelConfig', 'transform': 'TransformConfig',
+                'head': '', 'pooling': 'gap'}
     NOT_IDENTITY = ('batch_size',)
 
     #: One trunk, one exit -- same reason GigaPath's 'trunk' is an alias for
@@ -161,8 +149,6 @@ class ConvNeXtV2Encoder(TileEncoder):
     lets `rings3`/`tokens` reach real spatial structure instead of a single
     already-collapsed vector.
     '''
-
-    BASELINE = _CONVNEXTV2_BASELINE
 
     def __init__(self, cfg: ConvNeXtV2EncoderConfig, device: torch.device,
                 multi_gpu: bool = False):
