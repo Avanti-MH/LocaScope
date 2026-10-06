@@ -202,7 +202,10 @@ class SiftRansacLocalizer:
         self.query_kps, self.query_descs = sift.detectAndCompute(q_gray, None)
         self.crop_kps,  self.crop_descs  = sift.detectAndCompute(c_gray, None)
 
-        if self.query_descs is None or self.crop_descs is None:
+        # knnMatch(k=2) needs two crop descriptors to give every query its
+        # second neighbour for the ratio test; a blank crop has fewer.
+        if (self.query_descs is None or self.crop_descs is None
+                or len(self.crop_descs) < 2):
             self.good_matches = []
             return self.good_matches
 
