@@ -215,6 +215,7 @@ import collections
 import csv
 import dataclasses
 import json
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
@@ -225,7 +226,8 @@ import numpy as np
 # footprint) for a slide, and is the one place that knows ds 2 is native on a
 # 2x pyramid and a shrink on a 4x one.
 
-from ConfigIdentity import IdentifiedConfig, register             # noqa: E402
+from ConfigIdentity import (IdentifiedConfig, record,          # noqa: E402
+                            record_diff, register)
 from Cache import (atomic_dir, check_source, source_key,         # noqa: E402
                    wsi_stem_of)
 from DsLadder import DsLadder, RungPlan                          # noqa: E402
@@ -2062,10 +2064,21 @@ class TileSampler:
                     region_id=mask_cfg.region_id(), sampler_id=cfg.identity_id(),
                     plan=plan.key(),
                     mask_parts=list(mask_cfg.identity_parts()))
+        # The draw depends on the mask's code as well as on its id, so the
+        # mask recipe's versions ride in this record too.
+        want = record(cfg, also=(mask_cfg,), seg_id=info['seg_id'],
+                      region_id=info['region_id'], plan=info['plan'])
+        if (folder / 'meta.json').exists():
+            with open(folder / 'meta.json') as handle:
+                stored = json.load(handle)
+            check_source(stored, wsi_path, folder)
+            stale = record_diff(stored.get('identity'), want)
+            if stale:
+                print(f'  [sampler] {folder} is stale, drawing again: '
+                      + '; '.join(stale), flush=True)
+                shutil.rmtree(folder)
         if (folder / 'meta.json').exists():
             out = cls.load(folder, cfg=cfg)
-            with open(folder / 'meta.json') as handle:
-                check_source(json.load(handle), wsi_path, folder)
             info.update(mask_hit=True, samples_hit=True)
         else:
             from SafeSlide import SafeSlide                     # noqa: PLC0415
@@ -2077,7 +2090,8 @@ class TileSampler:
                     out.save(tmp, extra_meta=dict(
                         source=source_key(wsi_path), wsi_path=str(wsi_path),
                         seg_id=info['seg_id'], region_id=info['region_id'],
-                        plan=info['plan'], mask_parts=info['mask_parts']))
+                        plan=info['plan'], mask_parts=info['mask_parts'],
+                        identity=want))
             out.wsi, out.mask = None, None
             info.update(mask_hit=bool(mask_hit), samples_hit=False)
         out.slide = slide

@@ -463,6 +463,63 @@ def t_seg_plane_read_tiled_equals_whole():
     return f'{len(wsi.reads)} reads, tiled == whole'
 
 
+# ── fingerprints (ConfigIdentity rule 3) ─────────────────────────────────────
+#
+# Each producer's output on one fixed synthetic slide, pinned to its VERSION.
+# A behaviour change that forgets to bump the VERSION fails here instead of
+# leaving cached output that a record would still call current.
+
+FP_PLANE = {0: '364d3749d2221a33'}
+FP_REGIONS = {0: '7a5868decd5e243c'}
+FP_READER = {0: '908e7b4cd71b9c3a'}
+
+
+def _textured_slide():
+    """3000 x 2000, two stained sections and a pale one on noisy glass, with a
+    4x level: something every producer below has to get right."""
+    rng = np.random.default_rng(7)
+    plane = (235 + rng.integers(-8, 8, (2000, 3000, 3))).astype(np.uint8)
+    plane[300:900, 400:1500] = (175, 70, 150)
+    plane[1100:1700, 1800:2700] = (150, 90, 160)
+    plane[1300:1500, 300:700] = (215, 185, 205)
+    noise = rng.integers(-20, 20, (2000, 3000, 3))
+    plane = np.clip(plane.astype(int) + noise * (plane[..., :1] < 230), 0, 255
+                    ).astype(np.uint8)
+    return _Slide(3000, 2000, downsamples=(1.0, 4.0), plane=plane)
+
+
+def t_fingerprint_plane_segmenter():
+    from ConfigIdentity import check_fingerprint, digest
+    sm = PlaneSegConfig('hsv', seg_chunk_px=20_000,
+                        read_chunk_px=20_000).build().segment_slide(_textured_slide())
+    return check_fingerprint(PlaneSegConfig, digest(np.asarray(sm.mask)), FP_PLANE)
+
+
+def t_fingerprint_region_prep():
+    from ConfigIdentity import check_fingerprint, digest
+    wsi = _textured_slide()
+    sm = PlaneSegConfig('hsv').build().segment_slide(wsi)
+    regions = MASK_RECIPES['hsv'].regions(wsi, sm)
+    return check_fingerprint(TissueMaskConfig,
+                             digest(np.array(boxes_of(regions), np.int64)),
+                             FP_REGIONS)
+
+
+def t_fingerprint_slide_reader():
+    """A native read, a shrink through each filter, a forced level: the pixels
+    every cache made of slide pixels is made of."""
+    from ConfigIdentity import check_fingerprint, digest
+    from ReadGeometry import ReadSpec
+    from SlideReader import SlideReader
+    wsi = _textured_slide()
+    reads = [SlideReader(wsi, resize=r).read(380, 290, ReadSpec(96, 64), ds,
+                                             level=lv)
+             for r, ds, lv in (('lanczos', 4.0, None), ('lanczos', 3.0, None),
+                               ('area', 3.0, None), ('lanczos', 6.0, 1))]
+    assert all(r is not None for r in reads), 'a fixture read ran off the slide'
+    return check_fingerprint(SlideReader, digest(*reads), FP_READER)
+
+
 def t_seg_none_reads_nothing():
     """method '' is one region over the plane, and nothing is read to get
     there -- not a method returning ones, which read the whole level for it."""
@@ -630,6 +687,27 @@ def t_cache_region_change_reuses_the_mask():
         _, hit = MaskMaker(_cfg(min_region_ratio=0.3), root).mask(_slide())
         assert hit and FakeSegmenter.calls == 1, (hit, FakeSegmenter.calls)
     return 'min_region_ratio changed, no resegmentation'
+
+
+def t_cache_version_bump_resegments():
+    """Same address, other segmenter code: the stored record no longer
+    matches, so the mask is made again in place. The decoy is the same maker
+    after the version is restored, which must hit what was just rewritten."""
+    _fresh()
+    with tempfile.TemporaryDirectory() as root:
+        MaskMaker(_cfg(), root).mask(_slide())
+        saved = FakeSegConfig.VERSION
+        try:
+            FakeSegConfig.VERSION = saved + 1
+            _, hit = MaskMaker(_cfg(), root).mask(_slide())
+            assert not hit and FakeSegmenter.calls == 2, (hit, FakeSegmenter.calls)
+        finally:
+            FakeSegConfig.VERSION = saved
+        _, hit = MaskMaker(_cfg(), root).mask(_slide())
+        assert not hit, 'the restored version hit the bumped mask'
+        _, hit = MaskMaker(_cfg(), root).mask(_slide())
+        assert hit and FakeSegmenter.calls == 3, (hit, FakeSegmenter.calls)
+    return 'bump resegments, restore resegments once, then hits'
 
 
 def t_cache_segmenter_lives_with_the_maker():

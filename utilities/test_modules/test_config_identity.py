@@ -322,8 +322,19 @@ def t_every_config_owns_a_complete_literal_baseline():
     return f'{len(classes)} classes'
 
 
-def _variants(value):
+#: Legal values for fields whose vocabulary `__post_init__` checks, so the
+#: generic `_variants` (which can only guess) is not the only candidate.
+_ALTERNATIVES = {
+    'head': ('trunk', 'attn_pool'), 'pooling': ('grid2x2', 'tokens', 'cls_avg'),
+    'scorer': ('entropy',), 'bucket_frame': ('at_inherit',),
+    'floor_frame': ('taken',), 'stack_kind': ('R',), 'on_incomplete': ('keep',),
+    'candidates': ('random',),
+}
+
+
+def _variants(value, name=''):
     """Values of the same kind as `value`, in order of preference."""
+    yield from (a for a in _ALTERNATIVES.get(name, ()) if a != value)
     if isinstance(value, bool):
         yield not value
     elif isinstance(value, int):
@@ -370,7 +381,7 @@ def _perturbations(cfg, prefix=''):
                 except (TypeError, ValueError, KeyError):
                     yield sub, None, None
             continue
-        for candidate in _variants(value):
+        for candidate in _variants(value, f.name):
             try:
                 changed = dataclasses.replace(cfg, **{f.name: candidate})
             except (TypeError, ValueError, KeyError):

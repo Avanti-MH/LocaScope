@@ -33,9 +33,10 @@ The rules
    not literal. Editing a baseline renames every id of that class, which is
    what it is for; editing a default splits new from old.
 
-3. Code that changes an output without changing a config value bumps the
-   `VERSION` of the class that owns that code, and the reason goes in
-   log/TODO.log. Versions are in the record, not the address: the stale entry
+3. Code that changes an output without changing a config value bumps a
+   `VERSION`, and the reason goes in log/TODO.log. It lives on the config that
+   drives the code (a cache hit builds nothing, so it must be readable off the
+   config), or, for a producer with no config, on the producer's class. Versions are in the record, not the address: the stale entry
    is caught on load and recomputed in place. The fingerprint tests pin each
    producer's output on synthetic input to its VERSION, so a behaviour change
    that forgets the bump fails a test.
@@ -190,9 +191,10 @@ def versions_of(obj) -> Dict[str, int]:
     one itself, its `cfg` when it is a build, and every nested config field --
     keyed by the class that owns the code (rule 3). An inherited VERSION is
     the parent's code and is recorded under the parent's name, so a bump in a
-    base class reaches every subclass."""
+    base class reaches every subclass. `obj` may be a class: a producer with
+    no config of its own (`Store.FeatureStore`)."""
     out: Dict[str, int] = {}
-    for cls in type(obj).__mro__:
+    for cls in (obj if isinstance(obj, type) else type(obj)).__mro__:
         v = cls.__dict__.get('VERSION', 0)
         if v:
             out[cls.__qualname__] = int(v)
@@ -237,13 +239,49 @@ def environment() -> Dict[str, str]:
     return dict(_ENV)
 
 
-def record(obj, **upstream: str) -> Dict[str, Any]:
+def record(obj, *, also: tuple = (), **upstream: str) -> Dict[str, Any]:
     """What is written beside an artifact made by `obj` (a config or a build)
-    from the upstream artifacts named in `upstream` (`seg_id=...`)."""
+    from the upstream artifacts named in `upstream` (`seg_id=...`). `also`
+    adds the VERSIONs of the other code the artifact went through: the configs
+    of its upstream, whose ids do not carry their versions, and producer
+    classes with no config (`Store.FeatureStore`)."""
+    versions = versions_of(obj)
+    for extra in also:
+        versions.update(versions_of(extra))
     return {'id': obj.identity_id(), 'parts': list(obj.identity_parts()),
-            'versions': versions_of(obj),
+            'versions': dict(sorted(versions.items())),
             'upstream': {k: str(v) for k, v in sorted(upstream.items())},
             'env': environment()}
+
+
+def digest(*arrays) -> str:
+    """`ID_HEX` hex of arrays' dtype, shape and bytes: a producer's output on a
+    fixture, for `check_fingerprint`."""
+    import numpy as np                                              # noqa: PLC0415
+    h = hashlib.sha256()
+    for a in arrays:
+        a = np.ascontiguousarray(a)
+        h.update(str(a.dtype).encode())
+        h.update(str(a.shape).encode())
+        h.update(a.tobytes())
+    return h.hexdigest()[:ID_HEX]
+
+
+def check_fingerprint(owner: type, got: str, pinned: Dict[int, str]) -> str:
+    """Rule 3's guard. `pinned` maps each VERSION of `owner` to the digest of
+    its output on one fixture; an output that changed under the same VERSION
+    is a behaviour change nobody versioned."""
+    v = int(getattr(owner, 'VERSION', 0))
+    want = pinned.get(v)
+    if want is None:
+        raise AssertionError(
+            f'{owner.__name__}.VERSION {v} has no pinned fingerprint; pin {got!r}')
+    if want != got:
+        raise AssertionError(
+            f'{owner.__name__} output changed under VERSION {v} ({want} -> {got}). '
+            f'If the change is meant: bump {owner.__name__}.VERSION, say why in '
+            f'log/TODO.log, and pin {got!r} for the new version')
+    return f'{owner.__name__} v{v} {got}'
 
 
 def record_diff(stored: Optional[Dict[str, Any]], want: Dict[str, Any]) -> List[str]:
@@ -395,11 +433,10 @@ class IdentifiedBuild:
     Subclasses set `cfg`, `device` and `model` (which may be None) and get
     identity for free: the config's parts plus the loaded weights. `model`
     being None is a first-class state -- a segmentation method with no
-    network still has to be able to name itself. A VERSION on the build class
-    covers the code that runs the model.
+    network still has to be able to name itself. The code a build runs is
+    versioned on its CONFIG: a cache hit never builds, so a version on the
+    build class could not be read when the record is checked.
     """
-
-    VERSION: int = 0
 
     cfg: Any
     device: Any

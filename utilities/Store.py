@@ -222,6 +222,12 @@ class FeatureMeta:
 
     created_at:  str = ''
 
+    #: `ConfigIdentity.record` as JSON: the encoder's parts and weights, every
+    #: VERSION the vectors went through, the upstream ids and the environment.
+    #: '' for a store written without one, which a reader that checks treats
+    #: as stale.
+    record:      str = ''
+
     @property
     def key(self) -> str:
         """The coverage directory: `grid-t<tile>-o<0|1>` or `<sampler_id>_<plan>`."""
@@ -257,6 +263,12 @@ class FeatureStore:
     """Encoded tile features, one safetensors file per (slide, ds, pooling)."""
 
     Meta = FeatureMeta
+
+    #: The read and the cut between a region and its grid of tiles
+    #: (`PatchingLib.region_grids`, `SlideReader.read_grid`) -- code no config
+    #: names (ConfigIdentity rule 3). A change in WHERE the tiles sit is also
+    #: caught by `geometry_mismatch`; a change in their PIXELS only by this.
+    VERSION = 0
 
     # ── addressing ──────────────────────────────────────────────────────────
 
@@ -639,10 +651,34 @@ class FeatureMapCache:
         self.wsi_path = str(wsi_path)
         self.wsi_stem = wsi_stem_of(wsi_path)
         self.encoder = encoder
+        self.mask_cfg = mask_cfg
         self.seg_id = mask_cfg.seg_id()
         self.region_id = mask_cfg.region_id()
         self.mode = mode
         self.verbose = verbose
+        self._record = None
+
+    def record(self) -> Dict:
+        """What every file here was made by: the encoder (config and weights),
+        the grid code, the mask recipe's code, the upstream ids, the
+        environment. Computed once: the encoder's weights_id costs seconds."""
+        if self._record is None:
+            from ConfigIdentity import record                     # noqa: PLC0415
+            from SlideReader import SlideReader                   # noqa: PLC0415
+            self._record = record(
+                self.encoder, also=(FeatureStore, SlideReader, self.mask_cfg),
+                seg_id=self.seg_id, region_id=self.region_id)
+        return self._record
+
+    def _stale(self, path, meta) -> bool:
+        """True, with the reason printed, when `meta`'s record is not this
+        cache's."""
+        from ConfigIdentity import record_diff                    # noqa: PLC0415
+        diff = record_diff(json.loads(meta.record) if meta.record else None,
+                           self.record())
+        if diff:
+            self._say(f'{path.name} is stale:', *[f'    {d}' for d in diff])
+        return bool(diff)
 
     @property
     def pooling(self) -> str:
@@ -696,6 +732,8 @@ class FeatureMapCache:
                       *[f'    {k}: store {g!r}, now {w!r}'
                         for k, (w, g) in sorted(differs.items())])
             return None
+        if self._stale(path, meta):
+            return None
         tensors, _ = FeatureStore.load(path)
         from PatchingLib import region_grids                      # noqa: PLC0415
         grids = region_grids(regions, ds=ds, level=level, tile_size=tile_size,
@@ -725,6 +763,7 @@ class FeatureMapCache:
             num_prefix=self.encoder.model_spec.num_prefix,
             encoder_id=self.encoder.identity_id(), seg_id=self.seg_id,
             region_id=self.region_id, coverage='grid',
+            record=json.dumps(self.record(), sort_keys=True),
             n_available=wfm.n_patches(), n_tiles=wfm.n_patches())
         path = FeatureStore.save(
             self.root, meta=meta,
@@ -773,6 +812,7 @@ class FeatureMapCache:
                 num_prefix=self.encoder.model_spec.num_prefix,
                 encoder_id=self.encoder.identity_id(), seg_id=self.seg_id,
                 region_id=self.region_id, coverage='grid',
+                record=json.dumps(self.record(), sort_keys=True),
                 n_available=n, n_tiles=n)
             out[name] = FeatureStore.save(self.root, meta=meta,
                                           features=features, **columns)
@@ -803,6 +843,8 @@ class FeatureMapCache:
             self._say(f'{path.name} does not match:',
                       *[f'    {k}: store {g!r}, now {w!r}'
                         for k, (w, g) in sorted(differs.items())])
+            return None
+        if self._stale(path, meta):
             return None
         columns, _ = FeatureStore.load(path, keys=('x', 'y', 'region', 'grid_rc'))
         from PatchingLib import region_grids                      # noqa: PLC0415

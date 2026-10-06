@@ -281,6 +281,9 @@ class _Encoder:
     def identity_id(self):
         return self.ident
 
+    def identity_parts(self):
+        return [f'ident={self.ident}']
+
 
 class _Recipe:
     def __init__(self, seg='hest-e3b0c442', region='abcd1234'):
@@ -322,7 +325,20 @@ def t_map_cache_hits_and_misses_for_the_right_reasons():
         ro = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                              mode='r', verbose=False)
         assert ro.save(a_wfm()) is None, "mode='r' wrote"
-    return 'hit, encoder miss, gate miss, recipe moves the address'
+        # same address, same ids, other grid code: the record makes it stale
+        saved = FS.VERSION
+        try:
+            FS.VERSION = saved + 1
+            bumped = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(),
+                                     _Recipe(), verbose=False)
+            assert bumped.load(REGIONS, **GEO) is None, \
+                'a store from before a VERSION bump was served'
+        finally:
+            FS.VERSION = saved
+        again = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(),
+                                _Recipe(), verbose=False)
+        assert again.load(REGIONS, **GEO) is not None, 'the decoy broke the hit'
+    return 'hit, encoder miss, gate miss, VERSION miss, recipe moves the address'
 
 
 # ══════════════════════════════════════════════════════════════════════════════

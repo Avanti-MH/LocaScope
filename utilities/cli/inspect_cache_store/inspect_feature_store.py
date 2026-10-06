@@ -56,6 +56,7 @@ always more -- the asymmetry the 128 px inset predicts.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -123,6 +124,13 @@ def show(path: Path) -> FS.Meta:
     print(f'  made by   encoder={m.encoder_id}   mask={m.seg_id}/{m.region_id}   '
           f'tile={m.tile_size}   overlap={m.overlap}')
     print(f'  key       {m.key}   {size:.2f} GB   {m.created_at}')
+    if m.record:
+        rec = json.loads(m.record)
+        print(f'  record    parts {rec.get("parts")}')
+        print(f'            versions {rec.get("versions")}   '
+              f'upstream {rec.get("upstream")}')
+    else:
+        print('  record    (none: written without an identity record)')
     if is_query:
         # "fraction of the grid covered" is a reference-store idea. A query store
         # is not drawn from the grid at all -- its n_available is a placeholder

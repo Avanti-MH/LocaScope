@@ -1204,6 +1204,52 @@ def t_a_cache_hit_opens_nothing_and_returns_the_same_draw():
     return _with_fake_opener(run)
 
 
+def t_a_version_bump_draws_again():
+    """Same address, other sampler code: the stored record no longer matches,
+    so the slide is opened and the draw made again in place. The decoy: with
+    the version restored, the next call is stale once more and then hits."""
+    def run():
+        with tempfile.TemporaryDirectory() as root:
+            path = '/data/Group_A/SLIDE_1.svs'
+            TileSampler.cached(path, _cfg(), _FakePlan(), root, masks=_FakeMasks())
+            saved = SamplerConfig.VERSION
+            try:
+                SamplerConfig.VERSION = saved + 1
+                b = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+                                       masks=_FakeMasks())
+            finally:
+                SamplerConfig.VERSION = saved
+            assert not b.cache_info['samples_hit'], 'a bumped draw was served'
+            assert _CountingSlideOpener.opens == 2, _CountingSlideOpener.opens
+            TileSampler.cached(path, _cfg(), _FakePlan(), root, masks=_FakeMasks())
+            c = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+                                   masks=_FakeMasks())
+            assert c.cache_info['samples_hit'] and _CountingSlideOpener.opens == 3
+            return 'bump draws again, restore draws once, then hits'
+    return _with_fake_opener(run)
+
+
+#: SamplerConfig.VERSION -> the digest of one draw on `_one_big_block`
+#: (ConfigIdentity rule 3).
+FP_SAMPLER = {0: 'f4b2b0b019d18ada'}
+
+
+def t_fingerprint_sampler():
+    """Every position, level, bucket and inherit id of one draw, pinned: a
+    change in what the sampler picks that forgets to bump the VERSION fails
+    here rather than reading as the same corpus."""
+    from ConfigIdentity import check_fingerprint, digest
+    wsi, mask = _one_big_block()
+    cfg = _cfg(inherit=InheritConfig(share=0.25))
+    s = TileSampler(wsi, mask, cfg).sample(_plans((1.0, 2.0, 4.0)))
+    names = list(cfg.richness.names)
+    rows = np.array([(int(round(m.ds * 1000)), m.level, m.x, m.y,
+                      names.index(m.bucket), m.inherit_id)
+                     for m in (x.meta for x in s)], np.int64)
+    assert len(rows), 'the fixture drew nothing'
+    return check_fingerprint(SamplerConfig, digest(rows), FP_SAMPLER)
+
+
 def t_two_configs_on_one_slide_are_sibling_entries():
     def run():
         with tempfile.TemporaryDirectory() as root:
@@ -1666,6 +1712,8 @@ _SECTIONS = {
                  't_load_refuses_a_config_that_is_not_the_one_it_was_cut_with',
                  't_a_plain_openslide_handle_is_refused'],
     'cache':    ['t_a_cache_hit_opens_nothing_and_returns_the_same_draw',
+                 't_a_version_bump_draws_again',
+                 't_fingerprint_sampler',
                  't_two_configs_on_one_slide_are_sibling_entries',
                  't_the_report_is_the_same_on_a_hit_as_on_a_miss',
                  't_a_hit_for_a_different_slide_with_the_same_stem_is_refused',

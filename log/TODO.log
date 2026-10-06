@@ -3330,3 +3330,23 @@ front of whoever flips it.
     - UNI2 的前處理改成上游的 library path：Uni2EncoderConfig.transform 預設
       224/224 bilinear（get_encoder.py:40）。之前所有 UNI2 feature 與 uni2_pca mask 是
       256->224 bicubic 做的；這次 id 本來就全換，一起重建。
+
+[x] 2026-10-07 | Identity 紀錄接上 cache（階段 4b）
+    - mask（MaskMaker）、sampler draw（TileSampler.cached）、grid feature store
+      （FeatureMapCache）寫入 ConfigIdentity.record，讀取時 record_diff；不符就地重算並印出
+      哪一項不同（取代 mask 的 require={'seg_id'} 硬錯）。
+    - VERSION 放在 config 上（cache hit 不 build，build class 上的版本讀不到）；沒有 config 的
+      產生者放在自己的 class：SlideReader.VERSION（讀出的像素）、FeatureStore.VERSION（region
+      到 grid 的切法與讀法）。record(obj, also=(...)) 收集上游 config 與這些 class 的版本：
+      mask 列 SlideReader；sampler 列 mask recipe；feature 列 FeatureStore、SlideReader、mask。
+    - feature store 的格子位置原本就由 geometry_mismatch 抓；VERSION 補的是同位置、像素或
+      向量不同的情況。FeatureMeta 新增 record 欄位（JSON）。
+    - 指紋測試（{VERSION: digest}，ConfigIdentity.check_fingerprint）：TileSampler 一次抽樣、
+      平面 hsv 分割、region 整理、SlideReader 四種讀法。第一次跑會因未釘值而失敗，印出 digest，
+      釘上後才生效。Render 的指紋留到階段 6（和 FovSupply 一起動 Render 時）。
+    - 每個 cache 的 VERSION 加一測試：feature、mask、sampler 各一條 decoy（加一必須 miss，還原後
+      先 miss 一次再 hit）。
+    - inspect_mask_store / inspect_feature_store 印出紀錄；inspect_mask_store 改用 SafeSlide
+      開檔（階段 3 之後 read_matching_rgb 拒絕 plain OpenSlide，這裡原本會 TypeError）。
+    - 未接：build_reference_store、bench_tile_retrieval 寫的 FeatureStore（record 為 ''），
+      它們的讀者是分析 bench，沒有讀取時檢查。

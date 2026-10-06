@@ -42,6 +42,7 @@ for _d in (_HERE, _HERE.parent / 'aiNNModel'):
 from Cache import (check_source, read_meta, source_key,          # noqa: E402
                    wsi_stem_of, write_meta)
 from ConfigIdentity import (IdentifiedConfig, enc, parts_of,     # noqa: E402
+                            record, record_diff,
                             register, short_id)
 from HestSegFunc import HestSegConfig                            # noqa: E402
 from TissueMask import SlideMask, TissueMask                     # noqa: E402
@@ -165,22 +166,35 @@ class MaskMaker:
 
         folder = self.slide_dir(wsi_stem_of(wsi))
         data, meta_path = folder / 'mask.safetensors', folder / 'mask_meta.json'
+        want = self.record()
         if meta_path.exists():
-            meta = read_meta(meta_path, require={'seg_id': self.cfg.seg_id()})
+            meta = read_meta(meta_path)
             check_source(meta, wsi, meta_path)
-            return SlideMask.load(data, with_components=with_components), True
+            stale = record_diff(meta.get('identity'), want)
+            if not stale:
+                return SlideMask.load(data, with_components=with_components), True
+            print(f'  [mask] {meta_path} is stale, segmenting again: '
+                  + '; '.join(stale), flush=True)
 
         slide_mask = self._segment(wsi, with_components)
         slide_mask.save(data)
         write_meta(meta_path, dict(
             seg_id=self.cfg.seg_id(),
-            seg_parts=self.cfg.seg_parts(),
+            identity=want,
             segmenter_id=self.segmenter.identity_id(),
             source=source_key(wsi),
             wsi_path=str(getattr(wsi, '_filename', '') or ''),
             created_at=time.strftime('%Y-%m-%dT%H:%M:%S'),
             **slide_mask.geometry()))
         return slide_mask, False
+
+    def record(self) -> Dict:
+        """The identity record of this recipe's raw masks: the segmenter
+        config, its VERSIONs and the reader's, the weights' content and the
+        environment."""
+        from SlideReader import SlideReader                         # noqa: PLC0415
+        return record(self.cfg.seg, also=(SlideReader,),
+                      weights=self.cfg.seg.weights_key())
 
     def mask(self, wsi) -> Tuple[TissueMask, bool]:
         """`slide_mask`, then the region prep -- which is never cached: it is

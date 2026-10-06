@@ -140,6 +140,10 @@ def main():
         print(f'{stem:26s} {args.seg:14s} ds {meta["mask_ds"]:6.2f}  '
               f'{meta["rows"]}x{meta["cols"]}  fg {recomputed:6.2%} '
               f'(stored {meta["fraction"]:6.2%}{"" if agree else "  MISMATCH"})')
+        identity = meta.get('identity') or {}
+        print(f'{"":26s} parts {identity.get("parts", "(no record)")}  '
+              f'versions {identity.get("versions", {})}  '
+              f'upstream {identity.get("upstream", {})}')
 
         # The regions need the slide, not for pixels but for the four numbers
         # `TissueMask` reads off it -- level_dimensions, mpp and downsamples --
@@ -148,8 +152,8 @@ def main():
         trm = None
         wsi_path = meta.get('wsi_path', '')
         if wsi_path and os.path.exists(wsi_path):
-            import openslide                                    # noqa: PLC0415
-            wsi = openslide.OpenSlide(wsi_path)
+            from SafeSlide import SafeSlide                     # noqa: PLC0415
+            wsi = SafeSlide(wsi_path)
             try:
                 trm = TissueMask(wsi, slide_mask)
                 print(f'{"":26s} {len(trm.tissue_regions)} regions')

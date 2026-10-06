@@ -315,6 +315,11 @@ class SlideReader:
     """See the module docstring. One per slide per process; `Render` and its
     `at(ds)` objectives share one, as do the rungs of a training bank."""
 
+    #: The pixels a read returns for a given rectangle and scale: the level,
+    #: the resample, the hole colour (ConfigIdentity rule 3). Every record of
+    #: an artifact made of slide pixels lists it (`record(..., also=...)`).
+    VERSION = 0
+
     def __init__(self, slide: Union[SafeSlide, str, Path], *,
                  resize: str = 'lanczos', workers: int = 0):
         if resize not in RESIZE:
