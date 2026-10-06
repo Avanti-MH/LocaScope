@@ -70,6 +70,7 @@ import torch                                                        # noqa: E402
 import _paths                                                       # noqa: E402
 from _paths import encoder_tag                                      # noqa: E402
 import Cache                                                        # noqa: E402
+from AccessDatasets import list_names, locate                        # noqa: E402
 from Store import FeatureStore as FS                                # noqa: E402
 from dump_function import RetrievalReport as RR                     # noqa: E402
 from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
@@ -1024,14 +1025,15 @@ def main() -> int:
                          f'the reference pool. Pass none at all to skip the '
                          f'table -- it costs one eigh per (pooling, slot). '
                          f'Default {" ".join(WHITENS)}')
-    # Absolute, off _paths.RESULT_DIR. These were repo-relative and so resolved
-    # against the CALLER'S cwd -- which happened to work while runs were
-    # launched from the checkout with results still inside it, and stopped the
-    # moment result/ moved out to /work/u26130998/. A relative default cannot be
-    # right here: nothing under result/ lives in the repo any more.
-    ap.add_argument('--gt-csv',
-                    default=str(Path(_paths.RESULT_DIR) / 'MultiBatch1440' / 'gt.csv'),
-                    help='only read for its wsi_path/level pairs')
+    # The slides: the first --n-wsi of each dataset's recorded --split, the
+    # ones every other bench scores (a stored corpus's gt.csv used to name
+    # them, and went stale with it). Every native level of each; a level with
+    # no room for a FoV is skipped.
+    ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
+    ap.add_argument('--split', default='test', choices=['val', 'test'])
+    ap.add_argument('--n-wsi', type=int, default=5, help='slides per dataset')
+    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+                    help="masks are read from this job's cache")
     # default=None rather than the path itself, so that "the user named a
     # directory" stays distinguishable from "we chose one". Only the second gets
     # the encoder level appended, and BOTH phases resolve it the same way or
@@ -1090,16 +1092,20 @@ def main() -> int:
                         poolings=tuple(args.poolings), out_txt=args.report,
                         whitens=tuple(args.whitens))
 
-    import csv
-    rows = list(csv.DictReader(open(args.gt_csv, newline='')))
     combos = {}
-    for r in rows:
-        if args.wsi and args.wsi not in r['wsi_path']:
-            continue
-        lv = int(r['level'])
-        if args.levels and lv not in args.levels:
-            continue
-        combos.setdefault(r['wsi_path'], set()).add(lv)
+    for dataset in args.datasets:
+        dataset_split = f'{dataset}#{args.split}'
+        names = list_names(dataset=dataset_split)
+        if args.n_wsi > len(names):
+            sys.exit(f'--n-wsi {args.n_wsi} but {dataset_split} holds {len(names)}')
+        for name in names[:args.n_wsi]:
+            path = str(locate(name, dataset=dataset_split).path)
+            if args.wsi and args.wsi not in path:
+                continue
+            slide = SafeSlide(path)
+            combos[path] = {lv for lv in range(slide.level_count)
+                            if not args.levels or lv in args.levels}
+            slide.close()
     if not combos:
         sys.exit('no (slide, level) pairs matched')
 
@@ -1125,7 +1131,8 @@ def main() -> int:
     encoder_id = encoder.identity_id()
     print(f'spec={spec}\n')
 
-    masks = MaskMaker(mask_cfg_from_args(args), device=device)
+    masks = MaskMaker(mask_cfg_from_args(args), device=device,
+                      cache_root=Cache.cache_root(args.mask_cache_job, 'mask'))
     print(f'reference draw {reference_config(args.k, args.seed).sampler_id()}_'
           f'{plan_label(args.k_floor)}   mask {masks.cfg.seg_id()}/'
           f'{masks.cfg.region_id()}', flush=True)

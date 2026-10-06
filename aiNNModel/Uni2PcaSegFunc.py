@@ -318,6 +318,29 @@ def _read_rgb(wsi, location, level, size) -> np.ndarray:
     return reader(location, level, size)
 
 
+def _path_of(wsi) -> str:
+    """The file a handle opened. The readers' workers each reopen the slide
+    from it -- a handle carried across a fork is shared by every process."""
+    path = getattr(wsi, '_filename', None) or getattr(wsi, 'filename', None)
+    if path is None:
+        raise TypeError(
+            f'{type(wsi).__name__} does not expose the file it opened, so '
+            f'the reader cannot hand a path to its workers. SafeSlide does')
+    return str(path)
+
+
+def _cell_means(tiles: np.ndarray, cells) -> np.ndarray:
+    """`[B, gh, gw, 3]` uint8: each tile's mean colour per cell, what a figure
+    draws so the thumbnail and the feature grid come out the same shape. With
+    `cells` None, `[B, 1, 1, 3]` zeros."""
+    if cells is None:
+        return np.zeros((len(tiles), 1, 1, 3), dtype=np.uint8)
+    gh, gw = cells
+    b, t = tiles.shape[0], tiles.shape[1]
+    return (tiles.reshape(b, gh, t // gh, gw, t // gw, 3).mean(axis=(2, 4))
+            .astype(np.uint8))
+
+
 # ── configuration ─────────────────────────────────────────────────────────────
 
 @register('uni2-pca-seg')
@@ -792,36 +815,56 @@ class Uni2PcaSegmenter(TissueSegmenter):
     # ── reading tiles off the slide ─────────────────────────────────────────
 
     def _read_tiles(self, wsi, origin, positions, level, cells=None):
-        """Batches of `[B, tile, tile, 3]` uint8, on worker processes.
+        """Batches of `[B, tile, tile, 3]` uint8 at scattered grid `positions`
+        (row, col), on worker processes: `SlideReader.read_points`. Yields
+        `(tiles, small, index)`, `index` into `positions`.
 
-        `utilities/WsiTileLoader.py`, which is `test_EoMT`'s reader lifted into
-        the shared layer. The cost of a fit or a whole-slide projection is the
-        READ, not the model: a serial reader in the parent cannot feed a ViT
-        that does 650 tiles/s, and a MIRAX decodes every rect on the way out.
-
-        Takes the slide's PATH from the handle rather than the handle itself.
-        An OpenSlide handle carried across a fork is one handle used by several
-        processes -- it does not raise, it returns pixels from whatever region
-        another process last asked for. Each worker opens its own, lazily.
+        The fit's 1000 stratified tiles. The cost of a fit or a whole-slide
+        projection is the READ, not the model -- a serial reader in the parent
+        cannot feed a ViT that does 650 tiles/s -- so the reads run on workers,
+        each opening the slide itself from its PATH: an OpenSlide handle carried
+        across a fork returns another process's pixels without raising.
         """
-        from WsiTileLoader import wsi_tile_loader
+        from ReadGeometry import ReadSpec
+        from SlideReader import SlideReader
 
-        path = getattr(wsi, '_filename', None) or getattr(wsi, 'filename', None)
-        if path is None:
-            raise TypeError(
-                f'{type(wsi).__name__} does not expose the file it opened, so '
-                f'the reader cannot hand a path to its workers. SafeSlide does')
+        reader = SlideReader(_path_of(wsi), workers=self.cfg.workers)
+        ds = float(reader.level_downsamples[level])
+        tile_l0 = int(round(self.cfg.tile * ds))
+        points = [(origin[0] + c * tile_l0, origin[1] + r * tile_l0)
+                  for r, c in positions]
+        for tiles, index in reader.read_points(
+                points, ReadSpec(self.cfg.tile, self.cfg.tile), ds, level=level,
+                batch=self.cfg.batch_tiles):
+            tiles = tiles.numpy()
+            yield tiles, _cell_means(tiles, cells), index.numpy()
 
-        loader = wsi_tile_loader(path, origin, self.cfg.tile, positions,
-                                 level=level, cells=cells,
-                                 batch=self.cfg.batch_tiles,
-                                 workers=self.cfg.workers)
-        for tiles, small, index in loader:
-            # [B, 3, H, W] -> [B, H, W, 3], which is what _cells takes and what
-            # the notebook path feeds. The permute is here rather than in the
-            # worker because uint8 crossing the queue should stay contiguous.
-            yield (tiles.permute(0, 2, 3, 1).numpy(), small.numpy(),
-                   index.numpy())
+    def _read_lattice(self, wsi, region, grid, ds, level, cells=None):
+        """Every tile of `grid` (the scanned rectangle's lattice), in row-major
+        order: `SlideReader.read_grid`, a block of rows per call on the workers.
+        Yields what `_read_tiles` yields, `index` = row * cols + col.
+
+        Level 0 only in practice (`LEVEL`), and refused at a non-integer ds:
+        `read_grid` reads such a level one region per call, and the region here
+        is the whole scanned rectangle."""
+        from SlideReader import SlideReader, integer_downsample
+
+        if not integer_downsample(ds):
+            raise ValueError(
+                f'level {level} is ds {ds:g}: read_grid reads a non-integer ds '
+                f'one region at a time, and the region here is the whole '
+                f'scanned rectangle. The segmenter runs at LEVEL {LEVEL}')
+        reader = SlideReader(_path_of(wsi), workers=self.cfg.workers)
+        cols = grid.lattice_dims('main')[1]
+        batch = self.cfg.batch_tiles
+        for block in reader.read_grid([region], [grid], ds, tile=self.cfg.tile,
+                                      offset=False, level=level):
+            tiles = block.main.numpy()
+            first = block.row0 * cols
+            for s in range(0, len(tiles), batch):
+                part = tiles[s:s + batch]
+                yield (part, _cell_means(part, cells),
+                       np.arange(first + s, first + s + len(part)))
 
     @torch.no_grad()
     def segment_slide(self, wsi) -> 'SlideMask':
@@ -906,9 +949,11 @@ class Uni2PcaSegmenter(TissueSegmenter):
         anything that wants the components rather than one bit per cell.
 
         Partial tiles at the right and bottom edge are dropped, matching
-        `grid_positions` and `slide_pca_mask`.
+        `slide_pca_mask`: the lattice is `PatchGrid.for_region` of the scanned
+        rectangle, floor(span / tile) whole tiles on each axis.
         """
-        from WsiTileLoader import grid_positions
+        from PatchingLib import PatchGrid
+        from TissueMask import TissueRegion
 
         if not self.fitted:
             self.fit(wsi, level)
@@ -916,7 +961,12 @@ class Uni2PcaSegmenter(TissueSegmenter):
         cfg = self.cfg
         origin, span = scanned_rect(wsi, cfg.limit_bounds)
         level_ds = float(wsi.level_downsamples[level])
-        positions, (n_rows, n_cols) = grid_positions(span, cfg.tile, level_ds)
+        region = TissueRegion(x=int(origin[0]), y=int(origin[1]),
+                              w=int(span[0]), h=int(span[1]), index=0)
+        grid = PatchGrid.for_region(region, level_ds, cfg.tile, overlap=False,
+                                    level=level)
+        n_rows, n_cols = grid.lattice_dims('main')
+        positions = [(r, c) for r in range(n_rows) for c in range(n_cols)]
         if not positions:
             raise RuntimeError(
                 f'the scanned rectangle {span} holds no whole {cfg.tile} px '
@@ -936,8 +986,8 @@ class Uni2PcaSegmenter(TissueSegmenter):
         # line per ~25% still says the run is alive without flooding a log.
         report_every = max(1, len(positions) // 4)
         next_report = report_every
-        for tiles, small, index in self._read_tiles(wsi, origin, positions,
-                                                    level, cells):
+        for tiles, small, index in self._read_lattice(wsi, region, grid,
+                                                      level_ds, level, cells):
             projected = self._project(self._cells(tiles))
             projected = projected.reshape(len(index), side, side, -1)
             projected = projected.to(torch.float16).cpu().numpy()

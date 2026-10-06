@@ -17,7 +17,7 @@ and stage 3 cannot disagree about where a candidate is.
 
 POSITIONS ARE LEVEL-0, AND FRACTIONAL WHERE THEY ARE NOT A READ ORIGIN.
 openslide samples level n at x / ds with the fraction interpolated (measured
-in diag_container_retire.py's phase check), so a level-n position written as
+in diag_read_exp.py's phase flow), so a level-n position written as
 int(region.x / ds) is off by that fraction of a level pixel -- about 1 um at
 BRACS level 1, 4 um at level 2. `origin_l0` is the level-0 integer a read of
 the window starts at, `PatchGrid.tile_origin_l0`; nothing here truncates.

@@ -2,7 +2,7 @@
 #SBATCH --job-name=OffGridScore           # Job name -> log/<name>, result/<name>
 #SBATCH --partition=normal                # Partition
 #SBATCH --time=24:00:00                   # step 4 is 1089 captures per point
-#SBATCH --array=0-6                       # ONE SLIDE PER TASK, run in parallel
+#SBATCH --array=0-9                       # ONE SLIDE PER TASK: N_WSI per dataset
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # one card: encode + HEST segmentation
@@ -88,28 +88,32 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #               the hardest AND. All three reduce the SAME tensor, so they are
 #               columns of one row and cost nothing at all.
 
-BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
-KI67=/work/u26130998/datasets/Ki67_with_photo
-
-SLIDES=(
-  "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"
-  "$BRACS/Group_MT/Type_DCIS/BRACS_1476.svs"
-  "$BRACS/Group_AT/Type_FEA/BRACS_1936.svs"
-  "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"
-  "$KI67/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs"
-  "$KI67/S1137178_G7E_110926_mrxs/S1137178,G7E,110926.mrxs"
-  "$KI67/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs"
-)
+# The slides are the first N_WSI of each dataset's recorded TEST split (the
+# file make_split.py wrote), in its file order -- the slides Stage1MppBench
+# scores under SPLIT=test. Every one has a mask in the MppRoutingHead cache
+# (BRACS test's first 5, all 6 of Ki67 test), so nothing is segmented. Task IDX
+# takes dataset IDX / N_WSI and slide IDX % N_WSI, so --array must be
+# 0 .. (datasets x N_WSI - 1).
+DATASETS=(${DATASETS:-bracs/test#test ki67_with_photo#test})
+N_WSI="${N_WSI:-5}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-MppRoutingHead}"
 
 # One slide per array task. Each writes its own result directory, so nothing
 # races on a shared CSV; merge afterwards with the awk line at the bottom.
 IDX=${SLURM_ARRAY_TASK_ID:-0}
-if [ "$IDX" -ge "${#SLIDES[@]}" ]; then
-  echo "[skip] array index $IDX >= ${#SLIDES[@]} slides"
+DS_IDX=$(( IDX / N_WSI ))
+WSI_IDX=$(( IDX % N_WSI ))
+if [ "$DS_IDX" -ge "${#DATASETS[@]}" ]; then
+  echo "[skip] array index $IDX >= ${#DATASETS[@]} datasets x $N_WSI slides"
   exit 0
 fi
-WSI="${SLIDES[$IDX]}"
-STEM=$(basename "$WSI"); STEM="${STEM%.*}"
+DATASET="${DATASETS[$DS_IDX]}"
+# The name, for the result directory; the bench resolves the path itself.
+STEM=$(python -c "
+import sys; sys.path.insert(0, 'utilities')
+from _paths import setup_import_paths; setup_import_paths()
+from AccessDatasets import list_names
+print(list_names(dataset='$DATASET')[$WSI_IDX])")
 # Resolved once: the bench puts this name in every row it stores, so the echo
 # lines below must spell the same default.
 #
@@ -120,13 +124,14 @@ STEM=$(basename "$WSI"); STEM="${STEM%.*}"
 ENCODER="${ENCODER:-gigapath}"
 HEAD="${HEAD:-}"
 TAG="$ENCODER${HEAD:+_$HEAD}"
-OUT_DIR="${OUT:-"$RESULT_ROOT"/OffGridScore}/$TAG/$STEM"
+OUT_DIR="${OUT:-"$RESULT_ROOT"/${SLURM_JOB_NAME:-OffGridScore}}/$TAG/$STEM"
 
 echo "======== [$IDX] $STEM  encoder=$TAG ========"
-echo "wsi : $WSI"
+echo "wsi : $DATASET [$WSI_IDX] $STEM"
 echo "out : $OUT_DIR"
 
-python utilities/bench_modules/bench_offgrid_score.py "$WSI" \
+python utilities/bench_modules/bench_offgrid_score.py "$STEM" \
+  --dataset "$DATASET" --mask-cache-job "$MASK_CACHE_JOB" \
   --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
   --step "${STEP:-16}" \
   --points "${POINTS:-5}" \
@@ -138,14 +143,14 @@ python utilities/bench_modules/bench_offgrid_score.py "$WSI" \
 
 echo ""
 echo "======== done ========"
-echo "  result/OffGridScore/$TAG/<slide>/offgrid_scores.csv  one row per (slide, level,"
+echo "  result/${SLURM_JOB_NAME:-OffGridScore}/$TAG/<slide>/offgrid_scores.csv  one row per (slide, level,"
 echo "                                               point, dx, dy, preprocess)"
-echo "  result/OffGridScore/$TAG/<slide>/offgrid_gates.csv   geometry gates, AGGREGATED"
+echo "  result/${SLURM_JOB_NAME:-OffGridScore}/$TAG/<slide>/offgrid_gates.csv   geometry gates, AGGREGATED"
 echo "                                               over points -- per point the"
 echo "                                               endpoints are two separate"
 echo "                                               exposures and their order is"
 echo "                                               noise, not geometry"
-echo "  result/OffGridScore/$TAG/<slide>/offgrid_definitions.csv  every name, and what it is"
+echo "  result/${SLURM_JOB_NAME:-OffGridScore}/$TAG/<slide>/offgrid_definitions.csv  every name, and what it is"
 echo ""
 echo "  Read the gates FIRST. Both are forced by the geometry:"
 echo "    main_decays    main(0,0) > main(128,128)          on the mean combiner"
@@ -164,8 +169,8 @@ echo "  --plot-only reads the CSVs and redraws; no GPU, no WSI, no model, so"
 echo "  it runs on a login node in seconds and can be repeated freely:"
 echo ""
 echo "    python utilities/bench_modules/bench_offgrid_score.py --plot-only \\"
-echo "        result/OffGridScore/$TAG/*/offgrid_scores.csv \\"
-echo "        --out result/OffGridScore/$TAG/merged"
+echo "        result/${SLURM_JOB_NAME:-OffGridScore}/$TAG/*/offgrid_scores.csv \\"
+echo "        --out result/${SLURM_JOB_NAME:-OffGridScore}/$TAG/merged"
 echo ""
 echo "  That also writes the merged offgrid_gates.csv, aggregated across"
 echo "  all seven slides rather than one at a time. Keep the glob to ONE encoder:"

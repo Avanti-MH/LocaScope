@@ -13,7 +13,7 @@
 | # | 項目 | 難度 | 嚴重度 | 現況 | 現象/原因 | 處理方向 |
 |---|---|---|---|---|---|---|
 | 1 | `LocaScope.py` 刪除 | 低 | 低 | 卡在使用者手上 | 0 bytes,舊名字殘骸,repo 裡沒人 import 它 | `git rm LocaScope.py`——Claude Code 權限分類器擋下我直接刪,需你自己跑 |
-| 2 | `realtest.sh` 歸位 | 低 | 低 | 使用者決定 | 在根目錄,不符 `jobscripts/<Group>/` 慣例,但 `locate_photo.py`/`LocatePhotoTimeBreakdown.sh` 都還提到它 | 搬進 `jobscripts/` 前先確認沒有你自己習慣的 `sbatch realtest.sh` 之類路徑依賴 |
+| 2 | `realtest.sh` 歸位 | 低 | 低 | 使用者決定 | 在根目錄,不符 `jobscripts/<Group>/` 慣例,但 `locate_photo.py` 還提到它 | 搬進 `jobscripts/` 前先確認沒有你自己習慣的 `sbatch realtest.sh` 之類路徑依賴 |
 | 3 | `DomainGapConfig` 完整性斷言 | 低 | 低 | 延後(等 sweep 結束) | `CAMERA_FULL`/`CAMERA_GEOMETRY_ONLY` 手寫全部欄位,沒機制檢查清單跟得上 dataclass 本身 | 加一段 `dataclasses.fields()` 比對斷言,`MppRoutingHead/Datasets.py` 單檔案 |
 | 4 | 命名/詞彙先定案的習慣 | 低 | 中 | 未要求動手 | "arm"→"head"/"baseline"、"arm"→"training_framework" 都是程式碼寫完才改名,兩個姊妹套件各發生一次 | 每個新 training 套件開工前,在 `spec.md` 開一節詞彙表定案,仿 `CLAUDE.md` 自己 Vocabulary 那節的做法,CSV/checkpoint/CLI 欄位名照著抄 |
 | 5 | `PrototypeEstMpp.py` 補文件+驗證 | 低 | 中 | 未要求動手 | 硬 bracket 讀 checkpoint top-level 欄位,假設沒寫成文件;寫完後從沒真的餵過一個真實 checkpoint | 補一行假設說明(仿 `cli/evaluate.py` 已有的寫法),找一個真 checkpoint 跑一次 `estimate()` 驗證 |

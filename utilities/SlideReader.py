@@ -4,6 +4,7 @@
     tile   = reader.read(x, y, ReadSpec(256, 256), ds)              # one position
     for block in reader.read_grid(regions, grids, ds, tile=256):     # a region grid
         block.main, block.offset                                     # uint8 tensors
+    for tiles, index in reader.read_points(points, spec, ds):       # scattered points
 
 Coordinates are level-0, magnifications are ds (downsample from level 0). An
 mpp enters at the caller, once (`ds = mpp / base_mpp`).
@@ -291,6 +292,30 @@ class GridRead:
             yield from blocks
 
 
+class _Points(torch.utils.data.Dataset):
+    """One `SlideReader.read` per item, on a worker. The worker opens its own
+    SafeSlide on first use -- a handle carried across a fork returns another
+    process's pixels without raising, which is why only the path travels."""
+
+    def __init__(self, path, points, spec, ds, level, resize):
+        self.path, self.points = str(path), list(points)
+        self.spec, self.ds, self.level, self.resize = spec, float(ds), level, resize
+        self._reader = None
+
+    def __len__(self):
+        return len(self.points)
+
+    def __getitem__(self, k):
+        if self._reader is None:
+            self._reader = SlideReader(SafeSlide(self.path), resize=self.resize)
+        x, y = self.points[k]
+        img = self._reader.read(int(x), int(y), self.spec, self.ds, level=self.level)
+        if img is None:
+            raise RuntimeError(f'{self.path} ({x}, {y}) ds {self.ds:g}: the read '
+                               f'runs off the slide')
+        return torch.from_numpy(np.ascontiguousarray(img)), k
+
+
 # ── the reader ───────────────────────────────────────────────────────────────
 
 class SlideReader:
@@ -424,6 +449,23 @@ class SlideReader:
                     f'slide, which the sampler should never have offered')
             out.append(img)
         return out
+
+    def read_points(self, points: Sequence[Tuple[int, int]], spec: ReadSpec,
+                    ds: float, *, level: Optional[int] = None,
+                    batch: int = 64) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
+        """`read(x, y, spec, ds, level=level)` at every level-0 point, on the
+        reader's workers, in batches: `(uint8 [B, H, W, 3], index [B])`. The
+        index is each tile's position in `points` -- place results by it, not
+        by arrival. For scattered positions; a region's whole lattice is
+        `read_grid`, which reads a block of rows per call instead of a tile."""
+        if self.path is None:
+            raise ValueError('read_points needs a slide opened from a path '
+                             '(each worker reopens it)')
+        loader = torch.utils.data.DataLoader(
+            _Points(self.path, points, spec, ds, level, self.resize),
+            batch_size=batch, shuffle=False, num_workers=self.workers,
+            pin_memory=False, drop_last=False)
+        yield from loader
 
     def _read(self, p: ReadPlan) -> np.ndarray:
         """THE read: `read_region_rgb` (a scanner hole is the background colour,

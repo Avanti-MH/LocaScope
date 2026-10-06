@@ -48,5 +48,5 @@ retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC
   中心點優先於左上角：query 繞自己中心旋轉，中心不受旋轉影響。
 - **2026-10-05 前的記帳**把 crop 原點記成 `int(region.x / ds) + x0`，截掉 region 原點的
   小數；openslide 以 bilinear 取樣，所以回報位置偏 `-frac(region.x / ds) * ds` 個 level-0
-  像素（BRACS L1 約 1 µm、L2 約 4 µm）。現在直接記讀圖起點，見
-  `utilities/cli/diagnostics/diag_container_retire.py` 的 localize 段。
+  像素（BRACS L1 約 1 µm、L2 約 4 µm）。現在直接記讀圖起點；新舊記帳在已知位置上的
+  比對（舊的誤差等於 -frac，新的 < 0.025 level 像素）記在 `log/TODO.log`。

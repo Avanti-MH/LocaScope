@@ -54,9 +54,9 @@ the measurement behind it: whole slide, every tile, ~3.5 min for BRACS_1003691
 and ~5.8 min for a Ki67, so there was never a cost that justified reading
 coarser.
 
-What runs now is one call -- `components_wsi` fits on 1000 stratified tiles and
-streams every tile of the slide through `utilities/WsiTileLoader`, assembling
-only the CELL grid. That is 1/196 of the pixels (`cell_px` squared), which is
+What runs now is one call -- `components_wsi` fits on 1000 stratified tiles
+(`SlideReader.read_points`) and streams every tile of the slide through
+`SlideReader.read_grid`, assembling only the CELL grid. That is 1/196 of the pixels (`cell_px` squared), which is
 what makes a whole Ki67 slide a few hundred MB instead of 10 GB, and it is what
 `test_EoMT.slide_pca_mask` has always done.
 

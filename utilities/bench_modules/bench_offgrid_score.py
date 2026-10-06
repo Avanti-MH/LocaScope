@@ -115,6 +115,8 @@ from mpl_toolkits.mplot3d import Axes3D                             # noqa: E402
 
 from PatchingLib import PatchGrid, QueryPatchContainer             # noqa: E402
 from ReadGeometry import ReadSpec                                   # noqa: E402
+import Cache                                                        # noqa: E402
+from AccessDatasets import list_names, locate                        # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
@@ -828,8 +830,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description='How does the window score decay off the grid?')
     parser.add_argument('slides', nargs='*',
-                        help='WSI paths; with --plot-only these are '
+                        help='WSI paths, or slide names when --dataset is '
+                             'given; with --plot-only these are '
                              'offgrid_scores.csv paths instead')
+    parser.add_argument('--dataset', default=None,
+                        help='<dataset>#<split>: the slides are names in that '
+                             'recorded split (AccessDatasets), or with '
+                             '--wsi-index the index-th of it')
+    parser.add_argument('--wsi-index', type=int, default=None,
+                        help='with --dataset and no slides: the slide at this '
+                             'position of the split, in its file order -- one '
+                             'per array task')
+    parser.add_argument('--mask-cache-job', default='MppRoutingHead',
+                        help="masks are read from this job's cache; a slide "
+                             'it lacks is segmented once and written there')
     parser.add_argument('--plot-only', action='store_true',
                         help='draw the figures from existing offgrid_scores.csv '
                              'files and exit. No GPU, no WSI, no model -- runs '
@@ -874,8 +888,18 @@ def main() -> int:
     parser.add_argument('--out', default=None)
     args = parser.parse_args()
 
+    if args.dataset and not args.plot_only:
+        if args.wsi_index is not None:
+            names = list_names(dataset=args.dataset)
+            if args.wsi_index >= len(names):
+                parser.error(f'--wsi-index {args.wsi_index} but {args.dataset} '
+                             f'holds {len(names)} slide(s)')
+            args.slides = [names[args.wsi_index]]
+        args.slides = [str(locate(n, dataset=args.dataset).path)
+                       for n in args.slides]
     if not args.slides:
-        parser.error('give at least one WSI path, or CSV paths with --plot-only')
+        parser.error('give at least one WSI path, --dataset with names or '
+                     '--wsi-index, or CSV paths with --plot-only')
 
     def out_for(tag: str) -> Path:
         # The tag goes on the DERIVED path only. An explicit --out is used
@@ -928,7 +952,8 @@ def main() -> int:
     encoders = {
         name: base.variant(transform=_dc.replace(cfg.transform, preprocess=name))
         for name in PREPROCESS}
-    masks = MaskMaker(mask_cfg_from_args(args), device=device)
+    masks = MaskMaker(mask_cfg_from_args(args), device=device,
+                      cache_root=Cache.cache_root(args.mask_cache_job, 'mask'))
     rng = np.random.default_rng(args.seed)
 
     all_rows, failed = [], []

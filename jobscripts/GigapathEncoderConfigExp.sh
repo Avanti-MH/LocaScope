@@ -21,8 +21,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # Replaces AccuracyV1.sh and the encoder-throughput-sweep task
 # bench_gigapath_infer.py used to run (that call had gone dead, commented
-# out, inside the jobscript now renamed LocatePhotoTimeBreakdown.sh -- its
-# CURRENT task is unrelated, see that file). Both python files merged into
+# out, inside a jobscript later renamed LocatePhotoTimeBreakdown.sh and since
+# deleted). Both python files merged into
 # utilities/bench_modules/bench_gigapath_configs.py on 2026-09-17; EXP picks
 # which of its two modes this jobscript runs.
 #

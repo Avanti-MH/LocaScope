@@ -110,7 +110,7 @@ query、shot 沿用 `CLAUDE.md`；pool、rank、答案視窗、arm、pooling 見
   `best_rotation`、`ds`，crop 原點記成 `int(region.x / ds) + x0`）把 region 原
   點的小數截掉。openslide 以 bilinear 取樣（位置的小數會被內插出來），所以回報
   的位置偏 `-frac(region.x / ds) * ds` 個 level-0 像素，方向固定。實測（MppRoutingHead
-  的 mask，`diag_container_retire.py` phase / origins 段）：BRACS 幾乎每個 region
+  的 mask，`diag_read_exp.py` 的 phase / origins flow）：BRACS 幾乎每個 region
   都偏將近一個 level 像素，L1 約 1 µm、L2 約 4 µm；Ki67 在 L1、L2 為 0，L3 起
   約 1 µm 以上。
 
