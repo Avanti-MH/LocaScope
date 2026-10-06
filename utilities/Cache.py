@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _paths import RESULT_DIR                                    # noqa: E402
+from _paths import RESULT_DIR, job_name                          # noqa: E402,F401
 
 
 class CacheMismatch(RuntimeError):
@@ -55,12 +55,6 @@ class CacheMismatch(RuntimeError):
 
 
 # ── where ─────────────────────────────────────────────────────────────────────
-
-def job_name(default: str) -> str:
-    """SLURM_JOB_NAME, else `default` -- `_paths.job_result_dir`'s own rule, so
-    a job's results and the caches it made carry the same name."""
-    return os.environ.get('SLURM_JOB_NAME') or default
-
 
 def cache_root(made_by: str, obj: str) -> Path:
     """`result/cache/<made_by>_<obj>/`. Not created here: a reader pointed at

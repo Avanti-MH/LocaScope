@@ -860,12 +860,66 @@ def run_reach(args, wsi, level_ds) -> int:
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-SECTIONS = ('sensor', 'reach', 'map', 'seed', 'augment')
+#: DomainGapConfig.VERSION -> the digest of two photos of `_FakeSlide`
+#: (ConfigIdentity rule 3). The photos are made by camera.py and pipeline.py
+#: and by nothing a config names, so a change there that forgets the bump
+#: fails here.
+FP_RENDER = {0: '2dad9c74256e59e0'}
+
+
+class _FakeSlide:
+    """A 1200 x 900 textured plane with a 2x level: what SlideReader reads."""
+
+    def __init__(self):
+        rng = np.random.default_rng(3)
+        self.plane = rng.integers(0, 256, (900, 1200, 3), dtype=np.uint8)
+        self.plane[200:600, 300:900] //= 2
+        self.level_downsamples = [1.0, 2.0]
+        self.level_dimensions = [(1200, 900), (600, 450)]
+        self.dimensions = (1200, 900)
+        self.level_count = 2
+        self.base_mpp = 0.25
+        self.properties = {}
+
+    def read_region_rgb(self, location, level, size):
+        ds = self.level_downsamples[level]
+        x0, y0 = location
+        w, h = size
+        ys = (y0 + np.arange(h) * ds).astype(int).clip(0, 899)
+        xs = (x0 + np.arange(w) * ds).astype(int).clip(0, 1199)
+        return self.plane[np.ix_(ys, xs)]
+
+
+def run_fingerprint(args, wsi=None, level_ds=None) -> int:
+    from ConfigIdentity import check_fingerprint, digest
+    from camera import photo_rng
+    cam = Render(SlideReader(_FakeSlide()), (96, 64), DomainGapConfig(),
+                 ds=2.0, seed=0)
+    images, params = [], []
+    for x, y in ((420, 300), (520, 380)):
+        img, p = cam.capture_with_gt(x, y, rng=photo_rng(0, x, y, '2', 0))
+        if img is None:
+            print('  FAIL  a fixture photo ran off the slide')
+            return 1
+        images.append(img)
+        params.append([p['rot_deg'], p['scale']])
+    try:
+        print('  ok   ', check_fingerprint(
+            DomainGapConfig, digest(*images, np.array(params, np.float64)),
+            FP_RENDER))
+        return 0
+    except AssertionError as e:
+        print(f'  FAIL  {e}')
+        return 1
+
+
+SECTIONS = ('sensor', 'reach', 'map', 'seed', 'augment', 'fingerprint')
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('--wsi', required=True)
+    ap.add_argument('--wsi', default=None,
+                    help='the slide; every section but fingerprint needs one')
     ap.add_argument('--level', type=int, default=1,
                     help='pyramid level for map / seed / augment')
     ap.add_argument('--seed', type=int, default=0)
@@ -876,16 +930,22 @@ def main() -> int:
                     help='augment: where the csv goes. Default: '
                          'result/<SLURM_JOB_NAME or TestReadPath>/')
     args = ap.parse_args()
-    only = args.only or list(SECTIONS)
+    # Default: every slide section with --wsi, the slide-free one without.
+    only = args.only or ([s for s in SECTIONS if s != 'fingerprint']
+                         if args.wsi else ['fingerprint'])
+    wsi = level_ds = None
+    if any(s != 'fingerprint' for s in only):
+        if not args.wsi:
+            ap.error('--wsi is needed for every section but fingerprint')
+        wsi = SafeSlide(args.wsi)
+        base_mpp = wsi.base_mpp
+        level_ds = float(wsi.level_downsamples[args.level])
+        level_mpp = base_mpp * level_ds
+        print(f'{Path(args.wsi).name}  L{args.level}  base_mpp={base_mpp:.4f}  '
+              f'level_mpp={level_mpp:.4f}')
 
-    wsi = SafeSlide(args.wsi)
-    base_mpp = wsi.base_mpp
-    level_ds = float(wsi.level_downsamples[args.level])
-    level_mpp = base_mpp * level_ds
-    print(f'{Path(args.wsi).name}  L{args.level}  base_mpp={base_mpp:.4f}  '
-          f'level_mpp={level_mpp:.4f}')
-
-    runners = {'sensor': lambda: run_sensor(args, wsi, level_ds),
+    runners = {'fingerprint': lambda: run_fingerprint(args),
+               'sensor': lambda: run_sensor(args, wsi, level_ds),
                'reach': lambda: run_reach(args, wsi, level_ds),
                'map': lambda: run_map(args, wsi, level_ds),
                'seed': lambda: run_seed(args, wsi, level_ds),

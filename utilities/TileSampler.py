@@ -1169,38 +1169,12 @@ class TileSampler:
         # too far apart at ds 32.
         fp = int(plan.footprint_l0)
         step = max(1, int(round(self.cfg.overlap.step * fp)))
-        pad = _margin_of(plan)
-        fw, fh = self._dims(plan)
-        offx, offy = self._offset(plan)
-        sx0, sy0, sx1, sy1 = _scanned_rect(self.mask)
         out = []
         for region in self._regions(plan):
-            # TWO RECTANGLES, INTERSECTED, and they are two requirements on two
-            # different things:
-            #
-            #   the TILE must be in the REGION      it is the training sample,
-            #                                       so it has to be on tissue
-            #   the RESERVE must be in the SCANNED  it is only context for a
-            #   RECTANGLE                           warp, so it only has to be
-            #                                       READABLE
-            #
-            # A pre-tile reaching out of its region into the glass beside it is
-            # fine -- that is real glass and a microscope sees it too. A
-            # pre-tile reaching past the scanned rectangle is not: those pixels
-            # do not exist, SafeSlide fills them with the background colour, and
-            # the straight edge between tissue and that flat fill is exactly
-            # what a corner detector fires on. One is data; the other is an
-            # artefact of where the scanner stopped.
-            #
-            # "The tile" is the camera's FoV: the footprint square, or the
-            # rectangle centred in it (`_dims`, `_offset`), which is what a
-            # rectangular sensor actually photographs.
-            x0 = max(region.x - offx, sx0 + pad)
-            y0 = max(region.y - offy, sy0 + pad)
-            x1 = min(region.x + region.w - fw - offx, sx1 - pad - fp)
-            y1 = min(region.y + region.h - fh - offy, sy1 - pad - fp)
-            if x1 < x0 or y1 < y0:
+            bounds = self._bounds(region, plan)
+            if bounds is None:
                 continue
+            x0, y0, x1, y1 = bounds
             xs = np.arange(x0, x1 + 1, step, dtype=np.int64)
             ys = np.arange(y0, y1 + 1, step, dtype=np.int64)
             if not len(xs) or not len(ys):
@@ -1210,6 +1184,43 @@ class TileSampler:
         if not out:
             return np.zeros((0, 2), dtype=np.int64)
         return np.concatenate(out, axis=0)
+
+    def _bounds(self, region, plan: RungPlan):
+        """`(x0, y0, x1, y1)`, inclusive, of the footprint origins a candidate
+        in `region` may take, or None when none fits. Both arms draw inside it
+        (`_lattice`, `_random_candidates`), so they differ only in how they
+        fill it.
+
+        TWO RECTANGLES, INTERSECTED, and they are two requirements on two
+        different things:
+
+            the TILE must be in the REGION      it is the training sample,
+                                                so it has to be on tissue
+            the RESERVE must be in the SCANNED  it is only context for a
+            RECTANGLE                           warp, so it only has to be
+                                                READABLE
+
+        A pre-tile reaching out of its region into the glass beside it is fine
+        -- that is real glass and a microscope sees it too. A pre-tile reaching
+        past the scanned rectangle is not: those pixels do not exist, SafeSlide
+        fills them with the background colour, and the straight edge between
+        tissue and that flat fill is exactly what a corner detector fires on.
+
+        "The tile" is the camera's FoV: the footprint square, or the rectangle
+        centred in it (`_dims`, `_offset`), which is what a rectangular sensor
+        actually photographs."""
+        fp = int(plan.footprint_l0)
+        pad = _margin_of(plan)
+        fw, fh = self._dims(plan)
+        offx, offy = self._offset(plan)
+        sx0, sy0, sx1, sy1 = _scanned_rect(self.mask)
+        x0 = max(region.x - offx, sx0 + pad)
+        y0 = max(region.y - offy, sy0 + pad)
+        x1 = min(region.x + region.w - fw - offx, sx1 - pad - fp)
+        y1 = min(region.y + region.h - fh - offy, sy1 - pad - fp)
+        if x1 < x0 or y1 < y0:
+            return None
+        return x0, y0, x1, y1
 
     def _random_candidates(self, plan: RungPlan) -> np.ndarray:
         """The control arm: uniform draws inside a uniformly drawn region.
@@ -1225,20 +1236,13 @@ class TileSampler:
         if not regions:
             return np.zeros((0, 2), dtype=np.int64)
         n = int(self.cfg.n_per_rung * max(1, self.cfg.max_tries_per_tile))
-        fp = int(plan.footprint_l0)
-        pad = _margin_of(plan)
-        sx0, sy0, sx1, sy1 = _scanned_rect(self.mask)
         out = []
         for _ in range(n):
             region = regions[int(self._rng.integers(0, len(regions)))]
-            # The same two rectangles as `_lattice`, or the control arm would
-            # be measuring a different corpus and the comparison would be about
-            # the bounds rather than about the candidates.
-            lo_x, lo_y = max(region.x, sx0 + pad), max(region.y, sy0 + pad)
-            hi_x = min(region.x + region.w - fp, sx1 - pad - fp)
-            hi_y = min(region.y + region.h - fp, sy1 - pad - fp)
-            if hi_x < lo_x or hi_y < lo_y:
+            bounds = self._bounds(region, plan)
+            if bounds is None:
                 continue
+            lo_x, lo_y, hi_x, hi_y = bounds
             out.append([int(self._rng.integers(lo_x, hi_x + 1)),
                         int(self._rng.integers(lo_y, hi_y + 1))])
         if not out:

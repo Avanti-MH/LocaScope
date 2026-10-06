@@ -3375,3 +3375,25 @@ front of whoever flips it.
       --sampler-overlap-* / --sampler-inherit-*；--sampler-n-per-rung 等頂層不變。實際在跑的
       jobscript 沒有用到改名的 flag；WindowRetrievalBench.sh 只有註解範例，已改。
       extract_pretiles、build_reference_store 的 --inherit-share 是它們自己的 flag，不受影響。
+
+[x] 2026-10-07 | 雜項（階段 6）
+    - FovSupply 的 _objectives 刪除：Render.at 本身就快取物鏡（同一 dict 共用）。新增 Render
+      指紋（test_camera --only fingerprint，合成 slide，釘在 DomainGapConfig.VERSION），
+      TestReadPath 不需 slide 的部分跑它。第一次跑會印 digest 待釘。
+    - job_name 規則只在 _paths.job_name；Cache 重新匯出，job_result_dir 呼叫它。
+    - _paths 新增 MODEL_WEIGHTS_DIR（OUTPUT_ROOT 下，和 _env.sh 的 HF_HOME 一致）、DATA_ROOT
+      （LOCASCOPE_DATA_ROOT，預設 repo 的上一層；輸入資料不隨 OUTPUT_ROOT 移動）、DATASETS_DIR、
+      HOLED_DATASETS_DIR。四個 encoder 的 HF_HOME、CONCH 權重目錄、AccessDatasets 四個根目錄
+      都從這裡推導；值不變。
+    - TileSampler：lattice 和 random 臂各寫一次範圍計算，抽成 _bounds 共用。random 臂原本用
+      footprint 正方形，但「長方形 FoV + random」在 sample() 本來就被拒絕（TileSampler.py 的
+      rectangular-FoV 檢查），所以那段走不到；方形時兩式相同。沒有任何可到達的輸出改變，
+      SamplerConfig.VERSION 維持 0。（盤點時誤判為 bug，加的測試撞上拒絕而失敗，已撤回。）
+    - window bench 的 region_of 改用 ReadRect.inside。
+    - Features.encode_raw 的恆等 keep 刪除（reduce=None 本來就回傳原值，留在 device 上）。
+    - estimate_mpp_classic 底部的 CLI（argparse + print）刪除：stage 模組不放 CLI。
+    - ReadGeometry.TILE_PX 刪除：沒有任何使用者。
+    - S1103037 已移到 datasets_holed/：test_safe_slide 預設、scan_wsi_holes / diag_mask_validity
+      的範例改指向那裡（它是唯一有已知破洞的 slide）；TestPatchingLib 的 QUERY、test_patching_lib
+      的 --query、slide_win_sift 的範例改用 S1104360。test_safe_slide 原本沒有任何 jobscript
+      跑它，現在在 TestReadPath（有 slide 時）跑一次。

@@ -303,7 +303,7 @@ from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E40
                              encoder_cfg_from_args, encoder_config,
                              encoder_names, pooling_kinds)
 from FovSupply import FovSupply                                  # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR, levels_up_to         # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR, ReadRect, levels_up_to  # noqa: E402
 from ConfigArgs import add_config_args, config_from_args, describe  # noqa: E402
 from ConfigIdentity import ModelConfig, enc, short_id             # noqa: E402
 from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
@@ -1232,8 +1232,9 @@ def region_of(regions, x0: int, y0: int, w: int, h: int):
     """Index of the region that holds the rectangle, or None. Regions are found
     by GEOMETRY: the placer's regions and this bench's are two lists made by two
     filters, so their indices do not line up."""
+    rect = ReadRect(int(x0), int(y0), int(w), int(h))
     for i, r in enumerate(regions):
-        if r.x <= x0 and r.y <= y0 and x0 + w <= r.x + r.w and y0 + h <= r.y + r.h:
+        if rect.inside(r.x, r.y, r.x + r.w, r.y + r.h):
             return i
     return None
 

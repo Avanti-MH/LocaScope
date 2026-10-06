@@ -30,29 +30,24 @@ def encode_raw(encoder, patches: torch.Tensor, batch_size: int,
     `trunk_raw`, see there); the result is the batch the caller already chose.
 
     `layers` (absolute 0-based blocks, the union every head in the call needs)
-    returns a `LayerTokens` instead, from ONE forward per chunk; empty -- the
-    default, and every caller before it existed -- returns the tensor as
-    before.'''
+    returns a `LayerTokens` instead, from ONE forward per chunk; empty, the
+    default, returns the tensor.'''
     kind = encoder.model_spec.kind
-    keep = lambda t: t                                        # noqa: E731
-    # The uint8 batch goes to the encoder as it is (one transform, on the
-    # card) and what comes back never leaves it; `keep` is a no-op.
     if layers:
         if kind != 'tokens':
             raise TypeError(f'encoder layers need a token model; this one is '
                             f'{kind!r}')
         last = encoder.depth - 1
         want = sorted(set(int(i) for i in layers) | {last})
-        stacked = torch.cat([encoder.layer_tokens(patches[s:s + batch_size], want,
-                                                  reduce=keep)
+        stacked = torch.cat([encoder.layer_tokens(patches[s:s + batch_size], want)
                              for s in range(0, len(patches), batch_size)]).to(device)
         by_block = {b: stacked[:, k] for k, b in enumerate(want)}
         return LayerTokens(last=by_block[last], layers=by_block)
     out = []
     for start in range(0, len(patches), batch_size):
         batch = patches[start:start + batch_size]
-        out.append(encoder.tokens(batch, reduce=keep) if kind == 'tokens'
-                   else encoder.spatial(batch, reduce=keep).flatten(2).transpose(1, 2))
+        out.append(encoder.tokens(batch) if kind == 'tokens'
+                   else encoder.spatial(batch).flatten(2).transpose(1, 2))
     return torch.cat(out).to(device)
 
 

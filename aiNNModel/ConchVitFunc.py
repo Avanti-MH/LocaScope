@@ -93,7 +93,8 @@ for _d in (_HERE, _HERE.parent / 'utilities'):
 # blobs plus snapshot symlinks. CONCH_LOCAL is a sibling of that `hub/`, holding
 # the files under their own names. Same root, two layouts, and only the first
 # one huggingface_hub knows how to read.
-os.environ.setdefault('HF_HOME', '/work/u26130998/model_weights')
+from _paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+os.environ.setdefault('HF_HOME', MODEL_WEIGHTS_DIR)
 
 _DOTENV = _HERE.parent / '.env'
 if _DOTENV.exists():
@@ -132,10 +133,10 @@ CONCH_META = 'meta.yaml'
 #: the hub fallback below is the only remedy. Deleting the directory costs a
 #: download and nothing else, but that download is the one gating can fail.
 #:
-#: Override with CONCH_WEIGHTS_DIR. An absolute path is deliberate: this is
-#: outside the checkout, like everything else a run needs.
+#: Override with CONCH_WEIGHTS_DIR. Under the model weights root, which is
+#: outside the checkout like everything else a run needs (`_paths`).
 CONCH_LOCAL = Path(os.environ.get(
-    'CONCH_WEIGHTS_DIR', '/work/u26130998/model_weights/CONCH'))
+    'CONCH_WEIGHTS_DIR', os.path.join(MODEL_WEIGHTS_DIR, 'CONCH')))
 
 #: source='local' and this class, because there is no timm hub entry to name.
 #: ModelConfig documents 'package.module:Class' as exactly what that source

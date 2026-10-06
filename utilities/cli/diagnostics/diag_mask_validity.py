@@ -43,7 +43,7 @@ could not be read against the regions.
 
 Usage:
     python utilities/cli/diagnostics/diag_mask_validity.py \\
-        --wsi "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
+        --wsi "/work/u26130998/datasets_holed/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
         --seg hest --grid 48 --out result/DiagMaskValidity
     python utilities/cli/diagnostics/diag_mask_validity.py --dataset ki67_pure --seg hsv --grid 24
 

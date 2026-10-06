@@ -55,7 +55,8 @@ for _d in (_HERE, _HERE.parent / 'utilities'):
 # harmless: whoever wins, the answer is the same directory. `setdefault`, so an
 # exported HF_HOME still overrides all three; see jobscripts/_env.sh, which
 # exports it before python starts and is the part that actually decides.
-os.environ.setdefault('HF_HOME', '/work/u26130998/model_weights')
+from _paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+os.environ.setdefault('HF_HOME', MODEL_WEIGHTS_DIR)
 
 _DOTENV = _HERE.parent / '.env'
 if _DOTENV.exists():

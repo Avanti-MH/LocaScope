@@ -63,11 +63,12 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from Cache import cache_root
+from _paths import DATASETS_DIR
 
-_BRACS_TEST_ROOT = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test'
-_BRACS_TRAIN_ROOT = '/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/train'
-_KI67_ROOT = '/work/u26130998/datasets/Ki67_with_photo'
-_KI67_PURE_ROOT = '/work/u26130998/datasets/Ki67_pure'
+_BRACS_TEST_ROOT = os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it/BRACS_WSI/test')
+_BRACS_TRAIN_ROOT = os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it/BRACS_WSI/train')
+_KI67_ROOT = os.path.join(DATASETS_DIR, 'Ki67_with_photo')
+_KI67_PURE_ROOT = os.path.join(DATASETS_DIR, 'Ki67_pure')
 
 
 @dataclass(frozen=True)

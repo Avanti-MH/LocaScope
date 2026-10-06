@@ -59,7 +59,7 @@ ONLY="${ONLY:-grid coords containers}"
 
 SIZE=128
 RSIZE=256
-QUERY=/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037_ki67/2.bmp
+QUERY=/work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/2.bmp
 ROI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png
 
 echo "======== TestPatchingLib  sections: $ONLY ========"

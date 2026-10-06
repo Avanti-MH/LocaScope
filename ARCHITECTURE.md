@@ -183,7 +183,7 @@ def resample(img, w, h, method) -> np.ndarray          # 原 Render.py
 def degrade_resolution(img, ds, out_side) -> np.ndarray  # 原 Render.py；ChainStack 直接從這裡匯入
 
 # ── query_sim/camera.py（Camera → Render，大改）─────────────────────────────
-#   REAL_PHOTO_SENSOR、TILE_PX 在 ReadGeometry（純幾何）；讀取的 margin 由 read_margin 從 cfg 推導
+#   REAL_PHOTO_SENSOR 在 ReadGeometry（純幾何）；讀取的 margin 由 read_margin 從 cfg 推導
 def rotates_for(cfg, rotation=None) -> bool             # 不動
 def read_margin(cfg, sensor, rotation=None) -> int     # 這次曝光會取樣到的範圍（pipeline.read_reach）換成多讀的 px
 def render_spec(cfg, sensor, rotation=None) -> ReadSpec  # rotates_for + read_margin

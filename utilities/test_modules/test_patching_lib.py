@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from PIL import Image as PILImage
 
-from _paths import job_result_dir, setup_import_paths
+from _paths import DATASETS_DIR, job_result_dir, setup_import_paths
 
 setup_import_paths()
 
@@ -998,7 +998,8 @@ def main() -> int:
     ap.add_argument('--size', type=int, default=128, help='tile size (synthetic + coords)')
     ap.add_argument('--tile', type=int, default=None, help='PatchGrid tile size (default: --size)')
     ap.add_argument('--rsize', type=int, default=256, help='tile size for real-data container tests')
-    ap.add_argument('--query', default='/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037_ki67/2.bmp')
+    ap.add_argument('--query', default=os.path.join(
+        DATASETS_DIR, 'Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/2.bmp'))
     ap.add_argument('--roi',
                     default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
                             'BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png')

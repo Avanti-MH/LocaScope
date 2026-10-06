@@ -25,6 +25,17 @@ OUTPUT_ROOT = os.environ.get(
     'LOCASCOPE_OUTPUT_ROOT', os.path.abspath(os.path.join(PROJECT_ROOT, '..')))
 RESULT_DIR = os.path.join(OUTPUT_ROOT, 'result')
 LOG_DIR = os.path.join(OUTPUT_ROOT, 'log')
+#: Where the INPUTS are: the slides and photos (`AccessDatasets`), and the
+#: slides moved out of them for scanner damage (`datasets_holed/`). Its own
+#: root, because pointing outputs elsewhere must not move the data. Override
+#: with LOCASCOPE_DATA_ROOT.
+DATA_ROOT = os.environ.get(
+    'LOCASCOPE_DATA_ROOT', os.path.abspath(os.path.join(PROJECT_ROOT, '..')))
+DATASETS_DIR = os.path.join(DATA_ROOT, 'datasets')
+HOLED_DATASETS_DIR = os.path.join(DATA_ROOT, 'datasets_holed')
+#: Model weights: HF_HOME's default (jobscripts/_env.sh exports the same) and
+#: the CONCH checkpoint directory under it.
+MODEL_WEIGHTS_DIR = os.path.join(OUTPUT_ROOT, 'model_weights')
 QUERY_SIM_DIR = os.path.join(PROJECT_ROOT, 'query_sim')
 # stage1_estimation/, stage2_retrieval/ and stage3_localization/ are real
 # packages: imported as `stage2_retrieval.X` off PROJECT_ROOT, so
@@ -126,6 +137,12 @@ def encoder_tag(encoder: str, head: str = '') -> str:
     return f'{encoder}_{head}' if head else str(encoder)
 
 
+def job_name(default: str) -> str:
+    """SLURM_JOB_NAME, else `default`: the name a job's results AND the caches
+    it made carry (`job_result_dir`, `Cache.cache_root`)."""
+    return os.environ.get('SLURM_JOB_NAME') or default
+
+
 def job_result_dir(default_name: str, *, encoder: str = '') -> str:
     """
     Return the per-job output directory: RESULT_DIR / (SLURM_JOB_NAME or default_name).
@@ -147,7 +164,7 @@ def job_result_dir(default_name: str, *, encoder: str = '') -> str:
     encoder overwriting the first one's figures one at a time, which reads as a
     redrawn figure rather than as a collision. Pass encoder_tag(...) into it.
     """
-    name = os.environ.get('SLURM_JOB_NAME') or default_name
+    name = job_name(default_name)
     path = os.path.join(RESULT_DIR, name, encoder) if encoder \
         else os.path.join(RESULT_DIR, name)
     os.makedirs(path, exist_ok=True)

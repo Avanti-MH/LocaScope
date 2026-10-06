@@ -23,7 +23,6 @@ baseline:不用任何深度學習表徵,存在的價值是拿來比較(README �
 """
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 from dataclasses import dataclass, field
@@ -203,23 +202,3 @@ class ClassicEstMpp(IdentifiedBuild):
             query_fingerprint=[float(v) for v in q_feat],
             neighbour_levels=[self.ref_levels[i] for i in idx])
 
-
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("wsi", help="WSI 檔(.svs/.ndpi/...)")
-    ap.add_argument("query", help="query 顯微照片")
-    ap.add_argument("--tile", type=int, default=256, help="比對視窗大小")
-    ap.add_argument("--samples", type=int, default=40, help="每層 sample 幾塊")
-    ap.add_argument("--k", type=int, default=3, help="KNN 的 K 值")
-    ap.add_argument("--seg", default='hest', choices=sorted(MASK_RECIPES))
-    ap.add_argument("--device", default='cuda')
-    args = ap.parse_args()
-    import torch
-    query = cv2.cvtColor(cv2.imread(args.query), cv2.COLOR_BGR2RGB)
-    est = ClassicEstMpp(ClassicEstMppConfig(tile=args.tile, samples=args.samples,
-                                            k=args.k, seg=args.seg),
-                        torch.device(args.device)).build(args.wsi)
-    r = est.estimate(query)
-    print(f"query 指紋 = sc:{r.query_fingerprint[0]:.3f}  ac:{r.query_fingerprint[1]:.3f}")
-    print(f"最近層 {r.neighbour_levels}   估計 MPP ≈ {r.estimated_mpp:.4f}   "
-          f"chosen level {r.chosen_level}")

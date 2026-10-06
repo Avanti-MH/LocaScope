@@ -50,11 +50,6 @@ LEVEL_REL_TOL = 1e-3
 #: count, so a sampler placing for a camera and the camera cannot disagree.
 REAL_PHOTO_SENSOR = (1440, 1024)
 
-#: The encoder's input tile side, px -- what a reference tile, a query tile and
-#: a routing-head sensor all are.
-TILE_PX = 256
-
-
 
 def level_for(level_downsamples: Sequence[float], ds: float) -> int:
     """The level to READ for downsample `ds`: the coarsest whose native

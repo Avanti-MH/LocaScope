@@ -94,7 +94,8 @@ for _d in (_HERE, _HERE.parent / 'utilities'):
 # The same value GigaPathFunc and ConchVitFunc set, and that is the point: the
 # freeze happens at the first huggingface_hub import in the process, which is
 # often neither of them. GigaPathFunc carries the full argument.
-os.environ.setdefault('HF_HOME', '/work/u26130998/model_weights')
+from _paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+os.environ.setdefault('HF_HOME', MODEL_WEIGHTS_DIR)
 
 _DOTENV = _HERE.parent / '.env'
 if _DOTENV.exists():

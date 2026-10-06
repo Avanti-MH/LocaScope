@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 import numpy as np
 
@@ -59,7 +59,6 @@ class FovSupply:
         self.cfg = cfg if cfg is not None else SamplerConfig()
         self.mask = mask
         self._sampler: Optional[TileSampler] = None
-        self._objectives: Dict[float, Render] = {}
 
     @classmethod
     def cached(cls, microscope: Render, plan: PlanSpec, cfg: SamplerConfig,
@@ -101,12 +100,9 @@ class FovSupply:
 
     def camera_for(self, ds: float) -> Render:
         """The objective a position at `ds` is photographed through -- also
-        what maps its photo back to level 0 (`output_to_level0`)."""
-        ds = float(ds)
-        cam = self._objectives.get(ds)
-        if cam is None:
-            cam = self._objectives[ds] = self.microscope.at(ds)
-        return cam
+        what maps its photo back to level 0 (`output_to_level0`). `Render.at`
+        caches its objectives, so the same ds is the same Render."""
+        return self.microscope.at(float(ds))
 
     def photo(self, meta) -> Tuple[np.ndarray, dict]:
         """`(image, params)` of one position of the draw -- the same picture

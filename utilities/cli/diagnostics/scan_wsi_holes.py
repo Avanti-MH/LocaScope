@@ -38,7 +38,7 @@ as broken. SlideProbe replaces the handle on each failure, which is also why
 
 Usage:
     python utilities/cli/diagnostics/scan_wsi_holes.py \\
-        --wsi-path "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
+        --wsi-path "/work/u26130998/datasets_holed/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
         --levels 0,1,2,3,4 --block 4096 --out result/WsiHoles
     python utilities/cli/diagnostics/scan_wsi_holes.py --dataset ki67_pure bracs/test
 

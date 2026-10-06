@@ -30,6 +30,12 @@ source jobscripts/_env.sh
 #                         sampler reserves exactly what is read (a decoy each)
 #    test_tile_sampler    WHERE: lattice, richness, overlap, inherit, cache,
 #                         and the rectangular-camera fov section
+#    test_camera --only fingerprint
+#                         two photos of a synthetic slide, pinned to
+#                         DomainGapConfig.VERSION
+#    test_safe_slide      SafeSlide on the holed slide in datasets_holed/: a
+#                         failed read is recovered, the handle survives
+#                         (skipped with NO_SLIDES)
 #
 #  Per slide:
 #    test_slide_reader    SlideReader.read against read_region_rgb, and
@@ -78,6 +84,9 @@ run() {
 }
 run utilities/test_modules/test_read_geometry.py
 run utilities/test_modules/test_tile_sampler.py
+run utilities/test_modules/test_camera.py --only fingerprint
+# SafeSlide against the one slide with a known hole (its own default).
+[ -n "$SLIDES" ] && run utilities/test_modules/test_safe_slide.py
 for name in $SLIDES; do
     # locate() raises KeyError listing every known name if this one is not
     # found, which is a better failure than the test reading the wrong tissue.

@@ -47,8 +47,8 @@ Usage:
 
     # no ground truth: one photo, one slide, draw the best 5 and look
     python utilities/cli/driver/slide_win_sift.py \\
-        /work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037_ki67/1.bmp \\
-        "/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs"
+        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/1.bmp \\
+        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs
 
 Outputs (into --out, default result/SlideWinSift):
     results.csv                one row per photo: hits, distances, timings
