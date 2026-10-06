@@ -215,6 +215,37 @@ def routing_camera(tile_size: int):
     return full
 
 
+#: The code between a manifest row and its tile in this package (`render_row`,
+#: `CameraBank`, `choose_read_level`) -- ConfigIdentity rule 3.
+DATA_VERSION = 0
+
+
+def data_record(tile_size: int, seg: str) -> Dict:
+    """What a routing head's tiles and labels are made of, apart from WHICH
+    slides and how many positions: the sampler's distribution (its config
+    without `n_per_rung` and `seed`), the plan, both camera templates, the
+    rungs, the mask recipe, every VERSION on the way and the environment.
+    A checkpoint carries the one it was trained on (`extra['data']`) and
+    `cli/evaluate.py` refuses to score it on data whose record differs, so a
+    changed render cannot be read as a changed model."""
+    from ConfigIdentity import enc, environment, parts_of, short_id, versions_of
+    sampler = SamplerConfig(richness=RICHNESS, overlap=OVERLAP)
+    mask = MASK_RECIPES[seg]
+    plan = PlanSpec('ladder', tuple(RUNGS), camera=routing_camera(tile_size))
+    parts = ([f'sampler.{p}' for p in parts_of(sampler, exclude=('n_per_rung', 'seed'))]
+             + [f'plan={enc(plan.key())}', f'rungs={enc(RUNGS)}',
+                f'camera_full={enc(CAMERA_FULL.identity_id())}',
+                f'camera_native={enc(CAMERA_GEOMETRY_ONLY.identity_id())}',
+                f'seg_id={enc(mask.seg_id())}', f'region_id={enc(mask.region_id())}',
+                f'version={enc(DATA_VERSION)}'])
+    versions = {}
+    for owner in (sampler, mask, CAMERA_FULL, SlideReader):
+        versions.update(versions_of(owner))
+    return {'id': short_id(parts), 'parts': parts,
+            'versions': dict(sorted(versions.items())), 'upstream': {},
+            'env': environment()}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  manifest -- position identity only, no pixels, no Camera
 # ══════════════════════════════════════════════════════════════════════════

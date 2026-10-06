@@ -60,7 +60,8 @@ import torch                                                        # noqa: E402
 
 import _paths                                                       # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
-    RUNGS, add_cache_args, build_manifest, open_caches, read_label_of)
+    RUNGS, add_cache_args, build_manifest, data_record, open_caches,
+    read_label_of)
 from AccessDatasets import list_names                                # noqa: E402
 from training.MppRoutingHead.Runtime import (                       # noqa: E402
     build_from_checkpoint, encode_raw, head_parts, predict, rescore_by_rung,
@@ -179,6 +180,15 @@ def main() -> int:
                 f'{path.name} was trained with seg={seg!r} and --seg is '
                 f'{args.seg!r}: the test positions would come from a different '
                 f'mask than the ones it learned on')
+        # Everything else the tiles are made of: sampler distribution, camera
+        # templates, rungs, the code versions and the environment.
+        from ConfigIdentity import record_diff                    # noqa: PLC0415
+        stale = record_diff(ckpt['extra'].get('data'), data_record(args.tile, args.seg))
+        if stale:
+            raise ValueError(
+                f'{path.name} was trained on other data than the test rows '
+                f'would be made of: ' + '; '.join(stale) + '. Retrain it, or '
+                f'score it with the code and environment it was trained under')
 
         head_name = ckpt['head_name']
         for dataset_id, drows in rows.items():

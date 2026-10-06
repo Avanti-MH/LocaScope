@@ -521,6 +521,10 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             print(f'  [SKIP] failed to build: {type(exc).__name__}: {exc}  '
                  f'[{_mem_snapshot(device)}]')
             continue
+        # The estimator's own identity, weights included: two checkpoints
+        # under one label are two estimators, and analyze_stage1_metrics
+        # refuses to carry a val threshold across them.
+        estimator_id = estimator.identity_id()
         # Where a method's time goes, summed over its FoVs.
         t_build = t_fwd = t_vote = 0.0
         n_fov = 0
@@ -559,7 +563,7 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                         encoder=spec['encoder'], classifier=spec['classifier'],
                         reduction=spec['reduction'], loss=spec['loss'],
                         read_level=spec['read_level'],
-                        weights=spec['weights'])
+                        weights=spec['weights'], estimator_id=estimator_id)
 
                     if spec['kind'] not in VOTING_KINDS:
                         t0 = time.perf_counter()

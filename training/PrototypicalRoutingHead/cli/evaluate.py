@@ -74,7 +74,8 @@ setup_import_paths()
 import torch                                                        # noqa: E402
 
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
-    add_cache_args, build_manifest, open_caches, RUNGS, RenderConfig,
+    add_cache_args, build_manifest, data_record, open_caches, RUNGS,
+    RenderConfig,
     CameraBank)
 from AccessDatasets import list_names                                # noqa: E402
 from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
@@ -272,6 +273,14 @@ def main() -> int:
 
         num_prefix = int(encoder.model_spec.num_prefix)
         extra = ckpt.get('extra', {})
+        # Everything else the episodes are made of (Datasets.data_record).
+        from ConfigIdentity import record_diff                    # noqa: PLC0415
+        stale = record_diff(extra.get('data'), data_record(args.tile, args.seg))
+        if stale:
+            raise ValueError(
+                f'{path.name} was trained on other data than the test episodes '
+                f'would be made of: ' + '; '.join(stale) + '. Retrain it, or '
+                f'score it with the code and environment it was trained under')
         # support_native: by default read back off THIS
         # checkpoint's own recorded args, same as tile above -- render_episode
         # reproduces whatever this specific arm trained under (CAMERA_FULL or

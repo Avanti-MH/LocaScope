@@ -98,7 +98,8 @@ import torch.nn.functional as F                                     # noqa: E402
 import _paths                                                       # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
     NUM_CLASSES, READ_LEVELS, RESAMPLE_FROM, RUNGS, RenderConfig,
-    add_cache_args, build_manifest, cache_jobs, class_weights, iterate_epoch,
+    add_cache_args, build_manifest, cache_jobs, class_weights, data_record,
+    iterate_epoch,
     open_caches)
 from AccessDatasets import list_names                                # noqa: E402
 from Heads import HeadConfig, resolve_encoder_layers                # noqa: E402
@@ -914,7 +915,10 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
                   # this package's own `Datasets.RUNGS` at inference time,
                   # which could drift out of sync with what a specific
                   # checkpoint was actually trained against.
-                  extra=dict(tile_size=args.tile, rungs=RUNGS))
+                  extra=dict(tile_size=args.tile, rungs=RUNGS,
+                             # what the tiles were made of; evaluate.py
+                             # refuses test data whose record differs
+                             data=data_record(args.tile, args.seg)))
     save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
                                            'last', loss=args.loss,
                                            read_tag=read_tag), **common)

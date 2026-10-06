@@ -3350,3 +3350,19 @@ front of whoever flips it.
       開檔（階段 3 之後 read_matching_rgb 拒絕 plain OpenSlide，這裡原本會 TypeError）。
     - 未接：build_reference_store、bench_tile_retrieval 寫的 FeatureStore（record 為 ''），
       它們的讀者是分析 bench，沒有讀取時檢查。
+
+[x] 2026-10-07 | Identity 進結果與 checkpoint（階段 4c）
+    - stage 1 bench 每一列帶 estimator_id（估計器的 identity_id，含 weights；KNN 的 model 是
+      其 encoder）。ClassicEstMpp/Config 改用 IdentifiedBuild/IdentifiedConfig。
+    - analyze_stage1_metrics：--fit-thresholds 記下每個 kind 的 estimator id 集合；讀 val
+      thresholds 套到 test 時，集合不同就拒絕（之前檔名只含 FoV 與 mask，重訓 classifier 後會把
+      舊 checkpoint 的 val 門檻靜默套到新 checkpoint 的 test）。舊的 thresholds json 沒有這個欄位，
+      要重新 fit。
+    - routing head（MppRoutingHead、PrototypicalRoutingHead）的 checkpoint 在 extra['data'] 帶
+      Datasets.data_record：sampler 分布（不含 n_per_rung/seed）、plan、兩個 camera template、
+      rungs、mask 的 seg_id/region_id、DATA_VERSION、各 VERSION、環境。evaluate 不符就拒絕並
+      列出哪一項。現有 checkpoint 都沒有這個欄位，一律拒絕 → 重訓（使用者接受）。這同時回答了
+      「畸變修正後 routing head 要不要重訓」：要，而且系統會說。
+    - stage 1 bench 用 classifier/prototype checkpoint 估真實分布的照片（PHOTO_GAP），本來就和
+      訓練資料不同，不做 data_record 比對；那邊靠 estimator_id。
+    - window bench / stage 1 bench 的組合 id 已在 4a 改為元件 id 組成。

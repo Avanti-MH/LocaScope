@@ -216,6 +216,24 @@ def t_record_names_what_differs():
         ["upstream.seg_id: stored 'hest-2', now 'hest-1'"], CI.record_diff(up, want)
 
 
+def t_routing_data_record_moves_with_what_makes_the_tiles():
+    """A checkpoint's data record (MppRoutingHead.Datasets.data_record): equal
+    for the same data, and naming the field when the tile size or the
+    package's DATA_VERSION moves."""
+    import training.MppRoutingHead.Datasets as D
+    a = D.data_record(256, 'hest')
+    assert CI.record_diff(a, D.data_record(256, 'hest')) == []
+    assert any(d.startswith('id:') for d in CI.record_diff(a, D.data_record(224, 'hest')))
+    saved = D.DATA_VERSION
+    try:
+        D.DATA_VERSION = saved + 1
+        diff = CI.record_diff(a, D.data_record(256, 'hest'))
+    finally:
+        D.DATA_VERSION = saved
+    assert any('version=' in d for d in diff), diff
+    return f'record {a["id"]}'
+
+
 def t_environment_names_the_libraries():
     env = CI.environment()
     assert 'python' in env and 'numpy' in env and 'torch' in env, env
@@ -247,6 +265,7 @@ _MODULES = ('TileEncoderFunc', 'GigaPathFunc', 'Uni2Func', 'ConchVitFunc',
             'TissueMaskConfig', 'TileSampler', 'config',
             'stage1_estimation.KnnEstMpp', 'stage1_estimation.ClassifierEstMpp',
             'stage1_estimation.PrototypeEstMpp',
+            'stage1_estimation.estimate_mpp_classic',
             'stage2_retrieval.SlidingWinSimRot')
 _SUPERPATHPOINT = ('SuperPoint.Backbones', 'SuperPoint.Datasets',
                    'SuperPoint.Decoders', 'SuperPoint.EncoderBackbone',
@@ -630,6 +649,7 @@ def main() -> int:
     check('versions follow the owner',        t_versions_follow_the_owner)
     check('record_diff names the field',      t_record_names_what_differs)
     check('environment',                      t_environment_names_the_libraries)
+    check('routing data record',              t_routing_data_record_moves_with_what_makes_the_tiles)
 
     print('every config')
     check('own, complete, literal baseline',  t_every_config_owns_a_complete_literal_baseline)

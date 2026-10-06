@@ -40,7 +40,9 @@ question here needs it -- not the other way round.
                                               (bench_stage1_mpp.fov_stats)
 
         split                                 -- val / test
-        risk_*                                -- FoVVote.diagnose: the raw
+        estimator_id                          -- the estimator's identity_id,
+                                              weights included
+        risk_*                              -- FoVVote.diagnose: the raw
                                               quantities FoV_Vote.md's danger
                                               section names for the row's rule
 
@@ -49,7 +51,8 @@ the log2-rung MAE. Section 6 is FoV_Vote.md's risk flags: prevalence,
 accuracy flagged / unflagged and the risk ratio, overall and per GT rung.
 Their thresholds are fitted on a VAL run (`--fit-thresholds`, which refuses a
 test file) and read back for test (`--thresholds auto` finds the val file of
-the same recipe). Section 7 is risk-coverage per rule; `*_confusion.csv`
+the same recipe), refused when the test file's estimators -- per kind, by
+`estimator_id` -- are not the ones the val file was fitted on. Section 7 is risk-coverage per rule; `*_confusion.csv`
 holds every method's confusion matrix.
 
 Section 5 is the vote diagnosis: which rule wins, where two rules disagree
@@ -807,6 +810,31 @@ def _finite(v) -> bool:
     return v is not None and not math.isnan(v)
 
 
+def estimators_by_kind(rows: list) -> dict:
+    """`{kind: sorted estimator ids}` -- which estimators a file's taus are
+    taken over. A threshold is per kind, so it is only valid for the same set
+    of estimators: a retrained checkpoint under the same label is another."""
+    out = collections.defaultdict(set)
+    for r in rows:
+        if cell(r, 'vote'):
+            out[kind_of(r)].add(cell(r, 'estimator_id') or '')
+    return {k: sorted(v) for k, v in sorted(out.items())}
+
+
+def check_estimators(fitted: dict, rows: list, path: str) -> None:
+    """Refuse taus fitted on other estimators than the ones in `rows`."""
+    stored, now = fitted.get('estimators'), estimators_by_kind(rows)
+    if stored is None:
+        sys.exit(f'{path} records no estimator ids; refit it on the val run '
+                 f'(--fit-thresholds)')
+    bad = [f'{k}: val {stored.get(k)}, this file {now.get(k)}'
+           for k in sorted(set(stored) | set(now)) if stored.get(k) != now.get(k)]
+    if bad:
+        sys.exit(f'{path} was fitted on other estimators than this file holds -- '
+                 + '; '.join(bad) + '. Rerun the val split with the same '
+                 'estimators and refit')
+
+
 def fit_thresholds(rows: list, source: str) -> dict:
     """Every tau of THRESHOLD_SPECS, per (kind, vote label) -- a prototype's
     near-uniform probabilities and a classifier's sharp ones are different
@@ -830,6 +858,7 @@ def fit_thresholds(rows: list, source: str) -> dict:
             if v:
                 values[f'{kind}|{label}|{tau}'] = dict(value=pctl(v, q), n=len(v))
     return dict(source=os.path.abspath(source),
+                estimators=estimators_by_kind(rows),
                 specs={k: dict(rule=r, column=c, quantile=q, abs=a)
                        for k, (r, c, q, a) in THRESHOLD_SPECS.items()},
                 values=values)
@@ -1160,7 +1189,9 @@ def main() -> int:
                         if args.csv_path.endswith('_test.csv') else '')
             if path and os.path.exists(path):
                 with open(path) as fh:
-                    taus = json.load(fh)['values']
+                    fitted = json.load(fh)
+                check_estimators(fitted, rows, path)
+                taus = fitted['values']
                 print(f'\n  thresholds from {path}')
             else:
                 print(f'\n  [warn] no thresholds file ({path or "not a _test.csv"}); '

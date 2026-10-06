@@ -72,7 +72,8 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
-    add_cache_args, build_manifest, cache_jobs, CameraBank, open_caches,
+    add_cache_args, build_manifest, cache_jobs, CameraBank, data_record,
+    open_caches,
     RenderConfig, RUNGS)
 from AccessDatasets import list_names                                # noqa: E402
 from WsiSplit import native_bracs_rung_wsi_names                     # noqa: E402
@@ -617,7 +618,8 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
                            native_accuracy=summary['native'],
                            by_dataset=summary['by_dataset']),
                   run_args=vars(args),
-                  extra=dict(cross_domain_dataset=args.cross_domain_dataset, **run))
+                  extra=dict(cross_domain_dataset=args.cross_domain_dataset,
+                             data=data_record(args.tile, args.seg), **run))
 
     def fname(tag: str) -> str:
         return _prototype_weight_filename(

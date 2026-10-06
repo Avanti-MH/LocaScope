@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.join(
 from _paths import setup_import_paths                                   # noqa: E402
 setup_import_paths()
 
+from ConfigIdentity import IdentifiedBuild, IdentifiedConfig             # noqa: E402
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SafeSlide import SafeSlide                                         # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
@@ -95,7 +96,7 @@ _REFERENCE_BANK_RICHNESS = RichnessConfig(
 
 
 @dataclass(frozen=True)
-class ClassicEstMppConfig:
+class ClassicEstMppConfig(IdentifiedConfig):
     tile: int = 256          # 參考 tile 與 query 中央裁切的邊長(不縮放)
     samples: int = 40        # 每層參考 tile 數
     k: int = 3
@@ -103,6 +104,9 @@ class ClassicEstMppConfig:
     seed: int = 0
     seg: str = 'hest'        # build(wsi) 沒給 mask 時用的 MASK_RECIPES 名稱
     sampler_cfg: Optional[SamplerConfig] = field(default=None)
+
+    BASELINE = {'tile': 256, 'samples': 40, 'k': 3, 'min_std': 6.0, 'seed': 0,
+                'seg': 'hest', 'sampler_cfg': None}
 
     def sampler(self) -> SamplerConfig:
         if self.sampler_cfg is not None:
@@ -123,11 +127,13 @@ class ClassicEstMppResult(EstMppResult):
 
 # ── estimator ────────────────────────────────────────────────────────────────
 
-class ClassicEstMpp:
+class ClassicEstMpp(IdentifiedBuild):
 
     def __init__(self, cfg: Optional[ClassicEstMppConfig] = None, device=None):
         self.cfg = cfg or ClassicEstMppConfig()
         self.device = device
+        self.model = None
+        self._weights_id = None
         self.wsi = None
         self.ref_levels: List[int] = []
         self.ref_mpps: Optional[np.ndarray] = None
