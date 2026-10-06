@@ -177,14 +177,16 @@ def run_stage1(wsi, mask, query_qc, args, device):
 def run_stage2(wsi, mask, query_np, estimate, args, device):
     """Stage 2 on stage 1's output (or its ground-truth substitute). Builds
     its own encoder, as stage 1 does."""
-    t0 = time.perf_counter()
     retriever = SlidingWinSimRot(
         SlidingWinSimRotConfig(stage2_encoder_cfg(args), tile_size=args.tile,
                                        overlap=args.overlap),
         device, read_workers=CpuBudget.for_job(processes=1).apply().workers
     ).build(wsi, mask)
+    # the routed level's features, timed alone; retrieve() reuses them
+    t0 = time.perf_counter()
+    features = retriever.build_wsi_features(level=int(estimate.chosen_level))
     built = time.perf_counter() - t0
-    n_tiles = sum(len(fm.features) for fm in retriever.wsi_features)
+    n_tiles = sum(len(fm.features) for fm in features)
     print(f'  features: {n_tiles:,} tiles in {built:.1f}s = '
           f'{n_tiles / max(built, 1e-9):.0f} tiles/s ({args.precision})', flush=True)
     cs = retriever.retrieve(query_np, estimate)
