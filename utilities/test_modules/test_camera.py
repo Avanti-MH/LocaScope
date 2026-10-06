@@ -48,11 +48,14 @@ setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 
-from camera import Render                                        # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR as SENSOR, SENSOR_MARGIN  # noqa: E402
+import cv2                                                       # noqa: E402
+
+from camera import Render, render_spec                           # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR as SENSOR             # noqa: E402
 from ReadGeometry import ReadSpec                                # noqa: E402
 from SlideReader import SlideReader                              # noqa: E402
-from pipeline import simulate_with_gt                            # noqa: E402
+from pipeline import (_apply_params, _sample_params, lens_margin,  # noqa: E402
+                      simulate_with_gt)
 from config import DomainGapConfig                               # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from augment import field, geometry, lens                        # noqa: E402
@@ -347,9 +350,9 @@ def augment_cfg() -> DomainGapConfig:
 def textured_shots(camera, wsi, n_shots: int, seed: int) -> list:
     """(xy, raw square, params) from places whose pixels actually vary.
 
-    `reader.read` with the sensor margin returns the array the augment chain receives at rotation 0 --
-    the FoV rect plus SENSOR_MARGIN, which is what the camera reads once it knows
-    the exposure does not turn -- and `capture_with_gt` returns the parameter
+    `reader.read` at the camera's own spec returns the array the augment
+    chain receives -- `augment_cfg` does not turn, so the FoV rect plus its
+    margin -- and `capture_with_gt` returns the parameter
     set the chain would have been given. Both come straight off the camera, so
     nothing in this file invents an input.
     """
@@ -365,8 +368,7 @@ def textured_shots(camera, wsi, n_shots: int, seed: int) -> list:
             break
         x = int(rng.integers(0, span_x))
         y = int(rng.integers(0, span_y))
-        raw = q.reader.read(x, y, ReadSpec(q.output_w, q.output_h,
-                                           margin_out=SENSOR_MARGIN), q.ds)
+        raw = q.reader.read(x, y, q.spec, q.ds)
         if raw is None:
             continue
         array = np.array(raw)
@@ -498,7 +500,7 @@ def time_captures(wsi, cfg, positions, seed: int, level_ds: float) -> dict:
     # no rewrite in this file touches.
     set_fast(True)
     cam = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=seed)
-    pad = ReadSpec(cam.output_w, cam.output_h, margin_out=SENSOR_MARGIN)
+    pad = cam.spec
     reads = []
     for x, y in positions:
         start = time.perf_counter()
@@ -585,8 +587,7 @@ def run_augment(args, wsi, level_ds) -> int:
     camera = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=args.seed)
     q = camera
 
-    read_w = q.output_w + 2 * SENSOR_MARGIN
-    read_h = q.output_h + 2 * SENSOR_MARGIN
+    read_w, read_h = q.geometry.read_out(q.spec.rotates, q.spec.margin_out)
     side = q.geometry.square_out
     print(f'{Path(args.wsi).name}  L{args.level}  ds={level_ds:.4f}')
     print(f'sensor {q.output_w}x{q.output_h}   read {read_w}x{read_h} = '
@@ -668,11 +669,10 @@ def _frozen_sensor_size(wh_ratio: str, MPixels: float):
 
 def run_sensor(args, wsi, level_ds) -> int:
     """Every (ratio, MPixels) the project spelled a sensor with is the pixel
-    pair that replaces it, and the 4:3 decoy is not. A Render at (sensor, ds)
-    photographs what the frozen path -- the sensor's read, then the gap --
-    did, bit for bit, at three rngs whose photos must differ from each other;
-    `effective_mpp` is `ds * base_mpp / scale`; a Render without a sensor or
-    a ds is refused."""
+    pair that replaces it, and the 4:3 decoy is not. A Render photographs its
+    own spec's read through the gap, at three rngs whose photos must differ;
+    `effective_mpp` is `ds * base_mpp / scale`; a Render without a sensor or a
+    ds is refused."""
     failures = []
 
     def check(ok, what):
@@ -693,15 +693,14 @@ def run_sensor(args, wsi, level_ds) -> int:
     cfg = full_gap_cfg()
     cam = Render(reader, SENSOR, cfg, ds=level_ds, seed=args.seed)
     (x, y), _ = pick_textured_position(cam, wsi, seed=args.seed)
-    spec = ReadSpec(*SENSOR, rotates=True, margin_out=SENSOR_MARGIN)
     photos = []
     for k in range(3):
         new, p = cam.capture_with_gt(x, y, rng=random.Random(k))
-        raw = reader.read(x, y, spec, level_ds)
+        raw = reader.read(x, y, cam.spec, level_ds)
         old, _ = simulate_with_gt(raw, cfg=cfg, rng=random.Random(k),
-                                  output_wh=tuple(SENSOR))
+                                  output_wh=tuple(SENSOR), mpp=cam.mpp)
         check(new is not None and np.array_equal(new, old),
-              f'rng {k}: the Render photo is the frozen read + gap, bit for bit')
+              f'rng {k}: the photo is the read at the camera\'s spec + the gap')
         check(abs(p['effective_mpp'] - cam.mpp / p['scale']) < 1e-12
               and abs(cam.mpp - level_ds * wsi.base_mpp) < 1e-12,
               f'rng {k}: effective_mpp is ds * base_mpp / scale')
@@ -719,9 +718,149 @@ def run_sensor(args, wsi, level_ds) -> int:
     return 1 if failures else 0
 
 
+# ==============================================================================
+#  reach -- the read holds everything an exposure samples (synthetic, no slide)
+# ==============================================================================
+
+#: The cameras the project builds: the routing heads' tile (CAMERA_FULL's
+#: geometry and optics), the stage-1 / pipeline FoV, the window bench's still FoV.
+REACH_CAMERAS = (
+    ('tile 256, CAMERA_FULL', (TILE, TILE), DomainGapConfig(stage_shift_max=0)),
+    ('FoV, default gap', SENSOR, DomainGapConfig()),
+    ('FoV, still', SENSOR, DomainGapConfig(rotation_choices=(0,), angle_jitter_deg=0.0,
+                                           scale_range=(1.0, 1.0),
+                                           stage_shift_max=0)),
+)
+REACH_WIDER = 400     # output px: how much wider the reference read is
+REACH_CORNER = 24     # output px: the corner squares compared
+
+
+def _texture(side: int, seed: int) -> np.ndarray:
+    """Smooth random tissue stand-in: a half-pixel misalignment between two
+    reads changes it a little, a reflected border changes it a lot."""
+    rng = np.random.default_rng(seed)
+    noise = rng.integers(0, 256, (side, side, 3), dtype=np.uint8)
+    smooth = cv2.GaussianBlur(noise, (0, 0), 4).astype(np.float32)
+    lo, hi = smooth.min(), smooth.max()
+    return ((smooth - lo) * (255.0 / max(hi - lo, 1.0))).astype(np.uint8)
+
+
+def _centred(img: np.ndarray, w: int, h: int) -> np.ndarray:
+    H, W = img.shape[:2]
+    x0, y0 = (W - w) // 2, (H - h) // 2
+    return img[y0:y0 + h, x0:x0 + w]
+
+
+def _worst_params(cfg: DomainGapConfig, angle: float) -> dict:
+    """One draw with every outward-reaching op at its extreme and every
+    per-pixel op off, so two renders differ only where their reads did."""
+    p = _sample_params(cfg, random.Random(0), mpp=1.0)
+    j = cfg.query_mpp_jitter
+    low = (1.0 - j) if j > 0 else float(cfg.scale_range[0])
+    p.update(rot_deg=int(round(angle)), angle_jitter=angle - int(round(angle)),
+             scale=low, distortion_k1=float(min(cfg.distortion_k1_range)),
+             distortion_k2=float(cfg.distortion_k2),
+             stage_shift_dx=cfg.stage_shift_max, stage_shift_dy=cfg.stage_shift_max,
+             vignette_strength=0.0, noise_sigma=0.0, brightness=0.0,
+             contrast=0.0, color_temp=0.0, jpeg_quality=100)
+    return p
+
+
+def _corner_centre(a: np.ndarray, b: np.ndarray) -> tuple:
+    """Largest |a - b| in the four corner squares, and in the centre square.
+    The largest, not the mean: a reflected wedge covers part of a corner, and
+    where it does it differs by the texture's whole range."""
+    d = np.abs(a.astype(np.int16) - b.astype(np.int16)).max(axis=2)
+    c = REACH_CORNER
+    h, w = d.shape
+    corner = float(max(d[:c, :c].max(), d[:c, -c:].max(),
+                       d[-c:, :c].max(), d[-c:, -c:].max()))
+    centre = float(d[h // 2 - c:h // 2 + c, w // 2 - c:w // 2 + c].max())
+    return corner, centre
+
+
+def run_reach(args, wsi, level_ds) -> int:
+    """For each camera, the worst draw (largest angle, smallest scale, the
+    most outward k1, the full stage shift), rendered from the read its spec
+    asks for and from one REACH_WIDER px wider: the corners must agree as
+    well as the centre does. The decoy is the read without the margin: where
+    the margin is non-zero, its corners must not. And the distortion is the
+    sensor's: two frames of different margins give the same sensor crop, where
+    normalising to the frame (the decoy) does not."""
+    failures = []
+
+    def check(ok, what):
+        print(f'  {"ok  " if ok else "FAIL"} {what}', flush=True)
+        if not ok:
+            failures.append(what)
+
+    for name, sensor, cfg in REACH_CAMERAS:
+        spec = render_spec(cfg, sensor)
+        geo = spec.geometry(1.0)
+        rw, rh = geo.read_out(spec.rotates, spec.margin_out)
+        big = _texture(max(rw, rh) + 2 * REACH_WIDER, seed=7)
+        angle = (float(cfg.rotation_choices[0]) + cfg.angle_jitter_deg
+                 if cfg.geometric else 0.0)
+        p = _worst_params(cfg, angle)
+        ref = _apply_params(_centred(big, rw + REACH_WIDER, rh + REACH_WIDER),
+                            cfg, p, output_wh=tuple(sensor))
+        new = _apply_params(_centred(big, rw, rh), cfg, p, output_wh=tuple(sensor))
+        corner, centre = _corner_centre(new, ref)
+        print(f'  {name}: read {rw}x{rh} (margin {spec.margin_out})  '
+              f'|new - wider| corner {corner:.2f}  centre {centre:.2f}', flush=True)
+        check(corner <= 1.5 * centre + 4.0,
+              f'{name}: the corners agree with the wider read as the centre does')
+        if spec.margin_out:
+            dw, dh = geo.read_out(spec.rotates, 0)
+            old = _apply_params(_centred(big, dw, dh), cfg, p, output_wh=tuple(sensor))
+            dec, _ = _corner_centre(old, ref)
+            print(f'  {name}: decoy read {dw}x{dh}  corner {dec:.2f}', flush=True)
+            check(dec > 2.0 * corner + 10.0,
+                  f'{name}: the decoy without the margin reflects into its corners')
+
+    w, h = SENSOR
+    lx = max(lens_margin(DomainGapConfig(), SENSOR))
+    tex = _texture(max(w, h) + 2 * (lx + 80) + 8, seed=11)
+    crops = []
+    for normalise in (tuple(SENSOR), None):
+        outs = [_centred(lens.apply_distortion(_centred(tex, w + 2 * m, h + 2 * m),
+                                               k1=-0.04, sensor=normalise), w, h)
+                for m in (lx + 8, lx + 80)]
+        crops.append(np.abs(outs[0].astype(np.int16) - outs[1]).max())
+    check(crops[0] <= 1, f'distortion normalised to the sensor: two frame margins '
+                         f'past its reach ({lx} px) give the same sensor crop '
+                         f'(max |d| {crops[0]})')
+    check(crops[1] > 10, f'the decoy, normalised to the frame: they differ '
+                         f'(max |d| {crops[1]})')
+
+    # A frame narrower than the reach: the difference must be exactly where
+    # the clip predicts -- output pixels whose source lies past the frame -- and
+    # nowhere else, so a failure of the check above could only have been that.
+    tight, k1 = 16, -0.04
+    outs = [_centred(lens.apply_distortion(_centred(tex, w + 2 * m, h + 2 * m),
+                                           k1=k1, sensor=tuple(SENSOR)), w, h)
+            for m in (tight, lx + 80)]
+    d = np.abs(outs[0].astype(np.int16) - outs[1]).max(axis=2)
+    nx, ny = (w - 1) / 2.0, (h - 1) / 2.0
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    dx, dy = xx - nx, yy - ny
+    factor = 1.0 + k1 * ((dx / nx) ** 2 + (dy / ny) ** 2)
+    clipped = ((np.abs(dx / factor) > nx + tight)
+               | (np.abs(dy / factor) > ny + tight))
+    near = cv2.dilate(clipped.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    outside = int(d[~near].max()) if (~near).any() else 0
+    inside = int(d[clipped].max()) if clipped.any() else 0
+    print(f'  frame margin {tight} < reach: {int(clipped.sum()):,} px predicted '
+          f'clipped, max |d| there {inside}, elsewhere {outside}', flush=True)
+    check(clipped.any() and inside > 10 and outside <= 1,
+          f'a frame narrower than the reach differs only where the clip '
+          f'predicts (there {inside}, elsewhere {outside})')
+    return 1 if failures else 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 
-SECTIONS = ('sensor', 'map', 'seed', 'augment')
+SECTIONS = ('sensor', 'reach', 'map', 'seed', 'augment')
 
 
 def main() -> int:
@@ -747,6 +886,7 @@ def main() -> int:
           f'level_mpp={level_mpp:.4f}')
 
     runners = {'sensor': lambda: run_sensor(args, wsi, level_ds),
+               'reach': lambda: run_reach(args, wsi, level_ds),
                'map': lambda: run_map(args, wsi, level_ds),
                'seed': lambda: run_seed(args, wsi, level_ds),
                'augment': lambda: run_augment(args, wsi, level_ds)}

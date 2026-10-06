@@ -3229,3 +3229,23 @@ front of whoever flips it.
     - SurvivalProcess 的 grid NMS 取代兩版 O(n*k)（list 每輪重建、預配置 buffer 切片），
       舊版留在 cli/demo_survival_analysis.py 當參考實作；34503 點快 131x，2 個 ChainStack
       端到端 anchor mismatch 0%、曲線 bit-identical、整體快 1.5x。
+
+[x] 2026-10-06 | 讀取的 margin 從 cfg 推導；畸變以 sensor 正規化；刪 SENSOR_MARGIN
+    - 問題：旋轉讀取只讀 sensor 外接正方形（1440x1024 是 1767²），沒算 zoom-out、畸變、
+      stage shift。預設 gap 最壞一次（3°、scale 0.9、k1 -0.04、shift 3）從輸出角落往回推，
+      取樣到中心外 ~912 px，讀取半寬 883 → 角落十幾 px 是 BORDER_REFLECT 的假組織。
+      DiagReadExpS1Photo 的 corners（photometric 關、無畸變）推 828.7 ≤ 883，量不到，一致。
+    - 第二個問題：畸變以「lens 框」（sensor + 2*64）的半寬正規化，不是 docstring 說的
+      sensor：同一個 k1，1440 相機 sensor 角落實際強度 (720/784)² ≈ 0.84，256 tile
+      (128/181.5)² ≈ 0.50，而且 margin 一改強度就跟著變。
+    - 改：apply_distortion(..., sensor=) 以 sensor 半寬正規化；pipeline.lens_margin
+      （感測器階段的取樣範圍）與 read_reach（加上場景階段、cfg 會抽到的每個角度）往回推；
+      camera.read_margin 換成讀取要多讀的 px，ReadSpec.margin_out 旋轉時也算（外接正方形
+      + 2m）。SENSOR_MARGIN 刪除。
+    - 結果：256 tile m=0、讀取 363² 不變；1440 預設 gap m=30、讀 1827²（面積 +7%）；
+      1440 不轉 m=69（原 64）。所有開畸變的照片都變（強度變成名目值）；routing head
+      現有 checkpoint 的 eval 照片和訓練時不同（使用者接受）。FoV 相機的 cache key
+      （cam1440x1024-rot-m30、-m69）換了，draw 重抽。
+    - 驗證：test_camera `reach`：最壞一次抽樣，依 spec 讀的照片 vs 讀寬 400 px，角落一致；
+      不加 margin 的讀取當對照，角落要不一致；畸變兩種框 margin 給同一個 sensor 裁切，
+      以框正規化當對照要不同。

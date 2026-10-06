@@ -47,28 +47,6 @@ REAL_PHOTO_SENSOR = (1440, 1024)
 TILE_PX = 256
 
 
-#: Pixels kept outside the sensor frame while the ops that read a neighbourhood
-#: run, then dropped. `apply_defocus` reaches `radius` px and `apply_chromatic`
-#: reaches `shift` -- both 2 by default, both trivial. `apply_distortion` is
-#: what sets this number, and it is derived rather than guessed.
-#:
-#: Under pincushion (k1 < 0) `remap` samples OUTWARD, and `src_x` is clipped to
-#: the frame, so a frame that is too tight smears its own corner. The output
-#: corner sits (719.5, 511.5) from the centre whatever the margin is -- the
-#: margin moves the centre, not the corner -- while the frame's half-width is
-#: 719.5 + M. Nothing is clipped when
-#:
-#:     719.5 / factor + cx <= 2*cx      i.e.   factor >= 719.5 / (719.5 + M)
-#:     factor = 1 + k1*r2,  worst case k1 = -0.04 (distortion_k1_range's floor)
-#:
-#: at 1440x1024:   M=32 gives factor 0.9279 against 0.9574 needed -- CLIPPED.
-#:                 M=56 is the crossing.  M=64 gives 0.9347 against 0.9183,
-#:                 13.7 px of headroom, and is what is used.
-#:
-#: It is how much a camera READS around its sensor (`ReadSpec.margin_out`,
-#: `render_spec`), so it is geometry and lives here.
-SENSOR_MARGIN = 64
-
 
 def level_for(level_downsamples: Sequence[float], ds: float) -> int:
     """The level to READ for downsample `ds`: the coarsest whose native
@@ -148,6 +126,7 @@ class FovGeometry:
     rect_h_l0: int
     square_l0: int
     square_out: int
+    ds: float
 
     @classmethod
     def of(cls, output_w: int, output_h: int, ds: float) -> 'FovGeometry':
@@ -157,23 +136,27 @@ class FovGeometry:
         return cls(output_w=int(output_w), output_h=int(output_h),
                    rect_w_l0=rect_w, rect_h_l0=rect_h,
                    square_l0=_ceil(square_out * float(ds)),
-                   square_out=square_out)
+                   square_out=square_out, ds=float(ds))
 
     def margin_l0(self, margin_out: int) -> int:
         """A sensor margin of `margin_out` output px, in level-0 px."""
         return int(round(margin_out * (self.rect_w_l0 / self.output_w)))
 
+    def read_out(self, rotates: bool, margin_out: int = 0) -> Tuple[int, int]:
+        """`(w, h)` output px a read covers: the bounding square or the FoV
+        rectangle, grown by `margin_out` output px on every side."""
+        m = int(margin_out)
+        if rotates:
+            return self.square_out + 2 * m, self.square_out + 2 * m
+        return self.output_w + 2 * m, self.output_h + 2 * m
+
     def read_rect(self, x: int, y: int, rotates: bool,
                   margin_out: int = 0) -> ReadRect:
-        """What is read for a FoV whose level-0 top-left is (x, y).
-
-            rotates     the bounding square, centred on the FoV
-                        (`crop_bounding_square`)
-            margin_out  the FoV grown by that many output px on every side
-                        (`crop_padded`); 0 is the FoV alone (`crop`)
-        """
+        """What is read for a FoV whose level-0 top-left is (x, y): the
+        bounding square centred on the FoV if it rotates, else the FoV, each
+        grown by `margin_out` output px on every side."""
         if rotates:
-            side = self.square_l0
+            side = _ceil((self.square_out + 2 * int(margin_out)) * self.ds)
             return ReadRect(int(x) - (side - self.rect_w_l0) // 2,
                             int(y) - (side - self.rect_h_l0) // 2, side, side)
         if margin_out <= 0:
@@ -186,8 +169,8 @@ class FovGeometry:
 @dataclass(frozen=True)
 class ReadSpec:
     """What a read covers, as far as anyone placing it needs to know: its
-    sensor in output px, whether it rotates, and the margin it reads around
-    the frame when it does not. No pixels, no slide.
+    sensor in output px, whether it rotates (then the bounding square is
+    read), and the margin read around that, in output px. No pixels, no slide.
 
     The sampler takes its footprint and its reserve from here -- it decides
     WHERE, the spec decides how big and what is read (`SlideReader.read`) --
@@ -195,7 +178,8 @@ class ReadSpec:
     computation both sides use.
 
         ReadSpec(256, 256, rotates=True)              a routing-head tile
-        ReadSpec(1440, 1024, rotates=True)            a microscope FoV
+        ReadSpec(1440, 1024, rotates=True, margin_out=m)  a microscope FoV; m from
+                                                      `camera.render_spec`
         ReadSpec(256, 256)                            a plain tile, nothing around it
         ReadSpec(256, 256, margin_out=256)            a 3x pre-tile around a tile
 
@@ -225,12 +209,8 @@ class ReadSpec:
         return self.sensor_w == self.sensor_h
 
     def key(self) -> str:
-        """A readable name for a cache path: every field that changes a read.
-        `margin_out` is not read by a rotating camera (it reads the bounding
-        square), so it is left out there rather than forking the key."""
-        base = f'cam{self.sensor_w}x{self.sensor_h}'
-        if self.rotates:
-            return base + '-rot'
+        """A readable name for a cache path: every field that changes a read."""
+        base = f'cam{self.sensor_w}x{self.sensor_h}' + ('-rot' if self.rotates else '')
         return base + (f'-m{self.margin_out}' if self.margin_out else '')
 
     def geometry(self, ds: float) -> FovGeometry:

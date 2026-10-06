@@ -9,22 +9,14 @@ which `FOVRecord.from_capture` folds into a row.
 
 from __future__ import annotations
 
-import os
+import math
 import random
-import sys
 from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image
 
-# utilities/ so ReadGeometry imports when this is used alone
-_UTILITIES = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                          '..', 'utilities'))
-if _UTILITIES not in sys.path:
-    sys.path.insert(0, _UTILITIES)
-
-from ReadGeometry import SENSOR_MARGIN   # noqa: E402 -- the crops below
-from config import DomainGapConfig       # noqa: E402
+from config import DomainGapConfig
 from augment.color    import (
     apply_color, apply_color_temp, apply_brightness_contrast, apply_jpeg,
 )
@@ -131,6 +123,68 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random,
     }
 
 
+# ── how far one exposure samples, before anything is read ────────────────────
+#
+# Walked backwards from the sensor's corner through `_apply_params`, every op at
+# the most outward value the config can draw, one px for every resample. The
+# read is sized from this (`camera.read_margin`), so no pixel a photo shows
+# comes from outside what was read.
+
+def lens_margin(cfg: DomainGapConfig, sensor: Tuple[int, int]) -> Tuple[int, int]:
+    """`(mx, my)` output px the sensor stage samples beyond the sensor, per
+    side: chromatic shift and defocus, then the distortion at its most
+    outward k1. (0, 0) when the sensor stage is off."""
+    if not cfg.photometric:
+        return 0, 0
+    w, h = (int(v) for v in sensor)
+    nx, ny = (w - 1) / 2.0, (h - 1) / 2.0
+    bx = nx + cfg.chromatic_shift + cfg.defocus_radius
+    by = ny + cfg.defocus_radius
+    r2 = (bx / nx) ** 2 + (by / ny) ** 2
+    lens = [1.0] + [1.0 + k1 * r2 + cfg.distortion_k2 * r2 ** 2
+                    for k1 in cfg.distortion_k1_range]
+    factor = min(1.0, *lens)
+    if factor <= 0.0:
+        raise ValueError(f'distortion folds the frame at the sensor corner '
+                         f'(factor {factor:.3f}): k1 {cfg.distortion_k1_range}, '
+                         f'k2 {cfg.distortion_k2}')
+    sx, sy = bx / factor + 1.0, by / factor + 1.0
+    return max(0, math.ceil(sx - nx)), max(0, math.ceil(sy - ny))
+
+
+def _angles(cfg: DomainGapConfig, rotation: Optional[float]):
+    if rotation is not None:
+        return [float(rotation)]
+    j = float(cfg.angle_jitter_deg)
+    steps = max(1, int(math.ceil(2 * j / 0.05)))
+    return [float(c) - j + 2 * j * i / steps
+            for c in cfg.rotation_choices for i in range(steps + 1)]
+
+
+def read_reach(cfg: DomainGapConfig, sensor: Tuple[int, int],
+               rotation: Optional[float] = None) -> Tuple[float, float]:
+    """`(ex, ey)`: the half-extents, in read px about the FoV centre (pixel
+    centres), that one exposure can sample -- the lens frame, grown by the
+    stage shift, divided by the smallest scale, turned through every angle the
+    config can draw (or `rotation`)."""
+    w, h = (int(v) for v in sensor)
+    mx, my = lens_margin(cfg, sensor)
+    fx, fy = (w - 1) / 2.0 + mx, (h - 1) / 2.0 + my
+    if cfg.stage_shift_max > 0:
+        fx, fy = fx + cfg.stage_shift_max, fy + cfg.stage_shift_max
+    if not cfg.geometric:
+        return fx, fy
+    j = cfg.query_mpp_jitter
+    low = (1.0 - j) if j > 0 else float(cfg.scale_range[0])
+    if low < 1.0:
+        fx, fy = fx / low + 1.0, fy / low + 1.0
+    ex = ey = 0.0
+    turned = False
+    for a in _angles(cfg, rotation):
+        c, s = abs(math.cos(math.radians(a))), abs(math.sin(math.radians(a)))
+        ex, ey = max(ex, fx * c + fy * s), max(ey, fx * s + fy * c)
+        turned = turned or a % 360.0 != 0.0
+    return (ex + 1.0, ey + 1.0) if turned else (ex, ey)
 
 
 def _centre_crop(img: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -162,13 +216,10 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
     half-width, and JPEG's 8x8 blocks tile the delivered photograph. All three
     read a frame size, so all three must see the sensor's, not the read's.
 
-    Running the sensor stage on the oversized read is what the earlier order
-    did, and it silently weakened every frame-referenced effect: on a
-    1767x1767 read cropped to 1440x1024, the vignette's sigma came from the
-    read's half-width, so the photograph only ever saw the central 53% of the
-    falloff curve. Cropping first is therefore not an optimisation that happens
-    to be faster -- it is what makes these effects mean what they are named.
-    It IS also 2.12x less work for eleven of the twelve ops.
+    The scene stage ends by cropping to the sensor plus `lens_margin` -- what the
+    sensor stage reaches -- so the optics run on the sensor and that margin
+    only, and each is measured against the sensor: the vignette after the
+    crop to it, the distortion normalised to it.
 
     `output_wh` is the sensor size. None means the input already is the sensor,
     which leaves both crops as no-ops -- that is the path
@@ -191,7 +242,8 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
         img = apply_stage_shift(img, dx=p['stage_shift_dx'],
                                 dy=p['stage_shift_dy'])
 
-    img = _centre_crop(img, out_w + 2 * SENSOR_MARGIN, out_h + 2 * SENSOR_MARGIN)
+    mx, my = lens_margin(cfg, (out_w, out_h))
+    img = _centre_crop(img, out_w + 2 * mx, out_h + 2 * my)
 
     if not cfg.photometric:
         img = _centre_crop(img, out_w, out_h)
@@ -210,7 +262,8 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
 
     # These three read a neighbourhood, so they run while the margin is still
     # there and the sensor's own edge pixels have real neighbours.
-    img = apply_distortion(img, k1=p['distortion_k1'], k2=p['distortion_k2'])
+    img = apply_distortion(img, k1=p['distortion_k1'], k2=p['distortion_k2'],
+                           sensor=(out_w, out_h))
     img = apply_defocus(img, radius=p['defocus_radius'])
     img = apply_chromatic(img, shift=p['chromatic_shift'])
 

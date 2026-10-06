@@ -295,59 +295,49 @@ Step 9  刪除 synth_fov_generator.py（若存在於 repo 內）
 一件事決定：這個 op 的幾何是以哪個畫面為基準量出來的。
 
 ```
+── 讀取：camera.render_spec(cfg, sensor) ─────────
+   旋轉 → 外接正方形 + 2·m；否則 sensor 長方形 + 2·m
+   m = camera.read_margin：這次曝光所有取樣點都必須落在讀進來的範圍內
+   ↓
 ── 場景階段：決定什麼落到感測器上 ────────────────
-   crop_bounding_square        讀 1767² = FoV 對角線見方
    rotation                    旋轉需要畫面外的像素轉進來
    scale
    stage_shift                 載物台抖動 = 重新取景
    ↓
-   裁切到 output + SENSOR_MARGIN
+   裁切到 sensor + lens_margin（感測器階段會取樣到的範圍）
    ↓
 ── 感測器階段：光學與感測器對這張影像做了什麼 ──────
    color / brightness / color_temp
-   distortion                  ┐ 讀鄰域，需要 margin
+   distortion                  ┐ 讀鄰域；畸變以 sensor 半寬正規化
    defocus                     │
    chromatic                   ┘
    ↓
-   裁切到精確的 output（丟掉 margin）
+   裁切到精確的 sensor
    ↓
    vignette                    逐像素，要拿到精確的感測器畫面
    noise
    jpeg                        8×8 區塊對齊交付的影像
 ```
 
-**為什麼裁切要提前。** 以前裁切在最後一步，所有 op 都跑在 1767² 上。但
-`vignette` 的 σ、`distortion` 的正規化座標、`jpeg` 的區塊都是從「手上這個畫面」
-算出來的 —— 跑在過大的畫面上，等於用錯誤的基準。實際後果：輸出只看到暈影曲線
-的中央 53%，所以實際暈影比 `vignette_range` 說的弱。
+**每一個框都量自 sensor。** `vignette` 在裁到 sensor 之後才跑；`distortion` 以
+sensor 的半寬正規化（`augment.lens.apply_distortion(..., sensor=)`），所以 k1 =
+-0.04 就是 sensor 角落 4% 的形變，不論框外多讀了多少。
 
-裁切提前同時讓 11 個 op 少處理 2.12 倍的像素，但那是附帶效果，不是動機。
+**margin 是推導出來的，不是常數。** `pipeline.lens_margin(cfg, sensor)` 從 sensor
+角落往回走感測器階段：色差、失焦，再以最往外的 k1 做畸變，每次重取樣加 1 px。
+`pipeline.read_reach(cfg, sensor, rotation)` 接著往回走場景階段：stage shift、最小
+的 scale、cfg 會抽到的每個角度。`camera.read_margin` 把它換成讀取要多讀的 px：
+
+| 相機 | lens margin (x, y) | 讀取 |
+|---|---|---|
+| 256 tile，CAMERA_FULL 幾何 | 17, 15 | 363² (m = 0) |
+| 1440×1024，預設 gap | 69, 49 | 1827² (m = 30) |
+| 1440×1024，不轉不縮放 | 69, 49 | 1578×1162 (m = 69) |
+
+`test_camera.py` 的 `reach` 拿最壞的一次抽樣，比較依 spec 讀的照片和讀寬 400 px
+的照片，角落要一致；不加 margin 的讀取是對照組，角落必須不一致。
 
 **`field_mask` 已移除。** 它的圓半徑是 `min(w,h)//2 = 883`，而 1440×1024 輸出
 的半對角線是 883.48 —— 正方形的內切圓恆等於矩形的外接圓，因為正方形的邊長就是
 矩形的對角線。所以它畫的圓正好把整個輸出框住，裁切之後貢獻 0 個像素。真實照片
 的視野本來就是矩形的。
-
-**`SENSOR_MARGIN = 64`，這個數字是推導出來的。** `defocus` 讀 `radius` px、
-`chromatic` 讀 `shift` px（兩者預設都是 2，可忽略）。真正決定 margin 的是
-`distortion`：枕形（k1 < 0）時 `remap` 往畫面外取樣，而 `src_x` 被 `np.clip`
-夾在畫面內，所以畫面太窄會把自己的角落抹開。
-
-輸出角落到中心的距離**與 margin 無關**，恆為 (719.5, 511.5) —— margin 移動的是
-中心，不是角落。不被夾的條件是
-
-```
-719.5 / factor + cx ≤ 2·cx      即   factor ≥ 719.5 / (719.5 + M)
-factor = 1 + k1·r2，最壞 k1 = -0.04（distortion_k1_range 的下界）
-```
-
-| M | factor | 需要 ≥ | x 餘裕 | 畫面 |
-|---|---|---|---|---|
-| 0 | 0.9200 | 1.0000 | −62.6 px | 1440×1024，1.47 Mpx |
-| 32 | 0.9279 | 0.9574 | −23.9 px | 1504×1088，1.64 Mpx |
-| 56 | 0.9331 | 0.9278 | +4.4 px | 1552×1136，1.76 Mpx |
-| **64** | **0.9347** | **0.9183** | **+13.7 px** | **1568×1152，1.81 Mpx** |
-
-舊順序從來不會踩到：畸變跑在 1767² 上，輸出角落的取樣點落在 1632，畫面邊界是
-1766，完全沒被夾。**是「裁切提前」讓 margin 變成承重結構的**，所以它必須撐得住
-正方形以前免費吸收掉的同一個最壞情況。

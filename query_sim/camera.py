@@ -50,8 +50,8 @@ if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 
 from config      import DomainGapConfig                   # noqa: E402
-from pipeline    import simulate_with_gt                  # noqa: E402
-from ReadGeometry import FovGeometry, ReadSpec, SENSOR_MARGIN  # noqa: E402
+from pipeline    import read_reach, simulate_with_gt      # noqa: E402
+from ReadGeometry import FovGeometry, ReadSpec           # noqa: E402
 from SafeSlide   import SafeSlide                        # noqa: E402
 from SlideReader import SlideReader                      # noqa: E402
 
@@ -69,11 +69,26 @@ def rotates_for(cfg: DomainGapConfig, rotation: Optional[float] = None) -> bool:
     return any(float(a) % 360.0 != 0.0 for a in cfg.rotation_choices)
 
 
-def render_spec(cfg: DomainGapConfig, sensor: Tuple[int, int]) -> ReadSpec:
+def read_margin(cfg: DomainGapConfig, sensor: Tuple[int, int],
+                rotation: Optional[float] = None) -> int:
+    """The fewest output px to read around the sensor rectangle -- or around
+    its bounding square, if the exposure turns -- so that everything one
+    exposure can sample (`pipeline.read_reach`) was read."""
+    w, h = (int(v) for v in sensor)
+    ex, ey = read_reach(cfg, (w, h), rotation)
+    if rotates_for(cfg, rotation):
+        side = math.ceil(math.hypot(w, h))
+        return max(0, math.ceil(max(ex, ey) - (side - 1) / 2.0))
+    return max(0, math.ceil(ex - (w - 1) / 2.0), math.ceil(ey - (h - 1) / 2.0))
+
+
+def render_spec(cfg: DomainGapConfig, sensor: Tuple[int, int],
+                rotation: Optional[float] = None) -> ReadSpec:
     """The `ReadSpec` a renderer with this domain gap and this sensor reads:
     what a sampler needs to place it, before any slide is open."""
-    return ReadSpec(int(sensor[0]), int(sensor[1]), rotates=rotates_for(cfg),
-                    margin_out=SENSOR_MARGIN)
+    return ReadSpec(int(sensor[0]), int(sensor[1]),
+                    rotates=rotates_for(cfg, rotation),
+                    margin_out=read_margin(cfg, sensor, rotation))
 
 
 def photo_rng(*key) -> random.Random:
@@ -137,10 +152,9 @@ class Render:
 
     @property
     def spec(self) -> ReadSpec:
-        """What a sampler needs to place this camera: its sensor, whether it
-        rotates, the sensor margin it reads when it does not."""
-        return ReadSpec(self.output_w, self.output_h,
-                        rotates=rotates_for(self.cfg), margin_out=SENSOR_MARGIN)
+        """What a sampler needs to place this camera: `render_spec` of its gap
+        and sensor."""
+        return render_spec(self.cfg, self.sensor)
 
     @property
     def wsi(self) -> SafeSlide:
@@ -213,11 +227,9 @@ class Render:
         """The read at (x, y) -- the FoV rectangle's level-0 top-left -- then
         the domain gap, cropped to the sensor. `(None, None)` off the slide.
 
-        Whether the read is the bounding square is decided BEFORE it, from
-        what is fixed (`rotates_for`): headroom for rotating about the FoV
-        centre, 2.12x the rectangle's area. A shot that does not rotate reads
-        the rectangle and the sensor margin only -- the margin is real:
-        defocus, chromatic shift and distortion read a neighbourhood.
+        What is read is decided BEFORE it, from what is fixed (`render_spec`):
+        the bounding square if the exposure can turn (`rotates_for`), else the
+        rectangle, grown by everything the exposure can sample (`read_margin`).
 
         `rng`, if given, is used INSTEAD of this camera's own generator for
         this one call. For a caller that needs the SAME (x, y) to always render
@@ -227,9 +239,7 @@ class Render:
 
         `stack='R'` reads the ds 1 field and degrades it to this ds
         (`SlideReader.read`)."""
-        spec = ReadSpec(self.output_w, self.output_h,
-                        rotates=rotates_for(self.cfg, rotation),
-                        margin_out=SENSOR_MARGIN)
+        spec = render_spec(self.cfg, self.sensor, rotation)
         raw = self.reader.read(x, y, spec, self.ds, stack=stack,
                                level=self.read_level)
         if raw is None:

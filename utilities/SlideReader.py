@@ -12,7 +12,7 @@ mpp enters at the caller, once (`ds = mpp / base_mpp`).
 WHAT A READ IS (`read`, `plan`, `_read`)
 -----------------------------------------
 `ReadSpec` says how big: the sensor's output px, the bounding square if it
-rotates, the sensor margin if it does not. `ReadGeometry` turns that into a
+rotates, and the margin read around either. `ReadGeometry` turns that into a
 level-0 rectangle (`FovGeometry.read_rect`), the level (`level_for`: never
 upsample) and the level px (`level_px`: rounded, from output px, so a native
 read needs no resize). `_read` is the one `read_region_rgb` and the one
@@ -387,16 +387,11 @@ class SlideReader:
              level: Optional[int] = None) -> ReadPlan:
         """What `read` would read, with no IO. (x, y) is the sensor
         rectangle's level-0 top-left. A rotating spec reads the bounding
-        square (`square_out` output px), centred on the rectangle; otherwise
-        the rectangle grown by `margin_out` output px on every side."""
+        square, centred on the rectangle, otherwise the rectangle; either grown
+        by `margin_out` output px on every side (`FovGeometry.read_rect`)."""
         geo = FovGeometry.of(spec.sensor_w, spec.sensor_h, ds)
-        if spec.rotates:
-            rect = geo.read_rect(x, y, rotates=True)
-            out = (geo.square_out, geo.square_out)
-        else:
-            m = int(spec.margin_out)
-            rect = geo.read_rect(x, y, rotates=False, margin_out=m)
-            out = (spec.sensor_w + 2 * m, spec.sensor_h + 2 * m)
+        rect = geo.read_rect(x, y, spec.rotates, margin_out=spec.margin_out)
+        out = geo.read_out(spec.rotates, spec.margin_out)
         lv = self.level_of(ds, level)
         lds = self.level_downsamples[lv]
         return ReadPlan(rect=rect, level=lv,

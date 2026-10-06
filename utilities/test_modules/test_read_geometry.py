@@ -32,10 +32,12 @@ setup_import_paths()
 
 from DsLadder import RungPlan                                    # noqa: E402
 from ReadGeometry import (ReadSpec, FovGeometry, ReadRect,     # noqa: E402
-                          SENSOR_MARGIN, level_for, level_px, reserve_margin)
+                          level_for, level_px, reserve_margin)
 from TileSampler import PlanSpec, _margin_of, with_camera       # noqa: E402
 
 RUNGS = (1, 2, 4, 8, 16, 32)
+#: A margin, output px, as a still FoV camera reads one (`camera.read_margin`).
+MARGIN = 64
 #: downsamples that are not a ladder rung: a measured BRACS level, an
 #: arbitrary query magnification, and one whose products are never integers
 DS_AWKWARD = (4.00014, 3.9, 7.3)
@@ -127,6 +129,7 @@ def t_the_level_and_its_pixels():
 
 
 def t_read_rect_is_centred_and_shaped_as_the_three_crops():
+    import math
     g = FovGeometry.of(1440, 1024, 4.0)
     sq = g.read_rect(1000, 2000, rotates=True)
     assert (sq.w, sq.h) == (g.square_l0, g.square_l0)
@@ -134,11 +137,17 @@ def t_read_rect_is_centred_and_shaped_as_the_three_crops():
     assert sq.y0 == 2000 - (g.square_l0 - g.rect_h_l0) // 2
     plain = g.read_rect(1000, 2000, rotates=False)
     assert (plain.x0, plain.y0, plain.w, plain.h) == (1000, 2000, 5760, 4096)
-    pad = g.read_rect(1000, 2000, rotates=False, margin_out=SENSOR_MARGIN)
-    m = int(round(SENSOR_MARGIN * (5760 / 1440)))
+    pad = g.read_rect(1000, 2000, rotates=False, margin_out=MARGIN)
+    m = int(round(MARGIN * (5760 / 1440)))
     assert (pad.x0, pad.y0, pad.w, pad.h) == (1000 - m, 2000 - m, 5760 + 2 * m,
                                               4096 + 2 * m)
-    return f'square {g.square_l0}, margin {m} l0 px'
+    big = g.read_rect(1000, 2000, rotates=True, margin_out=17)
+    side = int(math.ceil((g.square_out + 34) * 4.0 - 1e-6))
+    assert (big.w, big.h) == (side, side) and big.w > sq.w
+    assert big.x0 == 1000 - (side - g.rect_w_l0) // 2
+    assert g.read_out(True, 17) == (g.square_out + 34,) * 2
+    assert g.read_out(False, MARGIN) == (1440 + 2 * MARGIN, 1024 + 2 * MARGIN)
+    return f'square {g.square_l0}, +17 out px {side}, margin {m} l0 px'
 
 
 # ── what a sampler reserves for a camera: ReadSpec.place / with_camera ─────
@@ -149,7 +158,8 @@ CAMERAS = (ReadSpec(TILE, TILE, rotates=True),
            ReadSpec(TILE, TILE),
            ReadSpec(TILE, TILE, margin_out=TILE),
            ReadSpec(1440, 1024, rotates=True),
-           ReadSpec(1440, 1024, margin_out=SENSOR_MARGIN))
+           ReadSpec(1440, 1024, rotates=True, margin_out=17),
+           ReadSpec(1440, 1024, margin_out=MARGIN))
 
 
 def _independent_read(cam: ReadSpec, x: int, y: int, ds: float) -> ReadRect:
@@ -162,7 +172,7 @@ def _independent_read(cam: ReadSpec, x: int, y: int, ds: float) -> ReadRect:
     rw, rh = int(cam.sensor_w * ds), int(cam.sensor_h * ds)
     if cam.rotates:
         square_out = math.ceil(math.hypot(cam.sensor_w, cam.sensor_h))
-        side = int(math.ceil(square_out * ds - 1e-6))
+        side = int(math.ceil((square_out + 2 * cam.margin_out) * ds - 1e-6))
         return ReadRect(x - (side - rw) // 2, y - (side - rh) // 2, side, side)
     m = int(round(cam.margin_out * (rw / cam.sensor_w)))
     return ReadRect(x - m, y - m, rw + 2 * m, rh + 2 * m)
@@ -206,7 +216,7 @@ def t_the_old_fov_reserve_misses_somewhere():
     import math
     missed = []
     for cam in (ReadSpec(1440, 1024, rotates=True),
-                ReadSpec(1440, 1024, margin_out=SENSOR_MARGIN)):
+                ReadSpec(1440, 1024, margin_out=MARGIN)):
         for ds in (1.0, 4.0, 16.0, 32.0) + DS_AWKWARD:
             fp = 1440.0 * ds
             box = int(fp)

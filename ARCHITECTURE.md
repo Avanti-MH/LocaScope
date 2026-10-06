@@ -130,7 +130,7 @@ PatchGrid（有序格點）────────┤   ├─ read(pos, spec, 
 class ReadSpec:                      # 原 CameraSpec，欄位與行為不變
     sensor_w: int; sensor_h: int     # 輸出像素
     rotates: bool = False            # True：讀外接正方形（旋轉需要）
-    margin_out: int = 0              # 不旋轉時四周多讀的輸出像素（光學效果、pre-tile）
+    margin_out: int = 0              # 讀取範圍（長方形或外接正方形）四周多讀的輸出像素
     long_side / square / key() / geometry(ds) / fov_offset(box, fw, fh)
     place(footprint_l0, ds) -> (fov_w_l0, fov_h_l0, reserve_l0)    # sampler 預留範圍
 # level_for / level_px / FovGeometry / ReadRect / reserve_margin：不動
@@ -152,7 +152,7 @@ class SlideReader:
     def native(self, ds, level=None) -> bool       # 這個 ds 從它的層讀出來不必縮放？
     def plan(self, x, y, spec: ReadSpec, ds, *, level=None) -> ReadPlan
         # (x, y) = sensor 長方形的 level-0 左上角
-        # rotates → 外接正方形（square_out 輸出像素）；否則長方形 + margin_out
+        # rotates → 外接正方形，否則長方形；兩者都 + margin_out
         # level=None → level_for(ds)；給定 → 檢查不比 ds 粗
     def read(self, x, y, spec: ReadSpec, ds, *, stack='F', level=None) -> np.ndarray | None
         # uint8 [H, W, 3]；越界 → None
@@ -179,9 +179,10 @@ def resample(img, w, h, method) -> np.ndarray          # 原 Render.py
 def degrade_resolution(img, ds, out_side) -> np.ndarray  # 原 Render.py；ChainStack 直接從這裡匯入
 
 # ── query_sim/camera.py（Camera → Render，大改）─────────────────────────────
-#   REAL_PHOTO_SENSOR、TILE_PX 與 SENSOR_MARGIN 在 ReadGeometry（純幾何）
+#   REAL_PHOTO_SENSOR、TILE_PX 在 ReadGeometry（純幾何）；讀取的 margin 由 read_margin 從 cfg 推導
 def rotates_for(cfg, rotation=None) -> bool             # 不動
-def render_spec(cfg, sensor) -> ReadSpec                # 原 camera_spec
+def read_margin(cfg, sensor, rotation=None) -> int     # 這次曝光會取樣到的範圍（pipeline.read_reach）換成多讀的 px
+def render_spec(cfg, sensor, rotation=None) -> ReadSpec  # rotates_for + read_margin
 def photo_rng(*key) -> random.Random                  # 一張照片的 rng，由它自己的身分決定（2026-10-06）
 #   不旋轉的 tile（參考、pre-tile）直接 ReadSpec(t, t, margin_out=m)；tile_spec 於 2026-10-06 刪除
 

@@ -81,7 +81,7 @@ from TissueMaskConfig import MASK_RECIPES, MaskMaker                  # noqa: E4
 from camera import Render, render_spec                                # noqa: E402
 from pipeline import simulate_microscope_photo                        # noqa: E402
 from pipeline import simulate_with_gt                                 # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR, SENSOR_MARGIN             # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR                            # noqa: E402
 from config import DomainGapConfig                                    # noqa: E402
 from FovSupply import FovSupply                                       # noqa: E402
 import Datasets                                                       # noqa: E402
@@ -330,11 +330,11 @@ S1_CORNER = 24         # output px: the corner square the corners check reads
 S1_CORNER_REF = 400    # output px: how much wider the corners reference reads
 
 
-def _s1photo_same(reader, pos, new, old):
+def _s1photo_same(reader, pos, new, old, spec_new):
     """One no-gap photo against the frozen read, judged by what the two reads
     can be expected to share. Both read the same level with the same filter;
-    Render's read is the FoV grown by SENSOR_MARGIN, so it starts `shift`
-    level-0 px earlier. Three cases follow from the plans alone:
+    Render's read (`spec_new`) is the FoV grown by its margin, so it starts
+    `shift` level-0 px earlier. Three cases follow from the plans alone:
 
       exact    the shift is a whole number of level px and nothing is
                resized: the same samples, so every pixel must be equal
@@ -346,7 +346,6 @@ def _s1photo_same(reader, pos, new, old):
                sub-pixel phase, so every pixel may differ, by far less than
                the same photo moved one pixel -- the decoy."""
     spec_old = ReadSpec(*S1_SENSOR)
-    spec_new = ReadSpec(*S1_SENSOR, rotates=False, margin_out=SENSOR_MARGIN)
     p_old = reader.plan(pos['x'], pos['y'], spec_old, pos['rung'])
     p_new = reader.plan(pos['x'], pos['y'], spec_new, pos['rung'])
     lds = float(reader.level_downsamples[p_new.level])
@@ -418,7 +417,7 @@ def flow_s1photo(t, args, name, wsi, mask):
                              verdict='FAIL', note='a read missing or a shape apart'))
             ok = False
             continue
-        row, kind = _s1photo_same(reader, pos, new, old)
+        row, kind = _s1photo_same(reader, pos, new, old, still.spec)
         row.update(slide=name)
         rows.append(row)
         ok &= row['verdict'] == 'PASS'
