@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""End-to-end LocaScope bench: read a query_sim multi_batch corpus, run each
-shot through LocaScopePipeline, collect per-stage errors, and produce plots.
+"""End-to-end LocaScope bench: render synthetic shots with known positions,
+run each through LocaScopePipeline, collect per-stage errors, and plot them.
 
-Inputs (from query_sim/cli/multi_batch.py):
-    <gt-csv>         result/MultiBatch/gt.csv
-    <images-dir>     result/MultiBatch/images/
-    (WSI paths are read from gt.csv's wsi_path column)
+Inputs: `split_shots` below -- the first --n-wsi slides of each of
+--datasets' recorded --split, --per-level FoVs at every native level from a
+TileSampler draw (placed on the hest masks of --fov-mask-cache-job),
+each photographed on demand through `FovSupply` (TileSampler -> Render). Nothing is
+read from a stored corpus: the retired MultiBatch1440 went stale whenever the
+camera changed. A shot's `filename` is an id, the name that corpus gave it.
 
 Outputs (in --out DIR/<encoder>/, default result/BenchLocaScope/<encoder>/):
     metrics.csv               per-shot: mpp/retrieval/refine errors (px + um)
@@ -18,9 +20,8 @@ Outputs (in --out DIR/<encoder>/, default result/BenchLocaScope/<encoder>/):
 
 Usage:
     python utilities/bench_modules/bench_locascope.py \\
-        --gt-csv result/MultiBatch/gt.csv \\
-        --images-dir result/MultiBatch/images \\
-        --out result/BenchLocaScope \\
+        --datasets bracs/test ki67_with_photo --split test --n-wsi 5 \\
+        --sampler-n-per-rung 50 --out result/BenchLocaScope \\
         [--limit N] [--batch-size 128] [--device auto] \\
         [--topk 20] [--sift-topk 5]
 
@@ -34,6 +35,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
+import json
 import math
 import os
 import sys
@@ -53,6 +56,7 @@ sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 
 sys.path.insert(0, str(_ROOT))     # the root, which resolves the stage packages
+sys.path.insert(0, str(_ROOT / 'query_sim'))
 
 from _paths            import encoder_tag, job_result_dir               # noqa: E402
 import Cache                                                           # noqa: E402
@@ -68,6 +72,122 @@ from stage2_retrieval.SlidingWinSimRot import (                   # noqa: E402
 from TissueMaskConfig import add_mask_args, mask_cfg_from_args           # noqa: E402
 from stage3_localization.SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names             # noqa: E402
+from CpuBudget         import CpuBudget                                 # noqa: E402
+from TileSampler       import (PlanSpec, SamplerConfig,             # noqa: E402
+                               add_sampler_args, sampler_from_args)
+from ReadGeometry      import LEVEL_REL_TOL                            # noqa: E402
+from TissueMaskConfig  import MASK_RECIPES, MaskMaker                   # noqa: E402
+from config            import DomainGapConfig                           # noqa: E402
+from ConfigArgs        import add_config_args, config_from_args        # noqa: E402
+from AccessDatasets    import list_names, locate                        # noqa: E402
+from SlideReader       import SlideReader                               # noqa: E402
+from camera            import Render                                    # noqa: E402
+from record            import FOVRecord                                 # noqa: E402
+from FovSupply         import FovSupply                                 # noqa: E402
+
+
+# ── the shots: FovSupply per (slide, level), the window bench's way ─────────
+#: The camera: the real photos' sensor (1440 x 1024), the full domain gap, and
+#: 5 per cent mpp jitter -- what the retired MultiBatch1440 corpus was made
+#: with. query_mpp is each level's own.
+CAMERA = DomainGapConfig(wh_ratio='45:32', MPixels=1.47456, query_mpp_jitter=0.05)
+#: Where the FoVs go: 50 per native level under the default richness mix, as
+#: the corpus had them, every level of a slide in one draw (`split_shots`).
+SAMPLER = SamplerConfig(n_per_rung=50, seed=0)
+
+
+def split_shots(datasets, split: str, n_wsi: int, sampler_cfg: SamplerConfig,
+                camera_cfg: DomainGapConfig, *, masks, max_ds=None, skip=None):
+    """`(row, image)` per synthetic FoV, rendered on demand: `row` is the
+    FOVRecord of its ground truth, `image` uint8 RGB.
+
+    SLIDES: the first `n_wsi` of each dataset's recorded `split`
+    (`<dataset>#<split>`), the slides Stage1MppBench and OffGridScore score,
+    every one with a cached mask in `masks` (a MaskMaker). LEVELS: every
+    native level up to `max_ds`, all in ONE draw per slide: a microscope
+    (`Render` at ds 1) and a `FovSupply` over `PlanSpec('ladder', <the levels'
+    own ds>)`, each position photographed through the objective at its level.
+    A level with no room for a FoV comes back short in the sampler's report; a
+    slide with none at all is skipped and says so.
+
+    `row['filename']` is `<slide>_L<level>_syn<i>.png`, `i` counting within
+    the level, an id; nothing is written. `skip(filename)` true passes a shot
+    over BEFORE it is rendered -- a resumed run's done shots -- and the rest
+    are the same pictures, since a FoV's rng is its own position's
+    (`FovSupply.photo`)."""
+    for dataset in datasets:
+        dataset_split = f'{dataset}#{split}'
+        names = list_names(dataset=dataset_split)
+        if n_wsi > len(names):
+            raise ValueError(f'n_wsi {n_wsi} but {dataset_split} holds '
+                             f'{len(names)} slide(s)')
+        for name in names[:n_wsi]:
+            path = str(locate(name, dataset=dataset_split).path)
+            reader = SlideReader(path)
+            mask, _ = masks.mask(reader.slide)
+            rungs = tuple(float(d) for d in reader.level_downsamples
+                          if max_ds is None or d <= max_ds * (1 + LEVEL_REL_TOL))
+            microscope = Render(reader, camera_cfg, ds=1.0, seed=sampler_cfg.seed)
+            supply = FovSupply(microscope, PlanSpec('ladder', rungs,
+                                                    camera=microscope.spec),
+                               sampler_cfg, mask)
+            try:
+                sampler = supply.sampler
+            except RuntimeError as exc:
+                print(f'  {name}: no FoV position at any level -- skipped '
+                      f'({str(exc).splitlines()[0]})', flush=True)
+                continue
+            counted = {}
+            for s in sampler:
+                m = s.meta
+                i = counted[m.level] = counted.get(m.level, -1) + 1
+                filename = f'{name}_L{m.level}_syn{i:05d}.png'
+                if skip is not None and skip(filename):
+                    continue
+                image, params = supply.photo(m)
+                yield (dataclasses.asdict(FOVRecord.from_capture(
+                    filename, path, supply.camera_for(m.ds), m.fov_rect[0],
+                    m.fov_rect[1], params, level=m.level)), image)
+
+
+# ── run identity: what a resumed metrics.csv must have been made with ────────
+
+#: How `split_shots` places and photographs. Bumped whenever the same filename
+#: would stop naming the same FoV: 'fov-supply-per-slide' is 2026-10-06's one
+#: draw per slide across its levels (the per-level draws before it gave the
+#: same ids to other positions).
+SHOTS_RECIPE = 'fov-supply-per-slide'
+
+
+def run_identity(args, sampler_cfg, camera_cfg, encoder, mask_cfg) -> dict:
+    """Everything that decides which shots a row is about and how it is
+    scored. A resume skips shots by filename, and a filename is only an id:
+    under another value of any of these, the same name is another FoV or
+    another score, and the old rows would be mixed into the new bench."""
+    return {'shots': SHOTS_RECIPE,
+            'datasets': list(args.datasets), 'split': args.split,
+            'n_wsi': args.n_wsi, 'max_ds': args.max_ds,
+            'sampler': dataclasses.asdict(sampler_cfg),
+            'camera': dataclasses.asdict(camera_cfg),
+            'fov_mask': MASK_RECIPES['hest'].seg_id(),
+            'encoder': encoder.identity_id(),
+            'mask': [mask_cfg.seg_id(), mask_cfg.region_id()],
+            'topk': args.topk, 'sift_topk': args.sift_topk}
+
+
+def refuse_foreign_resume(run: dict, run_path: str) -> None:
+    """Exit unless the metrics.csv being resumed was made by this same run."""
+    if not os.path.exists(run_path):
+        sys.exit(f'[refused] --resume, but {run_path} is missing: the metrics '
+                 f'beside it predate the run identity, so which shots they hold '
+                 f'cannot be told. Run without --resume, or give a new --out.')
+    with open(run_path) as f:
+        old = json.load(f)
+    fresh = json.loads(json.dumps(run, default=str))
+    differs = sorted(k for k in set(old) | set(fresh) if old.get(k) != fresh.get(k))
+    if differs:
+        sys.exit(f'[refused] --resume into a run made with other {differs} '
+                 f'({run_path}). Run without --resume, or give a new --out.')
 
 
 # ── metric helpers ────────────────────────────────────────────────────────────
@@ -190,6 +310,10 @@ def verify_candidates(pl, retriever, qc, candidates: list, n: int,
     return out
 
 
+def _round_s(seconds):
+    return None if seconds is None else round(float(seconds), 3)
+
+
 def compute_metrics(row: dict, result: LocaScopeQueryResult, base_mpp: float,
                     tile_l0: Optional[float] = None,
                     candidates: Optional[list] = None,
@@ -280,6 +404,11 @@ def compute_metrics(row: dict, result: LocaScopeQueryResult, base_mpp: float,
         'sift_best_inliers':    None,
         'sift_best_rank':       None,
         't_verify_s':           None,
+        # the pipeline's own clock, per stage of this shot (LocaScopeQueryResult)
+        't_stage1_s':           _round_s(result.t_stage1_s),
+        't_level_s':            _round_s(result.t_level_s),
+        't_stage2_s':           _round_s(result.t_stage2_s),
+        't_stage3_s':           _round_s(result.t_stage3_s),
         'refine_x0':      None,
         'refine_y0':      None,
         'refine_success': None,
@@ -545,9 +674,19 @@ def draw_recall_figure(
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--gt-csv',     required=True)
-    ap.add_argument('--images-dir', required=True)
+    ap = argparse.ArgumentParser(allow_abbrev=False)
+    ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
+    ap.add_argument('--split', default='test', choices=['val', 'test'])
+    ap.add_argument('--n-wsi', type=int, default=5, help='slides per dataset')
+    ap.add_argument('--max-ds', type=float, default=None,
+                    help='leave out levels coarser than this; default every level')
+    ap.add_argument('--fov-mask-cache-job', default='MppRoutingHead',
+                    help='hest masks the FoVs are placed on')
+    # One --sampler-* flag per SAMPLER field (--sampler-n-per-rung,
+    # --sampler-seed, ...) and one --camera-* flag per CAMERA field, as the
+    # window bench has them; query_mpp is each level's own.
+    add_sampler_args(ap, SAMPLER)
+    add_config_args(ap, CAMERA, 'camera', skip=('query_mpp',))
     ap.add_argument('--out',        default=None,
                     help='Output dir, used verbatim. Default: '
                          'result/<SLURM_JOB_NAME or BenchLocaScope>/<encoder>/ '
@@ -623,7 +762,9 @@ def main():
                          'skipped and the new rows are appended. For a run that '
                          'hit the walltime -- 2500 shots at about a minute each '
                          'does not fit 24 hours. The retrievers still have to be '
-                         'rebuilt, so resume at a WSI boundary loses least.')
+                         'rebuilt, so resume at a WSI boundary loses least. '
+                         'Refused unless run.json beside it names the same '
+                         'shots, mask, encoder and scoring (run_identity).')
     ap.add_argument('--features-cache-job', default=None, metavar='JOB',
                     help='cache each (slide, level) WSI feature map under '
                          'result/cache/<JOB>_features/<encoder>/, keyed on the '
@@ -666,8 +807,11 @@ def main():
     enc_tag = encoder_tag(args.encoder, args.head)
     out_dir = args.out or job_result_dir('BenchLocaScope', encoder=enc_tag)
     os.makedirs(out_dir, exist_ok=True)
-    print(f'gt-csv     : {args.gt_csv}')
-    print(f'images-dir : {args.images_dir}')
+    sampler_cfg = sampler_from_args(args, SAMPLER)
+    camera_cfg = config_from_args(args, CAMERA, 'camera', skip=('query_mpp',))
+    print(f'shots      : {" ".join(args.datasets)}  #{args.split}  n_wsi={args.n_wsi}  '
+          f'per level {sampler_cfg.n_per_rung}  seed {sampler_cfg.seed}  '
+          f'sampler {sampler_cfg.sampler_id()}')
     print(f'out        : {out_dir}')
 
     import torch
@@ -688,9 +832,13 @@ def main():
     # Stage 2 builds its encoder from that config; stage 1 builds its own
     # (fp32, one card) from the registry name. All three stages are built once
     # here and bound to each slide by its pipeline's build().
+    # Reads on DataLoader workers, so the slide is read while the GPU encodes;
+    # the rest of the cpus are this process's torch threads.
+    budget = CpuBudget.for_job(processes=1).apply()
+    print(f'  {budget.line()}', flush=True)
     retriever = SlidingWinSimRot(
         SlidingWinSimRotConfig(encoder_cfg), device,
-        multi_gpu=args.multi_gpu)
+        multi_gpu=args.multi_gpu, read_workers=budget.workers)
     encoder = retriever.encoder
     if args.multi_gpu:
         import torch as _t
@@ -705,9 +853,12 @@ def main():
 
     all_metrics: List[dict] = []
     metrics_path = os.path.join(out_dir, 'metrics.csv')
+    run_path = os.path.join(out_dir, 'run.json')
+    run = run_identity(args, sampler_cfg, camera_cfg, encoder, mask_cfg)
     metrics_fields: Optional[List[str]] = None
     done: set = set()
     if args.resume and os.path.exists(metrics_path):
+        refuse_foreign_resume(run, run_path)
         # Take the column order from the existing header, not from the first
         # new row: append_metrics_row will not re-write a header into a
         # non-empty file, so a different order would silently misalign every
@@ -724,21 +875,17 @@ def main():
         # Truncate once, here. append_metrics_row writes a header into an empty
         # file, so without this a re-run would stack a second bench onto the first.
         os.remove(metrics_path)
+    if not done:
+        with open(run_path, 'w') as f:
+            json.dump(run, f, indent=1, sort_keys=True, default=str)
 
-    with open(args.gt_csv) as f:
-        rows = list(csv.DictReader(f))
-    if args.limit:
-        rows = rows[:args.limit]
-    n_total = len(rows)
+    fov_masks = MaskMaker(MASK_RECIPES['hest'],
+                          Cache.cache_root(args.fov_mask_cache_job, 'mask'), device)
+    shots = split_shots(args.datasets, args.split, args.n_wsi, sampler_cfg,
+                        camera_cfg, masks=fov_masks, max_ds=args.max_ds,
+                        skip=lambda name: name in done)
     if done:
-        rows = [r for r in rows if r['filename'] not in done]
-    print(f'Shots      : {len(rows)}'
-          + (f'  ({n_total - len(rows)} skipped, already done)' if done else '')
-          + '\n', flush=True)
-
-    by_wsi: Dict[str, List[dict]] = defaultdict(list)
-    for r in rows:
-        by_wsi[r['wsi_path']].append(r)
+        print(f'Shots      : {len(done)} already done are passed over', flush=True)
 
     def record(m: dict) -> dict:
         """Keep the row for the plots AND put it on disk now.
@@ -748,6 +895,14 @@ def main():
         run return nothing.
         """
         nonlocal metrics_fields
+        if metrics_fields is not None and set(m) != set(metrics_fields):
+            # a resumed metrics.csv written by a bench with other columns:
+            # appending would misalign every row, or fail half-way
+            sys.exit(f'[refused] {metrics_path} has the columns of another '
+                     f'version of this bench (missing '
+                     f'{sorted(set(m) - set(metrics_fields))}, extra '
+                     f'{sorted(set(metrics_fields) - set(m))}). Run without '
+                     f'--resume, or give a new --out.')
         all_metrics.append(m)
         metrics_fields = append_metrics_row(m, metrics_path, metrics_fields)
         return m
@@ -755,121 +910,121 @@ def main():
     n_fail_drawn = 0
     t_start = time.time()
 
-    for wsi_path, wsi_rows in by_wsi.items():
-        wsi_tag = os.path.splitext(os.path.basename(wsi_path))[0]
-        print(f'== {wsi_tag}  n_shots={len(wsi_rows)}  path={wsi_path}', flush=True)
-        try:
-            pl = LocaScopePipeline(
-                wsi_path, estimator, retriever, localizer, mask_cfg=mask_cfg,
-                feature_store_root=(
-                    None if not args.features_cache_job else
-                    Cache.cache_root(args.features_cache_job, 'features') / enc_tag),
-                feature_store_mode=args.feature_store_mode).build()
-        except Exception as e:
-            print(f'  [pipeline build failed] {type(e).__name__}: {e}', flush=True)
-            for row in wsi_rows:
-                stub = LocaScopeQueryResult(None, None, False, None, None,
-                                           f'pipeline build failed: {type(e).__name__}: {e}')
-                record(compute_metrics(row, stub, 1.0))
+    pl, cur_wsi, build_error, i = None, None, None, 0
+    for row, img in shots:
+        if args.limit and i >= args.limit:
+            break
+        i += 1
+        if row['wsi_path'] != cur_wsi:
+            # A new slide: one pipeline per slide, built when its first shot
+            # arrives (split_shots yields a slide's shots together).
+            cur_wsi = row['wsi_path']
+            wsi_tag = os.path.splitext(os.path.basename(cur_wsi))[0]
+            print(f'== {wsi_tag}  path={cur_wsi}', flush=True)
+            pl, build_error = None, None
+            try:
+                pl = LocaScopePipeline(
+                    cur_wsi, estimator, retriever, localizer, mask_cfg=mask_cfg,
+                    feature_store_root=(
+                        None if not args.features_cache_job else
+                        Cache.cache_root(args.features_cache_job, 'features') / enc_tag),
+                    feature_store_mode=args.feature_store_mode).build()
+                print(f'  pipeline built (base_mpp={pl.base_mpp:.4f}  '
+                      f'mask_regions={len(pl.mask.tissue_regions)})', flush=True)
+            except Exception as e:
+                build_error = f'pipeline build failed: {type(e).__name__}: {e}'
+                print(f'  [{build_error}]', flush=True)
+        if pl is None:
+            record(compute_metrics(row, LocaScopeQueryResult(
+                None, None, False, None, None, build_error), 1.0))
             continue
 
-        print(f'  pipeline built (base_mpp={pl.base_mpp:.4f}  '
-              f'mask_regions={len(pl.mask.tissue_regions)})', flush=True)
+        want_fig = (args.draw_figures == -1
+                    or n_drawn < args.draw_figures)
+        t0 = time.time()
+        # candidate_set reads the retriever's similarity maps, which only live on
+        # the retriever object and only until the next shot overwrites
+        # them, so it has to be kept and read here rather than later.
+        # --draw-failures only knows the shot failed after the metrics
+        # exist, so the diagnostic objects have to be kept before that.
+        result = pl.run(img, keep_objects=(want_fig or args.topk > 0
+                                           or bool(args.draw_failures)))
+        dt = time.time() - t0
 
-        for i, row in enumerate(wsi_rows, 1):
-            img_path = os.path.join(args.images_dir, row['filename'])
+        # One tile at level-0 says the window itself is right. The refiner's
+        # padding says the truth is inside the crop SIFT would search, which
+        # is what a top-K plus verification loop could actually recover.
+        tile_l0 = strict_tol = hit_tol = None
+        if result.retrieval is not None:
+            tile_l0 = strict_tol = pl.tile_size * result.retrieval.ds
+            hit_tol = pl.localizer.padding * strict_tol
+
+        cands = None
+        if args.topk > 0 and result.retriever is not None and tile_l0:
             try:
-                img = np.array(Image.open(img_path).convert('RGB'))
+                # the maps of THIS shot are still on the retriever
+                cands = result.retriever.candidate_set(k=args.topk)
             except Exception as e:
-                stub = LocaScopeQueryResult(None, None, False, None, None,
-                                           f'image read failed: {type(e).__name__}: {e}')
-                record(compute_metrics(row, stub, pl.base_mpp))
-                print(f'  [{i:4d}/{len(wsi_rows)}] {row["filename"]}  FAIL: image read', flush=True)
-                continue
+                print(f'      [topk failed] {type(e).__name__}: {e}', flush=True)
 
-            want_fig = (args.draw_figures == -1
-                        or n_drawn < args.draw_figures)
-            t0 = time.time()
-            # candidate_set reads the retriever's similarity maps, which only live on
-            # the retriever object and only until the next shot overwrites
-            # them, so it has to be kept and read here rather than later.
-            # --draw-failures only knows the shot failed after the metrics
-            # exist, so the diagnostic objects have to be kept before that.
-            result = pl.run(img, keep_objects=(want_fig or args.topk > 0
-                                               or bool(args.draw_failures)))
-            dt = time.time() - t0
+        sift_topk = None
+        if cands and args.sift_topk > 0 and result.query_qc is not None:
+            gt_cx, gt_cy = _gt_center(row, pl.base_mpp)
+            t_v = time.time()
+            sift_topk = verify_candidates(
+                pl, result.retriever, result.query_qc, cands,
+                args.sift_topk, gt_cx, gt_cy, hit_tol)
+            sift_topk['t_verify_s'] = round(time.time() - t_v, 2)
 
-            # One tile at level-0 says the window itself is right. The refiner's
-            # padding says the truth is inside the crop SIFT would search, which
-            # is what a top-K plus verification loop could actually recover.
-            tile_l0 = strict_tol = hit_tol = None
-            if result.retrieval is not None:
-                tile_l0 = strict_tol = pl.tile_size * result.retrieval.ds
-                hit_tol = pl.localizer.padding * strict_tol
+        m = compute_metrics(row, result, pl.base_mpp, tile_l0=tile_l0,
+                            candidates=cands, hit_tol_px=hit_tol,
+                            hit_tol_strict_px=strict_tol,
+                            sift_topk=sift_topk)
+        record(m)
 
-            cands = None
-            if args.topk > 0 and result.retriever is not None and tile_l0:
-                try:
-                    # the maps of THIS shot are still on the retriever
-                    cands = result.retriever.candidate_set(k=args.topk)
-                except Exception as e:
-                    print(f'      [topk failed] {type(e).__name__}: {e}', flush=True)
+        if want_fig:
+            try:
+                p = draw_shot_figure(pl, row, img, result, out_dir,
+                                     zoom_pad=args.zoom_pad, metrics=m)
+                if p:
+                    n_drawn += 1
+                    print(f'      [fig] {p}', flush=True)
+            except Exception as e:
+                print(f'      [fig failed] {type(e).__name__}: {e}', flush=True)
 
-            sift_topk = None
-            if cands and args.sift_topk > 0 and result.query_qc is not None:
-                gt_cx, gt_cy = _gt_center(row, pl.base_mpp)
-                t_v = time.time()
-                sift_topk = verify_candidates(
-                    pl, result.retriever, result.query_qc, cands,
-                    args.sift_topk, gt_cx, gt_cy, hit_tol)
-                sift_topk['t_verify_s'] = round(time.time() - t_v, 2)
-
-            m = compute_metrics(row, result, pl.base_mpp, tile_l0=tile_l0,
-                                candidates=cands, hit_tol_px=hit_tol,
-                                hit_tol_strict_px=strict_tol,
-                                sift_topk=sift_topk)
-            record(m)
-
-            if want_fig:
-                try:
+        for mode in classify_failure(m, args.draw_failures, args.fail_tol_um):
+            try:
+                if mode == 'no-recall':
+                    p = draw_recall_figure(pl, row, img, result, out_dir, m,
+                                           zoom_pad=args.zoom_pad)
+                else:
                     p = draw_shot_figure(pl, row, img, result, out_dir,
-                                         zoom_pad=args.zoom_pad, metrics=m)
-                    if p:
-                        n_drawn += 1
-                        print(f'      [fig] {p}', flush=True)
-                except Exception as e:
-                    print(f'      [fig failed] {type(e).__name__}: {e}', flush=True)
+                                         zoom_pad=args.zoom_pad, metrics=m,
+                                         subdir=_MODE_DIR[mode])
+                if p:
+                    n_fail_drawn += 1
+                    print(f'      [fig {mode}] {p}', flush=True)
+            except Exception as e:
+                print(f'      [fig {mode} failed] {type(e).__name__}: {e}',
+                      flush=True)
 
-            for mode in classify_failure(m, args.draw_failures, args.fail_tol_um):
-                try:
-                    if mode == 'no-recall':
-                        p = draw_recall_figure(pl, row, img, result, out_dir, m,
-                                               zoom_pad=args.zoom_pad)
-                    else:
-                        p = draw_shot_figure(pl, row, img, result, out_dir,
-                                             zoom_pad=args.zoom_pad, metrics=m,
-                                             subdir=_MODE_DIR[mode])
-                    if p:
-                        n_fail_drawn += 1
-                        print(f'      [fig {mode}] {p}', flush=True)
-                except Exception as e:
-                    print(f'      [fig {mode} failed] {type(e).__name__}: {e}',
-                          flush=True)
-
-            print(f'  [{i:4d}/{len(wsi_rows)}] {row["filename"]:36s}  '
-                  f'L={row["level"]:>2}  '
-                  f'route=L{_fmt(m["routed_level"], "{:>1d}", "  ")}  '
-                  f'mpp_err={_fmt(m["mpp_err_rel"], "{:.3f}")}  '
-                  f'rot {m["gt_rot_deg"]:>3}->{_fmt(m["retr_rotation"], "{:>3d}", "  ?")}'
-                  f'{"" if m["rot_correct"] else "*"}  '
-                  f'retr_ctr={_fmt(m["retr_center_err_px"], "{:>7.0f}")}  '
-                  f'hit@{_fmt(m["retr_hit_rank"], "{:>2d}", " -")}  '
-                  f'sift@{_fmt(m["sift_hit_rank"], "{:>2d}", " -")}'
-                  f'/{_fmt(m["sift_verified_rank"], "{:<2d}", "- ")}  '
-                  f'refine_ctr={_fmt(m["refine_center_err_px"], "{:>7.0f}")}  '
-                  f'({dt:.1f}s)'
-                  + (f'\n      ERR: {m["error"]}' if m['error'] else ''),
-                  flush=True)
+        print(f'  [{i:4d}] {row["filename"]:36s}  '
+              f'L={row["level"]:>2}  '
+              f'route=L{_fmt(m["routed_level"], "{:>1d}", "  ")}  '
+              f'mpp_err={_fmt(m["mpp_err_rel"], "{:.3f}")}  '
+              f'rot {m["gt_rot_deg"]:>3}->{_fmt(m["retr_rotation"], "{:>3d}", "  ?")}'
+              f'{"" if m["rot_correct"] else "*"}  '
+              f'retr_ctr={_fmt(m["retr_center_err_px"], "{:>7.0f}")}  '
+              f'hit@{_fmt(m["retr_hit_rank"], "{:>2d}", " -")}  '
+              f'sift@{_fmt(m["sift_hit_rank"], "{:>2d}", " -")}'
+              f'/{_fmt(m["sift_verified_rank"], "{:<2d}", "- ")}  '
+              f'refine_ctr={_fmt(m["refine_center_err_px"], "{:>7.0f}")}  '
+              f'({dt:.1f}s: s1 {_fmt(m["t_stage1_s"], "{:.1f}")} '
+              f'lvl {_fmt(m["t_level_s"], "{:.1f}")} '
+              f's2 {_fmt(m["t_stage2_s"], "{:.1f}")} '
+              f's3 {_fmt(m["t_stage3_s"], "{:.1f}")})'
+              + (f'\n      ERR: {m["error"]}' if m['error'] else ''),
+              flush=True)
 
     print(f'\nTotal wall time: {time.time() - t_start:.1f}s', flush=True)
 

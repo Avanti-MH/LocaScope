@@ -15,7 +15,7 @@ rather than what it is.
 
 WHY THE MODULE IS BORROWED AND THE DECODE IS NOT
 -------------------------------------------------
-The network itself is imported from `/work/u26130998/SuperPoint/
+The network itself is imported from `/work/u26130998/github_repos/SuperPoint/
 superpoint_pytorch.py` rather than re-declared here. Re-declaring it means
 re-typing `VGGBlock`'s conv -> ReLU -> BatchNorm order (which is unusual: the
 activation comes BEFORE the norm, `superpoint_pytorch.py:50-65`), `eps=0.001`,
@@ -68,9 +68,11 @@ from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register
 
 from SuperPoint.Decoders import depth_to_space_prob
 
-#: Where the upstream checkout is. A sibling of this repo by default, the same
-#: relation `_paths.OUTPUT_ROOT` uses -- and overridable, because a checkout is
-#: not a fact about this project. Resolved lazily (inside `build`) so that
+#: Where the upstream checkout is. `github_repos/SuperPoint` beside this repo by
+#: default -- where the upstream checkouts live (prov-gigapath, UNI, eomt sit
+#: there too; until 2026-10-06 this looked for a bare `../SuperPoint`, which does
+#: not exist) -- and overridable, because a checkout is not a fact about this
+#: project. Resolved lazily (inside `build`) so that
 #: importing this module costs nothing and fails nowhere.
 UPSTREAM_ENV = 'SUPERPOINT_ROOT'
 
@@ -284,7 +286,7 @@ def _upstream_root(explicit: Optional[str]) -> str:
     else:
         here = os.path.dirname(os.path.abspath(__file__))
         repo = os.path.abspath(os.path.join(here, '..', '..', '..'))
-        root = os.path.join(os.path.dirname(repo), 'SuperPoint')
+        root = os.path.join(os.path.dirname(repo), 'github_repos', 'SuperPoint')
     if not os.path.isfile(os.path.join(root, 'superpoint_pytorch.py')):
         raise FileNotFoundError(
             f'{root} does not hold superpoint_pytorch.py. Point '

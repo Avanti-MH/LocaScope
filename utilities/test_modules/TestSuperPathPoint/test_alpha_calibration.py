@@ -225,7 +225,10 @@ def t_offset_quantiles_of_excludes_the_self_match_column():
     offset. Two anchors born at ds=1 (rows 0/1, dist=0.0 at column ds=1 by
     construction) and one born at ds=2 (row 2, a real 6.0 offset measured
     back at ds=1) -- the ds=1 column must drop rows 0/1 and keep only the
-    real 6.0, while the ds=2 column (nobody born there) keeps every row.
+    real 6.0, and the ds=2 column must drop row 2, its own 0.0, and keep
+    rows 0/1's real 3.0 and 5.0. (Until 2026-10-06 this said nobody was born
+    at ds=2 and expected all three rows there; row 2 is, and the code was
+    right to drop it.)
     """
     dist = np.array([[0.0, 3.0],
                      [0.0, 5.0],
@@ -237,11 +240,11 @@ def t_offset_quantiles_of_excludes_the_self_match_column():
         raise AssertionError(f'ds=1 column: {out[0, 0]} != 6.0 -- the two '
                              f'self-matched rows (born at ds=1) should have '
                              f'been excluded, leaving only the real offset')
-    expected_ds2 = np.quantile([3.0, 5.0, 0.0], 0.5)
+    expected_ds2 = np.quantile([3.0, 5.0], 0.5)
     if not np.isclose(out[1, 0], expected_ds2):
         raise AssertionError(f'ds=2 column: {out[1, 0]} != {expected_ds2} -- '
-                             f'no anchor was born at ds=2, so nothing here '
-                             f'should be excluded')
+                             f'row 2 was born at ds=2, so its own 0.0 there '
+                             f'should have been excluded')
     return f'ds=1 median {out[0, 0]} (self-matches excluded), ds=2 median {out[1, 0]}'
 
 

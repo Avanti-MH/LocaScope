@@ -2806,6 +2806,12 @@ front of whoever flips it.
        - pipeline 的 WsiTissuesContainer、PCA 切割的 WsiTileLoader、stage 3 的
          SlideWinSift 仍然各自讀圖，選層用 nearest，和 level_for 不同。ds 落在
          兩層之間時兩邊會選到不同層（BRACS 目前碰巧相同）。
+         2026-10-06：WsiTissuesContainer 淘汰（見 bias 那則）；WsiTileLoader
+         淘汰，PCA 切割的投影改走 SlideReader.read_grid、fit 的 1000 個零散
+         tile 改走新的 SlideReader.read_points（worker 上逐點 read）。兩者都在
+         level 0，像素必須和舊的逐 tile 讀完全相同，由 diag_read_exp 的 pca
+         flow 比對（舊讀法凍結在該檔）。PCA 在整數 ds，決定 2a（非整數 ds
+         分塊讀）因此用不到，未做。
        - 刪掉的檔案中沒進過 git 的（GridReader、Render.py、SlideContext、
          diag_render_reads.py + DiagRenderReads.sh、diag_read_exp 的舊版並排比對）
          只有備份，沒有歷史。diag_render_reads.py 是 ARCHITECTURE.md 量測數字的來源，
@@ -2994,3 +3000,165 @@ front of whoever flips it.
          在 9c92d98（CandidateSet 以 level-0 記帳）。
        - pixels / crops / localize 三段要用舊 container 當對照，container 淘汰
          時一起從 diag_container_retire.py 刪掉，只留 phase 與 origins。
+
+[ ] 2026-10-06 | 每張照片 ~60 s：每次重排整層 WSI 特徵網格，而且排法是平方；特徵留在 GPU
+
+    1. 量到的（BenchLocaScopeProfile，cProfile，BRACS_1228 L0，3 張；profiler 下
+       每張 145 s，平常 62 s）
+       - 每張照片的時間幾乎全在 compute_sim_maps（3 張 432 s）。SlidingWindowSimilarity
+         每次呼叫都重排 main / overlap 兩張 [R, C, D] 網格：每張照片 4 個旋轉就 4 次，
+         而同一層的網格不會變。
+       - 排一張網格逐格走 FeaturesMap.__getitem__（3 張 240 萬次）-> flat_index_at
+         -> len(grid)；PatchGrid.__len__ 和 _flat_prefix 每次都逐列加總
+         （_row_scan_width 8.8 億次），所以是 tile 數的平方。
+       - 第一張多出的 570 s 是建 L0 特徵：openslide read_region 248 s（read_workers
+         為 0，主程序串行讀，沒和 GPU 重疊）+ 編碼 261 s（.cpu() 138 s 是在等 GPU）。
+       - 特徵 encoder.features() 回到 host、from_grid_read 再 .cpu()，算相似度時每次
+         搬回 GPU。
+
+    2. 改法（只改計算方式，結果逐位元相同）
+       - PatchGrid.__len__ / _flat_prefix 改成封閉式，O(1)。
+       - FeaturesMap.main/overlap_feature_grid 改成一次 index_select，在特徵所在的
+         裝置上做。
+       - TileEncoder.features(host=False) 讓結果留在 GPU；from_grid_read 不再 .cpu()；
+         只有寫 cache（Store.to_store_tensors）時搬到 host；從 cache 讀回時整層
+         搬上 GPU 一次（WsiFeaturesMap.to）。
+       - SlidingWinSimRot 每一層建好 / 讀回後在 GPU 上排一次網格（wsi_grids，跟該層
+         一起存在 _by_ds），compute_sim_maps 直接用（_grid_sims）。
+       - bench_locascope、locate_photo、test_locascope_stages 用 CpuBudget 的 worker
+         數當 read_workers，讀圖和編碼重疊。
+       - 驗證：test_patching_lib 把舊的加總與逐格排法凍結比對（必須完全相等）；
+         LocaScopeStagesTest 的 best / score / rotation 必須和改前相同。
+
+    3. 接著做的：TileEncoder 的出口不再 .cpu()（取代上面的 features(host=False)）
+       - features / tokens / spatial / layer_tokens / pooled 的結果一律留在 encoder 的
+         裝置；搬不搬到 host 由呼叫端決定。_run 的 reduce 仍是每批套用的 hook。
+       - 呼叫端逐一看過，需要 host 的自己搬：KnnClassifier 的 topk indices 轉 numpy；
+         bench_gigapath_configs 的 cos 統計；bench_mpp_feature_decomposition（SVD、
+         KNN 標籤都在 numpy）；test_store 的 _gap 與從 store 讀回的 tensor 搬到 raw 的
+         裝置。寫檔一律在 FeatureStore.save 搬（save_pooled、build_reference_store、
+         bench_tile_retrieval、FeatureMapCache 都經過它）。
+       - 不必改的：retriever、PatchingLib.from_grid_read / from_patch_container、
+         bench_offgrid_score、bench_window_retrieval（gate 改成兩邊都在 device 上比）、
+         encode_raw 與用它的訓練、Uni2PcaSeg（自己的前向）。
+       - 沒看的：training/FewShotEoMT（未進 git）。
+
+    4. 驗證（2026-10-06）：PatchingLibTest grid、StoreTest 22/22、AiNNModelTest
+       45+4+40 全過；LocaScopeStagesTest 的 best (20572, 22972) / score 0.9128 /
+       rotation 0 / stage 3 0.0 um 和改前相同，retrieval 796.4 s -> 690.8 s。
+       StagesTest 只有一張照片，時間大半是建 L0 特徵，量不到每張照片省下的部分；
+       每張照片的時間還沒量（BenchLocaScope LIMIT + PROFILE）。
+
+[ ] 2026-10-06 | stage 1 bench 的照片改由 Render 拍（U3）
+    1. 舊的做法（bench_stage1_mpp 到 7f4398d）：只讀感測器大小的長方形
+       （1440x1024，ReadSpec(sensor)），再交給 simulate_microscope_photo，domain gap
+       是 DomainGapConfig() 的預設值（會轉 0/90/180/270 加 ±3 度、縮放 0.90-1.15）。
+       - 90/270 加抖動走 warpAffine(BORDER_REFLECT) 並維持 1440x1024：轉過的內容只有
+         中間 1024 寬，左右各 208 px 是反射出來的組織，約 29% 面積；約一半的照片如此。
+       - scale < 1 的邊緣也是反射補的；失真、散焦讀不到真的鄰居（沒有 margin）。
+       - 只有 stage 1 走這條路；window bench 和 ARCHITECTURE.md 是 位置 -> 讀 -> Render。
+    2. 改法
+       - photo_camera(args) = DomainGapConfig(wh_ratio, MPixels)，gap 欄位仍是預設值，
+         和舊照片同一組（不換成 CAMERA_FULL：只改照片怎麼做，新舊差異才歸因得了）。
+       - 位置仍是 TileSampler.cached 的 ladder（stage 1 要跨 rung，FovSupply 一次一個
+         rung 而且沒有 cache），plan 的 camera 換成 render_spec(cfg, sensor)：會轉、
+         讀外接正方形加 SENSOR_MARGIN。sampler 的 key 因此改變，第一次重抽；粗的
+         rung 位置會變少。
+       - 照片 = Render(SlideReader(wsi), cfg).at(rung).capture_with_gt(x, y,
+         rng=fov_rng(...))；fov_rng 不變，各方法看到同一張照片。
+       - _sampling_recipe_id 加上 photo=render：新結果不和舊照片的檔案同名。
+       - test_locascope_stages.pick_fov 用同一個 render_spec 讀 bench 的 draw；query
+         仍是不加 gap 的直讀（驗證三個 stage 串起來的正確性，stage 3 的誤差只在不轉、
+         沒有鏡頭效果時是確定的）。重抽後挑到的 FoV 會換，第一次跑完記下新基準。
+       - 比對：diag_read_exp 的 s1photo flow，凍結舊的讀法。不加 gap 時兩者必須
+         逐位元相同（PASS）；92 度只開幾何時量兩側邊條和中間的 |新-舊|；完整 gap 下
+         兩者的 photos/s。
+    3. 之前的 val（0979f35a_..._val，舊照片）作廢，val 和 test 都在新照片上重跑。
+       讀它得到、和照片無關而仍成立的：convnext_v2+attn_mlp_deep 這個 checkpoint
+       壞了（BRACS 413/445、Ki67 371/371 判成 32）；每跑完一個方法 GPU 記憶體多留
+       2.8-4.6 GB，到約 23 GB 才掉回來（疑似循環參照等 GC，未驗證）。
+
+[x] 2026-10-06 | feature cache 在非整數 ds 的 level 永遠 miss（c562441 起）
+    - LocaScopeStagesTest --check-sims（RUNG=4，BRACS_1952 L1）抓到：剛寫的
+      ds4.00003_cls.safetensors 讀回時 `ds: store 4.00003374275, now
+      4.00003374274531`。FeatureMeta 的 float 用 `.12g` 存，FeatureMapCache.load
+      和 load_pooled 用 `!=` 比，所以 BRACS L1 以上（4.00003、16.002、32.006）每次
+      都重新編碼再覆寫；整數 ds（L0、Ki67）不受影響。結果沒錯，只是 cache 沒作用。
+    - test_store 用 ds=4.00003（本身 6 位）往返，`.12g` 剛好不截，所以沒抓到。
+    - 改：_enc_float 用 repr（能原樣讀回的最短字串），不改成容差比較。test_store
+      加真實的 4.00003374274531 必須原樣往返，舊的 `.12g` 當誘餌必須不等。磁碟上
+      的舊檔讀時照樣 miss，重新編碼後由 save 覆寫，不用手動刪。
+
+[x] 2026-10-06 | FovSupply 只把基礎 module 串起來；query_sim 只管拍照
+    - 原則：TileSampler / SlideReader / ReadGeometry / TissueMask / DomainGapConfig /
+      Render 是基礎 module；FovSupply 不發明方法，只串 位置 -> 讀 -> 拍。基礎
+      module 缺的才補進去（這次只補了 camera.photo_rng）。
+    - generator.py -> FovSupply.py。FovSupply(camera, mask, cfg | sampler=) 抽一次、
+      每個位置拍一張，產出 (meta, image, params)；photo(meta) 單拍一個位置。
+      sampler= 收別處抽好的 draw（stage 1 的 cached ladder），每個 rung 走
+      camera.at(ds)。
+    - 刪：重抽 / 判定用完 / 重複輪（batch 的策略）、bank、shot、CameraShot、
+      generate、split_shots（搬進 bench_locascope，U1）、sampler_cfg_for、
+      base_mask、add_domain_gap_args / domain_gap_from_args（直接 add_config_args
+      / config_from_args）、camera.tile_spec（沒人用）、cli/batch.py、cli/demo.py。
+      RICHNESS_PRESETS 搬進 bench_window_retrieval（唯一使用者）。
+    - rng：一張照片的 rng 由它自己的身分決定，原本三份 sha256（FovSupply._rng、
+      bench_stage1_mpp.fov_rng、MppRoutingHead Datasets._eval_seed，最後一份取 8 位）
+      合成 camera.photo_rng（16 位）。FovSupply 的 key 照舊 (seed|x|y|ds|0)：window
+      bench、BenchLocaScope 的照片不變。stage 1 改走 FovSupply，key 不再含
+      dataset / slide：照片換了（val / test 本來就要重跑）。MppRoutingHead /
+      PrototypicalRoutingHead 的 eval 照片從今天起換了：之後的 val 曲線不能和
+      之前的 run 逐點比，跨今天續跑的 run 也不再和不中斷的一樣。
+    - 比對：test_fov_supply 的 equiv 段把舊的 FovSupply.bank 凍結，新的位置、像素、
+      gap 參數、bucket / 背景 / origin / overlap 必須完全相同。
+
+[x] 2026-10-06 | encoder 的 identity 隨 GPU 數變：DataParallel 蓋在 self.model 上
+    - BenchLocaScope1Gpu：同一張 BRACS_1413，4 張卡寫的 feature cache 是 encoder_id
+      881dc782，1 張卡是 5c4b8ed2，所以 miss 並重新編碼（314 s）。四個 encoder 都在
+      device_count() > 1 時把 DataParallel（GigaPath / Uni2 再加 torch.compile）存進
+      self.model；weights_id 雜湊 state_dict，key 多了 `module.` 前綴。程式裡已有 7 處
+      手動 `getattr(self.model, 'module', ...)` 在補同一個洞，weights_id 是沒補到的那個。
+    - 改（基礎 module，不遷就現有寫法）：
+      - TileEncoder._set_model(model, multi_gpu=, compile=)：唯一把網路交給 encoder 的
+        地方。self.model 永遠是網路本身（identity、spec、intermediates、depth、
+        train/eval 都讀它）；self.runner 是怎麼跑（compile、跨卡），只有呼叫網路本身的
+        前向（_run 的預設、features_with_grad 的 tokens、ConvNeXt 的 spatial）用它。
+        四個 encoder 改成呼叫它；7 處手動 unwrap、GigaPathFunc._compile 刪除；
+        EncoderBackbone 的 unwrap 也刪。
+      - ConfigIdentity.unwrapped：weights_id 先拆 DataParallel / DDP（.module）和
+        torch.compile（._orig_mod），可巢狀。外面交進來的包裝（之後訓練的 DDP）也一樣。
+    - 測試：test_config_identity 加 t_weights_id_ignores_the_wrapper（DataParallel、
+      compile、兩者疊加都同 id；改過一個權重的包裝必須不同 id）；test_tile_encoder 的
+      t_spec_unwraps_dataparallel 改成 t_the_model_is_never_the_wrapper；兩個 fake
+      encoder 改走 _set_model。
+    - 影響：4 張卡寫過的 feature cache 會 miss 一次、重編後覆寫；之後幾張卡都命中。
+      checkpoint 的 trunk_state 本來就存 encoder.model，現在保證不帶前綴。
+
+[x] 2026-10-06 | FovSupply 只收 PlanSpec；SENSOR_MARGIN、sensor_size 進 ReadGeometry；容差只留一份
+    - 依據：基礎模組圖（https://claude.ai/artifact/JYsdxJdVvJfYQV6cEWDt83）的 C1、C3、C4。
+    - FovSupply(microscope, plan: PlanSpec, cfg, mask) 與 FovSupply.cached(...)（參數就是
+      TileSampler.cached 的）。plan 必填、可跨好幾個 rung：每個位置經 microscope.at(meta.ds)
+      拍，stack=meta.stack_kind；microscope 本身的 ds 不重要。刪 sampler=、fov_plan_of、
+      TileSampler.camera_plan（只有它在用；test_tile_sampler 的 _fov_plan 改走 PlanSpec）。
+      PlanSpec('ladder', (rung,)) 經 level_for 的容差已等於舊 camera_plan：rung 4 在 BRACS 上讀
+      原生 level 1（4.00003）。test_fov_supply 的 equiv 把舊 camera_plan + bank 凍結。
+    - 呼叫端：stage 1 bench 用 FovSupply.cached（ladder），bench_locascope 每張 slide 一個
+      FovSupply 涵蓋所有 level（位置、照片都換了），window bench 與 diag fov 仍逐 level（level
+      是它們的 resume / 計時單位），rung 改成 level 自己的 ds：位置不變，photo rng 的 key 換了，
+      所以 window bench 的 config_id 加 fov_plan，舊 parts 不會被續跑。
+    - stage 1 bench 的 native 判定：`shrink == 1.0` 完全相等 → RungPlan.is_native。舊的 val
+      裡 BRACS rung 4 / 16 / 32 的 n_nat=0 就是這個 bug。
+    - 常數只留一份：SENSOR_MARGIN（連同推導的註解）與 sensor_size 從 pipeline / camera 搬到
+      ReadGeometry；SafeSlide 的 _LEVEL_REL_TOL 改成 import；window bench native_levels 與
+      bench_locascope 的 literal 1e-3 改用 LEVEL_REL_TOL。test_read_geometry 不再自留一份 64。
+
+[x] 2026-10-06 | bench_locascope --resume 只認檔名：換了 FoV 也會把舊列混進來
+    - BenchLocaScopeSmoke 續跑上次的 metrics.csv，因欄位少了 t_stage*_s 而 ValueError。
+      失敗本身是安全的；不安全的是欄位剛好一樣時：resume 只用 filename
+      （<slide>_L<level>_syn<i>）判斷做過沒，而 split_shots 改成每張 slide 一次抽樣後，
+      同一個 filename 已是另一個 FoV，舊列會被當成做完、和新列混成一個 bench，不報錯。
+    - 改：第一次寫 metrics.csv 時旁邊寫 run.json（run_identity：shots 的做法
+      SHOTS_RECIPE、datasets、split、n_wsi、max_ds、sampler、camera、fov mask、encoder
+      identity、mask、topk、sift_topk）；--resume 時沒有 run.json 或任何一項不同就拒絕並說
+      哪一項。欄位不同（換了版本的 bench）也拒絕。window bench 用 parts-<config_id> 做的
+      是同一件事。

@@ -57,6 +57,7 @@ Usage:
 from __future__ import annotations
 
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +96,14 @@ class LocaScopeQueryResult:
     retrieval:      Optional[CandidateSet]
     refine:         Optional[SiftRansacResult]
     error:          Optional[str]
+    # Wall seconds per stage of THIS shot. `t_level_s` is the routed level's
+    # one-time build (features encoded or read from the cache) when this shot
+    # is the first to need it, else ~0; `t_stage2_s` is the search alone.
+    # None for a stage that did not run.
+    t_stage1_s:     Optional[float] = None
+    t_level_s:      Optional[float] = None
+    t_stage2_s:     Optional[float] = None
+    t_stage3_s:     Optional[float] = None
     # Heavyweight refs kept only for diagnostics/plotting (not for bulk storage).
     # Populated when run(..., keep_objects=True).
     retriever: object = None      # SlidingWinSimRot
@@ -241,6 +250,10 @@ class LocaScopePipeline:
         # Stage 1 — estimate mpp AND route to a pyramid level (`chosen_level`,
         # the estimator's own snap). Stage 2 searches that level; it does not
         # choose again.
+        # Each stage ends in host values (an mpp, topk lists, a homography), so
+        # the GPU has finished by the time a clock is read.
+        t = {}
+        t0 = time.perf_counter()
         try:
             r1 = self.estimator.estimate(img_np)
             est_mpp = float(r1.estimated_mpp)
@@ -249,11 +262,16 @@ class LocaScopePipeline:
             return LocaScopeQueryResult(
                 None, None, False, None, None,
                 f'stage1 failed: {type(e).__name__}: {e}')
+        t['t_stage1_s'] = time.perf_counter() - t0
 
-        # Stage 2 — candidate windows at the routed level
+        # Stage 2 — candidate windows at the routed level; the level's build
+        # (first shot to need it) timed apart from the search
+        t0 = time.perf_counter()
         reason = self._level_ready(level)
+        t['t_level_s'] = time.perf_counter() - t0
         if reason:
-            return LocaScopeQueryResult(est_mpp, level, True, None, None, reason)
+            return LocaScopeQueryResult(est_mpp, level, True, None, None, reason, **t)
+        t0 = time.perf_counter()
         try:
             qc = QueryPatchContainer(img_np)
             qc.extract_all(self.tile_size, overlap=self.retriever.overlap)
@@ -261,18 +279,21 @@ class LocaScopePipeline:
         except Exception as e:
             return LocaScopeQueryResult(
                 est_mpp, level, False, None, None,
-                f'stage2 failed: {type(e).__name__}: {e}')
+                f'stage2 failed: {type(e).__name__}: {e}', **t)
+        t['t_stage2_s'] = time.perf_counter() - t0
 
         # Stage 3 — SIFT+RANSAC inside the best candidate
+        t0 = time.perf_counter()
         try:
             refine = self.localizer.localize(qc, retrieval, rank=0)
         except Exception as e:
             return LocaScopeQueryResult(
                 est_mpp, level, False, retrieval, None,
-                f'stage3 failed: {type(e).__name__}: {e}')
+                f'stage3 failed: {type(e).__name__}: {e}', **t)
+        t['t_stage3_s'] = time.perf_counter() - t0
 
         return LocaScopeQueryResult(
-            est_mpp, level, False, retrieval, refine, None,
+            est_mpp, level, False, retrieval, refine, None, **t,
             retriever = self.retriever if keep_objects else None,
             localizer = self.localizer if keep_objects else None,
             query_qc  = qc             if keep_objects else None,

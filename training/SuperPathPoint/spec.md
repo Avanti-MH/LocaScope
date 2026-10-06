@@ -6,7 +6,7 @@
 loss 是什麼、訓練迴圈長什麼樣、介面切在哪裡才換得掉 encoder 與 decoder，以及
 ——最重要的——**什麼數字會決定這整件事值不值得做**。
 
-上游參照：`/work/u26130998/SuperPoint`（rpautrat 的 TF 實作 + 根目錄的
+上游參照：`/work/u26130998/github_repos/SuperPoint`（rpautrat 的 TF 實作 + 根目錄的
 `superpoint_pytorch.py`）。訓練程序的形狀參照 `/work/u26130998/GMR-Conv`，
 WSI 套件的分層參照 `/work/u26130998/prov-gigapath`。所有從上游抄過來的常數，
 在第十節有一張表附出處，不憑記憶寫。
@@ -1998,7 +1998,7 @@ torch 2.3.0+cu121、opencv 4.13、timm 1.0.28、safetensors 0.7.0、wandb 0.26.0
 
 ## 9. 上游常數對照表
 
-每一格都能對回 `/work/u26130998/SuperPoint/` 的 file:line。憑記憶抄常數是這個
+每一格都能對回 `/work/u26130998/github_repos/SuperPoint/` 的 file:line。憑記憶抄常數是這個
 專案吃過虧的地方（ClaudeRules §13 的 CONCH mean/std 案例），所以這張表就是規格
 本身。
 
@@ -2620,9 +2620,8 @@ label，而且不會報錯。
 
 ### 還沒量到的常數，用 PENDING-MEASUREMENT 標記，不要猜
 
-有三個值必須等執行結果才知道，而它們擋在寫程式的路上。作法是照
-`utilities/_tempmeasure.py` 的 `TEMP-MEASURE` 慣例：一個可以被 grep 和 sed 掃掉的
-標籤，加上一份說明它在等什麼的檔案。
+有三個值必須等執行結果才知道，而它們擋在寫程式的路上。作法是一個可以被 grep 和 sed
+掃掉的標籤，加上一份說明它在等什麼的檔案（已刪除的 TEMP-MEASURE 量測用過同樣的做法）。
 
     grep -rn PENDING-MEASUREMENT --include=*.py .    # 還在等什麼
     sed -i '/PENDING-MEASUREMENT/d' <那些檔案>       # 填完之後掃掉
