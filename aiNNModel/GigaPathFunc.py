@@ -10,14 +10,6 @@ every exit are TileEncoderFunc's. What is left here is what is GigaPath's: the
 frozen baseline its numbers form, the CLS as the answer to "which token is the
 feature", and which poolings its 14x14 grid admits.
 
-Token Merging used to live here and is gone. It was rejected on the numbers
-(log/MILESTONE.log M3, log/TODO.log), and the new base is why it could not
-simply be left in place: it merged tokens without changing patch_embed.grid_size,
-so model_spec claimed 197 tokens over an output that carried 101. Nothing
-noticed while features() was raw[:, 0], which does not care how many tokens
-follow. pooling_kinds does care, and said so. GigaPathFunc_old.py, which kept the
-free functions for the test comparing the two APIs, was removed on 2026-10-05.
-
 _GIGAPATH_BASELINE is the zero point every id is measured against. Its transform
 is 256 -> 224, which is crop_pct 0.875 and NOT what the checkpoint declares:
 prov-gigapath's config.json says "crop_pct": 1.0. Their own code disagrees with
@@ -30,9 +22,8 @@ their own metadata, in four places and consistently --
 
 all four Resize(256) then CenterCrop(224), and the demo then asserts its output
 against a stored tensor. So 256/224 is the preprocessing those weights were
-validated with and crop_pct is an upstream slip. test_gigapath_equivalence held
-the baseline down against that same stored tensor until it was removed on
-2026-10-05; nothing checks it now, so a changed default goes unnoticed.
+validated with and crop_pct is an upstream slip. Nothing checks the baseline
+against that stored tensor, so a changed default goes unnoticed.
 
 flash-attn is auto-detected by timm; no extra code needed.
 '''
@@ -157,8 +148,7 @@ class GigaPathEncoderConfig(TileEncoderConfig):
     #: written. It is GigaPath's own answer and not a default, and 'cls' rather
     #: than 'token' because it is the CLS specifically -- pooling_kinds' slot 0
     #: is tokens[:, 0] and timm's pool(pool_type='token') is x[:, 0], the same
-    #: arithmetic under two names, which is why the vector_from override that
-    #: used to sit in this file could be deleted rather than rewritten.
+    #: arithmetic under two names.
     #:
     #: 'cls' appears twice because it is both the canonical value and a spelling
     #: of '', for the reason 'trunk' is above: one computation, one id.
@@ -205,12 +195,8 @@ class GigaPathEncoder(TileEncoder):
     so leaving it out worked for exactly one architecture and gave
     `model.head is Linear` on the first other one tried.
 
-    That the empty setting returns exactly what this module used to assemble by
-    hand -- fc_norm(forward_features(x)) -- is measured, not assumed:
-    test_gigapath_equivalence (removed 2026-10-05) checked it at max|delta| == 0 and the four
-    preconditions the equality rests on. Going through model() rather than
-    around it is what lets DataParallel work and removes the private attribute
-    reach.
+    The empty setting returns fc_norm(forward_features(x)). Going through
+    model() rather than around it is what lets DataParallel work.
     '''
 
     BASELINE = _GIGAPATH_BASELINE

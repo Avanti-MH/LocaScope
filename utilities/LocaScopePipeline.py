@@ -16,15 +16,10 @@ Design:
   18.6 GiB. The chunk budgets are fields of the recipe's segmenter config.
 * A retriever is built lazily on first use for each pyramid level; the
   routed level is the estimator's own `chosen_level` --
-  `wsi.coarser_level_for_downsample`, the repo's own measured, coarse-biased
+  `wsi.coarser_level_for_downsample`, the repo's measured, coarse-biased
   routing rule (`SafeSlide.py`'s own docstring: 91.1% recovered by stage 3 at
-  one level coarse against 15.7% at one level fine, 1398 shots). This file
-  used to snap with `wsi.get_best_level_for_downsample` instead -- the
-  FINE-biased general-purpose openslide rule, not the one measured for this
-  exact job -- inline, a second implementation of the same snap. Fixed by
-  reading `chosen_level` off the Result rather than recomputing it; see
-  `StageInterface.py`'s docstring for why that recompute is not a shared
-  function either, now that there is nothing left here to share it with.
+  one level coarse against 15.7% at one level fine, 1398 shots). It is read
+  off the Result, never recomputed here.
 * If a level's retriever build fails (e.g. `patchable` emptied the mask
   because tiles are too big at that level), the shot is marked
   `unusable_level` and its stage 2 / 3 metrics are None.
@@ -134,17 +129,14 @@ class LocaScopePipeline:
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi                 = wsi
-        # One value instead of five parameters and two remembered method calls.
-        # The mask a pipeline builds can now say how it was built, which is what
-        # a cache has to ask before trusting a stored feature map.
+        # The mask recipe: how the mask was built, which is what a cache has
+        # to ask before trusting a stored feature map.
         from TissueMaskConfig import MASK_RECIPES
         self.mask_cfg            = mask_cfg or MASK_RECIPES['hest']
         self.feature_store_root  = feature_store_root
         self.feature_store_mode  = feature_store_mode
 
-        # SafeSlide.base_mpp: the mean of mpp-x and mpp-y, with an aperio
-        # fallback. This line used to read mpp-x alone, which disagreed with
-        # QueryFromWSI on every slide in use.
+        # SafeSlide.base_mpp: the one definition of the slide's scale.
         self.base_mpp = wsi.base_mpp   # raises if the slide carries no mpp
 
         self.mask:      Optional[TissueMask] = None
@@ -166,8 +158,7 @@ class LocaScopePipeline:
         (per-WSI one-time)."""
         # Segment, filter and merge in one place and in one order. merge is
         # incomplete without filter having run first -- it skips nested boxes on
-        # the assumption they are already gone -- and that dependency used to be
-        # two lines every caller wrote out.
+        # the assumption they are already gone.
         self.mask = self.mask_cfg.build(
             self.wsi, getattr(self.retriever.encoder, 'device', None))
 
@@ -185,14 +176,9 @@ class LocaScopePipeline:
 
     # ── Lazy per-level retriever cache ────────────────────────────────────────
     #
-    # `_level_mask` used to live here: a per-level copy of the mask keeping only
-    # regions that can host a tile. It was the patchable filter written out a
-    # second time, because the mask's filter then mutated in place and this
-    # needed a copy. It moved into the retriever -- `build_wsi_features`
-    # takes a `mask.patchable(...)` view -- so the
-    # retriever now narrows the mask itself, at the ds it is actually going to
-    # build at. Which is the point: this class did not know that ds, it only
-    # knew the one it was asking for.
+    # The retriever narrows the mask itself (`build_wsi_features` takes a
+    # `mask.patchable(...)` view), at the ds it builds at -- which this class
+    # does not know.
 
     def _feature_store(self):
         '''The feature-map cache for this slide, or None when no root was given.

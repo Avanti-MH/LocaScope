@@ -25,28 +25,18 @@ from Heads import HeadConfig, classifier_class, classifier_name     # noqa: E402
 def weight_filename(encoder_name: str, frozen: bool, head_name: str,
                     tag: str, loss: str = 'bal', read_tag: str = '') -> str:
     '''`<encoder>_<frozen|finetuned>_<head>_<last|best|best_unweighted>.pt`,
-    with a `_<loss>` segment before the tag when `loss` is not `'bal'`
-    (2026-09-22).
+    with a `_<loss>` segment before the tag when `loss` is not `'bal'`.
 
     The tissue-mask recipe is NOT in the name. It is recorded in
     `ckpt['args']['seg']` and evaluation refuses a mismatch, but two runs that
     differ only in it overwrite each other: at this stage the recipe is not an
     axis being compared, and a name segment would say it was.
 
-    `loss='bal'` gets NO segment, not `_bal`: `bal` was every checkpoint's
-    only loss before `cli/train.py`'s `--loss` existed, so leaving it
-    untagged keeps every already-trained bal checkpoint's filename exactly
-    as it is -- only `ord_a`/`ord_b` runs (which used to need a hand-picked
-    `--out` subdirectory to avoid overwriting a bal checkpoint of the same
-    encoder+head, see `jobscripts/Benchmarks/Stage1MppBench.sh`'s
-    history, formerly MppFeatureDecomposition.sh) now get a real, distinct
-    filename in the SAME shared
-    weights/ directory. `loss` is a training-time hyperparameter, not an
-    architectural choice `build_from_checkpoint` needs to rebuild the
-    model correctly (unlike `training/PrototypicalRoutingHead`'s `collapse`/
-    `routing_head`) -- it is already recorded in `ckpt['args']['loss']`
-    regardless of what this function does, so this change is naming/
-    organisation only, not a `build_from_checkpoint` change.
+    `loss='bal'` gets NO segment, not `_bal`, so a bal checkpoint's filename
+    does not carry it; `ord_a`/`ord_b` runs get a distinct filename in the
+    SAME shared weights/ directory. `loss` is a training-time hyperparameter,
+    not an architectural choice `build_from_checkpoint` needs to rebuild the
+    model, and it is recorded in `ckpt['args']['loss']` either way.
 
     ENCODER FIRST, because `_paths.encoder_tag(encoder, head)` already spells
     an encoder-plus-head name that way and CLAUDE.md's result paths follow it
@@ -64,12 +54,10 @@ def weight_filename(encoder_name: str, frozen: bool, head_name: str,
 
     `best_unweighted`: `best` is picked on the N-WEIGHTED val accuracy
     across both eval datasets -- each dataset's own number is the plain mean
-    of its six rungs' own accuracies (NOT pooled over its tiles: 2026-09-21,
-    the caller switched away from that because a tile-pooled average is
-    dominated by whichever rungs happen to have the most val tiles), and the
-    two datasets' numbers are then combined weighted by each one's own total
-    n, so a dataset with more val positions still gets proportionally more
-    say (2026-09-18, BRACS had 1094 val positions against Ki67's 847).
+    of its six rungs' own accuracies (not pooled over its tiles, which would
+    be dominated by whichever rungs have the most val tiles), and the two
+    datasets' numbers are then combined weighted by each one's own total n,
+    so a dataset with more val positions gets proportionally more say.
     `best_unweighted` is picked on the UNWEIGHTED MEAN of each dataset's own
     accuracy instead, so both datasets get equal say regardless of how many
     positions each happened to contribute. Two separate files, not one flag,
@@ -81,10 +69,9 @@ def weight_filename(encoder_name: str, frozen: bool, head_name: str,
     package's own `val_report` calls it, currently `MppRoutingHead/
     cli/train.py`'s.)
 
-    `read_tag` (2026-10-02) is the training read mode
+    `read_tag` is the training read mode
     (`MppRoutingHead.Datasets.RenderConfig.read_tag`), one more segment after
-    the loss, and for the same reason absent at its default: `''` is how
-    every file before it existed was trained, so their names do not move.
+    the loss, and absent at its default `''`.
     '''
     if tag not in ('last', 'best', 'best_unweighted'):
         raise ValueError(
@@ -202,18 +189,11 @@ def build_from_checkpoint(path, device):
 #  save/load shape, not a forced fit into the existing one. See that
 #  spec.md's "Open design decisions", 1.
 #
-#  `collapse` (renamed from `generator` 2026-09-22, same day
-#  `PrototypeChoices.COLLAPSE_CHOICES` was). `support_context`/`query_
-#  context` (G/F, `aiNNModel/models/ContextEncoders.py`) got their OWN
-#  top-level state/cfg fields the same day they were added TO this
-#  function's signature, not the `extra` dict they briefly went through
-#  first: they train real weights (`bilstm`/`attnlstm`) exactly like
-#  `collapse` already can, so treating them as second-class (a caller
-#  reading `extra['support_context_state']` by string key, no default
-#  guaranteed) while `pooling`/`collapse`/`head` get real parameters was
-#  an inconsistency, not a deliberate design -- `extra` stays for facts
-#  that are genuinely outside this format's own opinion (`cross_domain_
-#  dataset`), not for a FOURTH and FIFTH trained module.
+#  `support_context`/`query_context` (G/F, `aiNNModel/models/
+#  ContextEncoders.py`) have their OWN top-level state/cfg fields, like
+#  `pooling`/`collapse`/`head`: they train real weights (`bilstm`/
+#  `attnlstm`). `extra` is for facts genuinely outside this format's own
+#  opinion (`cross_domain_dataset`), not for a trained module.
 # ══════════════════════════════════════════════════════════════════════════
 
 def save_prototype_checkpoint(path, *, pooling, support_context=None,
@@ -240,36 +220,20 @@ def save_prototype_checkpoint(path, *, pooling, support_context=None,
     `head_cfg` key the same way rather than overloading these two.
 
     `support_context`/`query_context`/`collapse` and their `_cfg` siblings
-    are all OPTIONAL (2026-09-21 for `collapse`, 2026-09-22 for the other
-    two) -- Stage 4's own BASELINE training arm (`cli/train_baseline.py`,
-    deleted 2026-09-22, its own inference-time positioning never having
-    settled) has no episode, so there was no support set for any Stage-2
-    sub-stage to act on at all in principle; it still built real, zero-
-    parameter `identity`/`identity`/`mean` instances for these three
-    rather than leaving them `None`, specifically so its OWN checkpoints
-    came out the same SHAPE as `cli/train.py`'s. Left OPTIONAL here for
-    whatever replaces it.
+    are all OPTIONAL, for a training arm with no episode and so no support
+    set for a Stage-2 sub-stage to act on.
 
     `support_context_name`/`query_context_name`/`collapse_name`/
-    `routing_head_name` (2026-09-22, promoted OUT of `extra`): which
-    registry entry (`PrototypeChoices.SUPPORT_CONTEXT_CHOICES`/
-    `QUERY_CONTEXT_CHOICES`/`COLLAPSE_CHOICES`/`ROUTING_HEAD_CHOICES` key)
-    built each module -- REQUIRED to even USE the matching `_state`: a
-    state dict alone cannot say which class it came from, and for the
-    zero-parameter entries (`identity`/`mean`/`off`) it provably CANNOT be
-    inferred from the state dict's own content either (all three produce
-    an identical empty `state_dict()`). This is exactly the same
-    necessity `save_checkpoint`'s own `head_name`/`reduction`/`classifier`
-    fields already answer for its single-Head world -- both live at the
-    TOP LEVEL there, not in `extra`, and this format was inconsistent with
-    its own sibling for not doing the same. `extra` now holds only facts
-    genuinely outside what is needed to rebuild the model (`cross_domain_
-    dataset`, `tile_size`/`rungs`) -- the same escape hatch `save_
-    checkpoint`'s own `extra` already is, and the same reason the trained
-    WEIGHTS themselves are top-level fields rather than a caller-supplied
-    `extra` entry: neither the weights nor the name of the class they
-    belong to is a "task-specific fact", both are what this function
-    exists to persist.
+    `routing_head_name`: which registry entry (`PrototypeChoices.
+    SUPPORT_CONTEXT_CHOICES`/`QUERY_CONTEXT_CHOICES`/`COLLAPSE_CHOICES`/
+    `ROUTING_HEAD_CHOICES` key) built each module -- REQUIRED to even USE the
+    matching `_state`: a state dict alone cannot say which class it came
+    from, and for the zero-parameter entries (`identity`/`mean`/`off`) it
+    provably CANNOT be inferred from the state dict's own content either
+    (all three produce an identical empty `state_dict()`). Top-level fields,
+    like `save_checkpoint`'s own `head_name`/`reduction`/`classifier`.
+    `extra` holds only facts genuinely outside what is needed to rebuild the
+    model (`cross_domain_dataset`, `tile_size`/`rungs`).
     '''
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,33 +274,14 @@ def build_prototype_from_checkpoint(path, device):
     unconditionally, a frozen one is built at the exact dtype its own
     `args` recorded.
 
-    REGISTRY-AWARE (2026-09-22, replacing a version that unconditionally
-    rebuilt `SetTransformerPrototype`/`CosineTauHead` regardless of what
-    the checkpoint actually held): the WEIGHTS (`support_context_state`/
-    `query_context_state`/`collapse_state`/...) are real top-level fields
-    (`save_prototype_checkpoint`'s own docstring), and so is WHICH
-    REGISTRY NAME built each one (`support_context_name`/`query_context_
-    name`/`collapse_name`/`routing_head_name`) -- the same class of fix
-    `save_checkpoint`'s own `head_name`/`reduction`/`classifier` already
-    got by never living anywhere else: a state dict cannot say which
-    class it came from (least of all for the zero-parameter registry
-    entries -- `identity`/`mean`/`off` all produce an IDENTICAL empty
-    `state_dict()`), so the name is not a "task-specific fact" `extra`
-    exists for, it is part of what this format exists to persist, same as
-    the weights themselves. Looked up in `PrototypeChoices`, the same
-    four registries `cli/train.py` itself builds from -- lives in
-    `aiNNModel/models/` alongside this file (NOT in a training package)
-    specifically so this import is safe: the generic checkpoint layer
-    importing FROM the generic model layer is fine, importing from
-    `training/PrototypicalRoutingHead/Runtime.py` would not be (see
-    `PrototypeChoices`'s own module docstring for why it moved there).
-
-    NO backward-compatibility fallback to the old `extra['collapse']`-
-    style checkpoints (2026-09-22): every checkpoint on disk when the four
-    names moved to the top level was retrained from scratch rather than
-    kept around, so there was never a real old-format file this function
-    needed to still read -- reading the old `extra` key first as a guess
-    would have been dead code with no caller to exercise it.
+    REGISTRY-AWARE: the WEIGHTS (`support_context_state`/
+    `query_context_state`/`collapse_state`/...) are top-level fields
+    (`save_prototype_checkpoint`'s own docstring), and so is WHICH REGISTRY
+    NAME built each one (`support_context_name`/`query_context_name`/
+    `collapse_name`/`routing_head_name`). Looked up in `PrototypeChoices`,
+    the same four registries `cli/train.py` itself builds from, which lives in
+    `aiNNModel/models/` so the generic checkpoint layer never imports a
+    training package.
     '''
     from dataclasses import replace                                 # noqa: PLC0415
     from TileEncoderFunc import encoder_config                      # noqa: PLC0415

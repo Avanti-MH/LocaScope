@@ -146,8 +146,8 @@ def gt_center(row: dict, base_mpp: float) -> tuple:
     """(cx, cy) @ level-0 of the shot's centre.
 
     Copied from bench_locascope._gt_center rather than imported, because that
-    module pulls in the whole pipeline. Torch is no longer part of that reason:
-    SlideWinSift now reaches SIFT_RANSAC for is_invertible and gets torch with
+    module pulls in the whole pipeline. Torch is not part of that reason:
+    SlideWinSift reaches SIFT_RANSAC for is_invertible and gets torch with
     it, accepted deliberately because this tool is the brute-force baseline
     with a single importer. What is still worth not importing is
     bench_locascope itself.

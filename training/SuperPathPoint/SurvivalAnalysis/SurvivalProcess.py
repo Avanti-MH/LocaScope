@@ -88,32 +88,13 @@ def nearest_detection(points: np.ndarray, score: np.ndarray,
     -- `Attribution.NONE` means "this rung found nothing AT ALL", a
     different thing from "found something, far").
 
-    `scipy.spatial.cKDTree`, not the O(N*M) all-pairs matrix this used to be
-    (`delta = xy0[:, None, :] - points[None, :, :]`, an `[N, M, 2]` array):
-    fine at a few thousand points a side, an OOM crash on a real C-tree's
-    ds=1 rung, which routinely has tens of thousands of both anchors and raw
-    detections (2026-09-12: ~70,000 either side would ask for ~78 GB).
+    `scipy.spatial.cKDTree`: an all-pairs `[N, M, 2]` matrix is an OOM on a
+    real C-tree's ds=1 rung (tens of thousands of anchors and detections a
+    side), and a grid-hash ring search costs `O(ring^2)` for a query far from a
+    small, dense cloud -- the C axis's own shape. A KD-tree's query cost does
+    not depend on where the query sits relative to the points.
 
-    A hand-rolled grid-hash expanding-ring search (bucket `points` into
-    cells, walk outward ring by ring from each query) was tried first and
-    DEPLOYED, then RETIRED the same day: it is exact and was fast on every
-    case checked at the time, but its per-query cost is `O(ring^2)` where
-    `ring` grows with (distance to the point cloud) / (the cloud's OWN
-    density-derived cell size) -- so a query far from a SMALL, DENSE cluster
-    of points forces a huge ring expansion, independent of how many points
-    there actually are. This is exactly the C axis's own shape: a coarse
-    rung's own detections can be few and tightly clustered (one small
-    mother tile) while the anchors being probed against it span the whole
-    tree, so some anchors sit far outside that rung's small cloud. Caught in
-    production 2026-09-11: two sweep tasks each burning 100%+ CPU for 20-40
-    minutes and climbing, stuck on one specific ChainStack, independent of
-    alive-method -- confirmed still making progress (not deadlocked, `/proc/
-    <pid>/stat`'s utime advancing at wall-clock rate) but with no visible
-    end. A KD-tree's query cost does not depend on where the query sits
-    relative to the tree's own points the way the grid-hash's does, so this
-    failure mode does not have an equivalent here.
-
-    EXACT, like the version before it: the DISTANCE always matches a
+    EXACT: the DISTANCE always matches a
     brute-force scan (`test_survival_process.py`'s `t_nearest_detection_
     matches_brute_force_on_random_points` checks it) -- the one thing that
     can differ is WHICH point wins an exact tie (two points at the identical
@@ -175,16 +156,8 @@ def _merge_within_radius(points: np.ndarray, radius: float,
     at a C generation's finest rung, where hundreds of tiles' raw detections
     concatenate into tens of thousands of points before this runs.
 
-    Replaced two prior versions, both O(n*k): a Python list rebuilt into a
-    fresh array every iteration, then a pre-allocated index buffer sliced in
-    place (removed the rebuild's extra O(n^2), not the O(n*k) itself). Both
-    retired to `cli/demo_survival_analysis.py` as reference implementations -- that
-    file is where this one was checked against them before being adopted
-    here: identical kept-index sets on synthetic data, on a real C-tree's
-    raw ds=1 detections (34503 points, 131x faster than the array-buffer
-    version), and deployed end-to-end in `cli/survival_alpha_analysis.py`'s
-    own C-axis flow (0% anchor mismatch and bit-identical aggregated curves
-    across 2 real ChainStacks, 1.5x faster overall).
+    The two O(n*k) reference implementations it was checked against
+    (identical kept-index sets) are in `cli/demo_survival_analysis.py`.
 
     `rung_id`/`rung_scale`, if given (both together, `[N]` each) -- turns on
     CROSS-RUNG mode (spec.md "同一個點的定義"). Two
@@ -288,8 +261,8 @@ def anchors_of(per_rung: Dict[float, np.ndarray], order: Sequence[float],
     The second array is WHICH RUNG (an `order` value) each anchor's
     coordinates were copied from unmodified -- finest-first merge order
     means that is always the finest rung the point survived in, never an
-    average or a recomputation (AlphaSelectionNotes.md §9). Added
-    2026-09-13 so `offset_quantiles_of` can exclude an anchor from its OWN
+    average or a recomputation (AlphaSelectionNotes.md §9). It lets
+    `offset_quantiles_of` can exclude an anchor from its OWN
     source rung's offset distribution: that entry is a self-match,
     guaranteed distance 0 by construction, not a real cross-rung
     measurement -- see that function's own docstring.

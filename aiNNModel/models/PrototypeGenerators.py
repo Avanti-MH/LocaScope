@@ -14,14 +14,8 @@ calls a generator once per rung, never once for the whole support pool.
 Nothing here enforces that; it is a calling-convention invariant, the same
 kind `Pooling`'s "same instance for support and query" is.
 
-ALL Stage 2 arms built so far live HERE, in ONE file, the same
-organisation `PrototypeRoutingHeads.py` already uses for Stage 3 -- before
-2026-09-21 they were three separate files (`SetTransformerPrototype.py`/
-`TrivialPrototype.py`/`SharedMlpPrototype.py`), which was the odd one out
-rather than a deliberate choice: nothing about Stage 2 needed three files
-any more than Stage 3 needed one per routing head. `AttnPoolPrototype`
-(2026-09-22) joined the same way -- no reason for it to be a fourth file
-either.
+ALL Stage 2 arms live HERE, in ONE file, the same organisation
+`PrototypeRoutingHeads.py` uses for Stage 3.
 
 Lives in `aiNNModel/models/`, not the training package, because it is
 encoder/head plumbing (a module that turns tile embeddings into a
@@ -58,8 +52,7 @@ class SetTransformerPrototype(nn.Module):
     pooled support-tile vectors (`K` = however many support tiles that rung
     drew, not fixed across rungs or episodes). Returns `[D]`.
 
-    Collapse-after-attention is an `AttentionPoolHead` (2026-09-21, replacing
-    a plain mean over the transformed set) -- ONE learned query attends over
+    Collapse-after-attention is an `AttentionPoolHead` -- ONE learned query attends over
     the K transformed members and picks out which of them matter most for
     this prototype, rather than weighting all K equally the way a mean does.
     A SEPARATE instance from any `Pooling(kind='attn')` the caller also
@@ -110,16 +103,6 @@ class AttnPoolPrototype(nn.Module):
     point for `SetTransformerPrototype`, the way `SharedMlpPrototype` is
     for whether cross-member attention specifically (as opposed to a
     per-member transform) matters.
-
-    2026-09-22: this is what `CrossAttentionMatch.collapse` used to
-    reimplement from scratch. That reimplementation added nothing over
-    `AttentionPoolHead` itself -- `CrossAttentionMatch`'s Stage 2 and
-    Stage 3 registry entries were ALREADY separate instances with no
-    shared weights (`Runtime.py`'s own builders each `to(device)` a fresh
-    one), so there was no actual sharing for reimplementing it to
-    preserve, only a second copy of the same six lines able to drift from
-    this one. `collapse` was deleted the same day; this class is its
-    replacement, and `CrossAttentionMatch` is Stage-3-only from here on.
     '''
 
     def __init__(self, cfg: AttnPoolConfig):
@@ -151,10 +134,7 @@ class TrivialPrototype(nn.Module):
     parameters at all. The FLOOR for the Stage 2 generator axis -- "does
     SetTransformerPrototype's self-attention over the support set do
     anything at all" needs a zero-parameter alternative to beat, not just
-    another learned one (the same role Stage 4's own Baseline arm was
-    meant to play one level up, for episodic training itself -- `cli/
-    train_baseline.py`, deleted 2026-09-22, its own inference-time
-    positioning never having settled).
+    another learned one.
     '''
 
     def __init__(self, cfg: TrivialPrototypeConfig):
@@ -227,12 +207,9 @@ class SharedMlpPrototype(nn.Module):
         super().__init__()
         self.cfg = cfg
         width = max(1, round(cfg.in_dim * cfg.width_mult))
-        # ResidualMlpBlock (Heads.py, 2026-09-22) bakes BOTH residuals in
-        # (inner, per hidden block; outer, around the whole transform) --
-        # this class no longer wraps a second outer `pooled + ...` around
-        # it, that would double the residual. Same math as before this
-        # refactor, one definition instead of two near-identical ones
-        # (`PrototypeRoutingHeads.AttnScoreHead`'s own MLPq/MLPk share it).
+        # ResidualMlpBlock (Heads.py) bakes BOTH residuals in (inner, per
+        # hidden block; outer, around the whole transform), so no second
+        # outer `pooled + ...` here -- that would double the residual.
         self.block = ResidualMlpBlock(cfg.in_dim, width=width, depth=cfg.depth,
                                       dropout=cfg.dropout)
 
@@ -250,7 +227,7 @@ class PassthroughCollapse(nn.Module):
     '''`--collapse off`. `forward(support) -> support`, unchanged --
     byte-for-byte `nn.Identity`, but kept as its OWN class rather than
     reused from `ContextEncoders.py`'s F off-switch or a bare
-    `nn.Identity()` (2026-09-22): this one carries `COLLAPSES = False`,
+    `nn.Identity()`: this one carries `COLLAPSES = False`,
     the flag `episode_forward` reads to decide whether `prototypes` comes
     out as a collapsed `[K,D]` stack or the per-rung `{rung:[K_r,D]}` dict
     -- monkey-patching that flag onto PyTorch's own `nn.Identity` class

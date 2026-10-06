@@ -17,12 +17,11 @@ of them can be measured before and after against the same numbers:
     tiles     SlideReader.read_samples of native reference tiles: tiles/s
     fov       FovSupply over the window bench's still FoV: shots/s
     pca       the UNI2-PCA segmenter's two reads (the fit's scattered tiles,
-              the projection's lattice) against the retired WsiTileLoader at
-              the same positions, frozen in this file: tiles/s for both, and
+              the projection's lattice) against a frozen WsiTileLoader at the
+              same positions: tiles/s for both, and
               PASS only if every tile is identical -- level 0, the same pixels.
     s1photo   bench_stage1_mpp's photo (Render, placed by render_spec) against
-              the bare sensor read + simulate_microscope_photo it replaced,
-              frozen in this file, at the same ladder positions: identical
+              a frozen bare sensor read + simulate_microscope_photo, at the same ladder positions: identical
               with no gap (PASS), the side bands a 92 degree turn filled by
               reflection, the corners a 0.9 zoom-out at 3 degrees pads, and
               photos/s for both under the bench's gap.
@@ -38,22 +37,11 @@ of them can be measured before and after against the same numbers:
     origins   frac(region.x / ds) per region and native level over the cached
               masks of --mask-cache-job, --origin-per-dataset slides per
               dataset: how far region origins fall from a level's pixel grid,
-              which is what the old int(region.x / ds) bookkeeping was off by.
+              which is what int(region.x / ds) bookkeeping is off by.
               Arithmetic only, no pixel read, no slide list. Writes origins.csv.
-    (phase and origins were diag_container_retire.py until 2026-10-06; the
-    container checks that file also held went with WsiTissuesContainer.)
-
 Each is run --repeats times and the best kept. Apart from pca and s1photo, nothing is
 compared with anything: the correctness of each path is its tests'
 (TestReadPath.sh).
-
-HISTORY. Until 2026-10-03 this file held the planned refactor written out
-whole beside the production code, and ran every flow through both: 566/566
-reads identical, 14/14 timings not slower (result/DiagReadExp/DiagReadExp/).
-The refactor then moved into production and the old side was deleted, so the
-comparison cannot be run again. `diag_render_reads.py`, the exploratory
-diagnostic the numbers in ARCHITECTURE.md come from, was deleted at the same
-time: everything it compared against is gone.
 """
 
 from __future__ import annotations
@@ -211,11 +199,10 @@ def flow_fov(t, args, name, wsi, mask):
         t.add(name, 'fov', f'bank still L{level}', n, _best(bank, args.repeats))
 
 
-# ── pca: the UNI2-PCA segmenter's reads, against WsiTileLoader (retired) ─────
+# ── pca: the UNI2-PCA segmenter's reads, against a frozen WsiTileLoader ─────
 
 class _OldWsiTileSet(torch.utils.data.Dataset):
-    """FROZEN: utilities/WsiTileLoader.WsiTileSet as it was before 2026-10-06,
-    reduced to the read. The tile at grid (row, col) is read at level-0
+    """FROZEN: utilities/WsiTileLoader.WsiTileSet, reduced to the read. The tile at grid (row, col) is read at level-0
     origin + (col, row) * round(tile * level_ds), one read_region_rgb per tile,
     on a worker that opens the slide itself."""
 
@@ -240,7 +227,7 @@ class _OldWsiTileSet(torch.utils.data.Dataset):
 
 
 def _old_tiles(path, origin, tile, positions, level, workers):
-    """{index: tile} through the frozen reader, as the old loader ran it."""
+    """{index: tile} through the frozen reader."""
     loader = torch.utils.data.DataLoader(
         _OldWsiTileSet(path, origin, tile, positions, level),
         batch_size=64, shuffle=False, num_workers=workers)
@@ -254,8 +241,8 @@ def _old_tiles(path, origin, tile, positions, level, workers):
 def flow_pca(t, args, name, wsi, budget):
     """The segmenter's two reads -- the fit's scattered tiles (`_read_tiles`,
     SlideReader.read_points) and the projection's whole lattice (`_read_lattice`,
-    SlideReader.read_grid) -- against the retired WsiTileLoader at the same grid
-    positions. Level 0, where the segmenter runs, so the two are the same
+    SlideReader.read_grid) -- against the frozen WsiTileLoader at the same
+    grid positions. Level 0, where the segmenter runs, so the two are the same
     pixels or a bug: PASS needs every tile identical and the lattice the same
     shape as WsiTileLoader.grid_positions'. The projection is compared on its
     first --pca-tiles tiles, not the whole slide."""
@@ -332,8 +319,7 @@ S1_SENSOR = sensor_size('45:32', 1.475)      # bench_stage1_mpp's --ratio/--mpix
 
 
 def _old_s1photo(reader, pos, cfg, rng, rotation=None):
-    """FROZEN: bench_stage1_mpp's photo before 2026-10-06 -- the bare sensor
-    rectangle off the slide, then the domain gap on that rectangle alone."""
+    """FROZEN: a bare-sensor photo -- the sensor rectangle off the slide, then the domain gap on that rectangle alone."""
     image = reader.read(pos['x'], pos['y'], ReadSpec(*S1_SENSOR), pos['rung'])
     if image is None:
         return None
@@ -355,7 +341,7 @@ def _s1photo_same(reader, pos, new, old):
                resized: the same samples, so every pixel must be equal
       resized  a whole-pixel shift, resized: the same filter on the same grid,
                so the inside must be equal; only the outermost S1_BORDER px may
-               differ, where the old read's kernel ran off its own edge
+               differ, where the frozen read's kernel ran off its own edge
       phase    the shift is not a whole number of level px (a level at a
                non-integer ds): openslide samples the level at another
                sub-pixel phase, so every pixel may differ, by far less than
@@ -399,10 +385,10 @@ def flow_s1photo(t, args, name, wsi, mask):
 
       same     no gap at all, per rung: what the two reads must share given
                their plans (`_s1photo_same`: exact, resized, phase), which is
-               what says Render reads the level, filter and rectangle the old
+               what says Render reads the level, filter and rectangle the frozen
                read did. Writes s1photo_same_<slide>.csv and the photo with
                the largest inner difference, new | old | |d| x 20. The verdict.
-      bands    a 92 degree turn, geometry only: the old read fills the two
+      bands    a 92 degree turn, geometry only: the frozen read fills the two
                side bands (outside the turned 1024 px) by reflection, Render
                reads them. Mean |new - old| in the bands against the centre,
                where both hold the same tissue -- the centre is the decoy.
@@ -662,7 +648,7 @@ def check_origins(cache_job, seg, per_dataset, seed, rows_out) -> None:
                     rows_out.append(dict(
                         dataset=dataset, slide=Path(path).stem, level=level, ds=ds,
                         region_x=r.x, region_y=r.y, frac_x=fx, frac_y=fy,
-                        # the old bookkeeping's error IF openslide is bilinear
+                        # int(x / ds) bookkeeping's error IF openslide is bilinear
                         old_err_um_if_bilinear=max(fx, fy) * ds * base_mpp))
             slide.close()
     masks.close()

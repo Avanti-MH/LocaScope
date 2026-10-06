@@ -329,7 +329,7 @@ def t_write_then_read_returns_the_same_arrays():
         for name in ('tile_x', 'tile_y', 'kp_xy', 'kp_score', 'kp_count', 'n_kp'):
             assert np.array_equal(getattr(back, name), getattr(batch, name)), name
         assert got.cfg_hash() == meta.cfg_hash()
-        # The old mask store's bug, pinned here too: `from __future__ import
+        # Pinned: `from __future__ import
         # annotations` makes every field annotation a STRING, so a decoder that
         # compares `field.type is float` hands back str and the first caller to
         # format it with :.2f raises.

@@ -83,7 +83,7 @@ def compute_loss(logits: torch.Tensor, target: torch.Tensor,
         probs = F.softmax(logits.float(), dim=-1)
         expected_log_rung = (probs * log2_rungs).sum(dim=-1)
         true_log_rung = log2_rungs[target]
-        # Weighted like L_bal (2026-09-24): an unweighted mean would let the
+        # Weighted like L_bal: an unweighted mean would let the
         # rungs with the most examples decide the ordinal term alone.
         w = weights[target]
         l_ord = (w * (expected_log_rung - true_log_rung).pow(2)).sum() / w.sum()

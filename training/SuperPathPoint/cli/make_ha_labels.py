@@ -4,7 +4,7 @@
     python training/SuperPathPoint/cli/make_ha_labels.py --tile 256
     python training/SuperPathPoint/cli/make_ha_labels.py --tile 256 --limit 100
 
-Outputs (in result/cache/keypoint_labels/ by default):
+Outputs (in result/cache/<this job>_keypoint_labels/, --labels-cache-job):
     <wsi_stem>__ds<d>__<cfg8>.safetensors
     make_ha_labels.csv          in result/<SLURM_JOB_NAME or MakeHaLabels>/
 
@@ -54,8 +54,8 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from cli import (RESULT_DIR, add_corpus_arg, add_pretile_args,    # noqa: E402
-                 corpus_arg, job_result_dir, setup_import_paths)
+from cli import (add_corpus_arg, add_labels_args, add_pretile_args,  # noqa: E402
+                 corpus_arg, job_result_dir, labels_root, setup_import_paths)
 
 setup_import_paths()
 
@@ -69,7 +69,6 @@ from common.KeypointLabelStore import (LabelMeta, batch_from_lists,  # noqa: E40
 from SuperPoint.HomographicAdaptation import HaConfig              # noqa: E402
 from SuperPoint.Teacher import TeacherConfig                       # noqa: E402
 
-DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 
 #: Upstream's HA EXPORT value, `magic-point_coco_export.yaml:9`, which is the
 #: config that generates the pseudo-labels this step reproduces. It carries
@@ -109,7 +108,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_pretile_args(ap)            # --tile: which extraction to read, v1 is 256
     add_corpus_arg(ap)
-    ap.add_argument('--labels-root', default=DEFAULT_LABEL_ROOT)
+    add_labels_args(ap, produces=True)
     ap.add_argument('--wsi-stem', nargs='*', default=None,
                     help='slides to do. Default: every slide the corpus has')
     ap.add_argument('--ds', type=float, nargs='*', default=None,
@@ -152,6 +151,7 @@ def main():
     ap.add_argument('--overwrite', action='store_true')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
+    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
 
     out_dir = args.out or job_result_dir('MakeHaLabels')
     os.makedirs(out_dir, exist_ok=True)

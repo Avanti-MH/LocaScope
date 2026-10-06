@@ -115,23 +115,13 @@ TILE_WH_RATIO = '1:1'
 OPTICS_P = 0.5
 
 #: Two COMPLETE, explicit `DomainGapConfig` templates -- `CameraBank.camera_
-#: for`'s `native` switch (2026-09-22) picks one, then `replace()`s only the
-#: three fields that are genuinely per-camera (`wh_ratio`/`MPixels`/
-#: `query_mpp` -- baked in per (WSI, rung), see `camera_for`'s own
-#: docstring) plus `stage_shift_max` (from `RenderConfig`, see below). Every
-#: OTHER field -- all 19 of them -- is spelled out here BY VALUE on both,
-#: not left for `DomainGapConfig`'s own dataclass defaults to silently
-#: supply -- `camera_for` used to build one `DomainGapConfig(...)` call
-#: passing only 6 fields explicitly and relying on the class's own defaults
-#: for the rest, which is exactly the "almost a key" trap CLAUDE.md's
-#: `manifest_path` already objects to for a different reason: a reader had
-#: to go open `DomainGapConfig`'s own source to know what a tile actually
-#: got. Verified by constructing both and printing every field back
-#: (2026-09-22) -- `DomainGapConfig` has SEVEN fields
-#: (`distortion_k1_range`/`distortion_k2`/`defocus_radius`/
-#: `chromatic_shift`/`noise_sigma`/`jpeg_quality`/`photometric`/`geometric`
-#: -- eight, not seven) the first draft of these two constants missed
-#: entirely, silently inheriting the class's own defaults for them.
+#: for`'s `native` switch picks one, then `replace()`s only the three fields
+#: that are genuinely per-camera (`wh_ratio`/`MPixels`/`query_mpp` -- baked in
+#: per (WSI, rung), see `camera_for`'s own docstring) plus `stage_shift_max`
+#: (from `RenderConfig`, see below). Every OTHER field is spelled out here BY
+#: VALUE on both, not left for `DomainGapConfig`'s own dataclass defaults to
+#: silently supply, so a reader does not have to open `DomainGapConfig`'s
+#: source to know what a tile got.
 #:
 #: `photometric`/`geometric` (`query_sim/config.py`'s own comment: "if
 #: False, skip color/vignette/lens/noise/jpeg" / "if False, skip rotation +
@@ -146,8 +136,7 @@ OPTICS_P = 0.5
 #:
 #: CAMERA_FULL: simulates a real photograph taken through a microscope --
 #: `photometric=True`, `geometric=True`, every value the class's own real
-#: production default (unchanged from before this constant existed). What
-#: EVERY tile (support and query alike) rendered before 2026-09-22.
+#: production default.
 #:
 #: CAMERA_GEOMETRY_ONLY: `geometric=True` (rotation stays on -- a real
 #: photo's own framing genuinely varies by it) but `scale_range=(1.0,1.0)`
@@ -330,12 +319,11 @@ def build_manifest(dataset_id: str, *, masks, sampler_root,
     this recipe, config and plan is read back from `sampler_root` without
     being opened; one that is not is opened, its mask taken from `masks` (a
     `TissueMaskConfig.MaskMaker`: the recipe, the device and the mask cache),
-    and its draw written back. So there is no manifest-level cache any more -- the
+    and its draw written back. There is no manifest-level cache: the
     per-slide one is finer (a different WSI list or `max_wsi` still reuses
     every slide it shares) and it is the same cache every other sampler uses.
 
-    The recipe HAS NO DEFAULT. It used to be an hsv mask at ds 32, built right
-    here and recorded nowhere. The caller names one (`MASK_RECIPES[--seg]`)
+    The recipe HAS NO DEFAULT. The caller names one (`MASK_RECIPES[--seg]`)
     and owns the MaskMaker, so a segmentation model loaded for a miss is
     dropped when the caller's `with` block ends rather than staying on the
     card through training.
@@ -386,8 +374,7 @@ def class_weights(rows: List[ManifestRow], device) -> torch.Tensor:
     `RICHNESS`'s own shortfall at coarse rungs (spec.md: "n_per_rung is a
     ceiling, not a promise") means rung 32 supplies roughly 1 percent of what
     rung 1 does, so an unweighted mean lets the common rungs' gradient drown
-    the rare ones out -- which is what the 2026-09-16 full run's val numbers
-    showed (near-perfect accuracy wherever the true class was the majority
+    the rare ones out (near-perfect accuracy wherever the true class was the majority
     rung, near-zero everywhere else).
 
     A rung with ZERO training positions gets weight 0, not `inf`: there is
@@ -418,39 +405,16 @@ RESAMPLE_FROM = ('finer', 'l0')
 class RenderConfig:
     '''What every render needs besides the row itself -- one object threaded
     through `CameraBank`/`RoutingHeadDataset`/`iterate_epoch` instead of
-    separate keyword arguments repeated at each of them (the first draft's
-    shape: easy for one call site to pass an inconsistent value and nothing
-    would catch it).
+    separate keyword arguments repeated at each of them, so no call site can
+    pass an inconsistent value.
 
-    `tile_size` is now ONE number doing ONE job -- the camera's sensor side,
+    `tile_size` is ONE number doing ONE job -- the camera's sensor side,
     the sampler's window, and the encoder's input are all it (see the
-    TILE_WH_RATIO note above). It used to do two unrelated jobs at once:
-    `build_manifest`'s sampler window AND the patch side a rendered frame was
-    cut into, which is how the two could be 5.6x apart without anything
-    saying so.
+    TILE_WH_RATIO note above).
 
     `stage_shift_max=0` turns OFF the mechanical stage-jitter augmentation
-    (`DomainGapConfig`'s own default is 3). Two independent reasons, and the
-    first one stands on its own:
-
-    1. This package's label is SCALE. A +/-3 px translation carries no scale
-       information, so the augmentation buys this task nothing -- it is not
-       a diversity source worth having here.
-    2. It also avoids a real bug in `query_sim/pipeline.py`: `_sample_params`
-       draws `stage_shift_dx/dy` from the caller's `rng` and records them in
-       `params`, but `_apply_params` (pipeline.py:158) calls
-       `apply_stage_shift(img, max_shift=cfg.stage_shift_max)` -- which
-       ignores them and draws its own pair from the GLOBAL `np.random`
-       (`augment/field.py:107-108`). The recorded ground truth is therefore
-       not what was applied, and the applied shift is not reachable by any
-       `rng` a caller passes -- which would break `render_row`'s
-       `deterministic=True` guarantee for the eval split. At 0 all three
-       layers agree (the ternary at pipeline.py:46-47, the guard at :153,
-       and field.py:103's own early return), so no divergence is possible.
-
-    Turning it off here does NOT fix that bug for anything else --
-    `FOVRecord.from_capture` (query_sim/record.py) still writes the mismatched
-    value into every GT row. Flagged, not fixed, 2026-09-16.
+    (`DomainGapConfig`'s own default is 3): this package's label is SCALE,
+    and a +/-3 px translation carries no scale information.
     '''
     tile_size: int = 256
     stage_shift_max: int = 0
@@ -459,7 +423,7 @@ class RenderConfig:
     #: (read_level, resample_from, max_resample_factor, resampled_share) and
     #: `choose_read_level`.
     #:
-    #:     pyramid    the nearest-level rule `QueryFromWSI` has always used: a
+    #:     pyramid    the nearest-level rule: a
     #:                rung with a native level reads it, one without (BRACS's
     #:                2 and 8) reads the next finer level and resamples
     #:     resampled  every rung that has a finer level reads one of them,
@@ -467,14 +431,14 @@ class RenderConfig:
     #:     mixed      `resampled` for a share of the tiles, `pyramid` otherwise
     #:
     #: Training only: val and test keep `pyramid`, so every score stays
-    #: comparable with the ones before this existed.
+    #: comparable.
     #:
     #: THESE FOUR DEFAULTS ARE FROZEN. A run at all four defaults gets no
-    #: `read_tag`, no file-name segment and no resume-identity key -- which is
-    #: what lets every weight, resume file and CSV row written before these
-    #: fields existed stand for `pyramid`. Change a default and those all start
-    #: to stand for something they were not trained with (the same reason
-    #: `Checkpoints.weight_filename` gives `bal` no segment).
+    #: `read_tag`, no file-name segment and no resume-identity key, so every
+    #: weight, resume file and CSV row without one stands for `pyramid`. Change
+    #: a default and those all start to stand for something they were not
+    #: trained with (the same reason `Checkpoints.weight_filename` gives `bal`
+    #: no segment).
     read_level: str = 'pyramid'
     #: `finer`: any level finer than the rung's. `l0`: level 0 only.
     resample_from: str = 'finer'
@@ -693,9 +657,7 @@ def choose_read_level(wsi, rung: float, cfg: RenderConfig,
 def _eval_rng(row: ManifestRow) -> random.Random:
     '''The eval photo's rng, from the sample's own identity (`camera.photo_rng`)
     -- not from worker id or call order, so the same query always renders the
-    same photo regardless of which DataLoader worker handles it or when.
-    Until 2026-10-06 this hashed the same key here to 8 hex digits, not
-    photo_rng's 16: eval photos from that date on are not the earlier ones.'''
+    same photo regardless of which DataLoader worker handles it or when.'''
     return photo_rng(row.dataset, row.wsi_name, row.x, row.y, row.rung)
 
 
@@ -709,11 +671,10 @@ def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
     "Camera: train vs eval"). One row is ONE patch, `[tile, tile, 3]` uint8:
     the camera's sensor IS the tile, so there is nothing left to cut up.
 
-    `native` (2026-09-22, default `False` -- every caller before this got
-    exactly today's `False` behaviour, unchanged): passed straight through
+    `native` (default `False`): passed straight through
     to `CameraBank.camera_for`'s own switch of the same name -- see that
-    method's docstring. `MppRoutingHead`'s own callers never pass this, so
-    nothing here changes for them; it exists for `Episodes.render_episode`'s
+    method's docstring. `MppRoutingHead`'s own callers never pass this; it
+    exists for `Episodes.render_episode`'s
     `support_native` switch.
 
     `rng` (training only, ignored when `deterministic`): the generator this
@@ -739,9 +700,8 @@ def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
     CLASS instead of averaging out, and a head can score on it rather than on
     scale.
 
-    Reached only through `RoutingHeadDataset.__getitem__`, for every split --
-    the first draft of this file wrote this logic out twice, once for training
-    and once for building a cached eval corpus; this is the one copy.
+    Reached only through `RoutingHeadDataset.__getitem__`, for every split:
+    the one copy of this logic.
 
     `cfg`'s read mode picks the level (`choose_read_level`), from the same
     generator the capture draws from; with no `rng`, training draws the level

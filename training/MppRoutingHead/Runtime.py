@@ -1,14 +1,14 @@
 '''What THIS package needs beyond the generic encoder/head plumbing --
 `cli/train.py`'s val/test scoring loop and its wandb logging. The generic
 pieces (head classes, the `Head` assembly, patches->raw-features, checkpoint
-save/load) moved to `aiNNModel/models/` on 2026-09-17: nothing about them was
-specific to routing a tile to an mpp rung, and `stage1_estimation/
+save/load) live in `aiNNModel/models/`: nothing about them is specific to
+routing a tile to an mpp rung, and `stage1_estimation/
 ClassifierEstMpp.py` needs the same pieces a training loop does, without
 importing a training package to get them. This file re-exports what
 `cli/train.py`/`cli/evaluate.py` still need from there, so their own imports
 do not have to know which pieces live where.
 
-`HEAD_CHOICES` (was `ARMS`) stays HERE, not in the generic layer: it is a
+`HEAD_CHOICES` stays HERE, not in the generic layer: it is a
 REGISTRY OF THIS TASK'S OWN CHOICES ('linear'/'mlp'/'attn_linear'/'arcface',
 spec.md's 2-1/2-5/2-6/2-3), including which BASELINE (2 = frozen, 3 =
 fine-tuned) each is valid for -- vocabulary that means nothing outside this
@@ -69,7 +69,7 @@ BASELINE3_ENCODER = 'convnext_v2'
 #: a run that quietly invents a row the spec does not name.
 #:
 #: The fourth field is EMPTY for every entry except the MlpHead architecture
-#: variants below -- 2026-09-17. `mlp_deep`/`mlp_wide`/`mlp_deep_wide`/
+#: variants below. `mlp_deep`/`mlp_wide`/`mlp_deep_wide`/
 #: `mlp_deep_residual` are the SAME MlpHead class as `mlp`, just built from a
 #: `HeadConfig` with different `mlp_depth`/`mlp_width`/`mlp_residual`; giving
 #: each its own registered NAME (rather than sweeping --mlp-depth/--mlp-
@@ -319,9 +319,8 @@ def rescore_by_rung(detail_rows: List[Dict]) -> Dict[float, Dict]:
     `level_accuracy`'s single pooled number cannot show whether a SPECIFIC
     rung is improving: `RICHNESS`'s own coarse-rung shortfall means fine
     rungs are oversupplied relative to coarse ones, so a tile-pooled average
-    is dominated by whichever rungs happen to have the most val tiles --
-    2026-09-19's own finding was a run posting ~90% pooled while its worst
-    rung sat under 10% the entire time, invisible in that one number. This
+    is dominated by whichever rungs happen to have the most val tiles -- a run
+    can post ~90% pooled while its worst rung sits under 10%. This
     is the one place a rung's own trajectory across epochs can be read at
     all, which is what decides whether `--loss ord_a`/`ord_b` are actually
     helping the rungs they target rather than moving the pooled average by

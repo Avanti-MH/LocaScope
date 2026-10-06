@@ -297,10 +297,9 @@ def t_a_tile_the_patch_does_not_divide_is_refused():
     """UNI2 is patch 14 and 256 % 14 = 4.
 
     The refusal names the multiples of the PATCH and stops there, because a
-    backbone does not know the cell. An earlier version computed
-    `lcm(patch, 8)` and told the reader to use multiples of 56 -- which bakes
-    cell 8 into a class that has no business assuming it, and is wrong the
-    moment uni2 takes cell 7 and every multiple of 14 becomes legal.
+    backbone does not know the cell. `lcm(patch, 8)` would bake cell 8 into a
+    class that has no business assuming it, and be wrong the moment uni2
+    takes cell 7 and every multiple of 14 becomes legal.
 
     So this checks two things: the patch multiples ARE named, and the cell
     constraint is handed to the decoder rather than decided here.
@@ -313,9 +312,8 @@ def t_a_tile_the_patch_does_not_divide_is_refused():
         assert '252' in msg and '266' in msg, \
             f'the refusal must name the nearest tiles the patch divides: {msg}'
         # NOT `'56' not in msg`: the message says "tile_size is 256", and
-        # '56' is a substring of '256'. The first version of this check failed
-        # for exactly that, which is the argument against matching on bare
-        # numbers -- assert the PHRASE the wrong version would have used.
+        # '56' is a substring of '256', which is the argument against
+        # matching on bare numbers -- assert the PHRASE the wrong version would have used.
         assert 'multiples of 56' not in msg and 'lcm' not in msg, \
             f'the refusal is assuming cell 8; a backbone does not know the ' \
             f'cell: {msg}'

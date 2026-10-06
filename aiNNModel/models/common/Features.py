@@ -36,9 +36,7 @@ def encode_raw(encoder, patches: torch.Tensor, batch_size: int,
     kind = encoder.model_spec.kind
     keep = lambda t: t                                        # noqa: E731
     # The uint8 batch goes to the encoder as it is (one transform, on the
-    # card) and what comes back never leaves it. `keep` is a no-op since the
-    # encoder's exits stopped moving results to the host (2026-10-06); it used
-    # to stop `_run`'s `.cpu()`, which `.to(device)` then undid.
+    # card) and what comes back never leaves it; `keep` is a no-op.
     if layers:
         if kind != 'tokens':
             raise TypeError(f'encoder layers need a token model; this one is '

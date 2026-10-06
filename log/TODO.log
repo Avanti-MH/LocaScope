@@ -3162,3 +3162,70 @@ front of whoever flips it.
       identity、mask、topk、sift_topk）；--resume 時沒有 run.json 或任何一項不同就拒絕並說
       哪一項。欄位不同（換了版本的 bench）也拒絕。window bench 用 parts-<config_id> 做的
       是同一件事。
+
+[x] 2026-10-06 | SuperPathPoint 的兩個 cache 改成 <made_by>_<object>
+    - keypoint labels：result/cache/keypoint_labels/（4 支 CLI 各寫死一份
+      DEFAULT_LABEL_ROOT，--labels-root）→ result/cache/<made_by>_keypoint_labels/。
+      make_ha_labels 預設自己的 job name（MakeHaLabels），train_superpathpoint、
+      inspect_ha_labels、reeval_density 預設讀 MakeHaLabels 的；--labels-cache-job。
+    - chain-stack tiles：ChainStack.DEFAULT_CACHE_ROOT（result/cache/ChainStack/，也是
+      函式參數的預設）→ 函式一律預設 None，入口自己給 result/cache/<made_by>_chainstack/。
+      這個 cache 沒有唯一的生產者（讀到沒存的 C descendant 就寫），所以三個入口都預設
+      自己的 job name；survival / demo 預設開、prepare_chain_stack 預設關（R / C own），
+      --chainstack-cache-job、--no-chainstack-cache / --chainstack-cache。jobscript 的
+      CACHE_ROOT 改成 CHAINSTACK_CACHE_JOB。demo 的 R own 一律不 cache（原本只在給了
+      --cache-root 時才會）。
+    - 兩個舊目錄在磁碟上都已不存在，沒有要搬的資料。共用的 helper 在
+      training/SuperPathPoint/cli（add_labels_args / labels_root、add_chainstack_args /
+      chainstack_root），和 pretile_root 同一種寫法。
+
+[x] 2026-10-06 | docstring / 註解裡的修改歷史移出程式碼
+    - 規則：docstring 和註解只寫現在的程式為什麼這樣；「哪天改了什麼、為什麼」寫在這裡。
+      約 130 個 .py 檔的歷史段落（日期、HISTORY、used to、retired、the old ...）刪除或改寫成
+      現況說明；只動 docstring 和註解，AST 不變（check_doc_only）。help / error 字串裡的
+      歷史沒動（那是程式碼），留到可讀性調整。
+    - 已在本檔的（richness 475/500、3b probe、19/1497、.12g、bench_locascope run.json ...）
+      直接刪；不在本檔、但決定過設計的數字搬到下面：
+    - TileSampler：舊的隨機 sampler（region 均勻抽、region 內 (x, y) 均勻抽、has_tissue_l0
+      過了就收）產出的 17,784 張 pre-tile（36 格）裡 0 張完全重複，但有 202,420 對重疊，
+      69.2% 的 tile 和別張重疊，ds 32 每一張都重疊。candidates='random' 留著當對照組。
+    - TileSampler：routing heads 的 tile camera 會旋轉，reserve 還沒改成由 ReadSpec 算之前，
+      bracs 有 1.3% 的位置讀到切片外。
+    - TileSampler._regions：舊規則要求整個 reserve 落在單一 region 內，ds 32 要 24576 px 寬
+      的 region，BRACS_1228 只拿到 21/500、S1104233 拿到 0。改成兩個矩形取交集（tile 在
+      region、reserve 在掃描矩形）。
+    - TileSampler._reserve_fits：2026-08-27 前 _top_up 和 _place_inherited 都沒檢查 reserve；
+      ds ≥ 8 時 top-up 位移最多 1.25 tile，pre-tile 超出掃描矩形 94 到 2560 px，細層全過
+      （lattice 填滿配額，top-up 沒跑）。所以 extract_pretiles 是 assert 不是修補。
+    - TileSampler._rate：_place_inherited 原本借最近 lattice 候選的 bucket（_nearest），
+      零上限會拒絕 inherited tile 之後近似值會決定 chain 生死，所以拿掉。
+    - SampleMeta.reserve：reserve_l0 - footprint 為奇數時（int(4096.4*3)=12289）置中後少
+      1 px，邊緣是 mask 邊界的 region 會讀出掃描矩形 1 px；所以 reserve 由 margin 推導。
+    - CpuBudget：torch 預設把 thread pool 開到看得到的所有 cpu，8 cpu 上兩個 shard 跑 16
+      thread，每個 process 36 tiles/s（單跑 251）；training 8 thread 配 8 個 render worker，
+      encode 10.6 -> 33 s。依 cpu 切份之後：每個 shard 4 thread 251 tiles/s，training 1
+      thread 配 8 worker 151 tiles/s（diag_render_reads B-bench 2026-10-02、combined train
+      2026-10-03）。
+    - AccessDatasets：2026-09-06 datasets/Ki67 改名成 Ki67_with_photo，打壞 23 支寫死舊根
+      目錄的檔案；這是一律走 AccessDatasets.locate 的理由。
+    - SuperPoint PairDataset：2026-08-31 前 rng 種子沒有 epoch 項，每個 tile 整個 run 都看到
+      同一個 warp（50 epoch × 5,344 pairs = 5,344 種，不是 267,200）；表現成典型 overfit：
+      train/detector 一路降到最後，val/detector 在 epoch 42 到底 3.12 後升到 3.27。
+    - reeval_density：2026-08-31 的 run，gray/rgb 420 pts/view（decoy 0.442/0.420，margin
+      1.50/1.57）對 gray_pre/rgb_pre 約 160 pts/view（decoy 0.22，margin 3.59/3.56）——兩組是
+      兩個密度工作點，不是兩個結果；420 是 max_keypoints（detection_threshold 0.015 < 1/65）。
+      那次 run 的 checkpoint 用 ','.join(stems) 記 held-out slides，之後改成 json.dumps，
+      _slides_from 保留兩種格式的讀法。
+    - KeypointNetConfig.max_keypoints=420：420 原本取自 MakeHaLabels log 的
+      `n_kp mean 221 min 85 max 420`，被寫成「label corpus 的最大值」；其實那行只是
+      BRACS_1228 ds 4 一格。72 個 (slide, rung) store 的 n_kp 平均 3–527、總平均 146、
+      最大 906。2026-08-28 的 run decoy 0.92–0.94、margin 1.03 對上限 1.10，epoch 0 和 9
+      分不出來。from-scratch arms 的 points_per_view 每張都是 420（cap），val/detector 3.27
+      對 ln(65)=4.174；_pre arms CE 0.19、159 點。
+    - SurvivalProcess.nearest_detection：原本 O(N*M) all-pairs，C-tree ds=1 兩邊約 70,000
+      點要 ~78 GB（2026-09-12）；中間試過 grid-hash expanding-ring，2026-09-11 在 production
+      兩個 sweep task 卡在單一 ChainStack 20–40 分鐘（小而密的 cloud 讓 ring 爆增），當天
+      改 cKDTree。
+    - SurvivalProcess 的 grid NMS 取代兩版 O(n*k)（list 每輪重建、預配置 buffer 切片），
+      舊版留在 cli/demo_survival_analysis.py 當參考實作；34503 點快 131x，2 個 ChainStack
+      端到端 anchor mismatch 0%、曲線 bit-identical、整體快 1.5x。

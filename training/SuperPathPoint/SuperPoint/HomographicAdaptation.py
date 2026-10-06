@@ -30,8 +30,7 @@ The visible consequence, and the evidence it is working: `mask` goes to nearly
 all-True while `counts` does not. Upstream's `mask` is "which output pixels came
 from inside the source" and with a 3x source that is everything but the eroded
 rim; `counts` is "how many views covered this pixel of the ORIGINAL frame",
-which a zoomed-in view still fails to do. Two masks that used to be symmetric
-and now are not.
+which a zoomed-in view still fails to do. The two masks are not symmetric.
 
 2. `aggregation: 'sum'` IS A MEAN, SO IT IS CALLED ONE
 -------------------------------------------------------

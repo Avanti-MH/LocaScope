@@ -5,38 +5,19 @@ section's own comment for why.
 
 The Stage 2 (G/F/Collapse)/Stage 3 REGISTRIES themselves (`SUPPORT_
 CONTEXT_CHOICES`/`QUERY_CONTEXT_CHOICES`/`COLLAPSE_CHOICES`/`ROUTING_
-HEAD_CHOICES`) moved to `aiNNModel/models/PrototypeChoices.py` (2026-09-22)
--- see that module's own docstring for the full picture (the pipeline
-shape, why `COLLAPSE_CHOICES` is not called `GENERATOR_CHOICES` any more,
-why "Matching Net" is a composition rather than a registry entry). Only
-RE-EXPORTED here so `cli/train.py`'s existing `from Runtime import (...)`
-did not need to change: the move was so the GENERIC checkpoint layer
-(`aiNNModel/models/common/Checkpoints.py`) could read the same registries
-`cli/train.py` does, without importing this training package into
-`aiNNModel/models/` -- a training package importing FROM the generic
-layer (this file always did that) is fine; the generic layer importing
-FROM a training package is the direction that is not.
+HEAD_CHOICES`) live in `aiNNModel/models/PrototypeChoices.py` -- see that
+module's own docstring for the pipeline shape and why "Matching Net" is a
+composition rather than a registry entry -- so the GENERIC checkpoint layer
+(`aiNNModel/models/common/Checkpoints.py`) can read the same registries
+`cli/train.py` does without importing a training package. They are
+re-exported here.
 
 `cli/train.py` imports this file as `training.PrototypicalRoutingHead.
 Runtime`: `training/MppRoutingHead/` and `training/PrototypicalRoutingHead/`
 are real Python packages (each with its own `__init__.py`, under
 `training/__init__.py`), so a same-named `Runtime.py` in each package is
 disambiguated by the QUALIFIED import path itself, not by which directory
-`sys.path` happens to favour. `setup_import_paths()` puts no training
-package's directory on `sys.path` at all, so no caller here needs
-`add_training_package` -- a qualified import needs no ordering rule to
-resolve.
-
-(`cli/train_baseline.py`, Stage 4's Baseline arm, existed 2026-09-20
-through 2026-09-22 and was DELETED -- its own definition of what a
-"Baseline" checkpoint should do at real inference kept changing across
-that window and never settled; it will be redesigned from scratch once
-that positioning is actually decided, not resumed from this version.
-`LearnedPrototypeClassifier` (`aiNNModel/models/PrototypeRoutingHeads.py`)
-was built for it and was deleted alongside it, same day -- see that
-module's own docstring for how to rebuild the same shape if a redesign
-wants it: any `ROUTING_HEAD_CHOICES` entry already accepts a learned
-`[K, D]` tensor as `prototypes` with no separate contract of its own.)
+`sys.path` happens to favour.
 '''
 from __future__ import annotations
 
@@ -55,8 +36,7 @@ from PrototypeChoices import (SUPPORT_CONTEXT_CHOICES, QUERY_CONTEXT_CHOICES,  #
 #  HEAD_CHOICES nor anything else specific to that package), not an import
 #  from there -- these are two INDEPENDENT training packages (this file's
 #  own module docstring), and importing one's generic plumbing from the
-#  other would couple them for no reason now that each is its own real
-#  Python package (2026-09-22): a change to MppRoutingHead's copy should
+#  other would couple them for no reason: a change to MppRoutingHead's copy should
 #  not be able to move PrototypicalRoutingHead's runs. `wandb_epoch_metrics`
 #  is NOT duplicated --
 #  that one IS shaped around MppRoutingHead's own val_report row schema
@@ -108,8 +88,8 @@ def wandb_finish(run) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 #  scoring -- a DUPLICATE of MppRoutingHead/Runtime.py's own score/rescore/
 #  rescore_by_rung (same reasoning as the wandb section above: generic,
-#  duplicated rather than imported across the package boundary). Added
-#  2026-09-21 for `cli/train.py`'s own held-out val loop.
+#  duplicated rather than imported across the package boundary), for
+#  `cli/train.py`'s own held-out val loop.
 # ══════════════════════════════════════════════════════════════════════════
 
 def score(pred_class: torch.Tensor, true_class: torch.Tensor,

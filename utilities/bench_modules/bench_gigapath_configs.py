@@ -42,27 +42,10 @@ MODE speed
              over --batch-sizes x --dtypes x --levels x --overlaps, with a
              cpu/gpu time split per point and a bottleneck verdict.
 
-NOT `--tissue-ratio`. The old accuracy bench took a `--tissue-ratio` float
-and ran it through `TileSampler.caps_for_tissue_ratio` -- a function whose
-own docstring called it "the RETIRED tissue_ratio gate" even before this
-file used it. `KnnEstMpp.py` hit the same call this session and replaced it
-with a richness policy spelled out directly (`REFERENCE_BANK_RICHNESS`:
-floors all zero, caps admit background < 50%, no preference between the
-three buckets that clears). This file reuses THAT constant rather than
-inventing a second one, since the two benches want the identical policy --
-"any admissible tile, no preference" -- for the identical reason (a fair
-per-config comparison should not also be biased toward busy tiles).
-
-Two bugs fixed while merging, found because each file failed to IMPORT under
-the old dependency list, not merely to run:
-  accuracy bench  `del hest` referenced a name that was never bound (the
-                  variable is `hest_method`) -- would have raised NameError
-                  the first time this file ever reached that line.
-  speed bench     `_CPU_TRANSFORM = TransformConfig().build()` ran at import
-                  time with no `TransformConfig` import anywhere in the file
-                  -- NameError before `main()` is ever reached.
-Neither bug is reachable from the other bench, which is presumably why each
-went unnoticed independently.
+The reference bank's richness is `KnnEstMpp.REFERENCE_BANK_RICHNESS` (floors
+all zero, caps admit background < 50%, no preference between the three buckets
+that clears), reused rather than a second copy: a fair per-config comparison
+should not also be biased toward busy tiles.
 """
 from __future__ import annotations
 
@@ -98,10 +81,9 @@ from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                 
 
 # ── shared config table ─────────────────────────────────────────────────────
 
-#: (label, flash, dtype, compile). Speed mode's own table (was
-#: `_COMPARE_CONFIGS`) -- accuracy mode uses the first two entries by
-#: default (was `_MAIN_CONFIGS`), since flash-attn/compile change SPEED, not
-#: the arithmetic, and the old accuracy bench never compared them.
+#: (label, flash, dtype, compile). Speed mode's own table -- accuracy mode
+#: uses the first two entries by default, since flash-attn/compile change
+#: SPEED, not the arithmetic.
 #: `--configs` lets accuracy mode check that assumption against more of the
 #: table instead of asserting it.
 _CONFIGS = [

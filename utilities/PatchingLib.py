@@ -8,9 +8,7 @@ PatchingLib — shared patch grid layout for query and WSI pipelines.
     QueryPatchContainer  — a query image cut into a PatchGrid
     WsiFeaturesMap       — every region's FeaturesMap at one scale
 
-A slide's tiles are read by SlideReader.read_grid, block by block; the
-containers that read a whole region image (WsiTissuesContainer,
-TissuePatchContainer) were retired on 2026-10-06.
+A slide's tiles are read by SlideReader.read_grid, block by block.
 """
 
 from __future__ import annotations
@@ -58,7 +56,7 @@ class PatchInfo:
     level n at the fractional x / ds, so x * ds is not where the patch's
     pixels are, by up to one level pixel. The level-0 point a read of the
     patch starts at is PatchGrid.tile_origin_l0; there is deliberately no
-    level-0 conversion here (to_level0 was int(x * ds) and went 2026-10-05).'''
+    level-0 conversion here.'''
     row: int
     col: int
     y: int          # top-left row or y at ds coords.
@@ -383,10 +381,8 @@ class PatchGrid:
         '''QueryPreprocessor._flat_prefix — main row r 之前的 flat slot 總數。
 
         Closed form of `sum(_row_scan_width(i) for i in range(r))`: the first
-        overlap_rows main rows each carry an overlap row beside them. The sum
-        was O(rows) per call and every tile lookup made one, which made
-        arranging a slide's feature grid quadratic in its tile count (the
-        BenchLocaScope profile, 2026-10-06).'''
+        overlap_rows main rows each carry an overlap row beside them. O(1), because
+        every tile lookup makes one call.'''
         if not self.has_overlap:
             return r * self.grid_cols
         with_overlap = min(r, self.overlap_rows)
@@ -771,18 +767,17 @@ class WsiFeaturesMap:
                        encoder: EncodeFn, *, ds: float, level: int,
                        tile_size: int, overlap: bool) -> 'WsiFeaturesMap':
         '''Encode what `SlideReader.read_grid` yields, block by block, into
-        every region's FeaturesMap -- the slide never held whole, which is
-        what the retired WsiTissuesContainer did.
+        every region's FeaturesMap -- the slide never held whole.
 
         A block carries main rows `row0 ..` and the offset rows between
         them, each row-major; tile (r, c) of a lattice goes to the flat slot
         `grid.flat_index_for_main/overlap(r, c)` names, so the result is in
-        exactly the order a container's `to_features` produced. Every slot
+        exactly the grid's flat order. Every slot
         must be written exactly once, or this raises: a block lost, or read
         twice, would otherwise leave zeros that score like a real tile.
 
         The features stay on the device `encoder` returns them on -- a
-        TileEncoder's, since its exits no longer move to the host -- because
+        TileEncoder's -- because
         the similarity runs there; nothing here moves them to the host. A cache
         write moves them, once, when it writes (`Store.to_store_tensors`).'''
         feats: List[Any] = [None] * len(grids)
@@ -846,7 +841,7 @@ class WsiFeaturesMap:
         return iter(self.maps)
 
     def items(self) -> Iterator[Any]:
-        '''(region, FeaturesMap) pairs -- the zip that used to be written out.'''
+        '''(region, FeaturesMap) pairs.'''
         return zip(self.regions, self.maps)
 
     def summary(self) -> WsiFeaturesMap:

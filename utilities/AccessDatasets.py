@@ -23,24 +23,14 @@ a name that resolves to a real file is found, one that does not is a
 `_locate_*` functions below already knows) needs a new rule written by hand,
 once, here -- not once per WSI it contains.
 
-An earlier version of this file registered one `WsiEntry` per WSI by hand,
-reasoning that "a directory listing cannot tell a companion from an
-unrelated thing that happens to sit next to it" (true of `Ki67_with_photo`'s
-two spellings for the same role, `{specimen}_ki67/` and a bare
-`{specimen}/`). That is true of a BLIND scan guessing at structure it has
-never been told; it is not true of checking a name against a known,
-hand-written template, which is what every `_locate_*` function below does
--- the ambiguity is resolved once, in the template itself (`_locate_ki67`'s
-docstring), not re-guessed per file.
+Checking a name against a known, hand-written template resolves the ambiguity
+a blind directory scan would have (`Ki67_with_photo` spells one companion role
+two ways, `{specimen}_ki67/` and a bare `{specimen}/`) once, in the template
+itself (`_locate_ki67`'s docstring), not per file.
 
 THE REGISTRY MOVES WHEN THE DATA MOVES, AND THAT IS THE ONE THING THIS FILE
-EXISTS TO CENTRALISE. `/work/u26130998/datasets/Ki67` was renamed to
-`Ki67_with_photo` on 2026-09-06 (after `organize_mrxs.py` folded every
-slide's scattered pieces into one `{specimen}_mrxs/` directory each) and the
-rename broke 23 files that had the old root hardcoded. Every one of them
-should have been reading `AccessDatasets.locate(...)` instead -- this file
-is that single place; callers that still hardcode a dataset path are exactly
-the next version of that same rename cost.
+EXISTS TO CENTRALISE. A caller that hardcodes a dataset path breaks the day the
+dataset is renamed; one that calls `AccessDatasets.locate(...)` does not.
 
 `locate()` RAISES ON AN UNKNOWN NAME, NOT ON A CLOSE GUESS. A caller who
 mistypes a name and gets back some OTHER slide's path silently analyses the

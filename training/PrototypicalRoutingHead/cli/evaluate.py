@@ -9,7 +9,7 @@ two ways, into two pairs of CSVs:
     K x K      test_scores_kxk_per_combo.csv / _per_rung.csv -- the same
                definition training's val uses (`train.kxk_report`): every
                held-out combination, K support x K query batches, rung ->
-               combo -> dataset -> total means. Added 2026-09-24.
+               combo -> dataset -> total means.
 
     python training/PrototypicalRoutingHead/cli/evaluate.py
 
@@ -26,7 +26,7 @@ native/resampled discipline `combo_report`'s own docstring explains
 here exactly as it does to held-out val; writing a second version of that
 logic against the test split would be the same mistake in a new file.
 
-DEEPER, FEWER SLIDES than val (2026-09-22 decision): `--n-wsi 5 --n-per-rung
+DEEPER, FEWER SLIDES than val: `--n-wsi 5 --n-per-rung
 50` (val: 10 slides, `--val-n-per-rung 20`) -- the same "shallow-and-wide
 for cheap per-epoch selection, deep-and-narrow for the one-shot final number"
 split `MppRoutingHead/cli/evaluate.py`'s own defaults use.
@@ -272,12 +272,12 @@ def main() -> int:
 
         num_prefix = int(encoder.model_spec.num_prefix)
         extra = ckpt.get('extra', {})
-        # support_native (2026-09-22): by default read back off THIS
+        # support_native: by default read back off THIS
         # checkpoint's own recorded args, same as tile above -- render_episode
         # reproduces whatever this specific arm trained under (CAMERA_FULL or
         # CAMERA_GEOMETRY_ONLY on the support side); --weights all scores
         # several arms in one call, and each may have trained differently.
-        # --support-native on/off (2026-10-02) overrides that for every
+        # --support-native on/off overrides that for every
         # checkpoint, to score them all against one kind of support -- the
         # `support_native` column below still says how each one TRAINED,
         # `eval_support` how this run rendered.
@@ -296,8 +296,8 @@ def main() -> int:
             collapse=ckpt['collapse_name'],
             routing_head=ckpt['routing_head_name'],
             cross_domain_dataset=extra.get('cross_domain_dataset', ''),
-            # train_dataset/loss (2026-09-22): same fields train.py's own
-            # _IDENTITY_FIELDS just gained -- read off ckpt['args'] since
+            # train_dataset/loss: the same fields as train.py's own
+            # _IDENTITY_FIELDS -- read off ckpt['args'] since
             # neither one is in `extra` (they are plain CLI values, not a
             # registry name needing a lookup).
             train_dataset=run_args.get('train_dataset', ''),

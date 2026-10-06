@@ -12,30 +12,14 @@ the prototype-routing analogue of `Heads.py`'s single-tile classifiers:
 explicit argument because Stage 2 (`SetTransformerPrototype`, or a simpler
 arm) computes a NEW set every episode, not once at construction time.
 
-THREE arms as of 2026-09-22: `CosineTauHead` (main line), `CosineLogSumExpHead`
-(pairs with `--collapse off`'s un-collapsed `{rung:[K_r,D]}` support --
-moved here from its own `CrossAttentionMatch.py`, 2026-09-22, the same day
-that file stopped ALSO needing a Stage 2 role: it used to carry a
-`collapse()` method registered as a Stage 2 `matching_net` generator,
-which is why it lived apart from this "Stage 3 lives in one file" file in
-the first place; once that method was deleted -- see `PrototypeGenerators.
-AttnPoolPrototype`'s own docstring for why -- there was no reason left for
-a second Stage-3 file), and `AttnScoreHead` (learned multi-head Q/K
-projections, `--routing-head attn_score` -- dynamic-K-safe the same way
-`CosineLogSumExpHead` is, see its own docstring). The non-learnable block
-(negative Euclidean, multi-prototype soft-min) and the bias-routing arm
-are plan.md step 4.2 -- still not built.
-
-`LearnedPrototypeClassifier` (added 2026-09-20, generalised 2026-09-21,
-DELETED 2026-09-22 along with `cli/train_baseline.py`, Stage 4's own
-BASELINE arm -- its inference-time positioning never settled; will be
-redesigned from scratch, not resumed from that version) used to be the
-exception to "prototypes as an explicit argument" from the CALLER's side
-only, wrapping a learned `[num_classes, D]` weight matrix as one of these
-heads' own `prototypes` argument. If a redesign needs the same shape
-again, the wrapper is cheap to rebuild: any `ROUTING_HEAD_CHOICES` entry
-already accepts an arbitrary `[K, D]` tensor as `prototypes`, learned or
-computed, with no separate contract of its own.
+THREE arms: `CosineTauHead` (main line), `CosineLogSumExpHead` (pairs with
+`--collapse off`'s un-collapsed `{rung:[K_r,D]}` support), and `AttnScoreHead`
+(learned multi-head Q/K projections, `--routing-head attn_score` --
+dynamic-K-safe the same way `CosineLogSumExpHead` is, see its own docstring).
+The non-learnable block (negative Euclidean, multi-prototype soft-min) and the
+bias-routing arm are plan.md step 4.2 -- still not built. Any
+`ROUTING_HEAD_CHOICES` entry accepts an arbitrary `[K, D]` tensor as
+`prototypes`, learned or computed.
 '''
 from __future__ import annotations
 
@@ -162,12 +146,9 @@ class AttnScoreHead(nn.Module):
     NO fixed-size classifier anywhere in this class -- every tensor whose
     size depends on K (how many rungs THIS episode has) is produced by
     evaluating the SAME per-pair computation once per prototype/member,
-    never by a layer whose own weight shape bakes in a specific K. This
-    was a real design mistake caught before it shipped (2026-09-22): the
-    first sketch of this idea was "attention, then a small classifier
-    layer" -- a classifier layer has a FIXED output width, which breaks
-    the moment an episode is N-way for a different N, exactly the failure
-    mode `cosine_tau`/`cosine_logsumexp` were built to avoid by using a
+    never by a layer whose own weight shape bakes in a specific K. A
+    classifier layer has a FIXED output width, which breaks the moment an
+    episode is N-way for a different N, exactly the failure mode `cosine_tau`/`cosine_logsumexp` were built to avoid by using a
     K-agnostic dot product/logsumexp instead of a class-count-shaped
     layer. `MLPq`/`MLPk` below are safe for the same reason `Context
     Encoders.BiLstmSupportContext`'s biLSTM is: applied per-member/

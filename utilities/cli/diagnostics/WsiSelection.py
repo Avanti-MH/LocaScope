@@ -1,6 +1,5 @@
 """ONE way to say "which WSIs" across every diagnostic in this directory --
-extracted 2026-09-18 alongside `SlideProbe.py`, but deliberately NOT put
-there: `SlideProbe.py` is about how to read a slide handle safely, this is
+deliberately NOT in `SlideProbe.py`: `SlideProbe.py` is about how to read a slide handle safely, this is
 about which slides to hand it in the first place, a different question one
 layer up.
 

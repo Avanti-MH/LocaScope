@@ -151,7 +151,7 @@ def _fit_uni2(slide_name: str, args, device):
 def _overlay(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """GREEN = selected, matching `inspect_pca_seg.py`'s own convention -- a
     grey mask reads backwards the moment the selected region is the
-    background (2026-08-26), an overlay on the actual tile cannot."""
+    background, an overlay on the actual tile cannot."""
     over = image.copy()
     selected = mask.astype(bool)
     over[selected] = (over[selected] * 0.55

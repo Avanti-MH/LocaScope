@@ -9,9 +9,7 @@ Sections:
   2. PatchInfo — for_query/for_wsi, grid offset coordinates
   3. Containers — QueryPatchContainer extraction, synthetic and real data
 
-TissuePatchContainer and WsiTissuesContainer were retired on 2026-10-06; their
-tests (cases 1-3, the from_ds scale contract) went with them. A slide's tiles
-are read by SlideReader.read_grid, tested in test_slide_reader.
+A slide's tiles are read by SlideReader.read_grid, tested in test_slide_reader.
 
 Usage:
   python utilities/test_modules/test_patching_lib.py
@@ -208,12 +206,9 @@ def validate_index_errors(grid: PatchGrid):
 # ── Offset: PatchInfo.x/y include offset ────────────────────────────────────
 
 def validate_offset(W, H, tile, ox, oy, ds=1.0, level=2):
-    # No mpp here, and none on PatchInfo. This test used to pass mpp= and assert
-    # info.mpp, against a field PatchGrid has not had for a long time -- it was
-    # already failing at eee3412, so nothing downstream ever depended on it.
-    # Not reinstated: a patch knows its ds and its level, and mpp is
-    # ds * wsi.base_mpp, so storing it would be the same quantity written twice
-    # and free to disagree.
+    # No mpp here, and none on PatchInfo: a patch knows its ds and its level,
+    # and mpp is ds * wsi.base_mpp, so storing it would be the same quantity
+    # written twice and free to disagree.
     grid = PatchGrid.from_size(W, H, tile, overlap=True,
                                x_offset=ox, y_offset=oy, ds=ds, level=level)
     for info in grid.iter_infos():
@@ -766,23 +761,23 @@ def show_patch_grid(ax, patches, n_cols: int = 4, title: str = ''):
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Closed-form index sums and one-gather grids, against the old loops ──────
+# ── Closed-form index sums and one-gather grids, against frozen loops ───────
 
 def _old_prefix(grid: PatchGrid, r: int) -> int:
-    '''FROZEN: PatchGrid._flat_prefix before 2026-10-06 -- a sum over rows.'''
+    '''FROZEN: PatchGrid._flat_prefix as a sum over rows.'''
     return sum(grid._row_scan_width(i) for i in range(r))
 
 
 def _old_len(grid: PatchGrid) -> int:
-    '''FROZEN: PatchGrid.__len__ before 2026-10-06.'''
+    '''FROZEN: PatchGrid.__len__ as a sum over rows.'''
     if not grid.has_overlap:
         return len(grid.main_patch_infos)
     return sum(grid._row_scan_width(r) for r in range(grid.grid_rows))
 
 
 def _old_lattice_grid(fm: FeaturesMap, lattice: str):
-    '''FROZEN: FeaturesMap.main/overlap_feature_grid before 2026-10-06 -- one
-    copy per cell, each through __getitem__.'''
+    '''FROZEN: FeaturesMap.main/overlap_feature_grid, one copy per cell,
+    each through __getitem__.'''
     g = fm.grid
     if lattice == 'main':
         rows, cols, flat = g.grid_rows, g.grid_cols, g.flat_index_for_main

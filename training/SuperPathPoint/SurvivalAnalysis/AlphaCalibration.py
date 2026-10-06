@@ -161,11 +161,10 @@ def offset_quantiles_of(dist: np.ndarray, *, rungs: Sequence[float],
     from whichever rung it was born in (finest-first merge), so probing
     THAT rung's own detections always finds the anchor itself at distance
     0 -- a self-match, not a real cross-rung offset measurement
-    (AlphaSelectionNotes.md §9: this is what made the ds=1 column read an
-    exact `q0.5 = 0.0` and silently diluted every rung's distribution with
-    however many anchors happened to be born there, before this was added).
-    `None` (default) keeps the OLD, contaminated behaviour -- every caller
-    updates to pass it in the same change that added it.
+    (AlphaSelectionNotes.md §9: without this the ds=1 column reads an exact
+    `q0.5 = 0.0`, and every rung's distribution is diluted by however many
+    anchors were born there). `None` (default) keeps every row, self-matches
+    included.
     """
     rungs_arr = np.asarray(list(rungs), np.float64)
     q = np.asarray(list(quantiles), np.float64)

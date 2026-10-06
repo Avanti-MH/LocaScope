@@ -70,8 +70,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                   # noqa: E402
 import numpy as np                                                # noqa: E402
 
-from cli import (RESULT_DIR, job_result_dir, pretile_root,        # noqa: E402
-                 setup_import_paths)
+from cli import (add_labels_args, job_result_dir, labels_root,      # noqa: E402
+                 pretile_root, setup_import_paths)
 
 setup_import_paths()
 
@@ -80,7 +80,6 @@ from Store import PreTileCorpus, PreTileStore                    # noqa: E402
 from common.KeypointLabelStore import points_from_prob             # noqa: E402
 from TileSampler import centre_crop  # noqa: E402
 
-DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 
 #: Every string a reader will see. Rewritten on every run so the definitions
 #: cannot drift from the code that produced them (ClaudeRules section 12).
@@ -109,7 +108,7 @@ DEFINITIONS = [
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--labels-root', default=DEFAULT_LABEL_ROOT)
+    add_labels_args(ap)
     ap.add_argument('--pretile-cache-job', default='ExtractPreTiles',
                     help='the job that made the pre-tiles the labels name')
     ap.add_argument('--wsi-stem', nargs='*', default=None)
@@ -125,6 +124,7 @@ def main():
                     help='N for those runs. Match what made the labels')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
+    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
 
     out_dir = args.out or job_result_dir('InspectHaLabels')
     os.makedirs(out_dir, exist_ok=True)

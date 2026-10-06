@@ -14,7 +14,7 @@ question here needs it -- not the other way round.
         weights                               -- which method/config;
                                               KnnEstMpp leaves classifier/
                                               reduction/loss/weights blank.
-                                              `loss` (2026-09-22): bal/ord_a/
+                                              `loss`: bal/ord_a/
                                               ord_b, blank on a checkpoint
                                               trained before --loss existed
                                               (treated as 'bal' by
@@ -29,8 +29,8 @@ question here needs it -- not the other way round.
                                               so a new method never needs a
                                               new column
         kind                                  -- knn / classifier / prototype /
-                                              classic (2026-10-05; absent in
-                                              older files, see kind_of)
+                                              classic (absent in some files,
+                                              see kind_of)
         vote                                  -- the FoVVote rule, on
                                               classifier and prototype rows
                                               only: one row per rule, all
@@ -39,7 +39,7 @@ question here needs it -- not the other way round.
                                               distribution, on voting rows
                                               (bench_stage1_mpp.fov_stats)
 
-        split                                 -- val / test (2026-10-05)
+        split                                 -- val / test
         risk_*                                -- FoVVote.diagnose: the raw
                                               quantities FoV_Vote.md's danger
                                               section names for the row's rule
@@ -126,20 +126,11 @@ BAR = '=' * 78
 #: `head_recipe_of`'s own docstring for why loss changes linestyle instead
 #: of colour.
 #:
-#: 2026-09-22: rebuilt against `training/MppRoutingHead/Runtime.
-#: HEAD_CHOICES`'s actual registered names -- the previous version's keys
-#: (`'LinearHead+fixed'`, `'ArcFaceHead+fixed'`, ...) were the CLASS names
-#: `classifier` used to hold before `bench_stage1_mpp.py`'s
-#: own `_method_specs` switched it to `head_name` (that switch's own
-#: comment explains why: 'classifier' collapsed all five mlp variants into
-#: one label). Nothing here was ever updated to match, so every lookup has
-#: been falling through to the `_INK_SECONDARY` grey fallback since that
-#: switch -- this was found and fixed the same day as the `loss` column,
-#: not a regression it introduced. One colour per head recipe, its own table:
-#: `training/MppRoutingHead/cli/evaluate.py` no longer has a per-head table to
-#: share -- since 2026-10-01 it colours by classifier and marks the reduction
-#: by shape (`CLASSIFIER_COLORS`, `head_style`), so the two reports do not use
-#: the same colour for the same head.
+#: Keyed by `training/MppRoutingHead/Runtime.HEAD_CHOICES`'s registered names
+#: (the `head_name` bench_stage1_mpp writes), one colour per head recipe. Its
+#: own table: `training/MppRoutingHead/cli/evaluate.py` colours by classifier
+#: and marks the reduction by shape (`CLASSIFIER_COLORS`, `head_style`), so
+#: the two reports do not use the same colour for the same head.
 HEAD_RECIPE_COLORS = {
     'baseline':              '#2a78d6',   # raw KnnEstMpp
     'linear+fixed':          '#eb6834',
@@ -168,8 +159,8 @@ _SURFACE = '#fcfcfb'
 
 def head_recipe_of(classifier: str, reduction: str) -> str:
     """`<classifier>+<reduction>` (e.g. `'arcface+fixed'`), 'baseline' for a
-    bare KnnEstMpp (blank classifier) -- LOSS-INDEPENDENT on purpose
-    (2026-09-22): colour follows which HEAD this is, the same entity
+    bare KnnEstMpp (blank classifier) -- LOSS-INDEPENDENT on purpose:
+    colour follows which HEAD this is, the same entity
     `HEAD_RECIPE_COLORS` keys on; which --loss trained it changes the
     LINESTYLE instead (`plot_dataset`'s own `LOSS_LINESTYLES`), not the
     colour -- giving every (head, loss) pair its own colour would need
@@ -222,9 +213,8 @@ def method_of(row: dict) -> str:
     the module docstring), so the label collapses to just the encoder there
     -- the same rule `_paths.encoder_tag` uses for an encoder with no head.
 
-    `loss` (2026-09-22) is appended ONLY when it is present AND not 'bal':
-    every checkpoint trained before `--loss` existed, and every 'bal' run
-    since, keeps the exact label it already had (no '+bal' suffix appearing
+    `loss` is appended ONLY when it is present AND not 'bal', so a bal
+    run keeps the bare label (no '+bal' suffix appearing
     everywhere) -- same reasoning `bench_stage1_mpp.py`'s own
     `_prototype_weight_filename`-style filenames only tag a NON-default
     loss. Without this, a bal- and an ord_a-trained checkpoint of the same
@@ -233,8 +223,8 @@ def method_of(row: dict) -> str:
     `head_name` already fixed once for the mlp variants (see the module
     docstring's csv columns note).
     """
-    # KnnEstMpp has no head, so its label was the bare encoder name and read
-    # like the encoder itself; 'knn:' says which method it is (2026-10-05)
+    # KnnEstMpp has no head; 'knn:' says which method it is, so the label
+    # does not read like the encoder itself
     encoder = cell(row, 'encoder') or '?'
     parts = [f'knn:{encoder}' if kind_of(row) == 'knn' else encoder]
     for k in ('classifier', 'reduction'):
@@ -244,13 +234,13 @@ def method_of(row: dict) -> str:
     loss = cell(row, 'loss')
     if loss and loss != 'bal':
         parts.append(loss)
-    # `read_level` (2026-10-02), the same rule one column on: only off the
+    # `read_level`, the same rule one column on: only off the
     # default, so a pyramid-trained head keeps its label
     read = cell(row, 'read_level')
     if read and read != 'pyramid':
         parts.append(read)
     label = '+'.join(parts)
-    # `vote` (2026-10-05): a classifier or prototype row is one FoVVote rule
+    # `vote`: a classifier or prototype row is one FoVVote rule
     # over the method's patch probabilities, and two rules of one checkpoint
     # are two methods here. '@' rather than '+', so `base_method_of` can
     # strip it without parsing the head recipe.
@@ -358,7 +348,7 @@ def cross_slide_rung(rows: list) -> list:
     `--native-only` where a rung some slides lack natively rests on fewer
     slides' worth of shots than one that every slide has.
 
-    `classifier`/`reduction`/`loss` (2026-09-22) are carried through
+    `classifier`/`reduction`/`loss` are carried through
     alongside the composed `method` string, read off `grp[0]` since every
     row a `method` groups together shares the same three values by
     construction (`method_of` is a deterministic function of them) --
@@ -1052,8 +1042,8 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
         for (recipe, loss, read), line_rows in sorted(by_line.items()):
             line_rows.sort(key=lambda r: r['rung'])
             color = HEAD_RECIPE_COLORS.get(recipe, _INK_SECONDARY)
-            # baseline (KnnEstMpp) has no loss at all -- dashed regardless,
-            # same as before this change; every classifier row's linestyle
+            # baseline (KnnEstMpp) has no loss at all -- dashed regardless;
+            # every classifier row's linestyle
             # comes from ITS OWN loss instead (`head_recipe_of`'s own
             # docstring: colour is head identity, loss is the line).
             style = '--' if recipe == 'baseline' else LOSS_LINESTYLES.get(loss, '-')

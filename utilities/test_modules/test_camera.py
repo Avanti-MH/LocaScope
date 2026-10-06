@@ -6,12 +6,9 @@
 
 Run through `jobscripts/TestReadPath.sh`, which resolves slide names and loops.
 
-This is `test_camera_output_to_level0.py` and `test_augment_equivalence.py`
-in one place, named after the module they test. Placing FoVs left Camera for
-`generator.FovSupply` on 2026-10-03, and its checks (the former `fov` section)
-went with it to `test_generator.py` (`test_fov_supply.py` since 2026-10-06).
-Each section runs on its own and the exit status is the worst of them -- the old
-map check returned on its first failure and never reached the seed check.
+Placing FoVs is `FovSupply`'s, tested in `test_fov_supply.py`. Each section
+runs on its own and the exit status is the worst of them, so a failing map
+check does not hide the seed check.
 
     map         `Render.output_to_level0` against pixels, not against its own
                 derivation. The sign of the inverse rotation is invisible at 0
@@ -83,8 +80,8 @@ ROTS = (0, 90, 180, 270)
 #: apart the two matches landed), not on the tile's texture.
 #:
 #: The margins are wide because the real signal is not subtle. A wrong
-#: inverse rotation scored MAD 5.2 against the correct position's 47.5 when
-#: this file caught it (see output_to_level0's docstring) -- ratio 0.11, gap
+#: inverse rotation scores MAD 5.2 against the correct position's 47.5 (see
+#: output_to_level0's docstring) -- ratio 0.11, gap
 #: 42.3. A correct map on textured tissue scores 0.02 against a decoy's 0.32.
 #: Both regimes sit an order of magnitude clear of these cuts.
 DECOY_RATIO = 0.5    # decoy must match at least twice as well ...
@@ -239,25 +236,18 @@ def run_map(args, wsi, level_mpp) -> int:
 
 
 def check_same_seed_same_pixels(wsi, query_mpp, x, y, seed) -> list:
-    """Two Cameras, one seed, one position -> must be BIT-IDENTICAL.
+    """Two Renders, one seed, one position -> must be BIT-IDENTICAL.
 
-    Nothing asserted this until 2026-09-16, which is how `apply_stage_shift`
-    and `apply_noise` drew from the process-global `np.random` for as long as
-    they did: `Camera.__init__` used to call `np.random.seed(seed)`, so in the
-    build-one-camera-then-shoot order every existing caller happens to use,
-    the global draws came out reproducible anyway and nothing looked wrong.
-
-    So the order here is deliberate and is the part that must not be
-    "simplified": BOTH cameras are built BEFORE EITHER shoots. Under the old
-    code that alone breaks it -- building B re-seeds the global, A's shot then
-    consumes it, and B's shot gets the advanced state. Building A, shooting A,
-    building B, shooting B would have passed on the buggy code and tested
-    nothing. The `np.random` call between the two shots is the same argument
+    The order here is deliberate and is the part that must not be
+    "simplified": BOTH are built BEFORE EITHER shoots. A constructor that
+    seeded the global `np.random` would pass a build-shoot-build-shoot order
+    and fail this one -- building B re-seeds the global, A's shot consumes it,
+    and B's shot gets the advanced state. The `np.random` call between the two shots is the same argument
     made louder: a shot must not depend on global state at all, so disturbing
     it must not change the pixels.
 
     That interleaved order is not hypothetical -- it is exactly what
-    `training/MppRoutingHead/Datasets.py`'s `CameraBank` does (one Camera per
+    `training/MppRoutingHead/Datasets.py`'s `CameraBank` does (one Render per
     rung of a slide, all built before any of them shoots).
     """
     failures = []
@@ -456,21 +446,21 @@ def set_fast(enabled: bool) -> None:
     """Flip all three augment modules at once.
 
     The public functions dispatch on these flags at call time and every caller
-    binds the dispatcher rather than a body, so this changes what a Camera
+    binds the dispatcher rather than a body, so this changes what a Render
     capture actually runs without importing anything from `pipeline`.
     """
     field.USE_FAST = lens.USE_FAST = geometry.USE_FAST = enabled
 
 
 def time_captures(wsi, cfg, positions, seed: int) -> dict:
-    """`Camera.capture_with_gt` timed both ways, on identical parameter draws.
+    """`Render.capture_with_gt` timed both ways, on identical parameter draws.
 
     A capture is read + augment + centre crop, and only the middle term
     changes. Including the other two is the point: the per-op table says what
     the rewrite saves, this says what fraction of a real shot that is, which is
     the number that decides whether a bench gets shorter.
 
-    Both passes build a fresh Camera from the SAME seed, so `_py_rng` hands
+    Both passes build a fresh Render from the SAME seed, so `_py_rng` hands
     them the same sequence of domain-gap parameters. Without that one pass
     could draw a larger `k1` or `vignette_strength` more often than the other
     and the difference would be luck rather than code -- the parameters are

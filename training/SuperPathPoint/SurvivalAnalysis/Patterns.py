@@ -52,8 +52,7 @@ PATTERNS = ('一直存活', '細部存活', '晚生型', '只在一階', '中間
 
 #: ASCII for figures. matplotlib's default font has no CJK glyphs, so a
 #: Chinese axis label renders as a row of empty boxes -- and the pattern names
-#: ARE the axis labels, which made all three of Stage B's figures unreadable on
-#: 2026-09-01. Kept beside the names rather than in the plotting code so that
+#: ARE the axis labels. Kept beside the names rather than in the plotting code so that
 #: adding a pattern cannot leave one without a label.
 ASCII_NAMES = {
     '一直存活': 'alive-everywhere',
@@ -164,7 +163,7 @@ def band_fraction(alive_rows: np.ndarray, *, multi_only: bool = False
     `multi_only` EXCLUDES POINTS ALIVE AT EXACTLY ONE RUNG, AND THAT IS THE
     NUMBER TO QUOTE. A width-one band is a band by arithmetic and says nothing
     about whether a head can be `(j_lo, j_hi)`: there is no interval to get
-    wrong. On the 2026-09-01 corpus 69 per cent of points were single-rung, so
+    wrong. On a corpus where 69 per cent of points were single-rung,
     the unfiltered fraction read 0.944 while the fraction among points that
     actually span a range read 0.82 -- and 0.97 against 0.6 is the decision
     spec.md 3.3 makes with it.

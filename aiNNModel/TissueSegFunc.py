@@ -18,10 +18,7 @@ How it gets there is the segmenter's business, and there are two shapes:
     (uni2_pca)          of it -- a PCA fitted across the slide -- so they read it
                         themselves and override `segment_slide`.
 
-The reading used to live in the PRODUCT, `TissueMask.from_wsi(method=...)`,
-with the segmenter handed in as a callable. The slide segmenter did not fit that
-door, so the recipe that called it had to ask which kind it was holding. Now the
-producer produces and the product only holds: this module imports `SlideMask`
+The producer produces and the product only holds: this module imports `SlideMask`
 from `TissueMask`, and nothing in `TissueMask` knows a segmenter exists.
 
     method   weights   what it is
@@ -33,11 +30,9 @@ from `TissueMask`, and nothing in `TissueMask` knows a segmenter exists.
 
 Everything is tissue, without paying for it
 -------------------------------------------
-'' replaces what used to be a method called mask_all -- a function that took
-every pixel of the level and returned np.ones of the same shape. The output was
-identical to this one; the cost was not: the whole level was read to be handed
-to a function that ignored it, then the result was allocated -- 411 MB at
-mask_ds=4, 6.6 GB at mask_ds=1, twenty minutes of reading, every element True.
+'' reads nothing: a mask of all ones costs a full read of the level and a
+full-size array to hold a constant -- 411 MB at mask_ds=4, 6.6 GB at
+mask_ds=1, twenty minutes of reading.
 
 Why it is worth having at all, rather than just segmenting: stage 2 scores a
 window by the mean cosine over the query's tiles, so a window sitting on blank
@@ -197,9 +192,9 @@ def tiled_apply(method: Callable[[np.ndarray], np.ndarray], H: int, W: int,
     `get_tile(y0, x0, y1, x1) -> (h, w, 3) uint8` supplies one expanded tile.
     Slicing an array already in memory is one implementation of that; reading
     the rect straight off the WSI is the other, and the second is what makes
-    mask_ds=1 affordable -- the level used to be materialised whole first, so
-    the peak scaled with the slide (16 bytes per level-0 pixel measured, 299 GB
-    on the largest MRXS here) no matter how small the segmentation budget was.
+    mask_ds=1 affordable: materialising the level whole first would scale the
+    peak with the slide (16 bytes per level-0 pixel measured, 299 GB on the
+    largest MRXS here) no matter how small the segmentation budget is.
 
     The grid halves the longer side until every tile fits `budget_px`. Each
     tile is read `stitch_overlap` px wider on every side and trimmed after the

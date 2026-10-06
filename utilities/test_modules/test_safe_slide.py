@@ -10,7 +10,7 @@ was diagnosed on.
                     the rest of the suite is testing something that matters
   1. good read    — an ordinary read is untouched, no reopen, no hole recorded
   2. bad read     — subdivision recovers tissue the whole-rect blank threw away,
-                    scored against min_chunk=0, which IS the old behaviour
+                    scored against min_chunk=0, the whole-rect blank
   3. survival     — metadata and further reads still work afterwards. This is
                     the whole point: a bare handle fails here
   4. sharing      — a second holder of the SAME object recovers too, which is
@@ -252,9 +252,8 @@ def validate_rgb_background(path, bad):
     """The hole composites to background; the recovered tissue does not.
 
     Located by the alpha mask rather than by assuming the whole rect is a hole.
-    That assumption was true before subdivision and is what the old version
-    asserted -- `(rgb == expected).all()` -- which now fails on the tissue
-    cfbef2d recovers. The proposition worth testing was never `the whole rect
+    Subdivision recovers tissue inside the rect, so `(rgb == expected).all()`
+    is not the property. The proposition worth testing was never `the whole rect
     is white`; it is `the part with no image is background rather than black`.
     """
     # The FULL bad rect, not a small read at its corner: the hole is somewhere

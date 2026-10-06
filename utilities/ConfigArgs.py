@@ -3,9 +3,7 @@
     add_config_args(ap, base, 'richness')          # --richness-caps, --richness-floors, ...
     cfg = config_from_args(args, base, 'richness')  # base, with whatever was given
 
-A config used to have a flag written by hand for each of the few fields somebody
-had wanted to change, which left the rest fixed in a default nobody could reach
-without editing the module. Here EVERY field is a flag, named after the field
+EVERY field is a flag, named after the field
 (`floor_frame` -> `--richness-floor-frame`), and none of them has a default of its
 own: a flag that is not given leaves the field at whatever `base` holds. So the
 value a run uses is the one written where `base` is built, unless the command line

@@ -11,13 +11,10 @@ Two numbers, and they answer different questions:
 
     ONE AT A TIME (max across methods)   what stage1_compare's own
                                          method-outer loop needs at peak,
-                                         now that only one method's encoder
-                                         is ever resident at once (the
-                                         2026-09-17 OOM fix).
-    ALL AT ONCE (sum across methods)     what the OLD build-everything-
-                                         up-front design needed -- and why
-                                         job 346494 got OOM-killed against a
-                                         64G --mem request.
+                                         with only one method's encoder
+                                         resident at once.
+    ALL AT ONCE (sum across methods)     what building every method up
+                                         front would need.
 
 Peak forward memory is measured on a SYNTHETIC batch (random uint8 tiles),
 not a real query -- the transformer forward pass is the expensive part and

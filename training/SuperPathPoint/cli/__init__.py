@@ -1,14 +1,10 @@
 """Shared setup for SuperPathPoint CLI entry points.
 
-Re-exports `_paths` rather than deriving the output root again, for the reason
-spelled out at length in `query_sim/cli/__init__.py`: that package once carried
-its own copy of the rule, the two drifted, and three of its four files ended up
-using a different definition from the fourth. `_paths` lives in `utilities/`,
-the library layer every package here already depends on, so this import points
-DOWN rather than sideways at a sibling.
-
-What this package owns is its default job names -- SuperPathPointDemo and the
-rest -- which are arguments to `job_result_dir`, not a second copy of it.
+Re-exports `_paths` rather than deriving the output root again. `_paths` lives
+in `utilities/`, the library layer every package here already depends on, so
+this import points DOWN rather than sideways at a sibling. What this package
+owns is its default job names -- SuperPathPointDemo and the rest -- which are
+arguments to `job_result_dir`, not a second copy of it.
 
 Entry points must put `training/SuperPathPoint/` on sys.path themselves before
 `from cli import job_result_dir`, since this package lives one level under it.
@@ -16,18 +12,10 @@ Entry points must put `training/SuperPathPoint/` on sys.path themselves before
 for `_paths` itself, which is the one import that cannot be bootstrapped by the
 thing it bootstraps.
 
-`setup_import_paths` here is NOT `_paths.setup_import_paths` re-exported
-unchanged (2026-09-22): that function no longer puts any training
-package's own directory on `sys.path` at all -- see its own docstring for
-why (a bare `from Runtime import ...` used to resolve to whichever
-training package `sys.path`'s own order favoured, not necessarily the
-caller's own). This wrapper calls `_paths.add_training_package(
-'SuperPathPoint')` right after, since every file that reaches
-`setup_import_paths` THROUGH this module IS a SuperPathPoint entry point --
-this package is the one place that fact is already known, so callers going
-through here (`from cli import job_result_dir, setup_import_paths`) get it
-automatically. A file that imports `_paths.setup_import_paths` directly
-instead still has to call `add_training_package('SuperPathPoint')` itself.
+`setup_import_paths` here is `_paths.setup_import_paths` followed by
+`_paths.add_training_package('SuperPathPoint')`: every file that reaches it
+through this module is a SuperPathPoint entry point. A file that imports
+`_paths.setup_import_paths` directly has to call `add_training_package` itself.
 """
 
 import os
@@ -89,6 +77,59 @@ def pretile_root(args):
 def mask_root(args):
     from Cache import cache_root                                   # noqa: PLC0415
     return cache_root(args.mask_cache_job, 'mask')
+
+
+# ── the two caches made from those corpora ───────────────────────────────────
+#
+# `<made_by>_<object>/` like every other cache: the producer defaults to its
+# own job name, a reader to the producer's, and either is named with the flag.
+#: Who makes the keypoint labels: make_ha_labels.py, MakeHaLabels.sh.
+LABELS_JOB = 'MakeHaLabels'
+#: The chain-stack tile cache has no single producer: whichever entry point
+#: reads a C descendant from the slide writes it (survival_alpha_analysis and
+#: demo_survival_analysis by default, prepare_chain_stack when asked), so each
+#: defaults to its own job name and shares another's with --chainstack-cache-job.
+
+
+def add_labels_args(ap, *, produces: bool = False) -> None:
+    """`--labels-cache-job`: whose keypoint labels, result/cache/<this>_
+    keypoint_labels/. The producer defaults to its own job name, a reader to
+    LABELS_JOB."""
+    from Cache import job_name                                     # noqa: PLC0415
+    ap.add_argument('--labels-cache-job',
+                    default=job_name(LABELS_JOB) if produces else LABELS_JOB,
+                    help='the job that made the keypoint labels: result/cache/'
+                         '<this>_keypoint_labels/')
+
+
+def labels_root(args) -> str:
+    from Cache import cache_root                                   # noqa: PLC0415
+    return str(cache_root(args.labels_cache_job, 'keypoint_labels'))
+
+
+def add_chainstack_args(ap, job: str, *, on: bool) -> None:
+    """`--chainstack-cache-job` (default `job`, this entry point's own name):
+    whose chain-stack tiles, result/cache/<this>_chainstack/. `on` keeps the
+    entry point's own default -- the analyses cache, prepare_chain_stack does
+    not (RStack.from_own says why) -- and the flag flips it."""
+    from Cache import job_name                                     # noqa: PLC0415
+    ap.add_argument('--chainstack-cache-job', default=job_name(job),
+                    help='the job whose chain-stack tile cache is read and '
+                         'written: result/cache/<this>_chainstack/')
+    if on:
+        ap.add_argument('--no-chainstack-cache', dest='chainstack_cache',
+                        action='store_false', help='read every tile fresh')
+    else:
+        ap.add_argument('--chainstack-cache', dest='chainstack_cache',
+                        action='store_true', help='cache the tiles read')
+
+
+def chainstack_root(args):
+    """The tile cache's root, or None when it is switched off."""
+    from Cache import cache_root                                   # noqa: PLC0415
+    if not args.chainstack_cache:
+        return None
+    return str(cache_root(args.chainstack_cache_job, 'chainstack'))
 
 
 def corpus_from_args(args, name: str, rungs=None):

@@ -190,12 +190,8 @@ def t_probe_bilinear_interpolation_is_exact_on_a_linear_ramp():
     discretisation error: the best `sample_step`-spaced point inside a disk
     of radius `tau` is not exactly the true continuum maximum, and how far
     off depends on which way the ramp's gradient happens to point relative
-    to the grid. An earlier version of this test tried to check both at
-    once -- comparing the wrapper's output against a hand-picked closed form
-    assumed to sit on the (1,1)/sqrt(2) diagonal -- which is wrong for any
-    ramp whose gradient (a, b) is not itself along that diagonal (this one
-    is (2, 3)), and conflated grid coarseness with interpolation error even
-    when the direction is fixed. Calling `_bilinear_sample` directly at an
+    to the grid, so checking both at once conflates grid coarseness with
+    interpolation error. Calling `_bilinear_sample` directly at an
     off-grid point isolates exactly the thing this test's name promises.
     """
     size = 10

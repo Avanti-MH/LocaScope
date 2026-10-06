@@ -39,11 +39,6 @@ is one call, which is what bounds a level made of a few large regions
 
 A grid read is NOT `read` in a loop, for both reasons above: speed (one call
 per tile was ~270 tiles/s, blocks over 7 workers ~1,060) and phase.
-
-HISTORY. This was `GridReader` (the grid half), `QueryFromWSI` (the
-single-position half, inside the Camera) and `Render.py` (the resample and
-the degrade) until 2026-10-03. `diag_read_exp.py` ran every flow through
-both before the move: 566/566 reads identical, 14/14 timings not slower.
 '''
 from __future__ import annotations
 
@@ -59,7 +54,7 @@ from ReadGeometry import (LEVEL_REL_TOL, FovGeometry, ReadRect, ReadSpec,
 from SafeSlide import SafeSlide
 
 #: The resampling filters a reader can be built with.
-#:   lanczos  PIL LANCZOS -- what the microscope simulation always used
+#:   lanczos  PIL LANCZOS -- the microscope simulation's filter
 #:   area     cv2 INTER_AREA -- the ladder's filter; anything else invents
 #:            high-frequency texture, and a keypoint detector learns to fire
 #:            on it (reference tiles, pre-tiles)
@@ -87,16 +82,15 @@ def resample(img: np.ndarray, w: int, h: int, method: str) -> np.ndarray:
 
 
 def degrade_resolution(img, ds: float, out_side: Optional[int] = None):
-    """An 'R' rung's degradation: shrink by `ds`, grow back. THE ONE DEFINITION.
+    """An 'R' rung's degradation: shrink by `ds`, grow back.
 
     INTER_AREA down, INTER_LINEAR up. Area-averaging is the non-aliasing
     downsample; coming back up with it would be a second box filter rather than
     the interpolation a real coarser level would have gone through.
 
     `read(stack='R')` applies it, and Stage B applies it to derive an 'R' stack
-    from a chain's ds 1 tile without a second extraction (TileSampler
-    re-exports it under this name). Two spellings would make a survival number
-    a statement about which resampling filter each half used.
+    from a chain's ds 1 tile without a second extraction. One definition, so a
+    survival number does not depend on which filter each half used.
     """
     import cv2                                                  # noqa: PLC0415
     side = int(out_side or img.shape[0])
@@ -193,9 +187,8 @@ def read_block(slide, level: int, grid, tile: int, row0: int,
 
 
 def read_region_whole(slide, region, ds: float, level: int) -> np.ndarray:
-    """The whole region in ONE read, at its level-0 origin and size --
-    the retired `WsiTissuesContainer`'s call, so a tile cut from it is what
-    the container cut -- the reference read_grid is tested against."""
+    """The whole region in ONE read, at its level-0 origin and size: the
+    reference read_grid is tested against."""
     size = (int(region.w / ds), int(region.h / ds))
     return slide.read_region_rgb((region.x, region.y), level, size)
 
@@ -356,8 +349,7 @@ class SlideReader:
 
         Exactly one of `mpp` / `ds`. Accepting both would mean deciding which
         wins, and a caller who passes two is telling you they are not sure --
-        that is a bug to surface, not an ambiguity to resolve. No I/O. Was
-        `WsiTissuesContainer.resolve_scale`."""
+        that is a bug to surface, not an ambiguity to resolve. No I/O."""
         if (mpp is None) == (ds is None):
             raise ValueError('give exactly one of mpp / ds')
         if ds is None:

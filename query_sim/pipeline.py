@@ -115,9 +115,8 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
         # Which noise, not how much: a shot's noise is img.shape worth of
         # values, so it cannot be recorded the way every other parameter here
         # is. The seed can, and it comes off the same `rng` as everything else
-        # -- which is what puts the noise under `Render(seed=)`/`capture(rng=)`
-        # instead of under the process-global numpy state it used until
-        # 2026-09-16. Nothing is expected to READ this back (see
+        # -- which is what puts the noise under `Render(seed=)`/`capture(rng=)`.
+        # Nothing is expected to READ this back (see
         # training/MppRoutingHead/spec.md on recording for reproducibility
         # rather than for correction); it exists so the same seed reproduces
         # the same shot.
@@ -184,9 +183,9 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
         img = apply_scale(img, p['scale'])
     if cfg.stage_shift_max > 0:
         # Mechanical stage jitter re-aims the field of view, so it belongs with
-        # the other framing decisions. It used to sit between the vignette and
-        # the lens, which meant the frame was lit and THEN moved -- shifting the
-        # vignette's centre off the optical axis, where it is physically fixed.
+        # the other framing decisions, before the vignette: moving a frame
+        # that is already lit would shift the vignette's centre off the
+        # optical axis, where it is physically fixed.
         img = apply_stage_shift(img, dx=p['stage_shift_dx'],
                                 dy=p['stage_shift_dy'])
 
@@ -194,7 +193,7 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
 
     if not cfg.photometric:
         img = _centre_crop(img, out_w, out_h)
-        # `apply_rotation(.., 0)` and `apply_scale(.., 1)` no longer copy, and
+        # `apply_rotation(.., 0)` and `apply_scale(.., 1)` do not copy, and
         # `_as_rgb_uint8` does not copy an ndarray caller's array either, so
         # without this the no-augmentation path could hand back the caller's
         # own buffer and any later write to the "output" would edit their

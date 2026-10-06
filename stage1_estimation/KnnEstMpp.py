@@ -5,18 +5,13 @@ pyramid, in the shape `StageInterface.MppEstimator` describes.
     est = KnnEstMpp(cfg, device).build(wsi)
     result = est.estimate(query_img)   # query_img: RGB uint8 np.ndarray
 
-NOT `GigaPathKnnEstiMpp`/`GigapathKnnEstiMppResult` any more. There was never
-anything GigaPath-specific in the KNN vote itself, only in which encoder a
-caller happened to build and pass in -- `encoder` is a config field now
-(`TileEncoderFunc`'s own registered name), built internally, the same as
-`ClassifierEstMpp.py`'s. `KnnEstMpp` says what this method actually is: a KNN
-vote, over whichever backbone `cfg.encoder` names.
+A KNN vote over whichever backbone `cfg.encoder` names (`TileEncoderFunc`'s
+registered name), built internally, the same as `ClassifierEstMpp.py`'s.
 
 WHY `build(wsi)` IS THE EXPENSIVE STEP HERE, unlike `ClassifierEstMpp`'s.
 This method's reference bank is sampled and encoded FROM THE TARGET WSI
 itself (`build_samples`/`build_ref_features`, kept as their own methods below
--- same reason the original file kept them: intermediate state worth
-inspecting while debugging). That is the opposite of a trained classifier,
+-- intermediate state worth inspecting while debugging). That is the opposite of a trained classifier,
 whose model exists independently of any one slide -- see `ClassifierEstMpp`'s
 own docstring for the contrasting case, and why its `build(wsi)` is cheap.
 
@@ -79,15 +74,8 @@ from SlideReader import SlideReader                                     # noqa: 
 #: The reference bank's own richness policy: any tile under 50% background,
 #: no preference between the buckets that admits -- NOT `RichnessConfig()`'s
 #: own general-purpose default (non-zero floors, meant for a training corpus
-#: that wants specific proportions of busy/quiet tiles). Spelled out directly
-#: rather than through `TileSampler.caps_for_tissue_ratio` -- that function's
-#: own docstring calls it "the RETIRED tissue_ratio gate", kept only so two
-#: OLD callers could reproduce their pre-richness-buckets behaviour without
-#: each owning the translation. A NEW config going through a function that
-#: names itself retired is the same mistake in a fresh coat -- this describes
-#: the policy directly instead. These are the exact caps `tissue_ratio=0.5`
-#: used to produce. Public (no leading underscore) so a caller building its
-#: own `SamplerConfig` for this estimator -- `LocaScopePipeline`, when it
+#: that wants specific proportions of busy/quiet tiles). Public (no
+#: leading underscore) so a caller building its own `SamplerConfig` for this estimator -- `LocaScopePipeline`, when it
 #: wants its own `--knn-samples`/`--knn-seed`-style overrides without
 #: re-deriving this policy -- reuses this object rather than a second copy of
 #: the tuple that could drift from it.
@@ -108,16 +96,13 @@ class KnnEstMppConfig(IdentifiedConfig):
     `encoder` is `TileEncoderFunc`'s own registered name (`'gigapath'`,
     `'uni2'`, ...) -- built internally by `KnnEstMpp.__init__`
     (`encoder_config(cfg.encoder).build(device)`), not accepted as an
-    already-built `Callable` the way the old `GigaPathKnnEstiMpp` took one.
-    The two happened to share one encoder across pipeline stages before, but
-    that sharing was incidental, never a requirement of this method.
+    already-built `Callable`: each stage builds its own encoder.
 
     `mask_cfg` is `TissueMaskConfig` -- the same recipe object
     `LocaScopePipeline` already builds its own mask from, so a caller that
     wants THIS estimator's tissue definition to match the pipeline's just
     passes the same `TissueMaskConfig` to both. Defaults to
-    `MASK_RECIPES['hest']`, named rather than the bare dataclass: `seg` has
-    no default any more, because the old one was hsv without saying so.
+    `MASK_RECIPES['hest']`, named: `seg` has no default.
 
     `sampler_cfg` is `TileSampler.SamplerConfig` -- n per rung, seed,
     richness caps/floors, overlap: everything that decides WHERE the
@@ -143,17 +128,9 @@ class KnnEstMppConfig(IdentifiedConfig):
 
 @dataclass(frozen=True)
 class KnnEstMppResult(EstMppResult):
-    '''No fields beyond `EstMppResult`'s own five.
-
-    The old `GigapathKnnEstiMppResult` carried `base_mpp`/`tile_size`/
-    `samples_per_level`/`k`/`query_patch_count` -- every one of those is
-    redundant under this design, for the same reasons `ClassifierEstMppResult`
-    gives for its own dropped fields: `base_mpp` is no longer needed to
-    reconstruct anything, now that both ds and mpp are stored directly on
-    `EstMppResult`; `tile_size` is already on `cfg`; `samples_per_level`/`k`
-    are this method's own BUILD-time hyperparameters (now on
-    `KnnEstMppConfig`), not a property of one estimate; `query_patch_count`
-    is already knowable from the input query at the call site.
+    '''No fields beyond `EstMppResult`'s own five: `tile_size` is on `cfg`,
+    the bank size and `k` are BUILD-time hyperparameters on `KnnEstMppConfig`,
+    and ds and mpp are both on `EstMppResult`.
 
     This subclass exists at all only so `type(result)` can say which method
     produced a Result without a `method: str` field -- see
@@ -201,7 +178,7 @@ class KnnEstMpp(IdentifiedBuild):
     here specifically, in contrast to `ClassifierEstMpp`'s.
 
     All intermediate state (`sampler`, `ref_feats`, `knn`, ...) is stored on
-    self for debugging and visualisation, same as the original file.
+    self for debugging and visualisation.
     '''
 
     #: Append-only zero point for `identity_id`/`identity_parts` -- empty
@@ -343,8 +320,7 @@ def knn_estimator(encoder_name: str, mask_cfg: TissueMaskConfig,
                   tile_size: int = 256, samples: int = 40, k: int = 5,
                   seed: int = 42,
                   device: Union[str, torch.device, None] = None) -> KnnEstMpp:
-    '''The KNN estimator with the reference bank LocaScopePipeline used to
-    build for itself: `samples` tiles per rung, the bank's richness, overlap
+    '''The KNN estimator with the pipeline's reference bank: `samples` tiles per rung, the bank's richness, overlap
     sampling. `mask_cfg` names the recipe of the mask its build() will be
     handed, so its identity says where that mask came from.'''
     if device is None:

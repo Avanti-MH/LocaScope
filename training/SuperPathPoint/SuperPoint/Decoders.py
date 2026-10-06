@@ -150,16 +150,15 @@ class UpsampleDecoderConfig(IdentifiedConfig):
 
     NO UPSTREAM TO COPY. This is the one genuinely new piece in the
     foundation-model path (spec.md 5.2) and the most likely thing to need a
-    second version. The first version is deliberately dull: `ConvTranspose2d`
+    second version. It is deliberately dull: `ConvTranspose2d`
     with stride 2, `GroupNorm`, `GELU`, channels halving each rung.
 
     `stride / cell` must be a power of two, because that is what a stack of
     stride-2 transposed convolutions can express. A ViT at stride 14 does not
     satisfy that against cell 8 -- 14/8 is not a power of two -- and NO tile size
     repairs it, because the tile cancels out of `(tile/cell) / (tile/stride)`.
-    An earlier version of this paragraph said such a backbone could be 'fed a
-    crop whose stride divides evenly', which is wrong: a crop changes the tile
-    and the tile is not in the ratio. The three things that would work are in
+    Feeding it a crop does not help: a crop changes the tile and the tile is
+    not in the ratio. The three things that would work are in
     `SuperPoint/EncoderBackbone.py` -- resize the image, resize the features
     here, or give that one backbone its own cell -- and none is chosen, because
     the patch-16 encoders need none of them. Refused rather than rounded:

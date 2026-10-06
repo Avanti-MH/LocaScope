@@ -17,29 +17,14 @@ The relative-rung labels of Stage C make the same point from the other side: a
 rung step has to mean the same thing on both datasets, and "the next pyramid
 level" means 4x on one and 2x on the other.
 
-WHY THIS NEEDS ITS OWN LEVEL RESOLVER
---------------------------------------
-SafeSlide already has two, and neither answers this question:
-
-    nearest_level_for_downsample   (SafeSlide.py:333) closest by ratio, either
-                                   side -- so it can land coarser than asked
-    coarser_level_for_downsample   (SafeSlide.py:349) the FINEST level at least
-                                   as coarse as the request, i.e. deliberately
-                                   the coarse side. Its docstring carries the
-                                   1398-shot measurement that justifies that
-                                   direction for routing a query to a level.
-
-Asking `coarser_level_for_downsample(2)` on a 4x pyramid returns level 1, whose
-ds is 4 -- coarser than requested, so reaching ds 2 from it means UPSAMPLING.
-Upsampling does not create resolution; it creates interpolation texture, and a
-keypoint detector will happily learn to fire on it.
-
-What a ladder needs is the opposite rounding: the COARSEST level whose native
-downsample is at most the target, then downsample the rest of the way in
-software. On a 4x pyramid ds 2 becomes "read level 0, shrink by 2".
-
-So `finer_level_for_downsample` below is a third resolver, on purpose, and this
-paragraph is why it is not a duplicate of the other two.
+THE LEVEL RULE
+---------------
+`finer_level_for_downsample` is `ReadGeometry.level_for`: the COARSEST level
+whose native downsample is at most the target, then shrink the rest of the way
+in software. On a 4x pyramid ds 2 becomes "read level 0, shrink by 2". The
+coarse side (`SafeSlide.coarser_level_for_downsample`, for routing a query)
+would reach ds 2 from ds 4 by UPSAMPLING, which creates interpolation texture
+a keypoint detector will happily learn to fire on.
 
 NOT AN IdentifiedConfig YET
 ----------------------------
@@ -55,10 +40,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
-# The rule and its slack live in ReadGeometry since 2026-10-03, where the
-# Camera asks the same question: one level rule for every read in the project.
-# `finer_level_for_downsample` is the name this module and SuperPathPoint have
-# always used for it, so it stays as that name.
+# The level rule and its slack are ReadGeometry's; this module and
+# SuperPathPoint call it `finer_level_for_downsample`.
 from ReadGeometry import LEVEL_REL_TOL, level_px                 # noqa: F401
 from ReadGeometry import level_for as finer_level_for_downsample
 

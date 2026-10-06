@@ -103,20 +103,12 @@ def apply_vignette(img, strength=0.4):
 def apply_stage_shift(img, dx: int = 0, dy: int = 0):
     """Translate by (dx, dy) whole pixels: stage mechanical jitter.
 
-    THE OFFSETS ARE THE CALLER'S, NOT DRAWN HERE. Until 2026-09-16 this
-    function drew its own pair from the global `np.random` while
-    `pipeline._sample_params` drew ANOTHER pair from the caller's rng and
-    recorded it in `params` -- so every shot's recorded `stage_shift_dx/dy`
-    named a displacement the image had never been given, and the real one
-    obeyed no `seed` any caller could pass. Both halves are fixed by this
-    function no longer having randomness of its own: `_apply_params` hands
-    it `p['stage_shift_dx'/'dy']`, the same values `params` reports, so the
-    record cannot diverge from the pixels because there is only one pair.
+    THE OFFSETS ARE THE CALLER'S, NOT DRAWN HERE: `_apply_params` hands it
+    `p['stage_shift_dx'/'dy']`, the same values `params` reports, so the
+    record cannot diverge from the pixels.
 
     Whole pixels, not sub-pixel: `_sample_params` draws integers, so this is
-    a pure re-indexing with no resampling. The old docstring said "sub-pixel"
-    and the old code drew `np.random.randint`, which is integer -- the name
-    was wrong about its own implementation, not just about this one.
+    a pure re-indexing with no resampling.
     """
     if dx == 0 and dy == 0:
         return img

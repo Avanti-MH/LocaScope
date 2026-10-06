@@ -457,9 +457,8 @@ class TileYieldProbe:
         # The plan IS the argument now: it already says which level to read,
         # what the footprint is and what must fit.
         #
-        # `self.candidates` is the arm. The 216-cell table of 2026-08-26 was
-        # cut with 'random', so a re-run at 'lattice' is a DIFFERENT
-        # measurement, not a correction of that one.
+        # `self.candidates` is the arm: 'random' and 'lattice' are DIFFERENT
+        # measurements.
         cfg = SamplerConfig(
             n_per_rung=self.n, seed=self.seed,
             candidates=self.candidates,

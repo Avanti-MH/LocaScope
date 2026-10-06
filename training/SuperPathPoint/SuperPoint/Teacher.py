@@ -70,8 +70,7 @@ from SuperPoint.Decoders import depth_to_space_prob
 
 #: Where the upstream checkout is. `github_repos/SuperPoint` beside this repo by
 #: default -- where the upstream checkouts live (prov-gigapath, UNI, eomt sit
-#: there too; until 2026-10-06 this looked for a bare `../SuperPoint`, which does
-#: not exist) -- and overridable, because a checkout is not a fact about this
+#: there too) -- and overridable, because a checkout is not a fact about this
 #: project. Resolved lazily (inside `build`) so that
 #: importing this module costs nothing and fails nowhere.
 UPSTREAM_ENV = 'SUPERPOINT_ROOT'

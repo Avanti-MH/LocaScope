@@ -5,9 +5,9 @@ run each through LocaScopePipeline, collect per-stage errors, and plot them.
 Inputs: `split_shots` below -- the first --n-wsi slides of each of
 --datasets' recorded --split, --per-level FoVs at every native level from a
 TileSampler draw (placed on the hest masks of --fov-mask-cache-job),
-each photographed on demand through `FovSupply` (TileSampler -> Render). Nothing is
-read from a stored corpus: the retired MultiBatch1440 went stale whenever the
-camera changed. A shot's `filename` is an id, the name that corpus gave it.
+each photographed on demand through `FovSupply` (TileSampler -> Render).
+Nothing is read from a stored corpus, which would go stale whenever the camera
+changed. A shot's `filename` is an id.
 
 Outputs (in --out DIR/<encoder>/, default result/BenchLocaScope/<encoder>/):
     metrics.csv               per-shot: mpp/retrieval/refine errors (px + um)
@@ -88,11 +88,10 @@ from FovSupply         import FovSupply                                 # noqa: 
 
 # ── the shots: FovSupply per (slide, level), the window bench's way ─────────
 #: The camera: the real photos' sensor (1440 x 1024), the full domain gap, and
-#: 5 per cent mpp jitter -- what the retired MultiBatch1440 corpus was made
-#: with. query_mpp is each level's own.
+#: 5 per cent mpp jitter. query_mpp is each level's own.
 CAMERA = DomainGapConfig(wh_ratio='45:32', MPixels=1.47456, query_mpp_jitter=0.05)
-#: Where the FoVs go: 50 per native level under the default richness mix, as
-#: the corpus had them, every level of a slide in one draw (`split_shots`).
+#: Where the FoVs go: 50 per native level under the default richness mix, every
+#: level of a slide in one draw (`split_shots`).
 SAMPLER = SamplerConfig(n_per_rung=50, seed=0)
 
 
@@ -153,9 +152,8 @@ def split_shots(datasets, split: str, n_wsi: int, sampler_cfg: SamplerConfig,
 # ── run identity: what a resumed metrics.csv must have been made with ────────
 
 #: How `split_shots` places and photographs. Bumped whenever the same filename
-#: would stop naming the same FoV: 'fov-supply-per-slide' is 2026-10-06's one
-#: draw per slide across its levels (the per-level draws before it gave the
-#: same ids to other positions).
+#: would stop naming the same FoV: 'fov-supply-per-slide' is one draw per
+#: slide across its levels.
 SHOTS_RECIPE = 'fov-supply-per-slide'
 
 
@@ -163,7 +161,7 @@ def run_identity(args, sampler_cfg, camera_cfg, encoder, mask_cfg) -> dict:
     """Everything that decides which shots a row is about and how it is
     scored. A resume skips shots by filename, and a filename is only an id:
     under another value of any of these, the same name is another FoV or
-    another score, and the old rows would be mixed into the new bench."""
+    another score, and rows of one bench would be mixed into another."""
     return {'shots': SHOTS_RECIPE,
             'datasets': list(args.datasets), 'split': args.split,
             'n_wsi': args.n_wsi, 'max_ds': args.max_ds,
@@ -867,7 +865,7 @@ def main():
             rdr = csv.DictReader(f)
             metrics_fields = rdr.fieldnames
             done = {r['filename'] for r in rdr}
-        # The old rows come back into memory too, so render_all at the end
+        # The resumed rows come back into memory too, so render_all at the end
         # plots the whole bench rather than only the resumed tail.
         all_metrics.extend(load_metrics_csv(metrics_path))
         print(f'Resume     : {len(done)} shots already in metrics.csv', flush=True)

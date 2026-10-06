@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=EoMTest # Job name
-#SBATCH --partition=normal2               # Partition
+#SBATCH --job-name=RUN # Job name
+#SBATCH --partition=normal                # Partition
 #SBATCH --time=24:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
 #SBATCH --cpus-per-task=2                 # CPU cores per task
 #SBATCH --ntasks-per-node=1               # Tasks per node
-#SBATCH -o /work/u26130998/log/EoMTest # STDOUT
-#SBATCH -e /work/u26130998/log/EoMTest # STDERR
+#SBATCH -o /work/u26130998/log/RUN # STDOUT
+#SBATCH -e /work/u26130998/log/RUN # STDERR
 
 # ---------------- Load modules ----------------
 ml purge
@@ -50,9 +50,27 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #   --draw-figures -1
 
 
-cd /work/u26130998/LocaScope
-python utilities/test_modules/test_EoMT.py \
-    --tile-figure /work/u26130998/prov-gigapath/images/01581x_25327y.png \
-                  /work/u26130998/prov-gigapath/images/01581x_25583y.png \
-    --wsi /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs \
-          /work/u26130998/datasets/Ki67_with_photo/S1103520_G7E_110126_mrxs/S1103520,G7E,110126.mrxs
+# cd /work/u26130998/LocaScope
+# python utilities/test_modules/test_EoMT.py \
+#     --tile-figure /work/u26130998/prov-gigapath/images/01581x_25327y.png \
+#                   /work/u26130998/prov-gigapath/images/01581x_25583y.png \
+#     --wsi /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs \
+#           /work/u26130998/datasets/Ki67_with_photo/S1103520_G7E_110126_mrxs/S1103520,G7E,110126.mrxs
+
+# python aiNNModel/models/common/migrate_checkpoint.py \
+#   /work/u26130998/result/MppRoutingHead/weights/*mlp*.pt  --write
+
+# python utilities/test_modules/test_cache.py
+# python utilities/test_modules/test_tissue_mask.py
+# python utilities/test_modules/test_tile_sampler.py
+# python utilities/test_modules/test_uni2_pca_seg.py
+# python utilities/test_modules/test_patching_lib.py
+# python utilities/cli/build_cache/make_split.py --cache-job MakeSplit
+# python utilities/test_modules/test_store.py
+# python utilities/test_modules/TestSuperPathPoint/test_chain_stack.py
+# python utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py
+# sbatch jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh
+# # once those pass, a small real extraction (it prints the corpus key at the top of the log):
+# N=20 DS="1 2 4 8 16" WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_BT/Type_N/BRACS_1598.svs CACHE_JOB=ExtractPreTilesSmoke sbatch jobscripts/SuperPathPointJobs/ExtractPreTiles.sh
+# sbatch jobscripts/PatchingLibTest.sh
+# sbatch jobscripts/TissueMaskTest.sh

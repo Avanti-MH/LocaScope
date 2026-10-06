@@ -3,11 +3,10 @@
 
     python utilities/test_modules/TestSuperPathPoint/test_reeval_density.py
 
-THIS TEST EXISTS BECAUSE THE THING IT CHECKS ALREADY WENT WRONG ONCE. The
-2026-08-31 training run reported margins of 1.50 and 3.59 for two arms and they
-were not comparable: the decoy rises with point density, `margin <= 1/decoy`, so
-the second arm was scored where the ceiling was twice as high. Nothing errored.
-The table looked like a result.
+THIS TEST EXISTS BECAUSE THE THING IT CHECKS FAILS SILENTLY. Two arms
+scored at different point densities are not comparable: the decoy rises with point density, `margin <= 1/decoy`, so
+an arm at twice the density is scored where the ceiling is twice as high.
+Nothing errors; the table looks like a result.
 
 The re-eval fixes that by cutting every view to exactly N points instead of
 thresholding. So the three claims it rests on are the three things here:
@@ -114,8 +113,8 @@ def check_fixture():
     asking it to be unlike the thing it stands in for. The zeros that make
     `> 0.0` different from `>= 0.0` are the ones `nms_max_pool` WRITES:
     everything it suppresses becomes exactly 0, and that is most of the field.
-    Checking the raw map instead is how the first version of this failed --
-    against a fixture whose 1e-4 floor was deliberate.
+    Checking the raw map instead would fail against a fixture whose 1e-4
+    floor is deliberate.
     """
     prob = _bumpy_map()
     xy, _, _ = points_from_prob(prob, None, score_threshold=0.0,
@@ -155,8 +154,7 @@ def t_a_budget_returns_exactly_that_many_points():
 def t_two_different_maps_give_the_same_count_at_one_budget():
     """The property the whole re-eval rests on, stated directly.
 
-    A threshold gives two models two densities; a budget gives them one. This
-    is the difference between the 2026-08-31 table and this one.
+    A threshold gives two models two densities; a budget gives them one.
     """
     counts = set()
     for seed in range(4):

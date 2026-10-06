@@ -178,8 +178,8 @@ def t_anchors_of_rung_scale_override_collapses_quantisation_term():
 
 
 def t_anchors_of_source_rung_names_which_rung_each_anchor_survived_in():
-    """The second return value (added 2026-09-13 for `offset_quantiles_of`'s
-    self-match exclusion): a fine-rung point that survives names its OWN
+    """The second return value (for `offset_quantiles_of`'s self-match
+    exclusion): a fine-rung point that survives names its OWN
     rung; a coarse-rung point that gets deduped away contributes nothing;
     a coarse-rung point with nothing nearby (a late-born anchor) names
     ITS OWN rung, not the fine one it failed to merge with."""
@@ -302,8 +302,8 @@ def t_nearest_detection_far_outside_query_still_finds_true_nearest():
     """A query can sit far outside `points`' own bounding box (the decoy-
     shifted-anchor case, or a coarse C rung's small cloud probed by anchors
     spanning the whole tree) -- `cKDTree` finds the true nearest point
-    regardless of that distance, unlike the retired grid-hash expanding-ring
-    search, whose per-query cost grew with (distance to the cloud) / (the
+    regardless of that distance, unlike a grid-hash expanding-ring search,
+    whose per-query cost grows with (distance to the cloud) / (the
     cloud's own density-derived cell size).
     """
     points = np.array([[0.0, 0.0], [1.0, 0.0], [-1.0, 1.0], [0.5, -0.5]])

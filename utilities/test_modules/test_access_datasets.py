@@ -9,18 +9,13 @@ today, potentially others later), which is why this test sits in the flat
 subdirectory -- filing it under one consumer's jobscript would say something
 false about who it belongs to (CLAUDE.md's own rule for this).
 
-2026-09-11: `AccessDatasets.py` moved from one hand-written `WsiEntry` per
-WSI to one hand-written naming-convention rule per DATASET (`_DATASETS`,
-`locate_fn`/`list_fn` pairs) -- `list_names()`/`locate()` are themselves now
-directory reads, not table lookups, which is why almost nothing here is
-"pure" any more: even the section that used to just check the registry's own
-internal consistency now touches disk, because there IS no registry to check
-without touching disk. Only the `disk` section's NAME survives to mark the
-distinction that mattered before (portable vs this-cluster-only) -- what
-still separates the sections is whether a test needs a SPECIFIC real name to
-exist (not portable) or just needs `list_names()` to return something
-self-consistent, whatever it currently holds (still runs anywhere the roots
-are reachable, but says nothing if they are empty).
+`AccessDatasets.py` holds one naming-convention rule per DATASET, so
+`list_names()`/`locate()` are directory reads, not table lookups, and almost
+nothing here is pure. What separates the sections is whether a test needs a
+SPECIFIC real name to exist (`disk`, not portable) or just needs
+`list_names()` to return something self-consistent, whatever it currently
+holds (runs anywhere the roots are reachable, but says nothing if they are
+empty).
 """
 
 from __future__ import annotations
@@ -176,7 +171,7 @@ def t_locate_kwargs_without_dataset_raises():
 
 
 def t_locate_finds_a_bracs_train_slide():
-    """`bracs/train` (`BRACS_WSI/train/`, 2026-09-11) -- registered the same
+    """`bracs/train` (`BRACS_WSI/train/`) -- registered the same
     way as `bracs/test`, a name found there resolves and is NOT also found
     unscoped-ambiguous with `bracs/test` (the two splits' stems were
     checked disjoint before registering `train` at all)."""
@@ -470,7 +465,7 @@ def t_pick_wsi_names_a_cap_of_all_changes_nothing():
 
 
 def t_pick_wsi_names_is_the_one_datasets_py_uses():
-    """`Datasets.py` used to define its own; the two must be the one function."""
+    """`Datasets.py` and AccessDatasets share one function."""
     import training.MppRoutingHead.Datasets as D               # noqa: PLC0415
     assert D.pick_wsi_names is AD.pick_wsi_names
 

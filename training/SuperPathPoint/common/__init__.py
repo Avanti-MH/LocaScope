@@ -4,7 +4,7 @@ Flat re-exports, matching `query_sim/augment/__init__.py`: callers put
 `training/SuperPathPoint/` on sys.path (via `_paths.add_training_package(
 'SuperPathPoint')`, called after `setup_import_paths()` -- see that
 function's own docstring for why the training package itself is a separate
-call, 2026-09-22) and then spell `from common.Homography import
+call) and then spell `from common.Homography import
 sample_homography`, or take the short names from here.
 """
 

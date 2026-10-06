@@ -4,7 +4,7 @@ training step, a validation step and a test step compare.
 TRAINING AND VALIDATION draw from a MIXED POOL (`pool_by_rung`): every
 position of a rung, across every WSI, in one list. Which WSI a position came
 from is not part of the task -- a scale question on one slide is the same
-question on another with the same base mpp and rungs (user, 2026-09-23) --
+question on another with the same base mpp and rungs --
 so there is no same-WSI coin and no borrowing. What the WSI still decides is
 the OVERLAP RULE: two positions on the same WSI whose footprints overlap
 (across rungs too) never land on opposite sides. `draw` enforces it, and
@@ -45,10 +45,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# MppRoutingHead's -- see module docstring. CameraBank/render_row were
-# renamed public there (were _CameraBank/_render_row) specifically so this
-# import is legitimate reuse rather than reaching past a no-stability-
-# promise underscore (2026-09-20).
+# MppRoutingHead's -- see module docstring. CameraBank/render_row are public
+# there so this import is legitimate reuse.
 from training.MppRoutingHead.Datasets import (
     CameraBank, ManifestRow, RUNGS, RenderConfig, render_row)
 from WsiSplit import BRACS_RUNGS
@@ -375,7 +373,7 @@ def training_pools(train_pool, cross_pool, rng: random.Random,
     """`(support_pool, query_pool)` for one training draw. With a cross-domain
     pool and a combination that fits inside `BRACS_RUNGS`, a coin decides
     which domain supplies which side -- forcing the comparison across a
-    staining domain neither side can shortcut through (2026-09-21)."""
+    staining domain neither side can shortcut through."""
     if cross_pool is not None and set(rungs) <= BRACS_RUNGS:
         return ((cross_pool, train_pool) if rng.random() < 0.5
                 else (train_pool, cross_pool))
@@ -504,7 +502,7 @@ def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
     own identity when `True`, the eval case -- see `RenderConfig`'s own
     docstring, "Camera: train vs eval").
 
-    `support_native` (2026-09-22, default `False` -- unchanged behaviour):
+    `support_native` (default `False`):
     passed straight through to `render_row`'s own `native` switch for the
     SUPPORT side only -- `query` always renders `native=False` (`CAMERA_
     FULL`, `Datasets.py`'s own module docstring), because a query genuinely

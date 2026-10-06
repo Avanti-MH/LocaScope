@@ -4,60 +4,31 @@ better if a candidate method uses that instead of the raw 1536-D space?
 
 Three parts, selected with `--parts` (`all` runs every one):
 
-    axes             feature_axes_analysis (was bench_feature_axes.py). Purely
-                     descriptive -- PCA + a parallel-analysis null, which
-                     components track log mpp, which track background instead.
-                     NEVER runs a KNN, NEVER produces a routing decision.
-    subspace_knn     was bench_subspace_knn.py. Step 5 of the same
-                     investigation: does a KNN run in the subspace `axes`
-                     found actually route better? Reads the SAME cached
-                     FeatureStore reference/query stores `axes` does, with the
-                     synthetic-camera-distortion query set (arm B) that gives
-                     this part its domain gap. This is a routing method, not
-                     analysis -- every setting produces a real accuracy number.
-    sampler_routing  NEW (2026-09-14). Neither of the above ever draws a fresh
-                     tile: both read whatever is already sitting in
-                     `result/cache/features/`. This part samples its OWN,
-                     UNCACHED tiles straight off the WSI (`TileSampler`, never
-                     written to `result/cache/tiles/`) and runs the CURRENT
-                     production baseline (a plain KNN vote) alongside a
+    axes             feature_axes_analysis. Purely descriptive -- PCA + a
+                     parallel-analysis null, which components track log mpp,
+                     which track background instead. NEVER runs a KNN, NEVER
+                     produces a routing decision.
+    subspace_knn     Step 5 of the same investigation: does a KNN run in the
+                     subspace `axes` found actually route better? Reads the
+                     SAME cached FeatureStore reference/query stores `axes`
+                     does, with the synthetic-camera-distortion query set (arm
+                     B) that gives this part its domain gap. This is a routing
+                     method, not analysis -- every setting produces a real
+                     accuracy number.
+    sampler_routing  Neither of the above ever draws a fresh tile: both read
+                     the feature cache. This part samples its OWN, UNCACHED
+                     tiles straight off the WSI (`TileSampler`) and runs the
+                     CURRENT production baseline (a plain KNN vote) alongside a
                      projected-subspace candidate on the exact same fresh
                      draw -- the comparison arena any FUTURE routing method
-                     (Prototypical/Relation/Siamese, still just reading, not
-                     built yet) drops into next to the baseline it has to beat.
-                     Both run through `patch_vote`/`fit_basis`/
-                     `select_components`/`project` directly (the same free
-                     functions `subspace_knn` itself uses), not through a
-                     class -- see below.
+                     drops into next to the baseline it has to beat. Both run
+                     through `patch_vote`/`fit_basis`/`select_components`/
+                     `project` directly (the same free functions
+                     `subspace_knn` itself uses), not through a class.
 
-The production estimators' head-to-head (`stage1_compare`) moved out to
-bench_stage1_mpp.py on 2026-09-29: it reads no store, and its result
-directory (`result/Stage1MppBench/`) is not one of these parts'. Jobscript:
-jobscripts/MppRoutingExp.sh (was Benchmarks/MppFeatureDecomposition.sh and
-SubspaceKnn.sh).
-
-NOT A `SubspaceKnnEstMpp` CLASS MIMICKING `KnnEstMpp` (removed 2026-09-17).
-An earlier draft of `sampler_routing` was written to need one -- the comment
-this replaces argued that running the baseline and a subspace candidate side
-by side needed the same staged, inspectable shape
-(`build_samples`/`build_ref_features`/`build_query_features`/`estimate`) a
-`KnnEstMpp`-alike would give it. What actually got built instead
-(`run_sampler_routing`, below) calls `fit_basis`/`select_components`/
-`project`/`knn_labels` directly on tensors it samples and encodes itself --
-the class the comment described was never once constructed anywhere in this
-file. Confirmed by grep before deleting it: `SubspaceKnnEstiMpp(` had exactly
-one call site, inside its own dead `estimate` method.
-
-WHAT THIS MERGE DID NOT CHANGE
-=================================
-The `axes` and `subspace_knn` bodies are the ORIGINAL bench_feature_axes.py /
-bench_subspace_knn.py logic, moved here under `--parts` instead of being two
-separate `if __name__ == '__main__'` scripts. Every function, every docstring
-rationale, every gate is unchanged. Two per-slide-comparison `plot_*`
-functions in the old bench_feature_axes.py were dead code (a same-named
-single-slide version defined earlier in the file was shadowed by a second
-definition of the same name -- Python keeps the last one, so `main()` only
-ever called the second) -- only the live (second) versions are kept here.
+The production estimators' head-to-head is bench_stage1_mpp.py: it reads no
+store, and its result directory (`result/Stage1MppBench/`) is not one of these
+parts'. Jobscript: jobscripts/MppRoutingExp.sh.
 
 Settled findings this file exists to keep visible (2026-08 runs, BRACS_1228 +
 six more slides):
@@ -201,7 +172,7 @@ def _by_slide(rows):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PART "axes"  --  feature_axes_analysis (was bench_feature_axes.py)
+#  PART "axes"  --  feature_axes_analysis
 # ══════════════════════════════════════════════════════════════════════════════
 
 def principal_axes(features: torch.Tensor):
@@ -590,7 +561,7 @@ def run_axes(args, out_dir: Path) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PART "subspace_knn"  --  was bench_subspace_knn.py
+#  PART "subspace_knn"
 # ══════════════════════════════════════════════════════════════════════════════
 
 K_NEIGHBOURS = 5
@@ -1319,7 +1290,7 @@ def run_subspace_knn(args, out_dir: Path) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PART "sampler_routing"  --  NEW, 2026-09-14
+#  PART "sampler_routing"
 # ══════════════════════════════════════════════════════════════════════════════
 
 #: (rule, r) settings run against the baseline in `sampler_routing` -- the
@@ -1422,8 +1393,7 @@ def run_sampler_routing(args, out_dir: Path) -> int:
 
     entry = locate(args.wsi_name)
     wsi = SafeSlide(entry.path)
-    # --seg's recipe, as in bench_stage1_mpp. This used to be hsv at the old
-    # default ds 32, built here and recorded nowhere.
+    # --seg's recipe, as in bench_stage1_mpp.
     mask = MASK_RECIPES[args.seg].build(wsi, args.device)
     encoder = GigaPathEncoderConfig(batch_size=args.batch_size)\
         .with_model(dtype='fp32').build(args.device)

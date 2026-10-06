@@ -27,13 +27,7 @@ For each (slide, level):
                     L0 is 18.7 Gpx and reading it whole once cost 3h43m.
 
     query set       whole FoVs photographed by query_sim's Render, then cut into
-                    5x4 tiles. Going through a FoV rather than augmenting each
-                    tile is not fussiness: vignette, field mask and lens
-                    distortion are all defined relative to the image they are
-                    given (field.py:19-23, lens.py:12-13), so applied to a 256px
-                    tile they paint a radial gradient centred on every tile --
-                    which is exactly what ring pooling measures, and would decide
-                    the comparison on an artefact.
+                    5x4 tiles.
 
     the answer      computed, not searched: Render.output_tile_origins inverts the
                     capture to a level-0 coordinate, and the nearest tile in each
@@ -168,7 +162,7 @@ def reference_config(k: int, seed: int) -> SamplerConfig:
 def plan_label(k_floor: int) -> str:
     """The rung plan -- one native rung per pyramid level -- the per-level
     sizing floor, which changes which tiles a coarse level holds, and the
-    camera: the tile size is no longer in `sampler_id`, so it is named here."""
+    camera: the tile size is not in `sampler_id`, so it is named here."""
     from ReadGeometry import ReadSpec                             # noqa: PLC0415
     return f'native-floor{k_floor}-{ReadSpec(TILE, TILE).key()}'
 
@@ -287,12 +281,10 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
 
     # reference: a COMPOSITION-CONTROLLED draw, plus every answer.
     #
-    # The draw used to be uniform over the grid, which sounds neutral and is
-    # not: 46% of level-0 grid positions on BRACS_1228 are pure background.
-    # Those are distractors that can never outrank an answer, so a nominal pool
-    # of 3000 was an effective pool of roughly half that -- and the share
-    # differs per level, so the per-level numbers were comparing descriptor
-    # difficulty and pool composition at the same time. TileSampler under the
+    # Not uniform over the grid: 46% of level-0 grid positions on BRACS_1228
+    # are pure background, distractors that can never outrank an answer, and
+    # the share differs per level, so per-level numbers would compare
+    # descriptor difficulty and pool composition at the same time. TileSampler under the
     # reference-bank richness contract holds the composition fixed, which is
     # what makes one pooling comparable with another. Its disjoint lattice IS
     # the main grid (test_tile_sampler: "the main grid is exactly patchgrids"),
@@ -339,7 +331,7 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
     # Read the reference tiles. Every one is on tissue: the answers are grid
     # tiles of a mask region and the distractors a TileSampler draw on the same
     # mask, and an unscanned block is glass to the mask -- so nothing is
-    # filtered after the read (2026-10-05, log/TODO.log).
+    # filtered after the read.
     from ReadGeometry import ReadSpec                             # noqa: PLC0415
     reader = SlideReader(slide)
     t0 = time.time()
@@ -1026,8 +1018,7 @@ def main() -> int:
                          f'table -- it costs one eigh per (pooling, slot). '
                          f'Default {" ".join(WHITENS)}')
     # The slides: the first --n-wsi of each dataset's recorded --split, the
-    # ones every other bench scores (a stored corpus's gt.csv used to name
-    # them, and went stale with it). Every native level of each; a level with
+    # ones every other bench scores. Every native level of each; a level with
     # no room for a FoV is skipped.
     ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
     ap.add_argument('--split', default='test', choices=['val', 'test'])
@@ -1118,9 +1109,8 @@ def main() -> int:
     # a changed checkpoint or precision cannot keep the old name -- and neither
     # can a changed encoder, which is why --encoder cannot collide with the
     # stores already on disk.
-    # Passed only when given, so gigapath and uni2 build byte-identical configs
-    # to before this option existed and their identity_id does not move -- which
-    # is what keeps the stores already on disk readable.
+    # Passed only when given, so gigapath and uni2 keep the identity_id of the
+    # stores already on disk.
     over = {'head': args.head} if args.head else {}
     cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp32')

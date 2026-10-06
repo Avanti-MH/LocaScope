@@ -7,12 +7,9 @@ between them is the REDUCTION -- the encoder's own fixed CLS/GAP against a
 learned `AttentionPoolHead`. Naming variants "linear" and "attnpool" side by
 side hides the axis that is actually changing.
 
-NOT NAMED `Arm`. It was, while this lived inside `training/MppRoutingHead/`
-and its whole point was several variants trained SIDE BY SIDE for comparison
--- "arm" the way a clinical trial has arms. Moved here on 2026-09-17 for a
-different use (`stage1_estimation/ClassifierEstMpp.py` loads exactly ONE
-trained head to run inference with, not several to compare), where "arm"
-reads as a comparison that is not happening. `Head` is the standard word for
+NOT NAMED `Arm`: `stage1_estimation/ClassifierEstMpp.py` loads exactly ONE
+trained head to run inference with, not several to compare, and "arm" reads as
+a comparison that is not happening. `Head` is the standard word for
 "the task-specific top of a network" and is what the task-specific registries
 that USE this class (still living with their tasks, e.g. `training/
 MppRoutingHead/Runtime.py`'s `HEAD_CHOICES`) already name their entries.
@@ -28,8 +25,7 @@ import torch.nn as nn
 from Features import LayerTokens                                    # noqa: E402
 from Heads import AttentionPoolHead, HeadConfig                      # noqa: E402
 
-#: Every reduction a `Head` knows. `fixed` and `attn` are the two every
-#: checkpoint before 2026-10-01 carries; `clsattn` was added then.
+#: Every reduction a `Head` knows.
 REDUCTIONS = ('fixed', 'attn', 'clsattn')
 
 

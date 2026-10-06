@@ -24,7 +24,7 @@ THE PAIR IS TWO CROPS OF ONE PRE-TILE
 ---------------------------------------
 The identity view is `centre_crop(pre)`. The warped view is
 `warp_from_pretile(pre, H, margin)`, the same composition Homographic
-Adaptation used to produce the labels (spec.md 6.6). Composing it differently
+Adaptation produces the labels with (spec.md 6.6). Composing it differently
 here would train the student on a correspondence its labels do not describe --
 and both compositions produce a perfectly ordinary-looking warped tile.
 
@@ -99,23 +99,13 @@ class PairDatasetConfig(IdentifiedConfig):
     #: Upstream's 3. Applied to the warped side's valid mask.
     valid_border_margin: int = 3
 
-    #: RE-SETTLED 2026-08-27, THE OTHER WAY (spec.md 6.5). The rule was written
-    #: before the numbers: align-min if the worst rung still holds hundreds,
-    #: loss-weight if it holds forty. The 2026-08-26 probe answered "hundreds"
-    #: -- ds 32 came back 1784 of 2000 over four slides -- and that number was
-    #: the TISSUE GATE, not the slides. The gate admitted only background <= 50
-    #: per cent and the sampler then asked for 500 positions it had already been
-    #: handed, so 1784 measured how fast a rejection budget ran out.
-    #:
-    #: The 12-slide probe measures the candidate pool instead: ds 32 offers 18
-    #: disjoint positions on the worst slide and 583 over all twelve. align-min
+    #: 'none' (spec.md 6.5). The 12-slide probe measures the candidate pool:
+    #: ds 32 offers 18 disjoint positions on the worst slide and 583 over all twelve. align-min
     #: truncates every rung to the worst cell, so 6 rungs x 12 slides x 18 =
     #: 1,296 tiles against 8,465 available at ds 8 alone. That is not balancing
     #: a ladder, it is deleting one.
     #:
-    #: So 'none' -- and not yet 'loss-weight' either, because the rung weights
-    #: are a second decision and the corpus had to exist first. The imbalance is
-    #: a recorded property of the v1 run rather than a later discovery. What
+    #: Not 'loss-weight' either: the rung weights are a second decision. What
     #: would change it is more slides, not this switch.
     #:
     #: The DEFAULT moves with the decision and `_PAIR_BASELINE` does not. The
@@ -329,15 +319,9 @@ class HomographyPairDataset(Dataset):
         # so two workers reading the same index get the same pair and a run
         # reproduces under a changed `workers`.
         #
-        # THE EPOCH TERM WAS MISSING UNTIL 2026-08-31 AND IT COST A RUN. Without
-        # it the seed is the same on every pass, so a tile is shown the SAME
-        # warp for the whole run: 50 epochs over 5,344 pairs is 5,344 distinct
-        # pairs seen 50 times, not 267,200. Homographic Adaptation's entire
-        # premise is that the same content under different geometry is what
-        # teaches invariance, and the augmentation was delivering one geometry
-        # per tile. It showed as textbook overfitting -- `train/detector` fell
-        # monotonically to the last epoch while `val/detector` bottomed at 3.12
-        # on epoch 42 and rose to 3.27.
+        # THE EPOCH TERM: without it a tile is shown the SAME warp on every
+        # pass, and Homographic Adaptation's premise is that the same content
+        # under different geometry is what teaches invariance.
         rng = np.random.default_rng((int(cfg.seed), index, int(self.epoch)))
         sample = sample_homography(shape, rng=rng, **cfg.homography.kwargs())
 

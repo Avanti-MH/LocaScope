@@ -10,14 +10,12 @@ def apply_noise(img, sigma=4.0, seed=None):
     pattern every other augment parameter follows cannot carry the noise
     itself -- it carries the seed that generates it instead.
 
-    None means "draw from the global numpy state", which is this function's
-    behaviour before 2026-09-16 and is kept for callers that only want SOME
-    noise and do not care which (`cli/demo.py`'s effect panel). Every caller
-    that needs a reproducible shot passes a seed: `pipeline._apply_params`
+    None means "draw from the global numpy state", for callers that only want
+    SOME noise and do not care which (`cli/demo.py`'s effect panel). Every
+    caller that needs a reproducible shot passes a seed: `pipeline._apply_params`
     passes `p['noise_seed']`, which `_sample_params` drew from the caller's
     own rng -- so `Render(seed=...)` and `Render.capture(rng=...)` both reach
-    the noise, which they could not while this function read `np.random`
-    directly.
+    the noise.
     """
     if sigma <= 0:
         return img

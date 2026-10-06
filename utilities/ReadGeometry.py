@@ -1,20 +1,9 @@
-'''What one read covers at level 0 -- the ONE definition both sides use.
+'''What one read covers at level 0 -- the one definition the sampler and the
+reader both use.
 
-A sampler reserves room around a position; `SlideReader` then reads around it
-(for a `Render` or for anyone else). The history below says Camera: that was
-the reader until 2026-10-03. The
-two used to compute that room separately -- `QueryFromWSI`'s three `crop*`, the
-FoV sampler's `fov_plan` (`fp * hypot/max`, truncated), and the routing heads'
-manifest (the footprint alone) -- and every disagreement was a position the
-sampler offered and the Camera could not read. Measured on bracs/test
-(`diag_render_reads.py` paths check, 2026-10-02): the manifest lost 19/1497
-positions, overrunning by up to the whole rotation margin (1697 px at rung
-32); the Camera's own sampler lost 10/1500, every one by exactly 1 px, because
-it reserved int(8192 * sqrt 2) = 11585 where the Camera reads
-ceil(hypot(8192, 8192)) = 11586.
-
-So the read is computed here, from the numbers the Camera itself has, and the
-reserve a sampler needs is derived FROM that read with the same integers:
+A sampler reserves room around a position; `SlideReader` then reads around it.
+The reserve is derived from the read with the same integers, so every position
+the sampler offers is one the reader can read:
 
     FovGeometry.of(output_w, output_h, ds)              the FoV at level 0
     .read_rect(x, y, rotates, margin_out)               what is read for (x, y)
@@ -26,17 +15,11 @@ reserve a sampler needs is derived FROM that read with the same integers:
     level_px(out_px, ds, level_ds)                      how many of its px
 
 Everything is in `ds`, a downsample relative to the slide's own level 0. An
-mpp enters once, where a caller has one (`ds = mpp / base_mpp`), and never
-goes back: `FovGeometry.of` used to take `(mpp, base_mpp)`, and every caller
-holding a ds built `base_mpp * ds` only for it to be divided again, which is
-not guaranteed to return ds and was one truncation away from a pixel.
+mpp enters once, where a caller has one (`ds = mpp / base_mpp`), and is not
+converted back.
 
-THE LEVEL AND ITS PIXELS, ONE RULE (2026-10-03). Two used to exist:
-`QueryFromWSI` took a level up to 5% COARSER than asked (then upsampled) and
-read `int(out * ds / level_ds)` px, which on a BRACS level at ds 4.00014 is
-`int(255.99) = 255` -- one short, then blown back up to 256; `DsLadder` took
-the coarsest level not coarser than asked and read `round(...)`. Both now use
-the ladder's rule: never upsample, and round the level px.
+One level rule: read the coarsest level not coarser than asked (never
+upsample), and round the level px.
 
 Pure arithmetic, no IO, no imports from the rest of the project: `TileSampler`
 and `SlideReader` both depend on this, and a sampler must know what a read
@@ -57,8 +40,7 @@ LEVEL_REL_TOL = 1e-3
 def sensor_size(wh_ratio: str, MPixels: float) -> Tuple[int, int]:
     """`(output_w, output_h)` in px for an aspect ratio and a pixel count --
     the sensor a camera produces. One definition, so a sampler placing for a
-    camera and the camera agree on its size. (query_sim/camera.py's until
-    2026-10-06: it is geometry, and the placing side needed it too.)"""
+    camera and the camera agree on its size."""
     w_r, h_r = (int(v) for v in wh_ratio.split(':'))
     factor = (MPixels * 1e6 / (w_r * h_r)) ** 0.5
     return int(factor * w_r), int(factor * h_r)
@@ -82,20 +64,15 @@ def sensor_size(wh_ratio: str, MPixels: float) -> Tuple[int, int]:
 #:                 M=56 is the crossing.  M=64 gives 0.9347 against 0.9183,
 #:                 13.7 px of headroom, and is what is used.
 #:
-#: The old order never hit this: distortion ran on the 1767^2 bounding square,
-#: where the output corner sampled at 1632 against a 1766 edge. Cropping first
-#: is what makes the margin load-bearing, so it is sized to the same worst case
-#: the square used to absorb for free.
+#: It is how much a camera READS around its sensor (`ReadSpec.margin_out`,
+#: `render_spec`), so it is geometry and lives here.
 SENSOR_MARGIN = 64
-#: (query_sim/pipeline.py's until 2026-10-06. It is how much a camera READS
-#: around its sensor -- ReadSpec.margin_out, render_spec -- so it is geometry.)
 
 
 def level_for(level_downsamples: Sequence[float], ds: float) -> int:
     """The level to READ for downsample `ds`: the coarsest whose native
     downsample is at most `ds` (within `LEVEL_REL_TOL`), so the rest of the
-    way is a shrink and never a blow-up. THE ONE LEVEL RULE -- the Camera, the
-    ladder and the sampler all ask this.
+    way is a shrink and never a blow-up.
 
     Raises when `ds` is finer than level 0: reaching it would be upsampling,
     and the caller almost certainly meant something else.
@@ -158,12 +135,11 @@ class FovGeometry:
                                                           exposure reads, sensor px
         square_l0  ceil(square_out * ds)                 the same, level-0 px
 
-    `square_l0` is DERIVED FROM `square_out`, not from the level-0 rectangle's
-    own diagonal, because the read is `level_px(square_out, ...)` px: a
-    square of `ceil(hypot(rect_l0))` = 725 at ds 2 centred the read for 725
-    level-0 px while 726 were read (363 x 2), one px past it on the right and
-    bottom. Both sides now describe one square. It still holds any rotation:
-    `rect_l0 <= output * ds`, so its diagonal is at most `ds * square_out`.
+    `square_l0` is derived from `square_out`, not from the level-0 rectangle's
+    own diagonal, because the read is `level_px(square_out, ...)` px: at ds 2,
+    `ceil(hypot(rect_l0))` is 725 while 363 x 2 = 726 are read. It holds any
+    rotation: `rect_l0 <= output * ds`, so its diagonal is at most
+    `ds * square_out`.
     """
     output_w: int
     output_h: int
@@ -210,8 +186,7 @@ class FovGeometry:
 class ReadSpec:
     """What a read covers, as far as anyone placing it needs to know: its
     sensor in output px, whether it rotates, and the margin it reads around
-    the frame when it does not. No pixels, no slide. (`CameraSpec` until
-    2026-10-03; the class that read was the Camera, and it no longer reads.)
+    the frame when it does not. No pixels, no slide.
 
     The sampler takes its footprint and its reserve from here -- it decides
     WHERE, the spec decides how big and what is read (`SlideReader.read`) --

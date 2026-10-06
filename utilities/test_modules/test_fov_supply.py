@@ -5,11 +5,11 @@
 
 Run through `jobscripts/TestReadPath.sh`, which resolves slide names and loops.
 
-`equiv` pins FovSupply over a PlanSpec against the one-camera FovSupply it
-replaced (2026-10-06), frozen below with the `camera_plan` it drew over: given
-the old rung as a PlanSpec, the same positions, the same pixels, the same gap
-(effective_mpp aside, which names the objective's ds), and the old shot's
-bucket / background / origin / overlap equal to the meta they came from.
+`equiv` pins FovSupply over a PlanSpec against a frozen one-camera FovSupply
+and the `camera_plan` it drew over: given that rung as a PlanSpec, the same
+positions, the same pixels, the same gap (effective_mpp aside, which names the
+objective's ds), and the frozen shot's bucket / background / origin / overlap
+equal to the meta they came from.
 `supply` checks what it is now: one supply across several rungs, each through
 its own objective; reproducible whatever the camera's own seed; a photo the
 same alone or in order; the cached draw the same as the drawn one; a plan for
@@ -71,11 +71,11 @@ class _Expect:
             self.failures.append(what)
 
 
-# ── equiv: the one-camera FovSupply this replaced ───────────────────────────
+# ── equiv: a frozen one-camera FovSupply ────────────────────────────────────
 
 def _old_camera_plan(level_downsamples, camera, ds: float, level: int) -> RungPlan:
-    """FROZEN: TileSampler.camera_plan before 2026-10-06 -- the camera's one
-    'F' rung, footprint `long_side * ds`, at the camera's own level."""
+    """FROZEN: TileSampler.camera_plan -- the camera's one 'F' rung, footprint
+    `long_side * ds`, at the camera's own level."""
     tile = camera.long_side
     level_ds = float(level_downsamples[level])
     plan = RungPlan(rung_ds=float(ds), level=int(level), level_ds=level_ds,
@@ -86,9 +86,9 @@ def _old_camera_plan(level_downsamples, camera, ds: float, level: int) -> RungPl
 
 
 def _old_bank(cam, mask, cfg):
-    """FROZEN: query_sim/generator.FovSupply(cam, mask, cfg).bank() before
-    2026-10-06 -- draw 0 over fov_plan_of(cam), every position rendered by
-    `cam` itself at its FoV rectangle, rng of (seed, x, y, ds, pass 0)."""
+    """FROZEN: the one-camera FovSupply(cam, mask, cfg).bank() -- draw 0 over
+    fov_plan_of(cam), every position rendered by `cam` itself at its FoV
+    rectangle, rng of (seed, x, y, ds, pass 0)."""
     plan = _old_camera_plan(cam.wsi.level_downsamples, cam.spec,
                             ds=cam.rect_w_l0 / float(cam.output_w), level=cam.level)
     sampler = TileSampler(cam.wsi, mask, cfg).sample([plan])

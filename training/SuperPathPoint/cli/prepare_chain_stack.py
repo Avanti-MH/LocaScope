@@ -40,12 +40,9 @@ reads it and never re-cuts it.
 
 THE CORPUS IS COMPUTED, NOT FOUND. Each axis's directory is
 `Corpora.corpus_of(recipe, ...)` -- known before anything runs, from the same
-config the extraction samples with. Two earlier versions guessed instead: v1
-took "the only sampler_id on disk for this slide" and silently read stageA as
-F the moment stageA existed and F's own did not (0 chains, reported as a clean
-result); v2 inspected what was on disk and duplicated F's and C's knobs a
-second time. Addressing by the config leaves nothing to guess and nothing to
-drift.
+config the extraction samples with, so there is nothing to guess and nothing
+to drift: a reader that looked on disk for "the only sampler_id" would read
+stageA as F the moment stageA existed and F's own did not.
 """
 
 from __future__ import annotations
@@ -64,8 +61,9 @@ for _p in (os.path.join(_REPO_ROOT, 'utilities'), os.path.join(_HERE, '..')):
 if _HERE not in sys.path:            # extract_pretiles.py lives right here
     sys.path.insert(0, _HERE)
 
-from cli import (add_pretile_args, corpus_from_args,  # noqa: E402
-                 job_result_dir, mask_root, setup_import_paths)
+from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
+                 chainstack_root, corpus_from_args, job_result_dir,
+                 mask_root, setup_import_paths)
 
 setup_import_paths()
 
@@ -233,7 +231,7 @@ def _run_slide(wsi_path: str, wsi_stem: str, args, masks: MaskMaker,
         t0 = time.perf_counter()
         own = ChainStack.RStack.from_own(
             corpora['R'], wsi_stem, args.rungs, tile=args.tile,
-            cache_root=args.cache_root)
+            cache_root=chainstack_root(args))
         print(f'R: {len(own)} own tiles ({time.perf_counter()-t0:.2f}s to '
               f'enumerate)', flush=True)
         if len(own):
@@ -247,7 +245,7 @@ def _run_slide(wsi_path: str, wsi_stem: str, args, masks: MaskMaker,
         with SafeSlide(wsi_path) as wsi:
             forest = ChainStack.CStack.from_own(
                 corpora['C'], wsi_stem, args.c_rungs, wsi,
-                tile=args.tile, cache_root=args.cache_root)
+                tile=args.tile, cache_root=chainstack_root(args))
             print(f'C: {len(forest)} trees, geometry built in '
                   f'{time.perf_counter()-t0:.2f}s (no wsi touched yet)',
                   flush=True)
@@ -283,9 +281,7 @@ def main():
     add_axis_corpus_args(ap)
     ap.add_argument('--axes', nargs='+', default=['F', 'R', 'C'],
                     choices=['F', 'R', 'C'])
-    ap.add_argument('--cache-root', default=None,
-                    help="R/C's own local cache (see RStack.from_own's "
-                         'docstring for why it defaults off)')
+    add_chainstack_args(ap, 'PrepareChainStack', on=False)   # R/C's own tiles: off
     ap.add_argument('--out', default=None,
                     help='directory for the summary CSV (default: '
                          "job_result_dir('PrepareChainStack'), NOT "

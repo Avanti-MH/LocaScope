@@ -1154,7 +1154,7 @@ descriptor loss 用。
 路徑與規矩照 `utilities/FeatureStore.py`：
 
 ```
-result/cache/keypoint_labels/<wsi_stem>__ds<d>__<cfg8>.safetensors
+result/cache/<made_by>_keypoint_labels/<wsi_stem>__ds<d>__<cfg8>.safetensors
 ```
 
 `result/cache/` 而不是 `result/<job>/`：這是好幾個 job 都會讀的昂貴中間產物，

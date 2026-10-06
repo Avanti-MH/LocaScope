@@ -29,8 +29,7 @@ Two passes, and the first one is free
                 level running out of positions is a fact about the slide.
 
 Every drawn tile is read and kept: the sampler places tiles on the mask, and an
-unscanned block is glass to the mask, so nothing is filtered after the read
-(2026-10-05, log/TODO.log).
+unscanned block is glass to the mask, so nothing is filtered after the read.
 
 Cost note: --pooling tokens keeps all 197 tokens, roughly 605 KB per tile;
 --pooling cls keeps one vector, about 61 MB per slide.
@@ -74,8 +73,8 @@ ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
 def plan_label(levels, tile: int) -> str:
     """The rung plan: every native level, or the ones asked for, for a plain
     `tile` px camera. Part of the draw's address, because an inherited chain
-    spans exactly these rungs -- and the tile size is the camera's, no longer
-    the sampler's, so it is named here or two tile sizes would share one."""
+    spans exactly these rungs -- and the tile size is the camera's, not the
+    sampler's, so it is named here or two tile sizes would share one."""
     from ReadGeometry import ReadSpec                             # noqa: PLC0415
     base = 'native' if levels is None else 'native-L' + '-'.join(map(str, sorted(levels)))
     return f'{base}-{ReadSpec(int(tile), int(tile)).key()}'

@@ -47,7 +47,6 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
 from Store import PreTileStore                               # noqa: E402
 from TileSampler import centre_crop                          # noqa: E402
 from PatchingLib import PatchGrid, PatchInfo                  # noqa: E402
-from _paths import RESULT_DIR                                 # noqa: E402
 from ReadGeometry import ReadSpec                             # noqa: E402
 from SlideReader import SlideReader, degrade_resolution       # noqa: E402
 
@@ -58,16 +57,17 @@ from SlideReader import SlideReader, degrade_resolution       # noqa: E402
 #: sampled -- forcing it through that schema would invent a `sampler_id` for
 #: something that has none.
 #:
-#: ONE DIRECTORY PER PYRAMID, NOT ONE FLAT POOL. The first version put every
-#: tile from every run straight under `DEFAULT_CACHE_ROOT` as
-#: `<wsi_stem>__x..._y..._ds..._t....png`, and it was wrong for the same
-#: reason a flat `PreTileStore` root would be: nothing on disk says which
+#: ONE DIRECTORY PER PYRAMID, NOT ONE FLAT POOL, for the same reason a flat
+#: `PreTileStore` root would be wrong: in a flat pool nothing on disk says which
 #: files belong together, so "how big is THIS pyramid's cache" is a question
 #: nobody could answer without re-deriving every position. `_pyramid_dir`
 #: gives every (axis, wsi_stem, root tile, finest rung) its own subdirectory --
-#: `ChainStack/<Axis>Stack/<key>/` -- so a directory listing is how anyone
-#: finds these, the same reason `PreTileMeta.dirname()` is human-readable.
-DEFAULT_CACHE_ROOT = os.path.join(RESULT_DIR, 'cache', 'ChainStack')
+#: `<root>/<Axis>Stack/<key>/` -- so a directory listing is how anyone finds
+#: these, the same reason `PreTileMeta.dirname()` is human-readable.
+#:
+#: WHICH ROOT IS THE CALLER'S. Every `cache_root` here defaults to None (no
+#: cache); an entry point passes `result/cache/<made_by>_chainstack/`
+#: (`training/SuperPathPoint/cli.chainstack_root`).
 
 
 def _pyramid_dir(cache_root: str, axis: str, wsi_stem: str, root: PatchInfo,
@@ -78,10 +78,10 @@ def _pyramid_dir(cache_root: str, axis: str, wsi_stem: str, root: PatchInfo,
     point, so every axis can key off the same kind of object it already has
     in hand.
 
-    `finest` DISAMBIGUATES WHAT USED TO COLLIDE (2026-09-05). Two pyramids at
-    the same root position and `tile` but a DIFFERENT `--rungs` ladder (e.g.
-    `1 2 4 8 16` vs `1 2 4 8 16 32`) used to be filed under the SAME directory,
-    silently mixing files from two different requests -- harmless per FILE
+    `finest` DISAMBIGUATES two pyramids at the same root position and `tile`
+    but a DIFFERENT `--rungs` ladder (e.g. `1 2 4 8 16` vs `1 2 4 8 16 32`):
+    one directory would mix files from two different requests -- harmless
+    per FILE
     (`_read_wsi_tile`'s cache is content-addressed by `(wsi_stem, x, y, ds,
     tile)`, so a shared file is always the same real pixels), but wrong for
     the one thing this per-pyramid layout exists to answer: "how big is THIS
@@ -126,7 +126,7 @@ def _cache_put(cache_root: Optional[str], wsi_stem: str, x: int, y: int,
 
 
 def _read_wsi_tile(wsi, x: int, y: int, ds: float, tile: int, *,
-                    wsi_stem: str, cache_root: Optional[str] = DEFAULT_CACHE_ROOT
+                    wsi_stem: str, cache_root: Optional[str] = None
                     ) -> np.ndarray:
     """One real tile, `tile` x `tile` RGB uint8, top-left `(x, y)` level-0.
 
@@ -157,14 +157,11 @@ def _read_wsi_tile(wsi, x: int, y: int, ds: float, tile: int, *,
 def _read_store_tile(folder, record, tile: int) -> np.ndarray:
     """One real tile, centre-cropped from its `PreTileStore` pre-tile.
 
-    THE SAME TWO LINES USED TO BE WRITTEN THREE TIMES (2026-09-06) --
-    `FStack.read`, `RStack`'s own tiles, and `CStack`'s own mother tile
-    (`OwnTiles`/`OwnForest.__getitem__`) each did `PreTileStore.read_tile`
-    then `centre_crop` separately. The pre-tile is `pre_tile_factor` times
+    Shared by `FStack.read`, `RStack`'s own tiles and `CStack`'s own mother
+    tile (`OwnTiles`/`OwnForest.__getitem__`). The pre-tile is `pre_tile_factor` times
     the tile (warp context, spec.md 6.6); the tile is its centre crop, which
     is what every other consumer uses (`Datasets.__getitem__`). One
-    definition here is what keeps the three from silently cropping
-    differently -- the same reason `_read_wsi_tile` exists for the WSI side.
+    definition keeps the three from silently cropping differently -- the same reason `_read_wsi_tile` exists for the WSI side.
     """
     pre = PreTileStore.read_tile(folder, record)
     return centre_crop(pre, int(tile))
@@ -213,9 +210,8 @@ def chains(corpus, wsi_stem: str, *, tile: int,
     # ONE CORPUS, BY ADDRESS. Two corpora in one root both number their chains
     # from 0, so a union would MERGE CHAINS THAT ARE NOT THE SAME CHAIN -- a
     # "complete" one could be four rungs of one corpus and two of another at a
-    # different level-0 centre. It happened: two smoke runs into one root,
-    # 2026-09-01. The corpus key is the directory now, so one call reads one
-    # extraction and there is nothing to refuse.
+    # different level-0 centre. The corpus key is the directory, so one call
+    # reads one extraction and there is nothing to refuse.
     for folder in corpus.rung_dirs(wsi_stem):
         meta = PreTileStore.load_meta(folder)
         if want is not None and not any(abs(meta.ds - r) < 1e-6 for r in want):
@@ -391,23 +387,22 @@ class RStack:
     survival number a statement about which resampling filter each half used.
 
     `source='C'`/`source='own'` are the two OTHER ways to get an 'R' tile.
-    `source='C'` (2026-09-06) is a WSI bypass, same as `CStack` itself -- it
+    `source='C'` is a WSI bypass, same as `CStack` itself -- it
     reads via `CStack.read_one`/`_read_wsi_tile`, not `PreTileStore`, because
     the descendant it reads was never a `TileSampler` draw either. `own` is a
     third `PreTileStore`-backed corpus (`stageB-rOwn`), independently sampled
     -- not a `derive` branch (see below), reached instead through
     `RStack.from_own`.
 
-    TWO LAYERS, NOT ONE (2026-09-06) -- `derive` USED TO BE BOTH AT ONCE
-    ========================================================================
+    TWO LAYERS, NOT ONE
+    ===================
     `from_tile` is the PRIMITIVE: one real tile plus the rung it was read at
     -> one 'R' stack. Pure -- no `Chain`, no `wsi`, no store. `derive` is a
     convenience wrapper around it for the ONE-CHAIN-AT-A-TIME case
     (`source='F'`/`'C'`, one `base_rung`, one stack out) -- what
     `build_survival.py` already loops over per chain.
 
-    `own` DOES NOT FIT `derive`'S SIGNATURE, AND THAT IS WHY IT NEVER HAD A
-    BRANCH HERE THAT WORKED. `derive(chain, ...)` requires a `Chain` --
+    `own` DOES NOT FIT `derive`'S SIGNATURE. `derive(chain, ...)` requires a `Chain` --
     `cx`/`cy`/`inherit_id`-grouped `members` -- and a `stageB-rOwn` tile has
     none of that: it is a standalone `PreTileStore` record, independently
     sampled, never grouped by `inherit_id`. Forcing it through `derive` would
@@ -415,11 +410,10 @@ class RStack:
     parameter the tile does not actually have.
 
     THE ACTUAL CARDINALITY IS "ONE STACK PER REAL TILE USED AS A BASE", AND
-    IT IS DELIBERATELY A CROSS PRODUCT (confirmed 2026-09-06 with concrete
-    numbers): `own` with 100 tiles at ds 1 and 100 at ds 4 is 200 stacks;
+    IT IS DELIBERATELY A CROSS PRODUCT: `own` with 100 tiles at ds 1 and 100 at ds 4 is 200 stacks;
     100 F chains x 2 chosen `base_rung`s is 200 stacks; 200 C pyramids x 256
-    descendants at one rung is 51,200 stacks. `RStack.from_own` (2026-09-06)
-    is the enumerator for own's whole store -- LAZY, same idiom as
+    descendants at one rung is 51,200 stacks. `RStack.from_own` is the
+    enumerator for own's whole store -- LAZY, same idiom as
     `TileSampler.Sample`, see `OwnTiles`. Enumerating a chain's chosen
     `base_rung`s or a pyramid's chosen rung's tiles is a plain loop calling
     `derive`/`from_tile` once per one -- there is no separate class for it,
@@ -464,9 +458,9 @@ class RStack:
         and `degrade_resolution` ONLY SKIPS DEGRADING FOR `ds<=1.0`, NEVER
         for `ds<=base_rung`. So every requested rung above 1.0 gets a FULL
         shrink-and-grow pass at that ABSOLUTE `ds`, compounding on top of
-        whatever blur `image` already carries -- confirmed intentional
-        2026-09-06 ("當作 ds=1 去二次降解", literally a second full
-        degradation stacked on the first, not a relative one). A LARGER
+        whatever blur `image` already carries -- intentional ("當作 ds=1 去二次
+        降解", a second full degradation stacked on the first, not a relative
+        one). A LARGER
         `base_rung` -- an F tile at ds 2/4/..., or a `source='C'` tile above
         ds 1, mother included -- means `R[ds=X]` for any `X` in
         `(1, base_rung]` is MORE degraded than a `base_rung=1` `R[ds=X]`
@@ -486,7 +480,7 @@ class RStack:
     @staticmethod
     def derive(chain: Chain, rungs: Sequence[float], *, tile: int,
                source: str = 'F', base_rung: float = 1.0, wsi=None,
-               cache_root: Optional[str] = DEFAULT_CACHE_ROOT
+               cache_root: Optional[str] = None
                ) -> Dict[float, np.ndarray]:
         """ONE chain, ONE `base_rung` -> one 'R' stack. Finds the real tile,
         then hands it to `from_tile`. The convenience for the ONE-AT-A-TIME
@@ -575,8 +569,8 @@ class RStack:
         AND 100 at ds 4), each record an independent draw with no chain to
         keep them together, unlike `chains()` which groups by `inherit_id`.
 
-        `cache_root` DEFAULTS OFF (2026-09-06, unlike every other
-        `cache_root` in this module). `degrade_resolution` is a resize on an
+        `cache_root` DEFAULTS OFF (unlike every other `cache_root` in
+        this module). `degrade_resolution` is a resize on an
         array already in memory -- cheap, nothing like the WSI reads
         `_read_wsi_tile` exists to avoid repeating -- so caching every 'R'
         rung of a large `from_own` run would be disk IO spent to save
@@ -711,17 +705,11 @@ class CStack:
     `PatchGrid.from_size` never rescales -- whatever unit `width`/`tile_size`/
     `x_offset` are given in is the unit `PatchInfo.x/y` comes back in, so
     `_children_of` passes `parent.x`/`parent.size_px` straight through
-    (level-0) rather than dividing by `d_child` first the way the one other
-    WSI caller of the time (the since-retired `ReferenceSampler`, which read
-    real pixels and needed a native size for that) did. An EARLIER version of this function
-    divided and multiplied back, matching that convention, and it was wrong:
-    `parent.x` has no reason to be a multiple of `d_child`, so
-    `round(parent.x/d_child)*d_child` silently drops up to `d_child/2` level-0
-    px -- caught by `test_chain_stack.py`'s reconstruction test, see
-    `_children_of`'s docstring for the actual numbers. Every `PatchInfo` this
-    class hands out is level-0 -- the unit `Chain.cx/cy` and `SurvivalTable`
-    use -- by construction now, not by a conversion step that can drop a
-    remainder.
+    (level-0) rather than dividing by `d_child` first: `parent.x` has no
+    reason to be a multiple of `d_child`, so `round(parent.x/d_child)*d_child` silently drops up to `d_child/2` level-0
+    px. Every `PatchInfo` this class hands out is level-0 -- the unit
+    `Chain.cx/cy` and `SurvivalTable` use -- by construction, not by a
+    conversion step that can drop a remainder.
     """
 
     @staticmethod
@@ -742,19 +730,13 @@ class CStack:
         Requires `parent.ds / d_child == 2` -- see the class docstring for why
         a step other than 2 would make "this group's mains" ambiguous.
 
-        BUILT DIRECTLY IN LEVEL-0 UNITS -- AN EARLIER VERSION WASN'T, AND IT
-        WAS WRONG. The first version of this function built the grid in
-        CHILD-NATIVE units (`x_offset=round(parent.x / d_child)`, converting
-        back with `x=round(info.x * d_child)` afterward) to mirror
-        the retired `ReferenceSampler`'s convention for an actual pixel READ. But
-        this function never reads a pixel -- it only computes positions -- and
-        `parent.x` is an arbitrary level-0 integer with no reason to be a
-        multiple of `d_child`. `round(parent.x / d_child) * d_child` silently
-        drops the remainder, and `test_chain_stack.py`'s reconstruction test
-        caught it: children union `(11320, 5764, 13368, 7812)` against a parent
-        of `(11321, 5765, 13369, 7813)` -- off by exactly 1 level-0 px in all
-        four corners, at ds 4.0 in a chain rooted at (12345.0, 6789.0), because
-        11321 is not a multiple of 4. Passing `parent.x`/`parent.size_px`
+        BUILT DIRECTLY IN LEVEL-0 UNITS. This function never reads a pixel --
+        it only computes positions -- and `parent.x` is an arbitrary level-0
+        integer with no reason to be a multiple of `d_child`, so building in
+        CHILD-NATIVE units (`round(parent.x / d_child) * d_child`) would drop
+        the remainder: 1 level-0 px in all four corners at ds 4.0 for a chain
+        rooted at (12345.0, 6789.0) (`test_chain_stack.py`'s reconstruction
+        test). Passing `parent.x`/`parent.size_px`
         straight through as `x_offset`/`width` avoids the division entirely --
         `tile * d_child` is always an exact integer (a power-of-2 `ds` times an
         integer `tile`), so nothing here needs `round()` at all, and children
@@ -837,7 +819,7 @@ class CStack:
     @staticmethod
     def read_one(info: PatchInfo, wsi, *, wsi_stem: str, root: PatchInfo,
                  finest: float, tile: int,
-                 cache_root: Optional[str] = DEFAULT_CACHE_ROOT
+                 cache_root: Optional[str] = None
                  ) -> np.ndarray:
         """ONE descendant tile's real pixels. Cached -- see `_read_wsi_tile`.
 
@@ -865,11 +847,11 @@ class CStack:
     @staticmethod
     def read_tree(groups_by_ds: Dict[float, List[TileGroup]], wsi, *,
                  wsi_stem: str, root: PatchInfo, tile: int,
-                 cache_root: Optional[str] = DEFAULT_CACHE_ROOT
+                 cache_root: Optional[str] = None
                  ) -> Dict[float, List[np.ndarray]]:
         """Real pixels for EVERY descendant tile in a pyramid, rung by rung.
 
-        NAMED `read_tree`, NOT `read` (2026-09-06) -- `FStack.read`/
+        NAMED `read_tree`, NOT `read` -- `FStack.read`/
         `RStack.derive` both return ONE tile per rung (`Dict[ds, image]`);
         this returns MANY per rung (`Dict[ds, List[image]]`), and sharing the
         name `read` across an incompatible shape is exactly the kind of thing
@@ -895,7 +877,7 @@ class CStack:
 
     @staticmethod
     def from_own(corpus, wsi_stem: str, rungs: Sequence[float], wsi, *,
-                tile: int, cache_root: Optional[str] = DEFAULT_CACHE_ROOT
+                tile: int, cache_root: Optional[str] = None
                 ) -> 'OwnForest':
         """Every record in `stageB-cOwn`'s store -> one tree each, as a
         mother -- LAZY, see `OwnForest`, but UNLIKE `OwnChains`/`OwnTiles`:
@@ -932,12 +914,11 @@ class CStack:
     @staticmethod
     def from_mother(mother_image: np.ndarray, cx: float, cy: float,
                     rungs: Sequence[float], wsi, *, wsi_stem: str, tile: int,
-                    cache_root: Optional[str] = DEFAULT_CACHE_ROOT):
+                    cache_root: Optional[str] = None):
         """Build and read a pyramid reusing an ALREADY-READ mother tile
         (e.g. `FStack.read(chain)[ds]`) instead of reading it again -- source
         #1 of the mother's two documented sources (plan.md 2.1); `from_own`
-        is source #2. Neither had code until 2026-09-06 -- `from_own` got
-        written first and this one was missing entirely until asked for.
+        is source #2.
 
         `mother_image` is taken on faith -- this does not re-derive it from
         `wsi`, only from `cx, cy, max(rungs)` geometrically (`CStack.mother`)

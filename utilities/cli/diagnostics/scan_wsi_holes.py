@@ -18,9 +18,8 @@ one block, no sampling -- reads each block in full, and reports which fail.
 Two things make the numbers mean something:
 
   * A block is read in FULL, so it is broken exactly when a read of that block
-    would fail. That was the question the retired WsiTissuesContainer asked:
-    it read a whole region in one call, and one bad tile inside took the lot.
-    SlideReader.read_grid now reads a region in blocks of tile rows.
+    would fail: one bad tile inside a single read takes the lot.
+    SlideReader.read_grid reads a region in blocks of tile rows.
 
   * --block is in LEVEL-0 pixels, so every level is cut on the same grid over
     the same physical area. Maps line up across a row and the percentages are
@@ -216,16 +215,10 @@ class WsiHolesScan:
         used_levels = [lv for lv in self.levels if any(k[1] == lv for k in results)]
 
         # ── which slides get DRAWN ───────────────────────────────────────
-        # Not all of them. This started as a two-slide diagnostic and the
-        # figure was one row per slide at 7.5 inches; at 145 slides (two
-        # whole datasets, 2026-09-16) that is 1087 inches, and Agg refused
-        # the render with "Image size of 1600x108750 pixels is too large"
-        # AFTER the scan had already spent 126.9 minutes. The scan's own
-        # outputs -- holes.csv and the per-slide summary -- were written
-        # before that and survived; only the two PNGs were lost.
-        #
-        # Drawing only the slides that HAVE a broken block is the fix
-        # rather than merely shrinking the rows, because 137 all-white
+        # Not all of them. The figure is one row per slide at 7.5 inches;
+        # at 145 slides (two whole datasets) that is 1087 inches, which Agg
+        # refuses to render. Only the slides that HAVE a broken block are
+        # drawn, rather than merely shrinking the rows, because 137 all-white
         # panels are not the information anyone opens this file for.
         # `--figure-slides all` is there for when the question really is
         # "show me the clean ones too".

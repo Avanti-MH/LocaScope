@@ -23,11 +23,11 @@ baseline every other arm is measured against.
 
 
 ═══════════════════════════════════════════════════════════════════════════════
- CURRENT DESIGN (2026-09-30) -- what changed, and what the sections below say
+ WHAT RUNS
 ═══════════════════════════════════════════════════════════════════════════════
 
-The tables and numbers further down were written for the earlier design (seven
-hand-picked slides, three levels, 100 FoVs each, top-left answers). What runs now:
+The worked numbers in the sections from VOCABULARY on assume seven slides,
+three levels, 100 FoVs each and top-left answers; this section is what runs:
 
   slides     `--datasets` names pools the way AccessDatasets does: a real dataset
              (`bracs/train`, the whole pool) or a recorded split of one
@@ -247,8 +247,7 @@ taking seconds, each able to pass only if the machinery means something:
                            the two is at most 128 -- NOT 90.51, because the two
                            grids interleave diagonally and their union is a
                            checkerboard, so (128, 0) belongs to neither. A
-                           derived bound, not a tolerance. It caught its own
-                           first version.
+                           derived bound, not a tolerance.
 
 And one gate on the run itself: `decoy`, the percentile of a uniformly random
 window, which must sit at 0.50. If the coordinate mapping is wrong the truth
@@ -328,7 +327,7 @@ from _paths import encoder_tag, job_result_dir                   # noqa: E402
 #  Each value below is the one the run uses, unless the command line says
 #  otherwise: every field of the sampler, camera and encoder configs is a flag
 #  (`--richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...; see
-#  ConfigArgs), and the older flags (`--n-fov`, `--seed`, `--rotation`, `--scale-min`,
+#  ConfigArgs), and the shorthand flags (`--n-fov`, `--seed`, `--rotation`, `--scale-min`,
 #  `--scale-max`, `--richness`, `--batch-size`, `--fp16`) name one field each. What
 #  a run really used is printed at its start, and everything that changes a
 #  number is in the parts id, so a changed value here can never be resumed into
@@ -352,8 +351,7 @@ RICHNESS = RichnessConfig(
     bucket_frame = 'per_rung',
     floor_frame  = 'ask',
 )
-#: What `--richness` can name instead of RICHNESS (query_sim/generator.py's
-#: until 2026-10-06; this bench is the one left that offers it).
+#: What `--richness` can name instead of RICHNESS.
 #:   default  `RichnessConfig()`: mostly tissue-dense FoVs, a share of edges,
 #:            nothing above 85 per cent background (the production contract).
 #:   open     no floors, any FoV up to 85 per cent background, first come over
@@ -528,15 +526,9 @@ def pooled_descriptors(patches, encoder, poolings) -> dict:
 
     They stay on the GPU, and so does the result. `reduce` is applied inside
     the encoder's batch loop and returns the concatenated slots where they were
-    computed: `stream_windows` scores them there and drops them. The `.cpu()`
-    this used to end with was a round trip with no use -- the next line moved
-    the descriptors straight back -- and cost 0.13 s of every 0.47 s row of the
-    raw arm (`diag_render_reads.py` B-raw, 2026-10-02). A caller that keeps
-    descriptors for a whole slide is the one that moves them to the host.
-
-    The earlier version pooled on the host, which needed an outer loop over
-    `--token-chunk` to bound the same total. That loop paid to move every token
-    across PCIe and only then discarded 93% of them.
+    computed: `stream_windows` scores them there and drops them. A caller that
+    keeps descriptors for a whole slide is the one that moves them to the host.
+    Pooling on the device means no token crosses PCIe only to be discarded.
 
     `patches` is a list of tiles or a uint8 batch `[N, T, T, 3]` (what
     `SlideReader.read_grid` yields); `TileEncoder` takes either.
@@ -782,8 +774,8 @@ def gate_tiles(path: str, n: int = 32, mask=None) -> list:
 
     The gates need pixels the encoder will actually see, and on a slide whose
     tissue is sparse the middle can be blank glass. They must not pay for them
-    either: reading a whole tissue region, as the retired WsiTissuesContainer
-    did, is on a level-0 BRACS slide the 4083-second case in log/TODO.log. One
+    either: reading a whole tissue region is, on a level-0 BRACS slide, the
+    4083-second case in log/TODO.log. One
     2048x1024 read is enough and costs nothing.
     """
     slide = SafeSlide(path)
@@ -1262,7 +1254,7 @@ def answers_for(camera, x: int, y: int, params: dict, region, ds: float,
     so the window it stands for is the centre of THAT grid, mapped back to the
     slide by `Render.output_to_level0` with the rotation and scale the shot was
     actually taken at. At rotation 0 and scale 1 this is the FoV's top-left
-    exactly (the old definition), which the caller checks.
+    exactly, which the caller checks.
 
     `output_to_level0` is exact for rotations of 0/90/180/270; angle jitter,
     lens distortion and the stage shift are not inverted (see its docstring),
@@ -1561,14 +1553,13 @@ def config_id(args, arm_specs, configs: dict) -> str:
             'datasets': list(args.datasets), 'n_wsi': args.n_wsi,
             'wsi_names': list(args.wsi_names or []), 'max_ds': args.max_ds,
             'wsi_seed': args.wsi_seed, 'split_job': args.split_cache_job,
-            # Where the FoVs may sit: since 2026-10-03 the sampler reserves
-            # exactly what the camera reads (ReadGeometry). Parts drawn under
-            # the old reserve are other FoVs and must not be resumed into.
+            # Where the FoVs may sit: the sampler reserves exactly what the
+            # camera reads (ReadGeometry). Parts drawn under another reserve
+            # are other FoVs and must not be resumed into.
             'fov_reserve': 'camera-read',
-            # Since 2026-10-06 the level's rung is its own ds through a PlanSpec
-            # (it was rect_w_l0 / output_w through camera_plan): the same
-            # positions, but the photo rng's key names the level's ds, so the
-            # photos are others and the old parts must not be resumed into.
+            # The level's rung is its own ds through a PlanSpec, and the photo
+            # rng's key names it: parts under another rung are other photos
+            # and must not be resumed into.
             'fov_plan': 'ladder-level-ds',
             'configs': {name: dataclasses.asdict(cfg)
                         for name, cfg in sorted(configs.items())}}
@@ -1768,7 +1759,7 @@ def main() -> int:
     parser.add_argument('--scale-max', type=float, default=None,
                         help='= the high end of --camera-scale-range')
     parser.add_argument('--white-max', type=float, default=None,
-                        help=argparse.SUPPRESS)      # retired: use --richness
+                        help=argparse.SUPPRESS)      # refused: use --richness
     add_sampler_args(parser, SAMPLER)
     add_config_args(parser, CAMERA, 'camera', skip=('query_mpp',))
     add_mask_args(parser, default=None)              # None: the CONFIG `MASK`

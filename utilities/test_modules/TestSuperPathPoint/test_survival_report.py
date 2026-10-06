@@ -314,7 +314,7 @@ def t_the_match_rate_rises_with_alpha_and_the_decoy_lags():
     THE DECOY IS A STORED SECOND PROBE, not `dist` plus a constant. The
     difference is the whole test: `dist + shift <= tau` is the match rate at a
     shifted alpha, so a "decoy" built that way tracks the real curve by
-    construction and reads margin 1.1 everywhere (2026-09-01).
+    construction and reads margin 1.1 everywhere.
     """
     dist = np.full((20, 6), 3.0, np.float32)
     batch = _batch(np.full((20, 6), 0.9), dist=dist)
@@ -336,8 +336,8 @@ def t_the_match_rate_rises_with_alpha_and_the_decoy_lags():
 def t_the_nearest_detection_has_no_window_in_it():
     """`dist` must depend on the point set and on nothing the build chose.
 
-    THE FAILURE THIS BLOCKS HAPPENED TWICE IN ONE DAY, in both directions.
-    `dist` used to be the offset of the argmax over a window of radius r:
+    THE FAILURE THIS BLOCKS, in both directions, if `dist` is the offset of
+    the argmax over a window of radius r:
 
         r bound to tau     -> dist <= tau, so the curve went flat AT the window
                               and read as the data saturating
@@ -385,11 +385,11 @@ def t_the_nearest_detection_has_no_window_in_it():
 def t_the_decoy_is_a_second_probe_and_not_the_same_curve_shifted():
     """The decoy must be able to differ from the match at EVERY alpha.
 
-    THE FAILURE THIS BLOCKS PRODUCED A NUMBER, NOT AN ERROR. When the decoy was
-    derived as `dist + shift <= tau` it was exactly the match rate at
+    THE FAILURE THIS BLOCKS PRODUCES A NUMBER, NOT AN ERROR. A decoy derived
+    as `dist + shift <= tau` is exactly the match rate at
     `alpha - shift/ds` -- one curve compared with itself -- so the gap was a
-    finite difference and `margin` sat at 1.1 for every rung and every axis
-    (2026-09-01). Nothing in the output said the control was not a control.
+    finite difference and `margin` sits at 1.1 for every rung and every axis.
+    Nothing in the output said the control was not a control.
 
     Here the decoy probe found something very close (offset 1) while the real
     probe found something far (offset 40). A derived decoy CANNOT produce that

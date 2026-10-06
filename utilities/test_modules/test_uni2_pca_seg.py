@@ -175,9 +175,8 @@ def t_every_identity_field_is_in_the_baseline():
 def t_every_identity_field_moves_the_hash():
     """Change any hashed field and the parts change; change batch_tiles and they do not.
 
-    The dead-field check. A knob that no longer reaches the code it names still
-    sits in the config looking applied -- this project has had three of those at
-    once -- and the cheapest way to notice is that it is either absent from the
+    The dead-field check. A knob that does not reach the code it names still
+    sits in the config looking applied, and the cheapest way to notice is that it is either absent from the
     hash or present and inert. This catches the first.
 
     It also pins NOT_IDENTITY from the other direction: `batch_tiles` cannot
@@ -255,10 +254,9 @@ def t_tile_saturation_finds_the_coloured_half():
 def t_stratified_covers_every_band_where_uniform_misses_some():
     """What stratifying actually buys: no quantile band goes unrepresented.
 
-    THIS CHECK REPLACES ONE THAT ASSERTED SOMETHING FALSE, and the correction is
-    worth keeping. The first version claimed stratifying oversamples a rare
-    class, and measured 3.5 percent against uniform's 2.7 -- barely a
-    difference, because there is no difference to find:
+    NOT that stratifying oversamples a rare class (3.5 percent against
+    uniform's 2.7 -- barely a difference, because there is no difference to
+    find):
 
         equal picks per QUANTILE bin is, in expectation, the same composition as
         uniform sampling. A class covering 3.5 percent of the area lands
@@ -389,10 +387,7 @@ def t_mask_ds_is_the_patch_size(seg):
     """Everything reads at level 0, so the mask lands at ds = cell_px = 14.
 
     Not a parameter and not a choice: `slide_pca_mask`'s "nothing here chooses a
-    resolution, the patch grid does". A `plane_ds` field and then a `level`
-    argument both used to make this answerable only after a fit, and both are
-    gone -- `Uni2PcaSegFunc.LEVEL` records why and the measurement that allowed
-    it.
+    resolution, the patch grid does". `Uni2PcaSegFunc.LEVEL` records the measurement.
 
     14 is FINER than the ds 32 hsv masks in use, which is what makes the
     granularity worry moot: a 256 px tile at ds 1 spans 18 cells, so
@@ -535,10 +530,9 @@ def t_fit_report_agrees_with_mask_ds(seg, wsi, args):
 
     Two places compute it -- the property from `_cell_px * level_ds`, the report
     from the same -- and a quantity computed twice is one that eventually
-    differs in one of them. They agree here because there is now only one input,
-    the level the fit actually read; before `plane_ds` was removed the property
-    used the REQUEST and the report used the resolution, and on BRACS those are
-    never the same number.
+    differs in one of them. They agree because there is only one input, the
+    level the fit actually read; a requested ds and a resolution are never the
+    same number on BRACS.
     """
     report = seg.fit_report
     assert abs(seg.mask_ds - report['mask_ds']) < 1e-9, (

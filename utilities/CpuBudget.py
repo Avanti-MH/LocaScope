@@ -5,13 +5,9 @@ ONE rule for every entry point -- a bench shard, a training run, the pipeline:
     torch threads (this process) + DataLoader workers (this process)
         <= the job's cpus / the processes the job runs side by side
 
-Nothing enforced it before, and the defaults broke it twice over. torch sizes
-its pool to every cpu the process can see, so two shards on 8 cpus ran 16
-threads and encoded 7x slower than one (36 against 251 tiles/s per process,
-`diag_render_reads.py` B-bench, 2026-10-02); and a training process kept 8
-threads beside 8 rendering workers, which tripled its encode (10.6 -> 33 s,
-combined train, 2026-10-03). Dividing the cpus fixed both: 251 tiles/s per
-shard with 4 threads each, 151 tiles/s training with 1 thread beside 8 workers.
+torch sizes its pool to every cpu the process can see, so without this two
+shards on 8 cpus run 16 threads and encode 7x slower than one, and a training
+process keeps 8 threads beside 8 rendering workers and triples its encode.
 
 Called by entry points only. A library module that set the thread count would
 be deciding for a process it does not own.

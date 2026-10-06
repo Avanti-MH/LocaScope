@@ -5,10 +5,9 @@ ranks every window of every rotation, lattice and region together. The output
 is a CandidateSet (StageInterface.py): candidates by score, in the frame of
 the level's grids, which stage 3 reads its crop by.
 
-`SlidingWindowSimilarity` (the per-window cosine kernel) lives here too. It
-came from GigaPathSlidingWinSim.py, whose non-rotating retriever this class
-replaced; that module was folded in on 2026-10-05 and removed, so the window
-bench, the off-grid bench and this class import the kernel from one place.
+`SlidingWindowSimilarity` (the per-window cosine kernel) lives here too, so the
+window bench, the off-grid bench and this class import the kernel from one
+place.
 
 Cost:
     4x query patch extraction + encoding + sim-map computation.

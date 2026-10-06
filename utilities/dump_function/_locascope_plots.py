@@ -61,9 +61,7 @@ def append_metrics_row(m: dict, out_path: str,
 
     Per shot rather than once at the end, because the end is not guaranteed to
     arrive. A bench over a whole corpus is hours of retriever builds and query
-    encodes, and a crash at the last shot used to return nothing at all -- the
-    same way a batch that died on its fifth slide used to throw away four
-    slides of images. compute_metrics declares every field up front with None
+    encodes, and a crash at the last shot must not lose the rest. compute_metrics declares every field up front with None
     defaults, so the first row fixes the columns and the rest align with it;
     pass the returned list back so a later row cannot silently re-order them.
     """

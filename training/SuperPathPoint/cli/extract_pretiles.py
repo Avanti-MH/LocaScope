@@ -39,22 +39,15 @@ at tile 256, drop the reachable ladder from ds 32 to ds 11 -- losing the two
 coarsest rungs, which is where Stage C's relative-survival labels carry the most
 information. The pre-tile has to be READABLE, not tissue.
 
-THE COST USED TO BE RECORDED; IT IS NOW REFUSED. Near the edge of the scanned
-rectangle a pre-tile can run off the slide, and `clip_px` on each record used to
-say by how much -- those positions kept the tile at the centre (`PreTileStore`
-never slides the window inward, because that would move the tile off centre and
-every crop downstream would be of the wrong place) and carried some background
-at one edge.
-
-`TileSampler` is now given the pre-tile as `reserve_l0`, so the lattice never
-OFFERS such a position: `patchable` gets the reserve rather than the
+A CLIP IS REFUSED, NOT RECORDED. Near the edge of the scanned rectangle a
+pre-tile could run off the slide (`PreTileStore` never slides the window
+inward, because that would move the tile off centre and every crop downstream
+would be of the wrong place). `TileSampler` is given the pre-tile as
+`reserve_l0`, so the lattice never OFFERS such a position: `patchable` gets the reserve rather than the
 tile, and the first legal corner sits a margin inside the region. `clip_px` is
 therefore 0 on every record, and the loop below asserts it rather than writing
-it. A non-zero clip now means the reserve stopped binding, and every tile after
+it. A non-zero clip means the reserve stopped binding, and every tile after
 it is suspect -- which is a thing to stop on, not a column to fill in.
-
-The 2026-08-26 corpus was cut before that and does carry clips: 295 of 500 at
-ds 32 on one slide. Those are not wrong, they are the older contract.
 
 RESUMABLE ON PURPOSE
 ---------------------
@@ -123,10 +116,7 @@ def main():
     # to the tile, no overlap admitted at all.
     # ── inheritance: the chains Stage B reads (spec.md 3.2) ──
     #
-    # A chain is one level-0 centre with a tile at EVERY rung. It was never
-    # reachable from this CLI before 2026-09-01, which is why the corpus of
-    # 2026-08-27 has `inherit_id = -1` on all 6,388 rows -- not a setting that
-    # was wrong, an option that was not wired.
+    # A chain is one level-0 centre with a tile at EVERY rung.
     ap.add_argument('--inherit-share', type=float, default=0.0,
                     help='fraction of each rung that comes from chains. The '
                          'number of CENTRES is share * n, capped by how many '
@@ -216,7 +206,7 @@ def main():
           flush=True)
 
     paths = args.wsi
-    # A PATH, NOT A STEM, and the difference used to surface four frames down
+    # A PATH, NOT A STEM, and the difference would surface four frames down
     # as openslide's "Unsupported or missing image file" -- which reads as a
     # corrupt slide, not as a wrong argument. The stem is what every OTHER
     # thing here is keyed by (the mask cache, the pre-tile cache, --wsi-stem in
@@ -272,7 +262,7 @@ def main():
         gb = sum(r['bytes'] for r in rows) / 1e9
         print(f'\nSaved {summary}   ({len(rows)} cells, {total} pre-tiles, '
               f'{gb:.1f} GB on disk)')
-        # PNG against raw. Measured 2026-08-27 on the v1 corpus: 45.1 per
+        # PNG against raw. Measured on the v1 corpus: 45.1 per
         # cent, 14.2 GB on disk for 17,784 pre-tiles of 768 px against 31.5 GB
         # uncompressed. Printed on every run rather than asserted -- it is a
         # fact about the data, and a slide set with more glass would compress
@@ -483,7 +473,7 @@ def _write_rung(wsi, slide_mask, segmenter_id: str, cfg: SamplerConfig,
     # `n_inherit_refused` IS THE COST OF `on_incomplete='drop'`, PER RUNG.
     # A centre chosen at `source_rung` is guaranteed to FIT at every finer
     # rung, but not to have tissue there: `caps[bucket] <= 0` on the top two
-    # buckets is the retired tissue gate, and it binds the inherited set too.
+    # buckets is the tissue gate, and it binds the inherited set too.
     # A chain refused at any rung truncates and is then dropped whole by
     # `stacks()`, so this column is the only place the loss is visible.
     refused = int(getattr(report, 'n_inherit_refused', 0)) if report else 0

@@ -39,8 +39,7 @@ from pathlib import Path
 #: transformers deprecation warning prints before any line of this file runs.
 #: So the setdefault each encoder module does above its own `import timm` is
 #: already too late: by then the constant is frozen to ~/.cache/huggingface,
-#: and prov-gigapath came down a second time on 2026-08-22 with a complete
-#: copy sitting in /work since April.
+#: and the weights download again into .
 #:
 #: Here it is early enough. Nothing has been imported yet except argparse, os
 #: and sys, none of which touch the hub.
@@ -156,9 +155,7 @@ def t_hub_cache_is_the_shared_one():
 
     FIRST, because a wrong answer here costs 4.5 GB and a progress bar and
     nothing else says anything -- the run succeeds, the numbers are right, and
-    a second copy of every model lands in $HOME. That happened while this file
-    was being written: prov-gigapath came down again on 2026-08-22 with a
-    complete copy sitting in /work since April.
+    a second copy of every model lands in .
 
     HF_HOME is read into module constants at huggingface_hub's own import, so
     the setdefault each encoder module does above its `import timm` only works

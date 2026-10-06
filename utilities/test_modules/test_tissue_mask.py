@@ -283,9 +283,9 @@ def t_mask_tissue_gate():
 
 def t_mask_backdrop_covers_the_mask():
     """read_matching_rgb at a mask_ds that is NOT a level. At ds 32 on a 4x
-    pyramid the broken version was correct -- 32 is a level -- so the check is
-    at ds 14, UNI2's patch grid, where the old code zoomed the backdrop 3.5x
-    under every overlay."""
+    pyramid a wrong backdrop scale would still pass -- 32 is a level -- so the
+    check is at ds 14, UNI2's patch grid, where it would zoom the backdrop
+    3.5x under every overlay."""
     DS, W, H = 14.0, 200, 100
     wsi = _Slide(int(W * DS), int(H * DS), downsamples=(1., 4., 16., 32.))
     trm = TissueMask(wsi, SlideMask(np.ones((H, W), bool), (0, 0),
@@ -310,8 +310,7 @@ def _sized(sides):
 
 def t_mask_views_do_not_leak():
     """Every region step is a view. The source keeps its regions whatever is
-    derived from it -- the property the old undo stack existed to fake, and
-    got wrong whenever a view shared the stack."""
+    derived from it."""
     trm = _sized([300, 2000, 100])
     before = boxes_of(trm)
     views = [trm.patchable(256), trm.filtered(0.5), trm.merged(), trm.raw()]
@@ -367,8 +366,8 @@ def _slide_mask(components: bool = True) -> SlideMask:
 
 def t_slide_mask_round_trip():
     """What a cache stores comes back as what went in, geometry TYPED:
-    `f'{mask_ds:.0f}'` on a string raises, which is how the old store's
-    lazy-annotation bug surfaced after six correct files."""
+    `f'{mask_ds:.0f}'` on a string raises (a lazy annotation decoded as
+    str)."""
     sm = _slide_mask(components=False)
     with tempfile.TemporaryDirectory() as root:
         back = SlideMask.load(sm.save(os.path.join(root, 'mask.safetensors')))

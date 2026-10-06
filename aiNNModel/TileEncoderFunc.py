@@ -98,10 +98,9 @@ class ModelOutputSpec:
     one scale outside this one. StoreMeta would otherwise carry `grid` and
     `grid_rc` side by side meaning opposite things.
 
-    `token_grid` was the old name and it is wrong twice over: a CNN's output is
-    a feature map and has no tokens, and even for a ViT the grid is something
-    the MODEL imposes, not a property of the tile -- the tile is only pixels.
-    `feat_hw` says what the value is: the H and W of the features. It pairs with
+    Not `token_grid`: a CNN's output is a feature map and has no tokens, and
+    even for a ViT the grid is something the MODEL imposes, not a property of
+    the tile. `feat_hw` says what the value is: the H and W of the features. It pairs with
     `dim`, which is their channel axis.
 
     `num_prefix` is the slice point before the patch tokens -- 1 for a CLS, 5
@@ -209,24 +208,9 @@ class EncoderOutputSpec:
 # ── reading a spec off a model, and pooling what it describes ─────────────────
 #
 # Everything in this section reads a spec and a tensor and nothing else, so it
-# serves every token model rather than the one it was written for. It lived in
-# GigaPathFunc while GigaPath was the only encoder, where it read as GigaPath's
-# pooling; the second ViT is what made the placement wrong, because reaching it
-# would have meant importing a sibling implementation -- and with it that
-# module's HF_HOME default, its timm import and its Token Merging patcher -- for
-# two functions about tensor shapes. GigaPathFunc re-exports these names, so
-# every existing importer is unaffected.
-
-# model_token_spec used to live here, reading dim, num_prefix and feat_hw off a
-# timm ViT and handing back a dict. It is TileEncoder._vit_model_spec now, for
-# two reasons that arrived together.
-#
-# feat_hw needs crop_size, which is on the CONFIG, and a free function taking a
-# model plus a crop size is half of each. The encoder holds both halves already.
-#
-# And model_spec had to stop being an attribute: `transform` is variable, so a
-# value computed once in __init__ outlives the config that produced it. A method
-# on the object is what a property can call.
+# serves every token model, and no implementation module has to import another
+# for it. Reading a spec off a model is `TileEncoder._vit_model_spec`: feat_hw
+# needs crop_size, which is on the config the encoder holds.
 
 
 def _ring_bins(gh: int, gw: int, n_rings: int,
@@ -525,8 +509,7 @@ class TransformConfig(IdentifiedConfig):
             # .contiguous() as ToTensor does. The VALUES are the same either
             # way, but the permute above leaves a channels-last layout, and
             # under fp16 cuDNN picks another convolution algorithm for it:
-            # GigaPath's tokens moved by 5e-2 against the PIL path
-            # (test_gigapath_equivalence, 2026-10-03) until this was added.
+            # GigaPath's tokens move by 5e-2 without it.
             x = x.contiguous().float().div_(255.0)
             return TF.normalize(x, mean=mean, std=std)
         return apply
@@ -684,12 +667,8 @@ class TileEncoder(IdentifiedBuild):
                           cards ran it does not change a single weight). Only
                           the forwards that call the model itself use it.
 
-        Until 2026-10-06 each subclass put DataParallel (and torch.compile) on
-        `self.model`. That made the wrapper what everything else saw: seven
-        places unwrapped it by hand (`getattr(self.model, 'module', ...)`), and
-        the one that did not -- `weights_id` -- hashed `module.`-prefixed keys,
-        so the same weights were 5c4b8ed2 on one card and 881dc782 on four, and
-        the feature cache missed every time the card count changed.
+        Keeping the wrapper off `self.model` is what keeps `weights_id` (and
+        so the feature cache) the same on one card and on four.
         forward_intermediates is not forward, and DataParallel replicates only
         forward, so a ViT's spatial and layer exits run on self.model -- one
         card -- whatever `runner` is."""
@@ -708,11 +687,10 @@ class TileEncoder(IdentifiedBuild):
 
         `transform` is in _VARIABLE and `variant` clones by copying __dict__, so
         an attribute set in __init__ survives a transform change while the
-        config that produced it does not. That was harmless while feat_hw came
-        off patch_embed.grid_size, which is fixed at construction. It stops
-        being harmless the moment feat_hw is derived from crop_size: the clone
-        would report the grid of the transform it no longer has, and every
-        pooling would fold the token axis on those numbers.
+        config that produced it does not. feat_hw is derived from crop_size,
+        so a stored value would make the clone report the grid of a transform
+        it no longer has, and every pooling would fold the token axis on those
+        numbers.
 
         Recomputing costs a handful of attribute reads. `_pool` asks once per
         BATCH, not once per tile, so at batch 1024 a 200k-tile slide reads this
@@ -829,10 +807,9 @@ class TileEncoder(IdentifiedBuild):
         token exactly right. The symptom is "averaging poolings do not help",
         which reads as a result rather than an error.
 
-        NOTHING HERE MOVES A RESULT TO THE HOST (2026-10-06). Whether it goes
-        there is the caller's decision: a cache write or numpy moves it, a
-        similarity on the GPU does not. Before, every exit ended in .cpu() and
-        the GPU callers moved it straight back. The size is the caller's too:
+        NOTHING HERE MOVES A RESULT TO THE HOST. Whether it goes there is the
+        caller's decision: a cache write or numpy moves it, a similarity on the
+        GPU does not. The size is the caller's too:
         [N, 197, 1536] fp32 is 1.21 MB per tile, so 68k tiles at once would be
         82 GB on the device -- a caller that encodes that many either chunks its
         calls or passes `reduce` (applied per batch, so `lambda t: t.cpu()` moves
@@ -841,10 +818,8 @@ class TileEncoder(IdentifiedBuild):
         `images` is a list (PIL images or `[H, W, 3]` arrays) or a uint8 batch
         `[N, H, W, 3]` -- one interface, one preprocessing. Either is moved to
         the device as uint8 and transformed there (`TransformConfig.
-        build_tensor`). The PIL transform this used to run tile by tile cost a
-        process its CPU exactly where DataLoader workers needed it: 8 workers
-        rendering beside it turned 10.6 s of encode into 33 s
-        (`diag_render_reads.py`, combined train, 2026-10-03).
+        build_tensor`), so the transform does not take the CPU the DataLoader
+        workers need.
         """
         forward = forward or self.runner
         dtype = self.cfg.model.torch_dtype()
@@ -889,18 +864,15 @@ class TileEncoder(IdentifiedBuild):
     def feature_pooling(self) -> str:
         """What features() reduced by: 'cls', 'gap', 'rings3', 'identity', ...
 
-        One line, and it used to be five. The four it replaces read
-        model_spec.kind to decide what '' meant, which is the same mistake _pool
-        had: consulting the MODEL's shape to describe a reduction that may have
-        happened after a head. POOLINGS resolves '' now -- at construction, in
-        a table, per config -- so by the time anything asks, cfg.pooling names
+        It does not read model_spec.kind: the MODEL's shape cannot describe a
+        reduction that may have happened after a head. POOLINGS resolves '' --
+        at construction, in a table, per config -- so by the time anything asks, cfg.pooling names
         a concrete mode and there is nothing left to infer.
 
         A store of features() output is labelled with this rather than with a
         literal, because the caller writing the label takes any encoder while
-        the label is only ever true of one. The feature-map cache used to write
-        pooling='cls' for whatever it was handed -- correct for GigaPath, and a
-        false claim about every CNN, whose features() is a global average.
+        the label is only ever true of one: 'cls' is true of GigaPath and false
+        of every CNN, whose features() is a global average.
 
         It is also what vector_from reduces BY, which is the point: the label
         and the arithmetic read the same attribute, so a store cannot say one
@@ -985,10 +957,8 @@ class TileEncoder(IdentifiedBuild):
         """One [B, ...] batch of model output -> [B, D], L2-normalised.
 
         head, then pooling, then one vector. Not a branch in sight: which head
-        and which pooling are both cfg, and every encoder in the project now
-        goes through this same line. It used to be an override point and the
-        overrides were all the same three lines with one word changed, which is
-        how GigaPath's version came to ignore cfg.pooling for a revision.
+        and which pooling are both cfg, and every encoder in the project goes
+        through this same line, so none can ignore cfg.pooling.
 
         What each config still has to say is what '' means for it -- 'cls' for
         a ViT whose answer is the CLS, 'gap' for a feature map, 'identity' where
@@ -1151,13 +1121,11 @@ class TileEncoder(IdentifiedBuild):
         needs no twin here -- pooling and L2-normalising a map or a token
         sequence is differentiable tensor arithmetic the caller can do itself.
 
-        WHY THE PUBLIC EXITS CANNOT BE USED FOR THIS. Three things `_run` does
-        are each independently disqualifying (a fourth, `raw.cpu()`, is gone:
-        since 2026-10-06 the exits leave their result on the device):
+        WHY THE PUBLIC EXITS CANNOT BE USED FOR THIS. Two things `_run` does
+        are each independently disqualifying:
 
             @torch.no_grad()            no gradient reaches the trunk
-            _to_pil(img) per image      takes a LIST of images, not a batch
-            self._transform             Resize(scale) then CenterCrop(crop),
+            the inference transform     Resize(scale) then CenterCrop(crop),
                                         so a 256 px tile silently becomes a
                                         224 px centre crop
 
@@ -1405,7 +1373,7 @@ class TileEncoder(IdentifiedBuild):
 #: when IT is imported. setdefault is first-one-wins, so importing all three
 #: would let whichever landed first decide where the other two look for weights:
 #: CONCH's checkpoint downloaded into prov-gigapath/model_weights, several
-#: gigabytes re-fetched, and a directory name that no longer says what is in it.
+#: gigabytes re-fetched, and a directory name that does not say what is in it.
 #: Nothing raises. Importing only the one asked for is the whole fix.
 _IMPLEMENTATIONS = {
     'gigapath':    'GigaPathFunc',

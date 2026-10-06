@@ -17,9 +17,7 @@ map ([N, 768, 7, 7] at 224x224 input for Tiny) rather than a flattened vector.
 Measured, not assumed: `NormMlpClassifierHead(pool_type='')` sets
 `global_pool` to a no-op and `fc` to `nn.Identity()` the moment `num_classes=0`
 is also passed -- confirmed by constructing the model and reading
-`m.head.global_pool` / `type(m.head.fc)` directly, the same way
-`test_gigapath_equivalence` (removed 2026-10-05) held GigaPath's baseline down against a
-stored tensor rather than trusting the docs. Keeping the map intact rather
+`m.head.global_pool` / `type(m.head.fc)` directly. Keeping the map intact rather
 than pooling it inside the model is what lets `TileEncoderFunc._pool`'s own
 rank-4 branch ("[B, C, H, W] -> flatten -> pooling_kinds") handle GAP / rings
 / grid for this CNN with the SAME code that already does it for a ViT's

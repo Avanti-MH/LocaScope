@@ -96,7 +96,7 @@ class Keypoints:
 
 #: The zero point. Nested configs take theirs from here, so the values below are
 #: the ones that reproduce upstream (spec.md 9). ConfigIdentity rule 1: adding a
-#: field needs a baseline entry that reproduces the old behaviour, or every
+#: field needs a baseline entry that reproduces the existing behaviour, or every
 #: checkpoint identity re-hashes -- a recompute, not a wrong answer, but one to
 #: know you are paying for.
 _NET_BASELINE = {
@@ -135,7 +135,7 @@ class KeypointNetConfig(IdentifiedConfig):
 
     #: Upstream's four (spec.md 9). The BASELINE keeps upstream's values and is
     #: append-only (ConfigIdentity rule 1); these DEFAULTS are what runs, and
-    #: two of them left upstream on 2026-08-29 for reasons measured here.
+    #: two of them differ from upstream for reasons measured here.
     nms_radius: int = 4
     border: int = 4
 
@@ -145,7 +145,7 @@ class KeypointNetConfig(IdentifiedConfig):
     #: rules makes every repeatability number a comparison of two extractions as
     #: well as of two views.
     #:
-    #: AND IT COLLIDES WITH THE VALUE OF TOTAL IGNORANCE, measured 2026-08-31.
+    #: AND IT COLLIDES WITH THE VALUE OF TOTAL IGNORANCE.
     #: The detector is a `cell**2 + 1` = 65-way softmax per cell, so a model
     #: that has learnt nothing puts
     #:
@@ -153,13 +153,8 @@ class KeypointNetConfig(IdentifiedConfig):
     #:
     #: on every class -- ABOVE this threshold. For an undertrained detector
     #: every cell therefore passes, NMS thins the field to a couple of thousand,
-    #: and `max_keypoints` picks the top ones out of noise. That is exactly what
-    #: the from-scratch arms did: `points_per_view` came back as the integer
-    #: 420, the cap, on every tile, while their `val/detector` was 3.27 against
-    #: `ln(65) = 4.174`.
-    #:
-    #: A well-trained detector is unaffected -- the `_pre` arms sat at CE 0.19
-    #: and emitted 159 points, their own density. So this value is right for
+    #: and `max_keypoints` picks the top ones out of noise. A well-trained
+    #: detector is unaffected. So this value is right for
     #: what it was chosen for (matching the labels) and unusable as an
     #: instrument on a model that has not converged. `cli/reeval_density.py`
     #: is the answer for measurement: it cuts to a fixed budget with the
@@ -168,22 +163,12 @@ class KeypointNetConfig(IdentifiedConfig):
 
     #: 420, NOT upstream's uncapped 0.
     #:
-    #: WHERE THE NUMBER CAME FROM, CORRECTED 2026-08-31. It was taken from
-    #: `n_kp mean 221 min 85 max 420` in the MakeHaLabels log and written up
-    #: here as "the label corpus's own maximum". It is not. That line is
-    #: `BRACS_1228 ds 4` -- one rung of one slide, and at the time the only
-    #: store that existed (`1 (slide, rung) stores`, two lines above it in the
-    #: same log). Over all 72 (slide, rung) stores the per-rung `n_kp` means
-    #: run 3 to 527, the overall mean is 146, and the corpus maximum is 906.
-    #:
-    #: So 420 is neither the maximum nor a typical density; it is one cell of a
-    #: 72-cell table, read before the other 71 existed. The cap never bound on
-    #: the label side either way (`at-cap 0` in every cell), so the labels are
-    #: unaffected -- what it bound was the STUDENT, and only because
-    #: `detection_threshold` sits under 1/65 (above). Keeping the value pending
-    #: the matched-budget table rather than replacing one guess with another:
-    #: `cli/reeval_density.py` scores every arm at several fixed budgets, and a
-    #: cap chosen from that is an argument about numbers.
+    #: Not the label corpus's maximum (906) nor its mean (146). The cap never
+    #: binds on the label side (`at-cap 0` in every cell); what it binds is the
+    #: STUDENT, and only because `detection_threshold` sits under 1/65 (above).
+    #: Kept pending the matched-budget table: `cli/reeval_density.py` scores
+    #: every arm at several fixed budgets, and a cap chosen from that is an
+    #: argument about numbers.
     #:
     #: WHY A CAP AT ALL, AND WHY NOT 1966. The decoy's match rate rises with
     #: point density: it asks whether a point set shifted past the NMS radius
@@ -197,10 +182,8 @@ class KeypointNetConfig(IdentifiedConfig):
     #:      1,966    29,999    0.912                1.10
     #:
     #: `margin = repeatability / decoy` and `repeatability <= 1`, so the decoy
-    #: IS the ceiling of the metric. The 2026-08-28 run came back with decoy
-    #: 0.92-0.94 and margin 1.03 against a ceiling of 1.10 -- a third of a ten
-    #: per cent range, which is why epoch 0 and epoch 9 were indistinguishable.
-    #: Copying the label side's 1966 would reproduce exactly that. 420 buys a
+    #: IS the ceiling of the metric: at the label side's 1966 the whole
+    #: measurable range is 1.10. 420 buys a
     #: ceiling of 2.47 while still capping nothing the teacher actually did.
     max_keypoints: int = 420
 

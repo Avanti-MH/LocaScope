@@ -21,9 +21,7 @@ THREE AXES, BOTH CONTROLS AND INDEXES
 =======================================
 Every axis is set when sampling and queried afterwards, because those are the
 same information read twice. All three go into `sampler_id`: a corpus cut at
-one setting is not the corpus cut at another, and `FeatureStore.cfg_hash`
-covers the encoder and the mask but nothing about sampling -- so without this,
-two different corpora write the same filename.
+one setting is not the corpus cut at another.
 
     richness   what is IN a tile. Candidates are scored, bucketed, and each
                bucket carries a FLOOR and a CAP -- two constraints of different
@@ -34,11 +32,9 @@ two different corpora write the same filename.
                background fraction (mask only, free), stain saturation,
                entropy.
 
-               THERE IS NO TISSUE GATE. There was, and it scored the same
-               quantity as the buckets -- so the gate could empty a bucket the
-               quota had reserved, and the rung came back short with nothing
-               saying why. A cap of zero on the top buckets is that gate,
-               stated once. See `RichnessConfig` for the 475/500 episode.
+               There is no separate tissue gate: it would score the same
+               quantity as the buckets and could empty a bucket the quota had
+               reserved. A cap of zero on the top buckets is that gate.
     overlap    how much two tiles of the SAME rung may share. Candidates come
                off a lattice whose step is a config field, a fraction of the
                footprint: step=0.5 is a deliberate 50 per cent lattice and
@@ -71,10 +67,6 @@ Any other order breaks, silently:
     overlap first   at ds 32 the footprint is 8192 level-0 px; a disjoint
                     lattice fills up long before the inherited centres are
                     placed.
-
-`ReferenceSampler`, the sampler this replaced, stated the same constraint about
-its inheritance set: "it must be fixed before the per-level quotas are filled, since it consumes
-them."
 
 TWO CONFLICTS, RESOLVED RATHER THAN HIDDEN
 ============================================
@@ -113,8 +105,7 @@ rungs" cannot both hold. `bucket_frame` says which one is given up:
                   with `inherit.share`.
 
 THE DEFAULT IS 'per_rung', because the floors exist to control what each rung
-CONTAINS, and that is the thing every consumer of a single rung depends on. It
-is the same choice the retired `ReferenceSampler` made.
+CONTAINS, and that is the thing every consumer of a single rung depends on.
 
 BUT STAGE B WANTS 'at_inherit'. A survival analysis stratified by bucket --
 "do keypoints in tissue-dense tiles survive the ladder better than ones at the
@@ -178,23 +169,19 @@ because the index is built anyway.
 
 A CHAIN IS COMPLETE OR IT SAYS SO
 ===================================
-The retired `ReferenceSampler` put it as "a correspondence with holes in it is
-not a correspondence." `stacks()` returns complete chains only; `stacks(
-complete_only=False)` returns the rest with the missing rungs named. A
-four-rung chain returned as if it were six reads as "the keypoint died at
-ds 16" when it means "ds 16 never sampled it", and those two are the whole of
-Stage B's conclusion.
+A correspondence with holes in it is not a correspondence. `stacks()` returns
+complete chains only; `stacks(complete_only=False)` returns the rest with the
+missing rungs named. A four-rung chain returned as if it were six reads as
+"the keypoint died at ds 16" when it means "ds 16 never sampled it", and those
+two are the whole of Stage B's conclusion.
 
 A Sample CARRIES COORDINATES, NEVER A HANDLE, NEVER PIXELS
 ============================================================
 An openslide handle cannot be pickled, so a `Sample` holding one kills a
 DataLoader the moment `num_workers > 0`. `SampleMeta` is therefore plain data.
 
-THE PIXELS ARE THE READER'S (2026-10-03). This module decides WHERE; how big
-a read is (`ReadSpec`) and the read itself (`SlideReader`) are not its.
-`Sample.materialise` read the pixels here until then, with its own level px
-and its own filter, while the camera read the same positions with another of
-each -- so the two never agreed on what "the tile at (x, y)" was. Now
+This module decides WHERE; how big a read is (`ReadSpec`) and the read itself
+(`SlideReader`) are not its.
 `SlideReader(wsi, resize='area').read_samples(sampler, ReadSpec(tile, tile))`
 reads them, with the handle the caller owns: a Dataset opens one per worker
 and builds its reader on it.
@@ -214,16 +201,12 @@ PERSISTENCE
 camera. The axis columns join `index.csv`; `stack_kind` and the config belong
 to the batch and go in `meta.json`.
 
-WHAT REPLACED WHAT
-====================
-The previous sampler drew a region uniformly, drew (x, y) uniformly inside it,
-and kept the draw if `has_tissue_l0` passed. It controlled none of the three
-axes and deduplicated nothing. Measured on the corpus it produced -- 17,784
-pre-tiles, 36 cells -- there were 0 exact duplicates but 202,420 overlapping
-PAIRS, and 69.2 per cent of tiles overlapped another. At ds 32 it was every
-tile: a 8192 px footprint sampled 500 times cannot avoid it by luck.
-`RandomStrategy` keeps that behaviour, not as a fallback but as the control
-arm: "how much less overlap does the lattice buy" has to be a measurement.
+THE CONTROL ARM
+================
+`candidates='random'` draws a region uniformly, a position uniformly inside it,
+and keeps it if the tissue gate passes. It controls none of the three axes and
+deduplicates nothing; it is there so that what the lattice buys is a
+measurement.
 """
 
 from __future__ import annotations
@@ -239,19 +222,9 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-# ── the rung a tile is cut at ────────────────────────────────────────────────
-#
-# `RungPlan` is `utilities/DsLadder.py`'s, not a second one. That file already
-# resolves a rung to (level, read_size, shrink, footprint) for a given slide,
-# which is the whole of what a sampler needs to know about the pyramid -- and
-# it is the only place that knows ds 2 is native on a 2x pyramid and a shrink
-# on a 4x one. A local copy would be a second class with the same name and
-# overlapping fields, which `extract_pretiles` (which imports both) would have
-# had to disambiguate at every use.
-#
-# Two fields were added there rather than here, for the same reason:
-# `reserve_l0` (what must FIT, when a caller reads a pre-tile around the tile)
-# and `stack_kind`.
+# `RungPlan` is `DsLadder`'s: it resolves a rung to (level, read_size, shrink,
+# footprint) for a slide, and is the one place that knows ds 2 is native on a
+# 2x pyramid and a shrink on a 4x one.
 
 from Cache import (atomic_dir, check_source, source_key,         # noqa: E402
                    wsi_stem_of)
@@ -297,8 +270,7 @@ class PlanSpec:
     around it, so the sampler never decides either. The tile size is the
     camera's sensor; the reserve is what the camera reads beyond its
     footprint, computed by `ReadSpec.place` from the numbers the camera
-    itself will use. The routing heads' tile camera rotates, and before the
-    reserve came from it they lost 1.3% of bracs positions off the slide.
+    itself will use.
 
     Both halves are in `key`, so a draw made for one camera is never read back
     for another.
@@ -514,22 +486,10 @@ SCORERS = {
 }
 
 def bucket_names(edges: Sequence[float]) -> Tuple[str, ...]:
-    """Bucket names, DERIVED from the edges rather than written down.
-
-    A written-down name drifts from the edge it describes. `BUCKETS` used to be
-    the literal `('lt15', 'mid', 'gt70', 'gt80', 'full')`, and the moment the
-    cuts moved to 0.15/0.30/0.50/0.70/0.85/0.95 three of those five names were
-    lying about which interval they stood for -- while still being written into
-    `index.csv` as the column a corpus is filtered by.
-
-    So the name IS the interval: `bg30_50` is background in [0.30, 0.50).
-
-    THE COST, STATED. The old tuple's comment promised that these were "the
-    same five and the same order as `ReferenceSampler.BUCKETS`, so a corpus cut
-    here and a reference bank cut there can be compared bucket for bucket".
-    Seven derived names broke that. `ReferenceSampler` has since been retired
-    and its reference banks are drawn here, and a comparison against names that lie is
-    not a comparison worth keeping -- but it is a real loss and not a free one.
+    """Bucket names, DERIVED from the edges rather than written down, so a
+    name cannot drift from the interval it stands for while still being the
+    `index.csv` column a corpus is filtered by: `bg30_50` is background in
+    [0.30, 0.50).
     """
     cuts = [0.0] + [float(e) for e in edges] + [1.0]
     return tuple(f'bg{int(round(cuts[i] * 100)):02d}_{int(round(cuts[i + 1] * 100)):02d}'
@@ -542,15 +502,6 @@ def assign_buckets(score: np.ndarray, edges: Sequence[float]) -> np.ndarray:
     `side='right'` puts a score EQUAL to an edge in the upper bucket, which is
     the reading of "背景比高於 15% ~ 低於 30%": 0.15 belongs to the second
     bucket, not the first. A score of exactly 1.0 lands in the last one.
-
-    THE `full` SPECIAL CASE IS GONE. It was a CLOSED bucket at [1.0, 1.0], on
-    the argument that "a footprint the mask calls entirely background is a
-    different thing from one it calls 99 per cent background -- the first is off
-    the tissue altogether and the second is an edge". That argument earned its
-    keep while the two carried different quotas. Under the settled contract both
-    `bg85_95` and `bg95_100` are capped at zero and neither is reachable, so the
-    distinction no longer changes any behaviour -- and an unreachable special
-    case is a branch nothing tests.
     """
     return np.searchsorted(np.asarray(edges, dtype=np.float64),
                            np.asarray(score, dtype=np.float64),
@@ -624,7 +575,7 @@ def spill_order(caps: Sequence[float], target: Sequence[float]) -> Tuple[int, ..
 class RichnessConfig:
     """What is in a tile, and how much of each kind is wanted.
 
-    THE CONTRACT, SETTLED 2026-08-27. Seven buckets on the background fraction,
+    THE CONTRACT. Seven buckets on the background fraction,
     each carrying a FLOOR and a CAP -- two constraints of different natures and
     therefore two tuples, not one:
 
@@ -646,33 +597,19 @@ class RichnessConfig:
     receive nothing -- their ceilings exist as somewhere a SHORTFALL can go, and
     a shortfall is the only thing that ever reaches them.
 
-    THREE ARITHMETIC GUARDS, and the middle one is the 475/500 bug itself:
+    THREE ARITHMETIC GUARDS:
 
         sum(floors) <= 1      or no rung can satisfy every floor at once
         sum(caps)   >= 1      or the rung is short BY CONSTRUCTION
         floors <= caps        elementwise
 
-    The old contract passed the middle guard by exactly nothing to spare --
-    0.85 + 0.15 = 1.00 -- which is why the fine rungs stopped dead on 85/15 and
-    read as a supply measurement when they were the caps themselves.
-
-    THE TISSUE GATE IS GONE, and its removal is what makes `bg50_70` and
-    `bg70_85` reachable at all. The gate and the buckets scored the SAME
-    quantity: `score_background` is `white_fractions`, and `tissue >=
-    tissue_ratio` is `background <= 1 - tissue_ratio`. At the settled 0.5 the
-    gate deleted every candidate above 50 per cent background before a bucket
-    ever saw it, so reserving share for those buckets did not produce tiles --
-    it produced a SHORT RUNG. The 2026-08-26 corpus came back 475/500 and the
-    number was read as a property of the slides.
-
-    A zero cap now says everything the gate said, and says it once:
-    `bg85_95` and `bg95_100` at 0 is exactly a gate at 85 per cent background.
+    There is no tissue gate besides the caps: `bg85_95` and `bg95_100` at 0 is
+    exactly a gate at 85 per cent background.
     """
     scorer: str = 'background'
 
     #: Cuts on the score, ascending, strictly inside (0, 1). Six cuts, seven
-    #: buckets. `bucket_names` derives the names from these so the two cannot
-    #: drift apart, which they had.
+    #: buckets. `bucket_names` derives the names from these.
     edges: Tuple[float, ...] = (0.15, 0.30, 0.50, 0.70, 0.85, 0.95)
 
     #: Smallest share of a rung each bucket must receive. NOT achievable by
@@ -681,15 +618,14 @@ class RichnessConfig:
     floors: Tuple[float, ...] = (0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0)
 
     #: Largest share of a rung each bucket may receive. A zero is HARD: it binds
-    #: the inherited set too, which is the one place a cap used to be advisory.
+    #: the inherited set too.
     caps: Tuple[float, ...] = (0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0)
 
     #: 'per_rung' | 'at_inherit'. See the spec above -- the two requirements
     #: are not both satisfiable and this says which is given up.
     bucket_frame: str = 'per_rung'
 
-    #: 'ask' | 'taken'. WHAT THE FLOORS ARE A SHARE OF, and the 3b probe of
-    #: 2026-08-27 is why it is a switch rather than a constant.
+    #: 'ask' | 'taken'. WHAT THE FLOORS ARE A SHARE OF.
     #:
     #:   'ask'    a share of `n_per_rung`. What was asked for is the frame, so
     #:            a rung that cannot supply the mix takes everything it has and
@@ -788,8 +724,7 @@ class OverlapConfig:
     #: the default, and the only spelling of it. `_lattice` multiplies by the
     #: rung's `footprint_l0`, so the step is the same fraction at every rung:
     #: as a LEVEL-0 constant it would be disjoint at ds 1 and 87 per cent
-    #: overlapping at ds 8 -- the trap `jitter_offsets` below records for its
-    #: own values.
+    #: overlapping at ds 8.
     step: float = 1.0
 
     #: Largest area fraction any two tiles of a rung may share. 0.0 admits
@@ -801,18 +736,11 @@ class OverlapConfig:
     overlapping_share: float = 0.0
 
     #: Displacements offered when a bucket runs out of lattice, **as fractions
-    #: of the tile**. The retired `ReferenceSampler` wrote the same five as absolute
-    #: pixels -- (64, 256), (256, 64), (192, 256), (256, 192), (320, 320) --
-    #: which are those numbers for a 256 px tile and are FOUR TIMES the tile at
-    #: 64. Its own docstring argued that the units matter ("as level-0
-    #: constants they would be 87% overlap at ds=8") and then picks one that
-    #: holds for a single tile size. Fractions hold for every one.
+    #: of the tile**, so they mean the same overlap at every tile size.
     #:
     #: Two properties, and an entry must have both:
     #:     disjoint from the parent   max(|dx|, |dy|) >= 1
     #:     not a lattice position     dx or dy not a multiple of 1/2
-    #: Three of the five originally there were multiples of 128 px -- half of a
-    #: 256 tile -- and failed the second.
     jitter_offsets: Tuple[Tuple[float, float], ...] = (
         (0.25, 1.0), (1.0, 0.25), (0.75, 1.0), (1.0, 0.75), (1.25, 1.25))
 
@@ -824,11 +752,8 @@ class OverlapConfig:
     #: four lattice tiles -- 75 per cent for four of the five offsets, 56 for
     #: the fifth -- and `max_overlap_ratio = 0` rejects all of them. The lattice
     #: IS the maximum set. A non-zero cap there promises a top-up that cannot
-    #: happen, and the bucket stays short with nothing saying why.
-    #:
-    #: It means something as soon as overlap is allowed, which is what the
-    #: retired `ReferenceSampler` assumed: it had these offsets and no overlap
-    #: bound at all.
+    #: happen, and the bucket stays short with nothing saying why. It means
+    #: something as soon as overlap is allowed.
     jitter_cap: float = 0.0
 
     def __post_init__(self):
@@ -941,15 +866,12 @@ def _config_parts(cfg, prefix: str = '') -> List[str]:
 class SamplerConfig:
     """Everything that decides WHICH tiles are chosen. Hashed into `sampler_id`.
 
-    The hash is the point, and `FeatureStore.py`'s own comment says why: its
-    `cfg_hash` covers the encoder and the mask and nothing about sampling, so
-    two runs with different quotas or a different seed produce the same
-    filename. Two corpora, one name, and the reader gets whichever ran first.
+    Two runs with different quotas or a different seed are two corpora, and
+    the hash gives them two names.
 
     NO TILE SIZE. How big a footprint is belongs to the camera
-    (`PlanSpec.camera`), and every quantity here is relative to the footprint.
-    It was a field until 2026-10-03, which let a sampler config and the camera
-    that rendered its positions disagree about the same number.
+    (`PlanSpec.camera`), and every quantity here is relative to the footprint,
+    so a sampler config and the camera cannot disagree about it.
     """
     n_per_rung: int = 500
     seed: int = 0
@@ -958,13 +880,9 @@ class SamplerConfig:
     overlap:  OverlapConfig  = field(default_factory=OverlapConfig)
     inherit:  InheritConfig  = field(default_factory=InheritConfig)
 
-    #: 'lattice' | 'random'. 'random' reproduces the sampler this file
-    #: replaced -- a region drawn uniformly, a position drawn uniformly inside
-    #: it, kept if the tissue gate passes -- and it is here as the CONTROL ARM,
-    #: not as a fallback. "How much overlap does the lattice remove" has to be
-    #: a measurement against something, and the something is the thing that was
-    #: actually run: 202,420 overlapping pairs over 17,784 tiles, 69.2 per cent
-    #: of them touching another, and every single tile at ds 32.
+    #: 'lattice' | 'random'. 'random' is the CONTROL ARM, not a fallback: a
+    #: region drawn uniformly, a position drawn uniformly inside it, kept if
+    #: the tissue gate passes -- what the lattice's overlap is measured against.
     candidates: str = 'lattice'
 
     #: Rejection budget for candidates='random'. Meaningless for a lattice,
@@ -972,9 +890,8 @@ class SamplerConfig:
     #: it changes which tiles come out of the random arm.
     max_tries_per_tile: int = 5
 
-    # No region prep here. It belongs to the mask's recipe
-    # (`TissueMaskConfig.min_region_ratio` / `merge`, hashed into `region_id`),
-    # and a second copy of it here ran the same prep twice under two configs.
+    # No region prep here: it belongs to the mask's recipe
+    # (`TissueMaskConfig.min_region_ratio` / `merge`, hashed into `region_id`).
 
     def __post_init__(self):
         if self.candidates not in ('lattice', 'random'):
@@ -1073,15 +990,10 @@ class SampleMeta:
 
         `reserve_l0` is what was ASKED for and `footprint + 2*margin` is what
         the geometry can actually centre, and they differ by one whenever
-        `reserve_l0 - footprint` is odd -- which it is whenever
-        `DsLadder.footprint_l0` (a float: `read_size * level_ds`) times the
-        factor lands off a whole number. `int(4096.4 * 3)` is 12289, the pad is
-        `(12289 - 4096) // 2 = 4096`, and `4096 + 2*4096` is 12288. One px.
-        A region with room to spare absorbs it; a region whose far edge IS the
-        mask's -- which at a coarse rung is the only kind left, because
-        `patchable` has removed every smaller one -- has nothing to
-        absorb it with, and the read runs one px off the scanned rectangle.
-        Deriving it here means the two can no longer be different numbers.
+        `reserve_l0 - footprint` is odd: `int(4096.4 * 3)` is 12289, the pad is
+        `(12289 - 4096) // 2 = 4096`, and `4096 + 2*4096` is 12288. A region
+        whose far edge is the mask's has no room to absorb that px, so the
+        reserve is the one the geometry centres.
         """
         return int(self.footprint_l0) + 2 * self.margin
 
@@ -1115,8 +1027,8 @@ class SampleMeta:
 
 
 class Sample:
-    """One tile's place: its `SampleMeta`. No pixels -- a camera reads those
-    (`SlideReader.read_samples`); see the module docstring for why the read left."""
+    """One tile's place: its `SampleMeta`. No pixels -- a reader reads those
+    (`SlideReader.read_samples`)."""
 
     __slots__ = ('meta',)
 
@@ -1140,11 +1052,8 @@ class RungReport:
     `n_below_floor`, and it is a different fact -- the first says a bucket was
     held back, the second says the slide did not have it.
 
-    `n_after_gate` is GONE along with the gate it counted. The tissue gate and
-    the buckets scored the same quantity, so the gate could empty a bucket the
-    quota had reserved and the rung came back short with nothing saying why.
-    What survives is `n_admissible`: candidates whose bucket has a non-zero
-    cap, which is the same filter expressed once instead of twice.
+    `n_admissible` counts candidates whose bucket has a non-zero cap -- the
+    tissue gate, expressed through the caps.
     """
     ds: float
     n_candidates: int = 0
@@ -1220,18 +1129,12 @@ class TileSampler:
 
         The mask arrives with its recipe's region prep already applied
         (`TissueMaskConfig.regions`), so all that is left is the one step that
-        depends on the rung. It used to run filter, merge and patchable here in
-        place and undo all three afterwards, with its own copy of the recipe's
-        `min_region_ratio` -- so the same prep ran twice under two configs,
-        and a rung's candidates depended on the undo count being right.
+        depends on the rung.
 
         The TILE's footprint, not the reserve, and that is the whole of the
         two-rectangle rule in `_lattice`: the TILE is the training sample and
         has to be in tissue; the RESERVE is only context for a warp and has to
-        be READABLE. Requiring the reserve to fit a single region was the
-        earlier rule and it cost the coarse rungs almost everything: at ds 32
-        it demanded a region 24576 px wide, and BRACS_1228 came back with 21
-        tiles of 500 while S1104233 came back with 0.
+        be READABLE.
         """
         if plan.is_rect:
             # a region hosts a rectangular FoV if it holds the RECTANGLE;
@@ -1274,8 +1177,7 @@ class TileSampler:
         The step is a fraction of the footprint and is converted here, which
         is the whole reason it is not a level-0 constant: as a level-0 number it
         would be a disjoint lattice at ds 1 and an 87 per cent overlapping one
-        at ds 8. The retired `ReferenceSampler.JITTER_OFFSETS` recorded the same
-        trap for its own offsets.
+        at ds 8.
         """
         # A fraction of the footprint, so the same step at every rung and on
         # either stack: the footprint grows with ds on an 'F' rung and is held
@@ -1328,16 +1230,12 @@ class TileSampler:
     def _random_candidates(self, plan: RungPlan) -> np.ndarray:
         """The control arm: uniform draws inside a uniformly drawn region.
 
-        This is what the previous sampler did, kept so that the lattice's gain
-        is measured against the thing that actually ran rather than against
-        zero. It shares the gate and the selection with the lattice, so the
-        only difference between the two arms is where the candidates came
-        from -- which is what makes the comparison mean anything.
+        It shares the gate and the selection with the lattice, so the only
+        difference between the two arms is where the candidates came from --
+        which is what makes the comparison mean anything.
 
         Draws `n_per_rung * max_tries_per_tile` positions and hands them all
-        to the same gate. The old code interleaved drawing and accepting,
-        which made `max_tries` a budget on ACCEPTED tiles; separating them
-        costs a few thousand wasted draws and makes the two arms comparable.
+        to the same gate, so the budget is on draws, not on accepted tiles.
         """
         regions = self._regions(plan)
         if not regions:
@@ -1375,17 +1273,8 @@ class TileSampler:
 
         `_lattice` bakes this into its range bounds, so a lattice position
         cannot fail it. The two paths that place a position NOT from the
-        lattice -- `_top_up` and `_place_inherited` -- have to ask, and until
-        2026-08-27 neither did.
-
-        What that cost, and it is a good illustration of why the assertion in
-        `extract_pretiles` is an assertion and not a repair: at ds 8 and above
-        the richness quotas run the buckets short, `_top_up` starts displacing,
-        and a displacement of up to 1.25 tiles walks straight past the region
-        edge. The pre-tile then ran off the scanned rectangle by 94 to 2560 px
-        -- while every FINE rung passed, because there the lattice filled the
-        quotas and the top-up never ran. A repair would have written those
-        tiles with a `clip_px` and nobody would have looked.
+        lattice -- `_top_up` and `_place_inherited` -- have to ask: a top-up
+        displacement of up to 1.25 tiles can walk past the region edge.
         """
         fp = int(plan.footprint_l0)
         pad = _margin_of(plan)
@@ -1399,12 +1288,9 @@ class TileSampler:
         """Score and bucket a set of positions. One door for every caller.
 
         `sample`, `preflight`, `_choose_centres` and `_place_inherited` all
-        need the same two arrays, and until 2026-08-27 three of them got the
-        bucket a different way -- `_place_inherited` borrowed the NEAREST
-        lattice candidate's via `_nearest`, which was an approximation that
-        nothing downstream knew about. Now that a zero cap REFUSES an inherited
-        tile, an approximate bucket would decide whether a chain lives, so the
-        approximation had to go.
+        need the same two arrays. An inherited tile is scored at its own
+        position, not borrowed from a nearby candidate: a zero cap refuses it,
+        so its bucket decides whether a chain lives.
         """
         if not len(xy):
             return np.zeros(0, np.float32), np.zeros(0, np.int8)
@@ -1443,11 +1329,9 @@ class TileSampler:
     def _admissible(self, bucket: np.ndarray) -> np.ndarray:
         """Positions whose bucket has a non-zero cap.
 
-        THIS IS THE TISSUE GATE, ONCE. `tissue_ratio` used to say
-        `background <= 1 - ratio` and the caps said it again per bucket, and
-        the two disagreeing is the whole 475/500 episode. A zero cap on
-        `bg85_95` and `bg95_100` is a gate at 85 per cent background, stated in
-        the only place that also decides what happens to everything below it.
+        THIS IS THE TISSUE GATE. A zero cap on `bg85_95` and `bg95_100` is a
+        gate at 85 per cent background, stated in the only place that also
+        decides what happens to everything below it.
         """
         caps = np.asarray(self.cfg.richness.caps, dtype=np.float64)
         if not len(bucket):
@@ -1663,10 +1547,8 @@ class TileSampler:
                 x = int(parent.x + round(dx * fp))
                 y = int(parent.y + round(dy * fp))
                 # Scored on its OWN position rather than inheriting the
-                # parent's bucket. The old code kept the parent's on the
-                # argument that rescoring "would need the mask again per
-                # offer" -- but the offer is a FULL TILE away and disjoint, so
-                # the parent's bucket was a claim about different pixels. One
+                # parent's bucket: the offer is a FULL TILE away and disjoint, so
+                # the parent's bucket would be a claim about different pixels. One
                 # `white_fractions` call on one position is the cost.
                 offer = np.array([[x, y]], dtype=np.int64)
                 oscore, ob = self._rate(offer, plan)
@@ -1859,20 +1741,11 @@ class TileSampler:
 
         for plan in plans:
             # EVERY RUNG STARTS FROM THE SAME SEED. `_select` draws a
-            # permutation of the candidates, so a shared stream makes ds 2's
-            # tiles depend on how many draws ds 1 happened to make -- and when
-            # one sampler began serving every rung (2026-09-01, so that
-            # inheritance could fix one set of centres across them) that is
-            # exactly what happened. `sampler_id` hashes the CONFIG, not the
-            # code, so the corpus changed underneath an unchanged id: the one
-            # failure that field exists to prevent.
-            #
-            # Reset here rather than seeding per rung, because that also
-            # restores the behaviour of the per-rung samplers this replaced: at
-            # `inherit.share = 0` the tiles are bit-identical to the corpus of
-            # 2026-08-27, so it can still be regenerated. The centres are drawn
-            # ABOVE this loop and keep their own draw, so a rung's tiles do not
-            # depend on whether inheritance ran either.
+            # permutation of the candidates, so a shared stream would make
+            # ds 2's tiles depend on how many draws ds 1 happened to make, and
+            # `sampler_id` hashes the config, not the draw count. The centres
+            # are drawn ABOVE this loop and keep their own draw, so a rung's
+            # tiles do not depend on whether inheritance ran either.
             self._rng = np.random.default_rng(cfg.seed)
 
             report = RungReport(ds=plan.rung_ds, n_asked=cfg.n_per_rung)
@@ -2084,9 +1957,8 @@ class TileSampler:
         pixels read on demand by whoever loads it, through a camera.
 
         The layout is `Store.PreTileStore`'s, not a second one. What this adds
-        is the axis columns. (A `with_images` flag wrote PNGs here until
-        2026-10-03; pixels are a camera's, and `extract_pretiles` is the one
-        writer of them.)
+        is the axis columns. Pixels are not written here: `extract_pretiles`
+        is the one writer of them.
         """
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
@@ -2315,9 +2187,6 @@ class TileSampler:
         if chains or broken:
             print(f'chains     : {len(chains)} complete, {len(broken)} broken')
         return self
-
-
-# ── what the previous sampler's callers hit ──────────────────────────────────
 
 
 # ── command-line control of the configs above ────────────────────────────────

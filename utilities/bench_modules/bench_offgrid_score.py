@@ -44,9 +44,8 @@ are wrong and no score in the output means anything.
 
 Reading one tile at a time, not the region
 ------------------------------------------
-Reading a whole tissue region in one call -- what the retired
-`WsiTissuesContainer` did -- is catastrophic here (an unsegmented L0 region is
-18.7 Gpx; one such read took 4083 s, see TODO 2026-08-13). This needs only
+Reading a whole tissue region in one call is catastrophic here (an
+unsegmented L0 region is 18.7 Gpx; one such read took 4083 s, see TODO.log). This needs only
 (R+2) x (C+2) tiles around each grid point, so it reads exactly that window,
 one native `SlideReader.read`, and cuts its main and offset tiles from the
 window's own (0, 0).
@@ -781,8 +780,8 @@ def encoder_from_rows(rows, fallback: str = '') -> str:
     heatmap drawn from two encoders is a picture of neither -- and it would
     look exactly like a picture of one.
 
-    Empty when the rows predate the column, which leaves the old filenames
-    unchanged so --plot-only over an old CSV still redraws what it drew.
+    Empty when the rows have no `encoder` column, so --plot-only over such a
+    CSV redraws under the same filenames.
     """
     seen = {r.get('encoder', '') for r in rows} - {''}
     if len(seen) > 1:
@@ -933,8 +932,7 @@ def main() -> int:
           f'domain_gap={args.domain_gap}')
     # One encoder per preprocess, over ONE loaded model. variant() shares the
     # weights and swaps only the pipeline, so the second arm costs a forward
-    # pass and not another 4.5 GB. dtype='fp32' keeps what the free function
-    # defaulted to before this call site moved to a config.
+    # pass and not another 4.5 GB.
     #
     # The transform is REPLACED rather than edited, and that carries a hazard
     # worth naming now that --encoder exists: TransformConfig(preprocess=name)
@@ -942,8 +940,7 @@ def main() -> int:
     # GigaPath's 256/224 bicubic ImageNet numbers. For UNI2 or CONCH that would
     # silently substitute another model's preprocessing -- so it is built off
     # the encoder's OWN transform, with only `preprocess` changed.
-    # Passed only when given, so gigapath and uni2 build byte-identical configs
-    # to before this option existed and their identity_id does not move.
+    # Passed only when given, so gigapath and uni2 keep their identity_id.
     over = {'head': args.head} if args.head else {}
     cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp32')

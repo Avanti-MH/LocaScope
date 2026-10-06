@@ -20,28 +20,17 @@ gives
 
     decoy ~ 1 - exp(-81 N / tile^2)
 
-so the decoy, and with it the ceiling `1/decoy`, is a function of N. The
-2026-08-31 run came back with
+so the decoy, and with it the ceiling `1/decoy`, is a function of N: two arms
+at different densities are two operating points, not two results.
 
-    arm        pts/view   decoy   margin   ceiling
-    gray            420   0.442     1.50      2.26
-    rgb             420   0.420     1.57      2.38
-    gray_pre        159   0.221     3.59      4.52
-    rgb_pre         161   0.222     3.56      4.51
+A THRESHOLD CAN MAKE THE COUNT THE CAP. A count that lands on `max_keypoints`
+to the integer is the cap selecting, not the model. The reason is arithmetic:
+the detector is a 65-way softmax per cell, so a model that has learnt nothing puts 1/65 = 0.015385 on every class,
+and a `detection_threshold` of 0.015 sits BELOW the value of total ignorance.
+For an undertrained detector every cell passes it, NMS thins the field to a few
+thousand, and the cap picks by score.
 
-and those two groups are not two results, they are two operating points. The
-`_pre` arms did not win by 2.4x; they were scored at a third of the density,
-where the ceiling is twice as high.
-
-WORSE, THE 420 IS NOT A POINT COUNT. It is `max_keypoints`, exactly, on every
-tile -- and a count that lands on the cap to the integer is the cap selecting,
-not the model. The reason is arithmetic: the detector is a 65-way softmax per
-cell, so a model that has learnt nothing puts 1/65 = 0.015385 on every class,
-and `detection_threshold` was 0.015. The threshold sits BELOW the value of
-total ignorance. For an undertrained detector every cell passes it, NMS thins
-the field to a few thousand, and the cap picks 420 of them by score.
-
-SO THE FIX IS TO STOP USING A THRESHOLD HERE. `--budgets` cuts each view to
+SO THIS USES NO THRESHOLD. `--budgets` cuts each view to
 exactly the top N by score (`score_threshold=0` and `max_points=N`), which pins
 the density by construction and makes the decoy the same quantity for every
 arm. `--native` keeps the trained rule as one more row, so the number the
@@ -87,9 +76,9 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from cli import (RESULT_DIR, add_corpus_arg, add_pretile_args,    # noqa: E402
-                 corpus_arg, job_result_dir, pretile_root,
-                 setup_import_paths)
+from cli import (RESULT_DIR, add_corpus_arg, add_labels_args,       # noqa: E402
+                 add_pretile_args, corpus_arg, job_result_dir, labels_root,
+                 pretile_root, setup_import_paths)
 
 setup_import_paths()
 
@@ -106,7 +95,6 @@ from SuperPoint.KeypointNet import KeypointNetConfig              # noqa: E402
 from SuperPoint.Trainer import (_repeatability,                   # noqa: E402
                                 _repeatability_row)
 
-DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 #: NOT `job_result_dir('TrainSuperPathPoint')`. That function returns
 #: `$SLURM_JOB_NAME or default_name`, which is right for an OUTPUT directory and
 #: wrong for an input one: submitted as ReEvalSuperPathPoint it would look for
@@ -237,10 +225,9 @@ def _check_val_size(val_set, history, arm):
 def _slides_from(recorded, corpus):
     """The held-out stems a checkpoint recorded, in either of the two formats.
 
-    Since 2026-08-31 the writer uses `json.dumps`, which needs no undoing. What
-    follows is for the checkpoints written BEFORE that -- including every arm of
-    the 2026-08-31 run, which are the only detectors Stage B can currently use,
-    so dropping the old path would strand them.
+    The writer uses `json.dumps`, which needs no undoing. What follows is for
+    checkpoints that recorded `','.join(stems)`, which Stage B's detectors
+    still are.
 
     UNDOING `','.join(stems)` WHEN A STEM CAN ITSELF CONTAIN COMMAS.
 
@@ -428,7 +415,7 @@ def main():
                     help="drop the trained threshold's row from the table")
     add_pretile_args(ap, tile=False)
     add_corpus_arg(ap, default=None)    # None: the checkpoint's own
-    ap.add_argument('--labels-root', default=DEFAULT_LABEL_ROOT)
+    add_labels_args(ap)
     ap.add_argument('--val-slides', nargs='+', default=None,
                     help='default: whichever the checkpoint says it held out')
     ap.add_argument('--ds', type=float, nargs='+', default=list(DEFAULT_RUNGS))
@@ -437,6 +424,7 @@ def main():
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
+    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
 
     bad = [n for n in args.budgets if n < 1]
     if bad:

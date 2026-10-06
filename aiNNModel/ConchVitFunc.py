@@ -128,12 +128,9 @@ CONCH_META = 'meta.yaml'
 #: which the `git clone https://huggingface.co/MahmoodLab/CONCH` that produced
 #: it already used.
 #:
-#: It WAS that clone; its .git was deleted to reclaim the second copy git-lfs
-#: keeps, so it is now a plain directory of files. The difference is not
-#: cosmetic -- there is no `git pull` to repair it any more, and the hub
-#: fallback below is the only remedy left. That fallback is unchanged, so
-#: deleting the directory still costs a download and nothing else, but the
-#: download is the one that has failed on gating before.
+#: It is a plain directory of files (no .git, so no `git pull` repairs it);
+#: the hub fallback below is the only remedy. Deleting the directory costs a
+#: download and nothing else, but that download is the one gating can fail.
 #:
 #: Override with CONCH_WEIGHTS_DIR. An absolute path is deliberate: this is
 #: outside the checkout, like everything else a run needs.

@@ -24,12 +24,8 @@ aspect ratio differs slightly from the span it covers.
 Regions are views, not state
 ----------------------------
 `filtered`, `merged`, `patchable` and `raw` each return a NEW TissueMask that
-shares the raster and owns its region list. They used to edit the region list
-in place and push a snapshot onto an undo stack, and every caller had to undo
-exactly as many times as it had filtered -- "Pushes 2 snapshots" was a
-docstring line callers were expected to honour, and a view taken from a mask
-shared the stack unless someone remembered to give it its own. A view cannot
-leak into the mask it came from, so there is nothing to undo.
+shares the raster and owns its region list. A view cannot leak into the mask it
+came from, so there is nothing to undo.
 """
 
 import copy

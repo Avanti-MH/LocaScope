@@ -10,18 +10,16 @@ Run through `jobscripts/TestReadPath.sh`. Needs a slide; no GPU, no model.
            (sensor + margin, or the bounding square); `stack='R'` is the ds 1
            read degraded; `read_samples` refuses a sample off the slide. The
            decoy for "untouched" is the same read one level px over.
-    grid   `read_grid` against what the retired `WsiTissuesContainer` did -- ONE
-           `read_region_rgb` of the region, main tile (r, c) cut at
-           (c*T, r*T), offset tile at (c*T + T/2, r*T + T/2). Blocks at an
-           integer ds, one read per region otherwise; every tile must equal
-           the container's to the pixel. The decoy is the reference read one
+    grid   `read_grid` against ONE `read_region_rgb` of the region, main
+           tile (r, c) cut at (c*T, r*T), offset tile at (c*T + T/2,
+           r*T + T/2). Blocks at an integer ds, one read per region
+           otherwise; every tile must equal the reference's to the pixel. The decoy is the reference read one
            level px to the right: it must differ, or the region is blank glass.
     scale  `native_scale`: each level, asked 0.04% off, gives back itself and
            its own downsample, which `level_of` maps to the same level; neither
            or both of mpp / ds is refused.
 
-(Was test_grid_reader.py, the grid half alone, until GridReader became
-SlideReader on 2026-10-03. The geometry is test_read_geometry.py.)
+The geometry is test_read_geometry.py.
 """
 from __future__ import annotations
 
@@ -215,9 +213,7 @@ def run_grid(slide, level, workers) -> list:
 
 def run_scale(slide) -> list:
     """native_scale must return a real level and THAT level's own downsample,
-    and refuse a call that gives neither or both of mpp / ds. (Was
-    test_patching_lib's validate_resolve_scale, when this was
-    WsiTissuesContainer.resolve_scale.)"""
+    and refuse a call that gives neither or both of mpp / ds."""
     failures = []
     reader = SlideReader(slide)
     for bad in ({}, {'mpp': 0.5, 'ds': 2.0}):

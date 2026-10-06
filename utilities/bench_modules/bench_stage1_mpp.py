@@ -28,8 +28,7 @@ per (FoV, voting method). utilities/cli/metrics/analyze_stage1_metrics.py
 scores them, the vote diagnosis included. The scoring lives there, not here:
 this bench only produces rows.
 
-Split out of bench_mpp_feature_decomposition.py (2026-09-29), where it was the
-`stage1_compare` part. That file's other three parts (axes, subspace_knn,
+bench_mpp_feature_decomposition.py's parts (axes, subspace_knn,
 sampler_routing) investigate the feature space and read cached stores; this
 one measures the production estimators and reads no store, which is why it
 has its own job and result directory. Its cache job defaults to
@@ -105,7 +104,7 @@ def write_csv(rows, path) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PART "stage1_compare"  --  NEW, 2026-09-17
+#  PART "stage1_compare"
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # Compares whichever stage-1 mpp estimators are named on the command line
@@ -132,15 +131,12 @@ def _sampling_recipe_id(args) -> str:
         f'mpixels={args.mpixels}', f'ratio={args.ratio}',
         f'datasets={",".join(sorted(args.datasets))}', f'n_wsi={args.n_wsi}']
         # --overlap draws other FoVs (jitter top-up at the coarse rungs), so it
-        # is part of "which FoVs". Missing until 2026-10-05: a val run without
-        # it and a test run with it shared one name, and the test analysis
-        # read thresholds fitted on another draw. Appended only when set, so
-        # a run without it keeps the name it always had.
+        # is part of "which FoVs": without it a val run and a test run would
+        # share one name. Appended only when set.
         + (['overlap=True'] if args.overlap else [])
         # A subset of the same draw: the first k positions of every rung.
         + ([f'fov_per_rung={args.fov_per_rung}'] if args.fov_per_rung else [])
-        # The photos are `Render`'s since 2026-10-06, placed for its rotated
-        # read: other FoVs and other pixels, so not the files made before.
+        # The photos are `Render`'s, placed for its rotated read.
         + ['photo=render'])
     sampler_id = hashlib.sha256(parts.encode()).hexdigest()[:8]
     mask_cfg = MASK_RECIPES[args.seg]
@@ -204,28 +200,18 @@ def _method_specs(args) -> list:
         # mlp_width_mult/mlp_residual. 'head_name' is the HEAD_CHOICES key
         # cli/train.py trained it under (`for name, head in heads.items():
         # save_tagged(..., name, ...)`), already stored in every checkpoint
-        # -- so this needs no Checkpoints.py change, only reading the field
-        # that was already there. Using 'classifier' here made
-        # analyze_stage1_metrics.py's method_of() collapse all five mlp
-        # variants into one 'uni2+mlp+fixed' label, averaging five actually-
-        # different trained models into one number.
+        # -- so analyze_stage1_metrics.py's method_of() does not collapse the
+        # five mlp variants into one 'uni2+mlp+fixed' label.
         #
-        # `loss` (2026-09-22): the SAME class of gap -- ckpt['args']['loss']
-        # (train.py's own `--loss`, default 'bal') is not part of `head_name`
-        # either, so a bal- and an ord_a-trained arcface head would collapse
-        # into one 'gigapath+arcface' method_of() label without this,
-        # averaging two differently-trained models the same way the mlp
-        # variants did before 'classifier' switched to head_name. `.get`,
-        # not `[...]`: a checkpoint trained before `--loss` existed has no
-        # `'loss'` key in `args` at all, and 'bal' was every run's behaviour
-        # before that flag was added, so it is the correct default, not a
-        # guess.
+        # `loss`: the SAME class of gap -- ckpt['args']['loss'] (train.py's
+        # own `--loss`, default 'bal') is not part of `head_name` either, so
+        # a bal- and an ord_a-trained arcface head would share one label.
+        # `.get` with 'bal': a checkpoint without the key was trained bal.
         specs.append(dict(
             kind='classifier', encoder=ckpt['encoder'],
             classifier=ckpt['head_name'], reduction=ckpt['reduction'],
             loss=ckpt.get('args', {}).get('loss', 'bal'),
-            # how the head was TRAINED (2026-10-02), the same gap one level
-            # further: a pyramid- and a resampled-trained head of one loss
+            # how the head was TRAINED, the same gap one level further: a pyramid- and a resampled-trained head of one loss
             # would share a label. `read_label_of` reads `pyramid` off a
             # checkpoint saved before the read mode existed.
             read_level=read_label_of(ckpt.get('args')),
@@ -457,9 +443,7 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     # The positions are placed for the camera that photographs them
     # (`photo_camera`): its sensor, and -- since it rotates -- the bounding
     # square and sensor margin it reads, so the rotated read stays on the
-    # tissue the sampler scored. Placing a 256 px tile and then reading a
-    # 1440 px FoV there, as it did before 2026-10-03, put the photographed
-    # rectangle partly outside it.
+    # tissue the sampler scored.
     cam_cfg = photo_camera(args)
     camera = render_spec(cam_cfg, sensor_size(args.ratio, args.mpixels))
     plan = (PlanSpec('native', camera=camera) if args.native_only
@@ -478,8 +462,8 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             sampler = supply.sampler
             mask, _ = caches.masks.mask(wsi)
             # `RungPlan.is_native`: the pyramid has the rung within
-            # LEVEL_REL_TOL. Until 2026-10-06 this was `shrink == 1.0` exactly,
-            # which called BRACS's 4.00003 / 16.0017 / 32.006 levels resampled.
+            # LEVEL_REL_TOL, so BRACS's 4.00003 / 16.0017 / 32.006 levels are
+            # native.
             native_by_rung = {float(p.rung_ds): p.is_native
                               for p in plan.plans_for(wsi)}
             # x, y are the FoV's own top-left (`fov_rect`): what is cropped,
@@ -506,14 +490,11 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     # Every photo, made ONCE. The read and the domain-gap simulation depend on
     # the FoV alone -- its rng is its position's (`FovSupply.photo`) -- so every method
     # is shown the same photos either way; made inside the method loop they
-    # were redone per method, and that was ~60% of a method's time
-    # (Stage1MppTiming, 2026-10-06). 816 photos of 1440x1024 are ~3.6 GB.
+    # would be ~60% of a method's time. 816 photos of 1440x1024 are ~3.6 GB.
     #
     # Rendered by `Render` (ARCHITECTURE.md: position -> read -> render), one
-    # objective per rung. Until 2026-10-06 the bench read the bare sensor
-    # rectangle and handed it to `simulate_microscope_photo`, so a 90/270
-    # turn kept 1440x1024 and filled two 208 px bands by reflection, a
-    # scale < 1 padded by reflection, and the lens ops had no margin.
+    # objective per rung, so a 90/270 turn and a scale < 1 read real
+    # tissue and the lens ops have their margin.
     t0 = time.perf_counter()
     photos_by_slide = {}
     for (dataset_id, wsi_name), (_, positions, supply) in slide_cache.items():

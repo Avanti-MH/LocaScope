@@ -29,10 +29,8 @@ for a trunk.
 
 `common/Head.py` composes these into a runnable (reduction, classifier) pair;
 this file has no opinion about that composition, only about what each
-building block computes on its own. Moved here from
-`training/MppRoutingHead/Models.py` on 2026-09-17 -- none of it was ever
-specific to routing a tile to an mpp rung, and `stage1_estimation/
-ClassifierEstMpp.py` needs the same classes a training loop does, without
+building block computes on its own. None of it is specific to routing a tile
+to an mpp rung, and `stage1_estimation/ClassifierEstMpp.py` needs the same classes a training loop does, without
 importing a training package to get them.
 '''
 from __future__ import annotations
@@ -84,12 +82,7 @@ class HeadConfig:
 
     THIS DEFAULT ALONE DOES NOT FIX ANYTHING if a caller forwards a training
     loop's own precision flag straight through on top of it -- an explicit
-    keyword always beats a dataclass default. `training/MppRoutingHead/
-    cli/train.py` hit exactly this on 2026-09-16: it constructed every
-    `HeadConfig` as `HeadConfig(..., dtype=args.dtype)`, and `--dtype`'s own
-    CLI default was still `'fp16'`, so the fp16-under-Adam NaN never stopped
-    happening until the call sites hardcoded `dtype='fp32'` instead of
-    forwarding a flag. This default is the fallback for a caller that omits
+    keyword always beats a dataclass default. This default is the fallback for a caller that omits
     `dtype` entirely, not the actual guard -- a caller that trains a head
     still has to pass `dtype='fp32'` itself.
     '''
@@ -192,12 +185,12 @@ class MlpHead(nn.Module):
     '''`cfg.mlp_depth` hidden layers, each `cfg.mlp_width` wide (ONE width
     for all of them, not one per layer -- a sweep names two numbers instead
     of `mlp_depth` of them). `cfg.mlp_width=None` defaults to `cfg.in_dim`,
-    same as before this was configurable, so this one class still serves
+    so this one class still serves
     768-d (ConvNeXt V2) and 1536-d (GigaPath/UNI2) input without retyping a
     size per backbone.
 
     `cfg.mlp_depth=1, mlp_width=None, mlp_residual=False` (the defaults)
-    reproduce the ORIGINAL architecture exactly: `Linear(in_dim, in_dim) ->
+    reproduce the base architecture exactly: `Linear(in_dim, in_dim) ->
     GELU -> Dropout -> Linear(in_dim, num_classes)`.
 
     `cfg.mlp_residual` wraps `x = x + block(x)` around every WIDTH-TO-WIDTH
@@ -341,7 +334,7 @@ class AttentionPoolHead(nn.Module):
 
     Parameter count depends on `in_dim`/`n_head`, NOT on L -- unlike
     flattening the grid into one Linear, which for GigaPath's 14x14x1536 grid
-    would be a first layer of ~231M parameters alone (measured 2026-09-15),
+    would be a first layer of ~231M parameters alone,
     several orders above what a small fine-tuning set can support without
     overfitting.
     '''
@@ -375,10 +368,8 @@ class ResidualMlpBlock(nn.Module):
     itself -- same role `AttentionPoolHead` above already plays for
     pooling, not more capacity stacked onto an already-pooled vector.
 
-    Added 2026-09-22 specifically so `training/PrototypicalRoutingHead`'s
     `PrototypeGenerators.SharedMlpPrototype` and `PrototypeRoutingHeads.
-    AttnScoreHead`'s own `MLPq`/`MLPk` share ONE definition instead of two
-    near-identical ones (caught the second copy before it shipped).
+    AttnScoreHead`'s own `MLPq`/`MLPk` share this ONE definition.
 
     `width` (defaults to `in_dim`) is the INNER width -- `SharedMlpPrototype`'s
     own `width_mult` axis stays expressible (pass `width=round(in_dim*

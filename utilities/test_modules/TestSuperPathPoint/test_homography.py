@@ -19,9 +19,9 @@ image no one can tell from the right one, and keypoints that are all off by half
 a pixel. Neither raises.
 
 So the checks that matter score against a DELIBERATELY WRONG alternative rather
-than against a tolerance -- the discipline that found the R(-theta) bug in
-`Camera.output_to_level0`, where the first version passed at 0 and 180 degrees
-and lost to a point-reflected candidate 40/40 times at 90 and 270. A margin over
+than against a tolerance -- an R(-theta) bug in `Render.output_to_level0`
+passes at 0 and 180 degrees and loses to a point-reflected candidate 40/40
+times at 90 and 270. A margin over
 a decoy is robust; a threshold is a guess.
 
 Sections:
@@ -263,10 +263,8 @@ def t_valid_mask_is_in_the_output_frame():
 def t_valid_mask_erosion_matches_tf_same_padding():
     """The eroded margin is EXACTLY TF's, on all four sides.
 
-    This check used to assert only "the outermost ring goes, and more radius
-    removes more", because cv2's anchor for an even-sized kernel was a detail
-    nothing here had measured. It then failed -- and what it had caught was two
-    real defects at once:
+    Two things decide the width, and a check weaker than exact would miss
+    either:
 
       * cv2's default erosion border is +DBL_MAX, so the frame edge counted as
         valid and an all-ones mask survived untouched. `tf.nn.erosion2d` with
@@ -276,8 +274,7 @@ def t_valid_mask_erosion_matches_tf_same_padding():
         the bottom-right for radius 3, cv2's default the other way round.
 
     With the anchor pinned to TF's `(k-1)//2` both are decided, so the widths
-    are now derivable and worth asserting exactly. An exact width is a much
-    stronger statement than "smaller than before": it fails if either the border
+    are derivable and worth asserting exactly. An exact width fails if either the border
     value or the anchor drifts, and it names which.
 
     Radius 1 is left out on purpose: at k=2 the elliptical structuring element
@@ -317,12 +314,10 @@ def t_small_radius_still_erodes():
     construction detail, and `getStructuringElement` applies its OWN anchor when
     building the ellipse.
 
-    An earlier version of this check asserted a direction -- that the top row
-    and left column survive, which is what `anchor=0` implies if the kernel is
-    full. It failed. Whether the kernel is not full, or the anchor interacts
-    with it differently, is not something this test has measured, and asserting
-    a direction on top of an unmeasured pattern was the mistake. The honest
-    statement is the weak one.
+    No direction is asserted (that the top row and left column survive, which
+    is what `anchor=0` implies if the kernel is full): whether the kernel is
+    full, or how the anchor interacts with it, is not something this test has
+    measured. The honest statement is the weak one.
 
     Measuring it would take a probe that prints the 2x2 kernel and the eroded
     mask beside it. Worth doing before anyone relies on radius 1; not worth

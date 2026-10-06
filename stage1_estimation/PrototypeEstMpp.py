@@ -18,7 +18,7 @@ instead of another training episode -- and runs it once through the
 checkpoint's own Stage 2 (support_context/collapse) so every subsequent
 `estimate(query)` call is cheap.
 
-INDEPENDENT of `KnnEstMpp.py` ON PURPOSE (2026-09-22): `StageInterface.py`'s
+INDEPENDENT of `KnnEstMpp.py` ON PURPOSE: `StageInterface.py`'s
 own "tree, not list of alternatives" docstring -- each branch owns its own
 build-time setup. `native_plans`/`TileSampler`/`TissueMaskConfig` are shared
 UTILITIES both methods happen to call the same way, but this file's own

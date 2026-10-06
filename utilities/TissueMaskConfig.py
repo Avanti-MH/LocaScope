@@ -23,9 +23,8 @@ slide both live on the segmenter's own config -- and `seg_id` hashes exactly
 that; it names the directory a raw mask is cached under. The fields beside it
 are the region prep after it, and `region_id` hashes those. Segmentation is
 minutes of GPU per slide and the region prep is milliseconds, so changing
-`min_region_ratio` changes `region_id` and never resegments. The split used to
-be two hand-kept field lists and an assertion that they partitioned the class;
-now a field cannot be on the wrong side, because the side is the nesting.
+`min_region_ratio` changes `region_id` and never resegments. A field cannot be
+on the wrong side, because the side is the nesting.
 """
 from __future__ import annotations
 
@@ -70,8 +69,7 @@ class TissueMaskConfig(IdentifiedConfig):
     that move the SEGMENTATION (see TissueSegFunc); the two here only move
     the regions found in it.
 
-    `seg` HAS NO DEFAULT. It used to default to hsv, and six callers built
-    `TissueMaskConfig()` and got hsv without saying so. Name a recipe:
+    `seg` HAS NO DEFAULT, so no caller gets a segmentation without naming it:
     `MASK_RECIPES['hest']`.
 
     The order of the region prep is fixed here -- `filtered`, then `merged` --
@@ -120,11 +118,9 @@ class TissueMaskConfig(IdentifiedConfig):
 class MaskMaker:
     """Where masks come from: one recipe, one device, optionally one cache.
 
-    Owns the segmenter's lifetime, which is what a module-level dict of built
-    segmenters used to do behind every caller's back -- a HEST or UNI2 model
-    held on the GPU until someone remembered to call `release_segmenters()`.
-    Here it is built on the first MISS, never on a hit, and dropped when the
-    `with` block ends.
+    Owns the segmenter's lifetime: it is built on the first MISS, never on a
+    hit, and dropped when the `with` block ends, so a HEST or UNI2 model does
+    not stay on the GPU.
 
     `cache_root` is `Cache.cache_root(<made_by>, 'mask')`; None means every
     call segments. A slide's raw mask lives at `<cache_root>/<seg_id>/<slide>/`
@@ -230,9 +226,8 @@ MASK_RECIPES: Dict[str, TissueMaskConfig] = {
 
 def add_mask_args(ap, default: str = 'hest') -> None:
     """`--seg` and the plane-read overrides, the same flags in every CLI that
-    builds a mask. A tool used to spell its own `--hest --mask-ds
-    --seg-chunk-px` and build the mask by hand; each spelling was a recipe no
-    other tool could name."""
+    builds a mask, so every recipe a tool uses is one any other tool can
+    name."""
     ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default=default,
                     help='tissue-mask recipe (TissueMaskConfig.MASK_RECIPES)')
     ap.add_argument('--mask-ds', type=float, default=None,

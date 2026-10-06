@@ -189,9 +189,8 @@ def main() -> int:
             result = scores[head_name]
             # `level_accuracy` OVERWRITTEN with the mean of the six rungs'
             # own accuracies, NOT the pooled per-tile value `scores[...]`
-            # still carries in every other key -- the exact fix `cli/
-            # train.py`'s `val_report` already applies to VAL (2026-09-20),
-            # extended here to TEST (2026-09-23): RICHNESS's own coarse-rung
+            # still carries in every other key -- the same rule `cli/
+            # train.py`'s `val_report` applies to VAL: RICHNESS's own coarse-rung
             # supply shortfall means a tile-pooled average is dominated by
             # whichever rungs happen to have the most test tiles, the same
             # `rescore_by_rung` finding val_report's own docstring cites.

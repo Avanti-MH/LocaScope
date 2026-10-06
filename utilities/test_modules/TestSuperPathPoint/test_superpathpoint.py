@@ -781,8 +781,7 @@ def t_validation_splits_by_slide_and_the_parts_sum_to_the_whole():
 def t_the_margin_ceiling_is_one_over_the_decoy():
     """Not arithmetic for its own sake: `margin = repeatability / decoy` and
     `repeatability <= 1`, so the decoy IS the ceiling -- at decoy 0.92 the whole
-    measurable range is 1.10, which is what the 2026-08-28 run ran into. It is
-    why the loop cuts to a fixed BUDGET rather than a threshold: a budget pins
+    measurable range is 1.10. It is why the loop cuts to a fixed BUDGET rather than a threshold: a budget pins
     the density, and with it the ceiling, so this epoch and the last are on one
     scale."""
     row = _repeatability_row([0.9, 1.0], [0.5, 0.5], [100.0, 200.0],
@@ -802,14 +801,9 @@ def t_the_margin_ceiling_is_one_over_the_decoy():
 
 
 def t_a_new_epoch_draws_a_new_warp_and_the_same_epoch_repeats():
-    """The augmentation was frozen until 2026-08-31 and NOTHING SAID SO.
-
-    `rng = default_rng((seed, index))` has no epoch term, so a tile is shown
-    the SAME warp on every pass. 50 epochs over 5,344 pairs is 5,344 distinct
-    pairs seen 50 times, and Homographic Adaptation's premise -- the same
-    content under different geometry -- was being delivered as one geometry per
-    tile. It surfaced only as textbook overfitting: `train/detector` fell to the
-    last epoch while `val/detector` bottomed on epoch 42 and rose.
+    """A frozen augmentation says nothing: `default_rng((seed, index))` with no
+    epoch term shows a tile the SAME warp on every pass, and it surfaces only as
+    overfitting.
 
     Both directions are asserted. A fix that made every read random would also
     pass "the warps differ", and would throw away the reproducibility the seed
@@ -842,9 +836,8 @@ def t_a_new_epoch_draws_a_new_warp_and_the_same_epoch_repeats():
 
 def t_the_budget_and_the_available_count_are_different_numbers():
     """`points_per_view` is what was MEASURED, `points_available` is what the
-    model would emit uncapped. Conflating them is what hid the 2026-08-31 run:
-    the capped column read 420 on every tile -- the cap, to the integer -- while
-    the real count was of order a thousand, and a count that lands exactly on
+    model would emit uncapped. Conflated, a capped column reads the cap on every
+    tile while the real count is far larger, and a count that lands exactly on
     the cap is the cap selecting rather than the model.
 
     Scored on a map with a KNOWN answer: a flat field just above the threshold,
@@ -919,7 +912,7 @@ def _make_stores(root, rungs=((1.0, 2),), stems=(_STEM_A,)):
 
     Written through the real `PreTileStore` and `KeypointLabelStore` rather than
     by hand, so that a change to either format breaks this test instead of
-    letting it test a shape nothing produces any more.
+    letting it test a shape nothing produces.
     """
     labels_root = os.path.join(root, 'labels')
     factor = 3

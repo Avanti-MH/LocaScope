@@ -322,8 +322,7 @@ def t_cache_root_none_disables_the_cache_rather_than_erroring():
 
 def t_from_tile_is_identity_at_ds_1_and_compounds_above_base_rung():
     """`base_rung` does NOT spare rungs up to itself -- only `ds<=1.0` is ever
-    the untouched tile. Written after the docstring got this wrong once
-    (2026-09-06): `base_rung=4` still fully re-degrades at `ds=4`, it does not
+    the untouched tile: `base_rung=4` still fully re-degrades at `ds=4`, it does not
     treat `ds<=base_rung` as "already there". Checked against the SAME `ds=4`
     built from `base_rung=1` -- the `base_rung=4` one must lose MORE detail,
     not the same amount, because it degrades an already-blurred tile again.
@@ -332,7 +331,7 @@ def t_from_tile_is_identity_at_ds_1_and_compounds_above_base_rung():
     the CALLER asserts about `image`'s own provenance (see the docstring), so
     the test has to actually hand it an already-degraded image for
     `base_rung=4` to mean anything; passing the same sharp noise for both
-    (the first version of this test did) makes the two calls bitwise
+    makes the two calls bitwise
     identical and asserts nothing about compounding at all.
     """
     rng = np.random.default_rng(1)

@@ -27,12 +27,10 @@ stride=2` throughout and the only thing `cell` decides there is how many rungs:
 
 CELL IS PER MODEL, NOT PER PROJECT
 ------------------------------------
-An earlier version of this paragraph said `cell` was "a property of the labels
-and therefore fixed across every backbone that is to be compared". The first
-half is wrong: the labels are POINTS (`KeypointLabelStore` holds `kp_xy`), and
+`cell` is not a property of the labels: they are POINTS (`KeypointLabelStore` holds `kp_xy`), and
 `Losses.cell_labels` folds them into cells at loss time, so changing `cell`
-re-discretises nothing that is stored. Only the second half survives, as a
-caveat rather than a constraint -- two models with different `cell` differ in
+re-discretises nothing that is stored. What remains is a caveat rather than a
+constraint -- two models with different `cell` differ in
 one more way than the thing being compared, and that has to be SAID rather than
 prevented, because preventing it is what forces a resize somewhere else.
 
@@ -57,8 +55,7 @@ Keeping them apart is what `UpsampleDecoder` exists for (spec.md 5.2): it climbs
 from a stride-16 feature map to a stride-8 cell grid, and then the depth-to-space
 is the same operation for every backbone.
 
-STRIDE 16, NOT 14. An earlier version of this paragraph said 14, and that is the
-one thing `UpsampleDecoder` cannot do. The climb is `stride / cell`, which a
+STRIDE 16, NOT 14: 14 is the one thing `UpsampleDecoder` cannot do. The climb is `stride / cell`, which a
 stack of stride-2 transposed convolutions can express only when it is a power of
 two: 16/8 = 2 is, 14/8 = 1.75 is not, and the tile size cancels out of that ratio
 so no choice of tile fixes it. `SuperPoint/EncoderBackbone.py` has the three

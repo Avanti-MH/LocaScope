@@ -35,7 +35,7 @@ WsiFeaturesMapStore is not a third store. It is the grid-coverage case of the
 feature store plus the conversion to and from `WsiFeaturesMap` -- which is what
 `FeatureMapCache` below is.
 
-WHAT A FILE MAY HOLD (added 2026-09-30)
+WHAT A FILE MAY HOLD
 ---------------------------------------
 One file is one (slide, ds, pooling), and a key directory holds as many
 poolings side by side as were asked for:
@@ -59,7 +59,7 @@ raw store says `slot_layout='raw:<prefix>+<h>x<w>'`, and `feat_hw` and
 The storage dtype is the tensor's own: fp16 or fp32. It follows what the
 encoder ran at -- an fp16 encoder's outputs are already fp16-accurate, and an
 fp32 one is not made worse by the file. Nothing about it goes into the
-metadata, so a file written before this existed reads exactly as it did.
+metadata.
 """
 from __future__ import annotations
 
@@ -128,9 +128,8 @@ _CORE = ('features', 'x', 'y', 'region', 'grid_rc')
 
 def _enc_float(v: float) -> str:
     # repr: the shortest string that reads back as the same float. The readers
-    # compare a stored ds with `!=`, and until 2026-10-06 this was `.12g`,
-    # which turned BRACS level 1 (4.00003374274531) into 4.00003374275 -- so
-    # every non-integer level missed its cache and was encoded again.
+    # compare a stored ds with `!=`, so anything shorter would make a
+    # non-integer level (BRACS level 1, 4.00003374274531) miss its cache.
     return repr(float(v))
 
 
@@ -675,8 +674,7 @@ class FeatureMapCache:
 
     # Every read takes the GEOMETRY the caller is about to use -- the regions
     # and the scale they are tiled at -- and never pixels: a hit must cost no
-    # read of the slide. These five are what WsiTissuesContainer used to be
-    # passed for, and all it was asked for.
+    # read of the slide.
 
     def load(self, regions, *, ds: float, level: int, tile_size: int,
              overlap: bool):

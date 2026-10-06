@@ -63,8 +63,7 @@ import numpy as np
 #: The writer is the natural owner of a format constant and that is the wrong
 #: direction here: `SurvivalProcess` imports torch, and a pure reader that
 #: depended on it would stop being testable in a second on a login node. So the
-#: heavy module depends on the light one. What must not happen is what this
-#: file did until 2026-09-01 -- write `>= 0.0` inline and reference nothing. A
+#: heavy module depends on the light one, and nothing writes `>= 0.0` inline. A
 #: sentinel with one definition and a reader that spells it out by hand keeps
 #: working after the definition changes, for the wrong reason.
 NONE = -1.0

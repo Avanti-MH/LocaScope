@@ -244,10 +244,9 @@ def tau_curve(batch, meta, *, alphas: Sequence[float],
     out, which is exactly the question.
 
     THE DECOY IS A SECOND PROBE, STORED AT BUILD TIME (`decoy_score`,
-    `decoy_dist`), NOT A SHIFT APPLIED TO `dist` HERE. It was the latter for one
-    day and that was not a decoy at all: `dist + shift <= tau` is exactly the
-    match rate at `alpha - shift/ds`, so the "gap" was a finite difference of
-    one curve with itself and read `margin 1.1` at every rung. A decoy has to be
+    `decoy_dist`), NOT A SHIFT APPLIED TO `dist` HERE: `dist + shift <= tau` is
+    exactly the match rate at `alpha - shift/ds`, so the "gap" would be a finite
+    difference of one curve with itself and read `margin 1.1` at every rung. A decoy has to be
     the same measurement somewhere the answer should be NO, which means probing
     a different place -- and that needs the images, so it happens where the
     images are.

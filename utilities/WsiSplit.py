@@ -4,11 +4,8 @@
     val  = list_names(dataset='bracs/test#val')       # AccessDatasets, to READ it
 
 A split is a property of a DATASET, not of whichever package trained on it
-first. It used to live in `training/MppRoutingHead/Datasets.py`, so
-PrototypicalRoutingHead, the stage-1 bench and the WSI diagnostics all reached
-sideways into one training package to find out which slides were held out --
-and before that, three of them wrote a missing split themselves, each its own
-way, so the held-out slides depended on which job ran first.
+first, and it has one writer, so the held-out slides never depend on which job
+ran first.
 
     result/cache/<made_by>_split/<dataset>/wsi_split.csv      split,wsi_name
 
@@ -62,8 +59,8 @@ from DsLadder import DsLadder
 #: Rungs a 4x-per-level pyramid can supply at its OWN native levels -- BRACS
 #: SVS steps 4x per level (`DsLadder`'s module docstring: ds 1, 4, 16, 32).
 #:
-#: NOT EVERY BRACS WSI HAS THIS SHAPE (measured 2026-09-22, `wsi_info.py
-#: --dataset bracs/test --val-only` on the held-out ten): 6 end their pyramid at
+#: NOT EVERY BRACS WSI HAS THIS SHAPE (`wsi_info.py --dataset bracs/test
+#: --val-only` on the held-out ten): 6 end their pyramid at
 #: ds 32 as expected, 3 end it at ds 64 (so their rung 32 always resamples from
 #: ds 16), and one has only 3 levels, topping out at ds 16.
 #: `native_bracs_rung_wsi_names` is how a caller that needs every position here

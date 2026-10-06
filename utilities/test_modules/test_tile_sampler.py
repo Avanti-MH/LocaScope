@@ -153,11 +153,10 @@ def _permissive(**over):
     tests then measure an almost empty rung: "0/6 overlapping, budget 4" passes
     while proving nothing, the top-up never runs because its bucket has no
     quota left, and the random arm is too sparse to produce a single
-    overlapping pair. Two of those failed outright on 2026-08-27 and three more
-    passed vacuously.
+    overlapping pair.
 
     All floors zero and all caps 1 means first-come over the shuffle, which is
-    what these fixtures assumed before richness had floors. The tests that ARE
+    what these fixtures assume. The tests that ARE
     about richness pass `RichnessConfig()` explicitly and use `_graded_mask`.
     """
     base = dict(floors=(0.0,) * 7, caps=(1.0,) * 7)
@@ -282,9 +281,8 @@ def t_reserve_is_what_must_fit_not_what_the_tile_covers():
     The tile has to be in the region because it is the training sample; the
     reserve only has to be readable, so it is allowed to reach into the glass
     beside the region and is not allowed to reach past the edge of the imaged
-    area. Requiring it to fit a single region was the earlier rule and it
-    emptied the coarse rungs -- at ds 32 it demanded a region 24576 px wide,
-    and one slide came back with 0 tiles of 500.
+    area. Requiring it to fit a single region would empty the coarse rungs --
+    at ds 32 it demands a region 24576 px wide.
     """
     wsi, mask = _one_big_block()
     s = TileSampler(wsi, mask, _cfg())
@@ -444,11 +442,8 @@ def t_the_overlapping_share_is_a_budget_and_binds():
 def t_every_jitter_offset_is_disjoint_and_off_lattice():
     """Both properties, per offset, AT EVERY TILE SIZE.
 
-    The offsets are fractions of the tile. The retired `ReferenceSampler` wrote
-    the same five as absolute pixels -- (64, 256) and so on -- which are those
-    numbers only at tile 256 and are four times the tile at 64. Its own
-    docstring argued that the units matter and then picked one that holds for
-    one size.
+    The offsets are fractions of the tile: as absolute pixels, (64, 256) and
+    so on are those numbers only at tile 256 and four times the tile at 64.
     The config holds no tile size at all now -- every quantity is a fraction
     of the footprint -- so a pixel constant has nowhere to live.
     """
@@ -599,9 +594,8 @@ def t_caps_must_be_able_to_reach_a_full_rung():
 def t_floors_are_met_before_the_free_fill():
     """A floor bucket gets its share even when the shuffle favours another.
 
-    THE DECOY IS THE OLD IMPLEMENTATION. A single shuffled pass with per-bucket
-    caps is what this replaced, and on this fixture it leaves bg30_50 under its
-    floor -- so a regression to one pass fails here rather than passing quietly
+    THE DECOY IS A SINGLE SHUFFLED PASS with per-bucket caps: on this fixture
+    it leaves bg30_50 under its floor -- so a regression to one pass fails here rather than passing quietly
     with a different mix.
     """
     wsi, mask = _graded_mask()
@@ -642,7 +636,7 @@ def t_floor_frame_trades_count_for_mix():
     a real slide -- both frames return `n_per_rung` with the target mix, and a
     test written there would pass under either implementation. So this asks for
     more than `_graded_mask` can supply at the target proportions, which is the
-    ds 32 situation the 3b probe of 2026-08-27 measured.
+    ds 32 situation.
 
     The assertion is a COMPARISON between the two frames, not a threshold on
     either: 'taken' must hold the mix closer AND return no more tiles. A
@@ -962,9 +956,8 @@ def t_a_sample_meta_survives_pickling():
 
 
 def t_a_sampler_holds_no_pixels():
-    """WHERE only: reading is SlideReader's (`read_samples`) since
-    2026-10-03, and the read of a sample against the old `materialise` is
-    `diag_read_exp.py` (566/566 identical) and test_slide_reader.py."""
+    """WHERE only: reading is SlideReader's (`read_samples`), tested in
+    test_slide_reader.py."""
     wsi, mask = _one_big_block()
     cfg = _cfg(inherit=InheritConfig(stack_kind='R'))
     s = TileSampler(wsi, mask, cfg).sample([resolution_plan(4.0, TILE)])
@@ -1354,8 +1347,7 @@ def t_an_odd_margin_and_a_non_square_pre_tile_are_refused():
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  fov -- a RECTANGULAR camera (1440 x 1024), placed by the square of its long
-#  side. This was `query_sim/source/fov_placer.FovSampler` until 2026-10-03;
-#  the rectangle is now a property of the camera (`ReadSpec`) and the same
+#  side. The rectangle is a property of the camera (`ReadSpec`) and the same
 #  sampler places it. Every load-bearing check scores against a DECOY -- the
 #  square, the overlap-permitting config, the other seed.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1378,7 +1370,7 @@ def _fov_cfg(n=16, richness=None, overlap=None, seed=0):
 
 def _fov_plan(wsi, rotates=False, sensor=FOV):
     """The rectangular camera's one rung at ds 1, through the PlanSpec every
-    caller uses (camera_plan, which built it directly, went 2026-10-06)."""
+    caller uses."""
     camera = ReadSpec(*sensor, rotates=rotates)
     return PlanSpec('ladder', (1.0,), camera=camera).plans_for(wsi)[0]
 

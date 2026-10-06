@@ -189,9 +189,7 @@ class TokenConfig(FakeConfig):
     One table entry is the whole of it: '' -> 'cls'. There is no vector_from
     override here and none in GigaPathFunc or Uni2Func either -- the base
     reduces by cfg.pooling, so an override would be a second copy of that
-    decision and, worse, one that ignores cfg.pooling. This fake kept such an
-    override for one revision and two of the tests below caught it, which is
-    what they are for.
+    decision and, worse, one that ignores cfg.pooling; two of the tests below catch one.
     """
     POOLINGS = {**FakeConfig.POOLINGS, '': 'cls'}
 
@@ -258,9 +256,8 @@ def enc(kind, cls=FakeEncoder, **over):
 def t_features_for_vector_and_spatial():
     """The two kinds whose reduction is arithmetic, once the config names it.
 
-    Named here rather than inferred from kind: the base used to read
-    model_spec.kind to decide that a 'spatial' model means 'gap', which is only
-    sound while nothing sits between the model and the reduction. A head breaks
+    Named here rather than inferred from kind: reading model_spec.kind to
+    decide that a 'spatial' model means 'gap' is only sound while nothing sits between the model and the reduction. A head breaks
     it, and CONCH has one.
     """
     for kind, pooling in (('vector', 'identity'), ('spatial', 'gap')):
@@ -594,7 +591,7 @@ def t_no_prefix_makes_slot_0_the_average():
     # would show up only as a pooling that scores worse than it should.
     #
     # Scored against that exact decoy rather than a tolerance: the corner is
-    # what the old code returned, so if it ever comes back this fails at the
+    # what reading tokens[:, 0] returns, so if it ever comes back this fails at the
     # decoy and not at the margin.
     spec = {'dim': 4, 'feat_hw': (2, 2), 'num_prefix': 0}
     x = torch.zeros(1, 4, 4)
@@ -766,8 +763,7 @@ class _VitProbe(TileEncoder):
 def t_the_model_is_never_the_wrapper():
     """`_set_model` keeps the network on `model` and the wrapper on `runner`, so
     the spec and the identity read the network and neither moves when the
-    forward is split across cards. Until 2026-10-06 the wrapper WAS `model`:
-    the spec unwrapped it by hand and weights_id did not, so one encoder had
+    forward is split across cards: a wrapper on `model` would give one encoder
     one id on one card and another on four."""
     m = _Fake()
     probe = _VitProbe(torch.nn.Identity())
@@ -797,8 +793,8 @@ def t_spec_reads_the_config_not_the_grid():
     answer is (4, 4) too -- so the crop is moved to 16, where the two diverge:
     the config says (8, 8) and the stale attribute still says (4, 4).
 
-    This is the whole point of the change. Under dynamic_img_size grid_size is
-    what timm itself calls prev_grid_size, and reading it made model_spec
+    Under dynamic_img_size grid_size is
+    what timm itself calls prev_grid_size, and reading it would make model_spec
     describe an input the encoder was never given.
     """
     assert _VitProbe(_Fake(), crop=8).model_spec.feat_hw == (4, 4)

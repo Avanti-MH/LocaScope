@@ -285,9 +285,6 @@ def t_json_round_trip_rebuilds_a_nested_config():
     accepted it without complaint, and the failure surfaced later and elsewhere:
     `'dict' object has no attribute 'kwargs'`, inside a DataLoader worker, four
     stack frames from anything to do with configs.
-
-    The old `t_registry_round_trip` passed throughout -- its Demo has one int
-    field, so it never had a nested config to lose.
     """
     text = CI.config_json(_Outer(inner=_Inner(a=7), k=9))
     back = CI.config_from_json(text)

@@ -2,12 +2,11 @@
 
 No slide, no GPU: every check is arithmetic on the numbers `SlideReader` reads by.
 A reserve is right when the read fits inside the footprint box grown by it,
-and TIGHT when one pixel less no longer fits -- so each check also runs the
-decoy that made positions fall off the slide before 2026-10-03 and requires it
-to fail:
+and TIGHT when one pixel less does not fit -- so each check also runs a decoy
+reserve that lets positions fall off the slide and requires it to fail:
 
-    manifest   footprint-only reserve      (before the camera supplied it)
-    fov_plan   int(fp * hypot / long side) (FovSampler's, now removed)
+    manifest   footprint-only reserve
+    fov_plan   int(fp * hypot / long side)
 
 The read the reserve is checked against is written out independently of
 `read_rect` (`_independent_read`), so a reserve and a read computed by the
@@ -71,9 +70,8 @@ def _fits(read: ReadRect, box: int, margin: int) -> bool:
 def t_fov_geometry_is_query_from_wsi_arithmetic():
     """The four numbers, written out: the rect is `int(output * ds)`, the
     square its ceiled diagonal. In ds, so no mpp round trip can cost a px:
-    `base * rung / base` is not always `rung` in floating point, and the
-    `(mpp, base_mpp)` form this took before 2026-10-03 truncated whatever it
-    came back as."""
+    `base * rung / base` is not always `rung` in floating point, and a
+    `(mpp, base_mpp)` form would truncate whatever it came back as."""
     import math
     for rung in RUNGS:
         g = FovGeometry.of(TILE, TILE, rung)
@@ -91,7 +89,7 @@ def t_the_square_centred_is_the_square_read():
     """The rotating read's origin is centred for `square_l0`; its length is
     `level_px(square_out)` level px. The two must be one square: at most one
     level px apart in level-0 terms, at every ds and level. The decoy is the
-    square this used to centre, `ceil(hypot(rect_l0))`: 725 at ds 2, where
+    square of the level-0 diagonal, `ceil(hypot(rect_l0))`: 725 at ds 2, where
     726 level-0 px are read."""
     import math
     worst = 0.0
@@ -109,9 +107,9 @@ def t_the_square_centred_is_the_square_read():
 
 def t_the_level_and_its_pixels():
     """`level_for` never upsamples; `level_px` rounds, and a native read is
-    the output size exactly. The decoys are the two rules this replaced:
-    QueryFromWSI's 5% window, which took a coarser level and blew it up, and
-    its `int` read size, 255 px for a 256 tile off BRACS's ds 4.00014 level."""
+    the output size exactly. The decoys: a 5% window, which takes a coarser
+    level and blows it up, and an `int` read size, 255 px for a 256 tile off
+    BRACS's ds 4.00014 level."""
     bracs = (1.0, 4.00014, 16.0011, 32.0045)
     assert level_for(bracs, 4.0) == 1 and level_for(bracs, 2.0) == 0
     assert level_for(bracs, 3.9) == 0, 'a level 2.6% coarser was taken'

@@ -96,17 +96,14 @@ class TrainerConfig(IdentifiedConfig):
 
     #: 'online' still, and now ALSO read off `WANDB_MODE` when that is set.
     #:
-    #: THE ENV VAR COULD NOT REACH THIS BEFORE. `_start_wandb` calls
+    #: THE ENV VAR IS THE DEFAULT. `_start_wandb` calls
     #: `wandb.init(mode=self.cfg.wandb_mode)`, and an explicit `mode=` beats
-    #: `WANDB_MODE` -- so the literal 'online' that used to be here made the
-    #: environment variable look like it was being ignored, which is the worst
-    #: kind of knob. Reading it as the DEFAULT is the whole fix: a real run is
-    #: online as before, and `WANDB_MODE=offline` (a smoke run, a node with no
-    #: route out) now actually takes effect without editing anything.
+    #: `WANDB_MODE`, so a literal here would make the environment variable look
+    #: ignored. A real run is online, and `WANDB_MODE=offline` (a smoke run, a
+    #: node with no route out) takes effect without editing anything.
     #:
-    #: Online IS reachable from normal2 -- verified 2026-08-28 after the
-    #: opposite had been written as a fact in TrainSuperPathPoint.sh and cost a
-    #: run. Do not turn that into a default here on an assumption.
+    #: Online IS reachable from normal2 (verified). Do not make offline a
+    #: default here on an assumption.
     #:
     #: In NOT_IDENTITY below, so none of this can re-hash a checkpoint.
     wandb_mode: str = os.environ.get('WANDB_MODE', 'online')
@@ -116,8 +113,7 @@ class TrainerConfig(IdentifiedConfig):
     #: top N by score with no threshold. A FIXED BUDGET AND NOT A THRESHOLD,
     #: because `margin = repeatability / decoy` and the decoy is a function of
     #: the density: two models cut by one threshold land at two densities, on
-    #: two different scales, and the 2026-08-31 run reported 1.50 against 3.59
-    #: that way with nothing to say they were not comparable.
+    #: two different scales, with nothing to say they are not comparable.
     #:
     #: 200 is inside the label corpus's own range (per-rung `n_kp` means run 3
     #: to 527, overall 146; the two held-out slides average about 295 and 40).
@@ -421,10 +417,10 @@ def _cut(prob, cfg, budget):
                     BUDGET, so the density is pinned and `decoy` is the same
                     quantity for every epoch and every arm.
       the count     how many survivors clear `cfg.detection_threshold`, with no
-                    cap at all. This is the convergence gauge, and it is the
-                    one the old code could not report: `points_per_view` was
-                    measured after the cap, so an undertrained detector emitting
-                    thousands of points read as exactly `max_keypoints`.
+                    cap at all. This is the convergence gauge: `points_per_view`
+                    is measured after the cap, so an undertrained detector
+                    emitting thousands of points reads as exactly
+                    `max_keypoints`.
 
     `points_from_prob` does NMS, then the border cut, then the threshold, then
     the cap. Asking for both numbers separately would run NMS twice; asking
@@ -468,9 +464,7 @@ def _repeatability(prob, warped_prob, homography, cfg, shift, budget):
     with density, because it asks whether a set shifted past the NMS radius
     matches anyway and a dense enough set matches anything. Two models cut by
     one threshold land at two densities and their margins are on two different
-    scales: the 2026-08-31 run reported 1.50 for one arm and 3.59 for another
-    at 420 and 159 points per view, and nothing in the table said they could not
-    be compared.
+    scales, and nothing in the table says they cannot be compared.
     """
     from common.Homography import inside, points_input_to_output  # noqa: PLC0415
 

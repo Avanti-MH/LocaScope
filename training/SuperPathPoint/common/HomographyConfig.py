@@ -10,7 +10,7 @@ torch inside itself so that `cli/demo_homography.py` and the geometry half of
 `test_homography` stay runnable without it. `ConfigIdentity` imports torch at
 module level, so putting an `IdentifiedConfig` next to `HOMOGRAPHY_DEFAULTS`
 would quietly take that property away -- and the way it would be noticed is a
-demo that used to run on a login node failing to import.
+login-node demo failing to import.
 
 WHY IT IS NOT THIRTEEN FIELDS IN EACH CONFIG
 ----------------------------------------------

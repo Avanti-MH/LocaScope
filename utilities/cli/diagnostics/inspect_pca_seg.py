@@ -47,14 +47,11 @@ asks, and it does NOT mean the mask is correct. Nothing here measures that.
 
 NO MAGNIFICATION FLAG, BECAUSE THE SEGMENTER HAS NO MAGNIFICATION
 ------------------------------------------------------------------
-This tool had `--plane-ds`, then `--level`, then `--crop`, and all three
-described how an earlier version read a plane on the segmenter's behalf rather
-than anything the segmenter does. `Uni2PcaSegFunc.LEVEL` records the removal and
-the measurement behind it: whole slide, every tile, ~3.5 min for BRACS_1003691
-and ~5.8 min for a Ki67, so there was never a cost that justified reading
-coarser.
+The segmenter reads level 0, and `Uni2PcaSegFunc.LEVEL` records the
+measurement: whole slide, every tile, ~3.5 min for BRACS_1003691 and ~5.8 min
+for a Ki67, so no cost justifies reading coarser.
 
-What runs now is one call -- `components_wsi` fits on 1000 stratified tiles
+What runs is one call -- `components_wsi` fits on 1000 stratified tiles
 (`SlideReader.read_points`) and streams every tile of the slide through
 `SlideReader.read_grid`, assembling only the CELL grid. That is 1/196 of the pixels (`cell_px` squared), which is
 what makes a whole Ki67 slide a few hundred MB instead of 10 GB, and it is what
@@ -245,10 +242,9 @@ def analyse(wsi_path, args, out_dir):
                    f'bimodal?', fontsize=9)
     axis.set_yticks([])
 
-    # SELECTED IS GREEN, ON THE SLIDE. Not a grey mask, which is what these two
-    # panels were and which got read backwards on 2026-08-26: with cmap='gray'
-    # white is 1, and when the selected region is the BACKGROUND the eye reads
-    # the dark shape as the answer -- the tissue-shaped speckle in an fg=False
+    # SELECTED IS GREEN, ON THE SLIDE. Not a grey mask, which reads backwards:
+    # with cmap='gray' white is 1, and when the selected region is the
+    # BACKGROUND the eye reads the dark shape as the answer -- the tissue-shaped speckle in an fg=False
     # panel is value 0, and it looks exactly like a tissue mask.
     #
     # An overlay cannot be read that way round: whatever is tinted is what the
@@ -296,10 +292,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('wsi', nargs='+', help='one or more slides')
     # NO --plane-ds, --level or --crop. The segmenter reads at level 0 and
-    # produces a ds 14 mask over the whole slide, and none of those three
-    # described anything it does -- they described how an earlier version read
-    # a plane on its behalf. See Uni2PcaSegFunc.LEVEL for the measurement that
-    # removed the last reason to keep them.
+    # produces a ds 14 mask over the whole slide; see Uni2PcaSegFunc.LEVEL.
     ap.add_argument('--workers', type=int, default=8,
                     help='DataLoader workers for reading tiles. 0 reads in the '
                          'parent, which is right on a login node and wrong for '

@@ -226,9 +226,7 @@ def t_offset_quantiles_of_excludes_the_self_match_column():
     construction) and one born at ds=2 (row 2, a real 6.0 offset measured
     back at ds=1) -- the ds=1 column must drop rows 0/1 and keep only the
     real 6.0, and the ds=2 column must drop row 2, its own 0.0, and keep
-    rows 0/1's real 3.0 and 5.0. (Until 2026-10-06 this said nobody was born
-    at ds=2 and expected all three rows there; row 2 is, and the code was
-    right to drop it.)
+    rows 0/1's real 3.0 and 5.0.
     """
     dist = np.array([[0.0, 3.0],
                      [0.0, 5.0],
@@ -249,9 +247,8 @@ def t_offset_quantiles_of_excludes_the_self_match_column():
 
 
 def t_offset_quantiles_of_without_source_rung_keeps_old_contaminated_behaviour():
-    """`source_rung=None` (the default) must reproduce the pre-2026-09-13
-    behaviour exactly -- existing callers that have not been updated yet
-    see no change."""
+    """`source_rung=None` (the default) keeps every row, self-matches
+    included."""
     dist = np.array([[0.0], [0.0], [6.0]])
     out = AC.offset_quantiles_of(dist, rungs=[1.0], quantiles=[0.5])
     expected = np.quantile([0.0, 0.0, 6.0], 0.5)
@@ -270,7 +267,7 @@ def t_aggregate_offset_quantiles_shares_the_curve_aggregator():
 
 
 # ── 6. probability_map_curve / probability_map_pattern_curve (candidates 1/2) ─
-# 2026-09-11. One rung's `combined_map` is a 10x10 field, all zero except a
+# One rung's `combined_map` is a 10x10 field, all zero except a
 # single pixel spike at (5,5) -- placing an anchor exactly on an integer
 # pixel makes `_bilinear_sample` read that pixel's value with no blending,
 # so every number below is hand-computable, not just "ran and looked right".
@@ -317,8 +314,8 @@ def t_probability_map_alive_true_at_the_peak_false_off_the_map():
 
 
 def t_probability_map_alive_sample_step_is_actually_threaded_through():
-    """`sample_step` used to be hardcoded at `probe_via_probability_map`'s
-    own default (2026-09-11 caught this: the CLI never exposed it at all).
+    """`sample_step` reaches `probe_via_probability_map` rather than its own
+    default.
     r=tau/scale=2.0: a step of 0.5 divides 2.0 exactly, so the search grid
     lands exactly on offset (0, 0) -- the anchor sits exactly on the peak,
     so peak_value is exactly 1.0. A step of 0.3 does NOT divide 2.0 exactly

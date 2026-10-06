@@ -20,9 +20,9 @@ Sections:
   table        the store round-trips, and refuses a rung count that disagrees
 
 `ChainStack` (`rung_scale`/`rung_shrink`, the 'R' degradation) has its own
-test file now -- `test_chain_stack.py` -- because it is tested with no store
+test file -- `test_chain_stack.py` -- because it is tested with no store
 and no GPU either, the same reason `Patterns`/`Attribution` are here and not
-folded into a file that needs a slide. Moved 2026-09-05, not deleted.
+folded into a file that needs a slide.
 """
 
 from __future__ import annotations
@@ -144,8 +144,8 @@ def t_the_band_fraction_over_multi_rung_points_is_the_one_that_decides():
     spec.md 3.3 reads the band fraction to choose whether Stage C's head can be
     two outputs `(j_lo, j_hi)`. A point alive at exactly one rung has no
     interval to get wrong, so counting it as evidence FOR the simplification
-    counts a non-answer as a yes -- and on the 2026-09-01 corpus 69 per cent of
-    points were single-rung, which put the unfiltered fraction at 0.944 and the
+    counts a non-answer as a yes -- on a corpus where 69 per cent of points
+    were single-rung, that put the unfiltered fraction at 0.944 and the
     one that decides at 0.82.
     """
     rows = np.array([_v('100000'), _v('010000'), _v('001000'),  # three width-1
@@ -167,9 +167,8 @@ def t_the_band_fraction_over_multi_rung_points_is_the_one_that_decides():
 def t_every_pattern_has_an_ascii_label():
     """matplotlib has no CJK glyphs, and the pattern names ARE the axis labels.
 
-    All three of Stage B's figures rendered their labels as empty boxes on
-    2026-09-01. A pattern added without an entry here would do it again, and
-    the failure is a warning on stderr rather than an error.
+    A pattern added without an entry here renders its label as empty boxes,
+    and the failure is a warning on stderr rather than an error.
     """
     missing = [p for p in Patterns.PATTERNS if p not in Patterns.ASCII_NAMES]
     if missing:

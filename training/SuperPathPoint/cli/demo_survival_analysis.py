@@ -13,13 +13,11 @@ default). spec.md 3.2, plan.md 2.1②.
     python training/SuperPathPoint/cli/demo_survival_analysis.py --parts scale_diagnostic \
         --checkpoint <.pt> --wsi-name BRACS_1228 --n-scale-tiles 10
 
-Merged 2026-09-11 from two standalone scripts (`demo_chains_stack.py`,
-`demo_merge_grid.py`) that had grown into one jobscript family each -- they
-share `--wsi-name`/`--tile`/`--c-rungs`/`--cache-root`/`--out` and nothing
+The parts share `--wsi-name`/`--tile`/`--c-rungs`/`--chainstack-cache-job`/`--out` and nothing
 else, so this file keeps them as independent functions (`_run_chains_stack`,
 `_run_merge_grid`, `_run_visualize`) dispatched from one `main()`, never
-forcing one part's logic through another's. `visualize` (added the same day,
-for a PPT demo of this stage) is the same pattern again: synthetic, step-by-
+forcing one part's logic through another's. `visualize` (a PPT demo of this
+stage) is the same pattern again: synthetic, step-by-
 step GIFs of keypoints -> anchor merge -> alive, with an optional real-data
 closing figure -- see that section's own module comment.
 
@@ -31,7 +29,7 @@ Neither part's own filenames changed, only where the shared root comes from.
 
 =====================================================================
 PART "chains_stack" -- smoke-test all three axes' OWN and REUSE-F paths
-against a REAL slide (formerly `demo_chains_stack.py`)
+against a REAL slide
 =====================================================================
 `test_chain_stack.py` (2.1①) proved the geometry is correct against synthetic
 coordinates, and `own`'s wiring against a fake `PreTileStore` fixture. What
@@ -62,7 +60,7 @@ re-derived here, so both address the same directories.
 
 =====================================================================
 PART "merge_grid" -- three implementations of `_merge_within_radius`
-compared (formerly `demo_merge_grid.py`)
+compared
 =====================================================================
 ADOPTED. `A` (grid hash) is what `SurvivalProcess._merge_within_radius` runs
 now -- the evidence this part produced (identical kept-index sets on
@@ -122,7 +120,7 @@ Outputs (in `result/<SLURM_JOB_NAME or DemoSurvivalAnalysis>/`):
 
 =====================================================================
 PART "scale_diagnostic" -- does RStack's own resampling filter matter, or
-does the six-pattern classification track pure SCALE? Added 2026-09-14.
+does the six-pattern classification track pure SCALE?
 =====================================================================
 Takes `--n-scale-tiles` real F-chain tiles (ds=1, sharpest read), builds TWO
 R-shaped stacks per tile from the SAME real pixels -- `RStack.from_tile`
@@ -159,7 +157,6 @@ synthetic-only mode and is never in the default `--parts` list.
 
 =====================================================================
 PART "scale_synthetic_control" -- is `_decay_rate` a working ruler at all?
-Added 2026-09-14, same day the real run showed rho=0.031 (n=2917).
 =====================================================================
 `--n-synthetic-points` Gaussian blobs of KNOWN, controlled radius (log-
 uniform, same 1..16 range `--rungs` spans), well separated on one flat
@@ -195,7 +192,8 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
 if _HERE not in sys.path:            # prepare_chain_stack.py lives right here
     sys.path.insert(0, _HERE)
 
-from cli import add_pretile_args, job_result_dir, setup_import_paths  # noqa: E402
+from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
+                 chainstack_root, job_result_dir, setup_import_paths)
 
 setup_import_paths()
 
@@ -437,7 +435,7 @@ def _run_chains_stack(args, out_dir: str) -> None:
 
     fig_dir = os.path.join(out_dir, 'figures')
     os.makedirs(fig_dir, exist_ok=True)
-    cache_root = args.cache_root or ChainStack.DEFAULT_CACHE_ROOT
+    cache_root = chainstack_root(args)
     mother_ds = max(args.c_rungs)
 
     # prepare_chain_stack's own addresses -- imported, not re-derived, see
@@ -471,8 +469,10 @@ def _run_chains_stack(args, out_dir: str) -> None:
               f"{dt*1000:.1f} ms   {'OK' if all(oks) else 'FAIL'}")
 
         # ── R: own (stageA, independent) and reuse-F (this same chain) ──
+        # R's own tiles are a resize of a stored pre-tile: never cached
+        # (RStack.from_own says why), whatever --chainstack-cache-job is
         r_own = RStack.from_own(r_corpus, wsi_stem, args.rungs,
-                                tile=args.tile, cache_root=args.cache_root)
+                                tile=args.tile, cache_root=None)
         if len(r_own):
             t0 = time.perf_counter()
             r_own_stack = r_own[0]
@@ -709,7 +709,7 @@ def _load_real_points(args) -> Tuple[np.ndarray, float, str]:
     with SafeSlide(entry.path) as wsi:
         forest = ChainStack.CStack.from_own(
             c_corpus, entry.name, args.c_rungs, wsi, tile=args.tile,
-            cache_root=args.cache_root or ChainStack.DEFAULT_CACHE_ROOT)
+            cache_root=chainstack_root(args))
         mother, mother_image, groups_by_ds, images_by_ds = forest[args.tree_index]
         _per_rung_tiles, per_rung = SurvivalProcess.detect_all_generations(
             mother, mother_image, groups_by_ds, images_by_ds, net,
@@ -765,7 +765,7 @@ def _run_real_flow_comparison(args) -> Dict[str, Tuple[Optional[dict], float,
     with SafeSlide(entry.path) as wsi:
         forest = ChainStack.CStack.from_own(
             c_corpus, entry.name, args.c_rungs, wsi, tile=args.tile,
-            cache_root=args.cache_root or ChainStack.DEFAULT_CACHE_ROOT)
+            cache_root=chainstack_root(args))
         chainstacks = [forest[i] for i in forest][:args.real_flow_n_trees]
 
         tree_data = []
@@ -1183,7 +1183,7 @@ def _run_merge_grid(args, out_dir: str) -> int:
 
 # =============================================================================
 #  visualize -- synthetic, step-by-step GIFs for a PPT: keypoints -> anchor
-#  merge -> alive. Added 2026-09-11.
+#  merge -> alive.
 # =============================================================================
 #
 # SYNTHETIC, NOT REAL DETECTIONS, AND DELIBERATELY NOT RANDOM EITHER. The
@@ -1226,8 +1226,8 @@ _VIZ_PATTERN_RUNGS = {
 
 def _place_viz_points() -> Dict[str, Tuple[float, float]]:
     """name -> level-0 xy for the six points, via rejection sampling with a
-    FIXED seed -- less rigid than a hand-picked grid (2026-09-11 feedback:
-    "could be more randomly distributed"), while staying reproducible
+    FIXED seed -- less rigid than a hand-picked grid ("could be more randomly
+    distributed"), while staying reproducible
     across runs of this file (a fresh, ungoverned random draw every run
     would make the GIF a different scene each time, which is not what a
     PPT asset should be).
@@ -1275,11 +1275,8 @@ _VIZ_TRUE_POINTS = {name: (_VIZ_POSITIONS[name], rungs)
 #: `--viz-alpha` ceiling that follows from it -- computed here, once, from
 #: whatever `_VIZ_TRUE_POINTS` actually is, rather than a hand-typed
 #: literal that has to be remembered and re-typed by hand every time the
-#: scene changes. 2026-09-11: a hand-typed `--viz-alpha` default drifted out
-#: of sync with the scene once already (sized for a 64x64 canvas, left
-#: unchanged when the canvas shrank to 32x32) and the job failed on
-#: `_run_visualize`'s own safety check -- correctly, but avoidably. Deriving
-#: the default FROM the scene makes that whole bug class impossible: the
+#: scene changes, and drifts out of sync with it. Deriving the default FROM
+#: the scene makes that impossible: the
 #: default is always exactly as large as this scene allows, whatever this
 #: scene currently is.
 _VIZ_MIN_SPACING = min(
@@ -1298,7 +1295,7 @@ _VIZ_ALPHA_DEFAULT = round(
 #: heavier import chain) since "which rung" and "which pattern" are two
 #: different questions a viewer needs to tell apart in the same figure. A
 #: SHAPE per rung, not just a colour, is what actually solves "every point
-#: looks exactly overlapped" (2026-09-11, caught by eye): a rung's own
+#: looks exactly overlapped": a rung's own
 #: jitter from its neighbour is a fraction of a level-0 px by design (the
 #: whole reason a merge RADIUS is needed instead of exact-match), so no
 #: marker size fix alone makes two near-coincident dots read as two --
@@ -1327,11 +1324,8 @@ def _marker_area(target_radius_units: float, data_range: float,
     RANGE and the figure's PHYSICAL width in inches -- derived, not a bare
     `s=N` literal, because `s` is a fixed physical size (points, 1/72 inch)
     that does NOT automatically track a change in axes range or figure
-    size. 2026-09-11: shrinking the canvas 64->32 also shrank `s` (backwards
-    -- the same `s` already reads BIGGER on a smaller range at the same
-    figure size), and the flat constants were then reused for
-    `visualize_real_example.png`'s crop, whose range (`--viz-real-crop`) is
-    a completely different, user-set number -- this formula self-adjusts to
+    size, and `visualize_real_example.png`'s crop has a user-set range
+    (`--viz-real-crop`) -- this formula self-adjusts to
     any figure/range combination instead of needing to be re-tuned by hand
     every time either changes.
 
@@ -1369,7 +1363,7 @@ def _viz_offset(ds: float, point_index: int) -> np.ndarray:
     so it is worked through by hand once here rather than sampled per run.
 
     Magnitude `0.25*ds` is pushed as close to that bound as a comfortable
-    margin allows, per 2026-09-11 feedback ("pull the cross-rung jitter
+    margin allows ("pull the cross-rung jitter
     apart more -- radius is tied to ds/2, there's room"). Checked for
     every rung PAIR (not just the finest, since the merge visits
     finest-first and a later rung always compares against whatever
@@ -1386,21 +1380,17 @@ def _viz_offset(ds: float, point_index: int) -> np.ndarray:
     more than 6 anchors and raise `AssertionError` there, not render
     silently.
 
-    THE ANGLE MATTERS AS MUCH AS THE MAGNITUDE (2026-09-11, second pass):
+    THE ANGLE MATTERS AS MUCH AS THE MAGNITUDE:
     the margin above is a TRIANGLE-INEQUALITY upper bound (`m_i+m_j`, two
     offsets pointing straight at each other) -- it says the offsets CANNOT
-    exceed the radius, not that they are actually spread apart. The first
-    version of this function picked the angle as `ds*0.05`, which differs
-    by only 0.05-0.4 RADIANS (3-23 degrees) between ds=1..8, so any two
-    rungs' offsets for the same point pointed in nearly the SAME direction
-    -- the realised separation was close to the SAME-direction worst case
-    (`|m_i-m_j|`, near 0), not the bound above, which is why the points
-    still looked crowded even though the radius had plenty of room. Fixed
-    by keying the angle to `_VIZ_ORDER`'s INDEX, not `ds` itself: a fixed
+    exceed the radius, not that they are actually spread apart. An angle of
+    `ds*0.05` differs by only 0.05-0.4 RADIANS between ds=1..8, so offsets
+    would point in nearly the SAME direction (`|m_i-m_j|`, near 0). The angle
+    is keyed to `_VIZ_ORDER`'s INDEX, not `ds` itself: a fixed
     90-degree step per rung spreads any two rungs at least 90 degrees
     apart, which puts the realised distance near
     `sqrt(m_i^2+m_j^2)` (perpendicular) up to `m_i+m_j` (opposite,
-    non-adjacent rung pairs) -- both comfortably bigger than before, and
+    non-adjacent rung pairs) -- both comfortably bigger, and
     the safety bound above (which never assumed a particular angle) still
     holds exactly as derived.
     """
@@ -1438,16 +1428,14 @@ def _place_viz_noise_peaks(seed: int, n: int = 10) -> np.ndarray:
     throw away before a coordinate ever becomes one of `detect()`'s
     keypoints (`SurvivalProcess._detect_one` runs NMS on `prob` AFTER the
     network produces it -- the map candidate 1 reads is that PRE-NMS
-    field, not the sparse post-NMS result, per 2026-09-12 discussion).
-    Without any noise, `_synthetic_probability_field` was drawing the
-    post-NMS picture instead -- clean bumps and nothing else -- which
+    field, not the sparse post-NMS result). Without any noise the field
+    would be the post-NMS picture -- clean bumps and nothing else -- which
     does not show what candidate 1 actually has to pick a winner out of.
 
     `seed` differs PER RUNG (`_VIZ_NOISE_PEAKS` below) -- a real network
     forward pass produces an independent field at every rung, so the same
     noise layout repeating at all four ds would misrepresent that as one
-    fixed pattern (2026-09-12 feedback: "each rung should have its own
-    noise, not share one"). Still a fixed seed per rung, not `np.random`
+    fixed pattern. Still a fixed seed per rung, not `np.random`
     freshly drawn per run, for the same reproducibility reason `_place_
     viz_points` gives.
 
@@ -1492,15 +1480,15 @@ def _synthetic_probability_field(points: np.ndarray, *,
     OWN centre or a `probe_via_probability_map` window could pick up a
     neighbour's response instead of "nothing here". At `sigma=1.5`, `d=5`
     gives `exp(-25/4.5) ~= 4e-3` -- nowhere near `score_threshold=0.5`. A
-    wider sigma would also be the "too uniform, no clear peaks" heatmap
-    this replaces (2026-09-11 feedback): on a 32-wide canvas a `sigma=2.5`+
+    wider sigma would also be the "too uniform, no clear peaks" heatmap:
+    on a 32-wide canvas a `sigma=2.5`+
     bump is wide enough to wash out most of the frame.
 
     `noise_peaks`, if given (a caller passes `_VIZ_NOISE_PEAKS[ds]` -- this
     function does not default to any particular rung's own set, since it
     has no way to know which rung `points` came from), additionally folds
     those in at `_VIZ_NOISE_AMPLITUDE` -- background clutter a real PRE-NMS
-    probability map would have (2026-09-12 feedback), capped low enough to
+    probability map would have, capped low enough to
     never change an alive/dead decision (see `_place_viz_noise_peaks`'s
     own docstring). Real `points` always win the max-combine regardless of
     proximity, since `_VIZ_NOISE_AMPLITUDE < 1.0`.
@@ -1613,7 +1601,7 @@ def _animate_keypoints(points_by_rung: Dict[float, np.ndarray], out_path: str,
     the SAME fixed level-0 coordinate frame: the picture behind "convert
     every rung's keypoints into one shared coordinate system and overlay
     them", before any merging happens. Legend spells out shape+colour ->
-    rung explicitly (2026-09-11 feedback: nothing was labelled before).
+    rung explicitly.
     """
     fig, ax = plt.subplots(figsize=(6, 6))
 
@@ -1636,9 +1624,8 @@ def _animate_keypoints(points_by_rung: Dict[float, np.ndarray], out_path: str,
 
 def _viz_merge_legend() -> List[Line2D]:
     """Proxy handles shared by every frame of `_animate_anchor_merge` --
-    built once, not re-derived per frame. 2026-09-11 feedback: nothing was
-    labelled before (raw shapes, the kept star's colour, the search-radius
-    circle, the merged-away mark all need spelling out explicitly).
+    built once, not re-derived per frame: raw shapes, the kept star's colour,
+    the search-radius circle and the merged-away mark, all spelled out.
     """
     handles = [Line2D([0], [0], marker=_RUNG_MARKERS[ds], color='w',
                       markerfacecolor='none', markeredgecolor=_RUNG_COLORS[ds],
@@ -1658,7 +1645,7 @@ def _viz_merge_legend() -> List[Line2D]:
 def _animate_anchor_merge(all_pts: np.ndarray, rung_id: np.ndarray,
                           frames: List[dict], out_path: str, fps: float,
                           frame_dir: Optional[str] = None) -> None:
-    """(c) -- THREE PHASES, per 2026-09-11 feedback ("draw one figure per
+    """(c) -- THREE PHASES ("draw one figure per
     ds first, then one figure with everything overlaid" before the merge
     itself): (1) each rung's raw points fade in on their own, one rung per
     frame (same picture as `_animate_keypoints`, repeated here so this GIF
@@ -1669,12 +1656,11 @@ def _animate_anchor_merge(all_pts: np.ndarray, rung_id: np.ndarray,
     same physical test, just a faster way to ask it -- see
     `_merge_within_radius`'s own docstring). A kept point becomes a STAR
     coloured by WHICH RUNG it came from (`rung_id`), not a single uniform
-    colour -- "can't tell which rung became the anchor" was the other half
-    of that feedback.
+    colour, so it is visible which rung became the anchor.
     """
     # Wider than tall so the legend has its own space to the right of the
-    # coordinate axes instead of sitting inside it (2026-09-11 feedback:
-    # an in-axes legend was covering real points on this small canvas).
+    # coordinate axes instead of sitting inside it: an in-axes legend covers
+    # real points on this small canvas.
     fig, ax = plt.subplots(figsize=(8.5, 6.5))
     fig.subplots_adjust(right=0.72)
     n = len(all_pts)
@@ -1707,7 +1693,7 @@ def _animate_anchor_merge(all_pts: np.ndarray, rung_id: np.ndarray,
                          'about to merge', fontsize=10)
         elif k == n_total - 1:
             # Continues straight from the LAST decision frame, not a clean
-            # cut to just the survivors (2026-09-11 feedback: "the circle
+            # cut to just the survivors ("the circle
             # should turn into an X, that's what makes it connect") -- every
             # merged-away point (including the one the previous frame was
             # still highlighting with a circle) settles into the same plain
@@ -1825,8 +1811,7 @@ def _animate_alive(anchors: np.ndarray, anchor_pattern: List[str],
     -- not because the other three (candidates 2/3/4) are less interesting;
     they are text, not pictures, in the PPT for now.
 
-    FILL COLOUR CHANGES MEANING ONCE, AT THE CLOSING FRAME (2026-09-11
-    feedback): for the four per-rung frames, an anchor's fill is
+    FILL COLOUR CHANGES MEANING ONCE, AT THE CLOSING FRAME: for the four per-rung frames, an anchor's fill is
     `anchor_rung` -- which rung its own coordinate came from (the same
     colour it had as a star at the end of `_animate_anchor_merge`, so this
     picks up where that GIF left off). Only the FIFTH, closing frame
@@ -1841,9 +1826,8 @@ def _animate_alive(anchors: np.ndarray, anchor_pattern: List[str],
     n_rungs = len(_VIZ_ORDER)
     fig, (ax_b, ax_p) = plt.subplots(1, 2, figsize=(12.5, 6.8))
 
-    # The six-pattern colour key, spelled out ON the figure (2026-09-11
-    # feedback: naming it in the suptitle's own text was not the same as
-    # actually labelling it) -- added ONCE, outside frame(): a fig-level
+    # The six-pattern colour key, spelled out ON the figure (naming it in
+    # the suptitle is not the same as labelling it) -- added ONCE, outside frame(): a fig-level
     # legend is not inside the axes `ax.clear()` wipes each frame, so it
     # does not need to be re-added every frame the way the per-axes
     # alive/dead legends do. Only becomes the ACTIVE meaning at the final
@@ -1898,7 +1882,7 @@ def _animate_alive(anchors: np.ndarray, anchor_pattern: List[str],
         # to each frame's min/max is a no-op for the peak but lets a frame
         # with a smaller/absent bump stretch its own noise floor up to look
         # like a real signal -- fixed limits keep every frame's colour
-        # meaning the SAME number (2026-09-11 feedback: "too uniform").
+        # meaning the SAME number.
         ax_p.imshow(field, origin='upper',
                    extent=(0, _VIZ_FOOTPRINT, _VIZ_FOOTPRINT, 0),
                    cmap='viridis', vmin=0.0, vmax=1.0, alpha=0.7, zorder=1)
@@ -1922,7 +1906,7 @@ def _animate_alive(anchors: np.ndarray, anchor_pattern: List[str],
             # match line, the tau window) stop meaning anything -- this
             # frame is the CLASSIFICATION result, not another rung check --
             # so both collapse to a plain neutral edge and nothing else is
-            # drawn on top of the anchors (2026-09-11 feedback).
+            # drawn on top of the anchors.
             edge = '0.3' if is_final else ('limegreen' if alive_b[i] else 'crimson')
             ax_b.scatter(x, y, s=_VIZ_MARKER_LARGE, facecolor=colors[i],
                         edgecolor=edge, linewidth=2, zorder=4)
@@ -1939,10 +1923,9 @@ def _animate_alive(anchors: np.ndarray, anchor_pattern: List[str],
                                           color='white', lw=1, alpha=0.8,
                                           zorder=3))
                 # The sample grid `probe_via_probability_map` actually
-                # checks (every candidate, real signal or noise alike --
-                # 2026-09-12 discussion), plus the winning one, marked --
-                # 2026-09-12 feedback: a bare circle only implies a search
-                # radius, it does not show candidate1's mechanism itself.
+                # checks (every candidate, real signal or noise alike),
+                # plus the winning one, marked: a bare circle only implies a
+                # search radius, it does not show candidate1's mechanism itself.
                 gxs, gys, best_x, best_y, traced_val = \
                     _trace_probability_map_peak(field, (x, y), tau)
                 if not np.isclose(traced_val, peak_value[i], atol=1e-6):
@@ -2023,11 +2006,9 @@ def _run_visualize_real_example(args, out_dir: str) -> None:
     `--checkpoint` is given -- deferred torch import keeps a synthetic-only
     `--parts visualize` run model-free, same as `merge_grid`. Pass
     `--c-rungs 4 8 16` (etc.) to keep the DETECTION to the coarse rungs
-    only; `--viz-real-crop` controls the DISPLAY crop size separately (2026
-    -09-11 feedback: anchors drawn on top were hiding everything else, and
-    the previous version showed the whole mother footprint with no tissue
-    image at all -- both fixed here: anchors are now the BOTTOM scatter
-    layer, tissue image bottom of everything, per-rung dots on top).
+    only; `--viz-real-crop` controls the DISPLAY crop size separately. Anchors are
+    the BOTTOM scatter layer (drawn on top they hide everything else), the
+    tissue image bottom of everything, per-rung dots on top.
     """
     if not args.checkpoint:
         print('  [visualize] --checkpoint not given -- skipping the real-'
@@ -2048,7 +2029,7 @@ def _run_visualize_real_example(args, out_dir: str) -> None:
     with SafeSlide(entry.path) as wsi:
         forest = ChainStack.CStack.from_own(
             c_corpus, entry.name, args.c_rungs, wsi, tile=args.tile,
-            cache_root=args.cache_root or ChainStack.DEFAULT_CACHE_ROOT)
+            cache_root=chainstack_root(args))
         mother, mother_image, groups_by_ds, images_by_ds = forest[0]
         per_rung_tiles, per_rung = SurvivalProcess.detect_all_generations(
             mother, mother_image, groups_by_ds, images_by_ds, net,
@@ -2220,8 +2201,8 @@ def _run_visualize(args, out_dir: str) -> None:
 
 # =============================================================================
 #  scale_diagnostic -- does RStack's shrink-and-grow agree with a plain
-#  Gaussian blur on WHICH points are 只在一階/一直存活/不連續? Added
-#  2026-09-14, to test the hypothesis that 只在一階 tracks a point's own
+#  Gaussian blur on WHICH points are 只在一階/一直存活/不連續? It tests
+#  the hypothesis that 只在一階 tracks a point's own
 #  characteristic SCALE (classical scale-space theory) rather than something
 #  specific to RStack's own resampling filter.
 # =============================================================================
@@ -2268,7 +2249,7 @@ def classical_blur_stack(image: np.ndarray, rungs: Sequence[float], *,
 _SCALE_MARK_COLORS = {'只在一階': '#2ECC40', '一直存活': '#111111',
                       '不連續': '#888888'}
 
-#: The other three patterns (2026-09-14: draw these too, but as a circle
+#: The other three patterns (drawn too, but as a circle
 #: coloured by that rung's own score rather than a fixed per-pattern
 #: colour) -- 'Blues' runs light-to-dark, matching "darker = higher score"
 #: with no inversion needed.
@@ -2325,13 +2306,12 @@ def _draw_scale_diagnostic_figure(r_stack, r_anchors, r_patterns, r_alive,
     """2 rows (RStack / classical blur) x len(order) columns (ds=1, no
     degradation, first; most-degraded last). An anchor's marker is drawn
     ONLY on the columns where its OWN `alive[]` row says it actually
-    survived (2026-09-14 change from the first version, which drew every
-    anchor at a fixed position on every column regardless of alive/dead) --
+    survived --
     只在一階 therefore appears in exactly one column, 不連續 (flicker) in
     whichever non-contiguous columns it survived, and 一直存活 in every
     column, which is what "alive everywhere" already means.
 
-    細部存活/晚生型/中間帶 (2026-09-14 addition) are drawn too, but as an
+    細部存活/晚生型/中間帶 are drawn too, but as an
     unfilled CIRCLE rather than a fixed-colour X, coloured by that rung's
     OWN score (`_SCALE_CIRCLE_CMAP`, dark = high, light = low, normalised
     over `[score_threshold, 1.0]` since nothing alive ever scores below the
@@ -2342,8 +2322,8 @@ def _draw_scale_diagnostic_figure(r_stack, r_anchors, r_patterns, r_alive,
     n_cols = len(order)
     # +1.0 in width is the colorbar's OWN reserved strip (added below via
     # add_axes), not shared with the column axes -- fig.colorbar(..., ax=
-    # axes) was the earlier version's bug: it borrows room from the axes it
-    # is given, which shrank column n_cols-1 every time this ran.
+    # axes) would borrow room from the axes it
+    # is given, shrinking column n_cols-1 every time this runs.
     fig, axes = plt.subplots(2, n_cols, figsize=(3.2 * n_cols + 1.0, 7.2),
                              squeeze=False)
     norm = matplotlib.colors.Normalize(vmin=float(score_threshold), vmax=1.0)
@@ -2377,8 +2357,7 @@ def _draw_scale_diagnostic_figure(r_stack, r_anchors, r_patterns, r_alive,
             ax.set_xticks([]); ax.set_yticks([])
 
     # ASCII_NAMES ONLY, not the Chinese pattern name -- matplotlib's default
-    # font has no CJK glyphs (Patterns.py's own docstring: this exact bug
-    # made all three of Stage B's figures unreadable on 2026-09-01). Putting
+    # font has no CJK glyphs (Patterns.py's own docstring). Putting
     # the Chinese name in the label even alongside the ASCII one still
     # renders that half as empty boxes.
     handles = [Line2D([0], [0], marker='x', color=color, linestyle='None',
@@ -2829,8 +2808,7 @@ def main():
                     help="chains_stack: C's mother is always the coarsest "
                          'of these. merge_grid: which rungs a real C-tree '
                          'covers')
-    ap.add_argument('--cache-root', default=None,
-                    help='default: ChainStack.DEFAULT_CACHE_ROOT')
+    add_chainstack_args(ap, 'DemoSurvivalAnalysis', on=True)
     ap.add_argument('--out', default=None,
                     help='output DIRECTORY (default: '
                          "job_result_dir('DemoSurvivalAnalysis')) -- shared "

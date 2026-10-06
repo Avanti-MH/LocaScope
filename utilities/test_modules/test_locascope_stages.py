@@ -196,8 +196,7 @@ def run_stage2(wsi, mask, query_np, estimate, args, device):
 # ── --check-sims: stage 2's maps against the path they replaced ──────────────
 
 def _old_lattice_grid(fm: FeaturesMap, lattice: str) -> torch.Tensor:
-    '''FROZEN: FeaturesMap.main/overlap_feature_grid before 2026-10-06 -- one
-    copy per cell, each through __getitem__ (test_patching_lib keeps the same
+    '''FROZEN: FeaturesMap.main/overlap_feature_grid, one copy per cell,, each through __getitem__ (test_patching_lib keeps the same
     copy for the grid alone).'''
     g = fm.grid
     if lattice == 'main':
@@ -212,9 +211,9 @@ def _old_lattice_grid(fm: FeaturesMap, lattice: str) -> torch.Tensor:
 
 
 def _old_sim_maps(retriever) -> dict:
-    '''FROZEN: SlidingWinSimRot.compute_sim_maps before 2026-10-06. Features
-    on the host (encoder.features() returned there), every grid arranged per
-    call from them, moved to the device, then `_sim_tensors`.'''
+    '''FROZEN: SlidingWinSimRot.compute_sim_maps with features on the host,
+    every grid arranged per call from them, moved to the device, then
+    `_sim_tensors`.'''
     device = retriever.device
     out = {}
     for rot, qfm in retriever.query_features_by_rot.items():
@@ -243,8 +242,7 @@ def _same_maps(a: dict, b: dict) -> Tuple[int, int]:
 
 def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
     """Stage 2's similarity maps, every rotation x region x lattice, against
-    (a) the frozen pre-2026-10-06 path, which arranged the grids from host
-    features per call, and (b) the same retriever with its features read back
+    (a) the frozen path that arranges the grids from host features per call, and (b) the same retriever with its features read back
     from a FeatureMapCache. Both must be bit-identical. The decoy: the maps at
     rotation 0 against those at 180, which have the same shape and must differ
     -- so an equality here is evidence the comparison compares."""

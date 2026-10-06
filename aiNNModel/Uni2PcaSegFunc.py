@@ -160,14 +160,8 @@ from TissueSegFunc import (TissueSegConfig, TissueSegmenter,  # noqa: E402
 #: Nowhere in that does a level appear. `test_EoMT.TileSet.__getitem__:391`
 #: passes the literal 0 for the same reason.
 #:
-#: A level parameter WAS here, and it existed only because fit and apply had
-#: been split apart to serve the old `from_wsi(method=...)` door -- which
-#: made "the two must share a magnification" an invariant that nothing could
-#: check. `segment_slide` puts them back in one call and the parameter has nothing
-#: left to do.
-#:
-#: The cost that seemed to justify a coarser level is measured and small. From
-#: the EoMTest run of 2026-08-24, whole slide, every tile:
+#: Fit and apply share one magnification because `segment_slide` does both in
+#: one call. Level 0 costs little, whole slide, every tile:
 #:
 #:     BRACS_1003691   276 x 315 = 86,940 tiles    ~410 tiles/s    ~3.5 min
 #:     S1103520 Ki67   435 x 622 = 270,570 tiles   ~783 tiles/s    ~5.8 min
@@ -363,16 +357,11 @@ class Uni2PcaSegConfig(TissueSegConfig):
     #: with a patch grid too, and swapping is one flag.
     encoder: str = 'uni2'
 
-    #: NO plane_ds, AND THAT IS THE POINT. It used to hold "the downsample the
-    #: masking pass will read at", which had to equal the `ds` the caller passed
-    #: to the old `from_wsi` -- and nothing could check it. `__call__` receives an
-    #: ndarray and cannot know its magnification, so a basis fitted at ds 8 and
-    #: applied to a ds 32 plane produced a mask of the right shape, silently
-    #: wrong. An invariant held together by a docstring is not an invariant.
-    #:
-    #: The magnification now enters nowhere: `segment_slide` fits and projects
-    #: at `LEVEL` in one call, so there is no second place for it to disagree
-    #: with.
+    #: NO plane_ds. `__call__` receives an ndarray and cannot know its
+    #: magnification, so a basis fitted at one ds and applied at another would
+    #: give a mask of the right shape, silently wrong. `segment_slide` fits and
+    #: projects at `LEVEL` in one call, so there is no second place for the
+    #: magnification to disagree with.
 
     #: Side of the square handed to the encoder, in plane pixels. Fed as read --
     #: `cfg.transform`'s resize and centre crop are bypassed -- so this only has
@@ -391,13 +380,10 @@ class Uni2PcaSegConfig(TissueSegConfig):
     #: component is arbitrary, which is what the second field is for -- the
     #: notebook's own flag, kept rather than replaced by a rule.
     #:
-    #: The POLARITY is settled. `InspectPcaSeg` of 2026-08-26 drew both masks on
-    #: BRACS_1228 (H&E) and S1104233 (Ki67) at four magnifications; True is the
-    #: side that lies on the tissue in all eight panels, and False is the side
-    #: that lies on the glass and puts a tissue-shaped HOLE in itself -- which
-    #: is exactly what it looks like when read as a mask, and did get read that
-    #: way once. The default moved with the finding: editing a dataclass default
-    #: splits new ids from old rather than invalidating them, rule 1 above.
+    #: The POLARITY is settled. `InspectPcaSeg` drew both masks on BRACS_1228
+    #: (H&E) and S1104233 (Ki67) at four magnifications; True is the side that
+    #: lies on the tissue in all eight panels, and False is the side that lies
+    #: on the glass and puts a tissue-shaped HOLE in itself.
     #:
     #: The THRESHOLD is NOT settled to the same standard, and 0.5 is still the
     #: notebook's number. PC1's histogram is bimodal on Ki67 (valley near 0.2)

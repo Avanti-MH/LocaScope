@@ -3,7 +3,7 @@
 PrototypicalRoutingHead/Losses.compute_loss` and `training/MppRoutingHead/
 cli/train._compute_loss` -- named after the formula rather than a module
 because what it checks is that the two agree and that both weight the
-regression term (user, 2026-09-24).
+regression term.
 
     python utilities/test_modules/TestRoutingHeads/test_ordinal_loss.py
 

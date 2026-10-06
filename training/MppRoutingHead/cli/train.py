@@ -50,9 +50,7 @@ variable (`online` if unset), so a smoke run stays off the server with
 `WANDB_MODE=offline` in the environment rather than a flag here -- see
 `jobscripts/_env.sh`.
 
-`best` is by val `level_accuracy`, which is a meaningful quantity only because
-there is a val split; before there was one, every run's number came from
-whatever the last epoch happened to be.
+`best` is by val `level_accuracy` on the val split.
 
 WHY ONE ENCODER PASS FEEDS EVERY HEAD (baseline 2)
 ----------------------------------------------------
@@ -68,10 +66,7 @@ per-epoch camera augmentation (spec.md, "Camera: train vs eval") the pixels
 differ every epoch, so the encoder genuinely has new input each time. Caching
 features across epochs would be caching the augmentation away.
 
-NOT `--arms`/`Arm`/`ARMS` (2026-09-17). Those names came from a context where
-several configurations were trained SIDE BY SIDE for comparison -- "arm" the
-way a clinical trial has arms. This file still compares (that is what it is
-for), but the underlying class (`common.Head.Head`) and its per-task registry
+NOT `--arms`/`Arm`/`ARMS`. This file compares heads, but the underlying class (`common.Head.Head`) and its per-task registry
 (`Runtime.HEAD_CHOICES`) are also used by `stage1_estimation/
 ClassifierEstMpp.py`, which loads exactly ONE trained head to run inference
 with -- no comparison happening there, so "arm" would misname what it is
@@ -142,8 +137,8 @@ def train_render_cfg(args) -> RenderConfig:
 def _identity(args, **more) -> Dict:
     '''The resume identity: the arguments that decide what is trained, plus
     `more`. The read mode is in it as `read_tag` only when it is not the
-    default, so every resume file written before the read mode existed is
-    still this run's identity at the default.'''
+    default, so a resume file without it is this run's identity at the
+    default.'''
     identity = dict(resume_identity(args, _NOT_IDENTITY), **more)
     tag = train_render_cfg(args).read_tag
     if tag:
@@ -243,10 +238,8 @@ def print_class_weights(weights) -> None:
 #: relied on alone -- `f'{name:_NAME_W}s'` does not TRUNCATE a name that
 #: somehow exceeds this width, it just stops padding, so a name and the
 #: field after it would glue together with no separator at all if the
-#: field boundary were the only thing keeping them apart. This is exactly
-#: the 2026-09-20 bug this fixes: `f'{name:12s}{dataset_id:17s}'` (no space
-#: between the two fields) printed `mlp_deep_residualbracs/test` once
-#: `name` (17 chars) exceeded the old 12-char field.
+#: field boundary were the only thing keeping them apart
+#: (`mlp_deep_residualbracs/test`).
 _NAME_W = 22
 
 
@@ -256,14 +249,9 @@ def val_report(name: str, combined: Dict, rows: List[Dict],
     '''Print the val line and return the CSV rows -- one per dataset plus an
     `all` row, for ONE head. Called once per head, from a loop the CALLER
     owns (`run_baseline2`'s `for name in heads`, `run_baseline3`'s own
-    `for name in names`) -- NOT looped over every head internally the way
-    this function did before 2026-09-20, because that shape is what put
-    the print for `rung_report`'s ENTIRE pass after `val_report`'s entire
-    pass: every head's val block, then every head's rung block, so by the
-    time a head's rung breakdown printed, its own val block could be many
-    lines above with nothing on screen saying which head the numbers in
-    between belonged to. The caller now calls `val_report` THEN
-    `rung_report` for the SAME head before moving to the next one.
+    `for name in names`) -- NOT looped over every head internally, so the
+    caller calls `val_report` THEN `rung_report` for the SAME head before
+    moving to the next one and a head's val and rung blocks print together.
 
     MUTATES `combined` to add `level_accuracy_unweighted` -- `save_tagged`
     reads it back off the same dict `run_baseline2`/`run_baseline3` already
@@ -279,16 +267,12 @@ def val_report(name: str, combined: Dict, rows: List[Dict],
 
     TWO `all` NUMBERS, not one. Each dataset's OWN `level_accuracy` here is
     the plain mean of its six rungs' own accuracies (not pooled over its
-    tiles -- 2026-09-20, `rescore(dataset_rows)`'s pooled-per-tile number is
-    computed and then DISCARDED, `per_rung`'s mean used instead: RICHNESS's
+    tiles -- `per_rung`'s mean, not `rescore(dataset_rows)`'s pooled one: RICHNESS's
     coarse-rung shortfall means a tile-pooled average is dominated by
-    whichever rungs happen to have the most val tiles, exactly
-    `rescore_by_rung`'s own "90% pooled while the worst rung sat under 10%"
-    finding). `level_accuracy` ("all, n-weighted") then combines those SIX-
+    whichever rungs happen to have the most val tiles). `level_accuracy` ("all, n-weighted") then combines those SIX-
     RUNG-AVERAGED per-dataset numbers weighted by each dataset's own total n
-    -- so a dataset with more val positions still gets proportionally more
-    say (2026-09-18, BRACS had 1094 against Ki67's 847), just no longer at
-    the tile level. `level_accuracy_unweighted` ("all, dataset-avg") is the
+    -- so a dataset with more val positions gets proportionally more say,
+    but not at the tile level. `level_accuracy_unweighted` ("all, dataset-avg") is the
     plain mean of the two dataset numbers instead, so both datasets get
     equal say regardless of n. `save_tagged` selects `_best.pt` on the first
     and `_best_unweighted.pt` on the second -- see `Checkpoints.
@@ -452,7 +436,7 @@ def _compute_loss(logits: torch.Tensor, target: torch.Tensor, weights,
         probs = F.softmax(logits.float(), dim=-1)
         expected_log_rung = (probs * log2_rungs).sum(dim=-1)
         true_log_rung = log2_rungs[target]
-        # Class-weighted like L_bal (2026-09-24). Unweighted, the regression
+        # Class-weighted like L_bal. Unweighted, the regression
         # term is a plain mean over the batch, and rung 32 -- 0.3 per cent of
         # the training manifest -- would barely move it.
         sq = (expected_log_rung - true_log_rung).pow(2)
@@ -501,8 +485,7 @@ def _apply_warmup(opt, epoch: int, warmup_epochs: int, base_lrs: List[float]) ->
     off) or once `epoch` has passed it. Otherwise linearly ramps every param
     group's LR from 0 up to its own `base_lrs[i]` over the first
     `warmup_epochs` epochs -- lets a freshly-initialised head settle before
-    it is pushing a pretrained trunk at full strength (the mechanism behind
-    the 2026-09-17 convnext_v2/attn_linear collapse, epoch 6 of that run).
+    it is pushing a pretrained trunk at full strength.
 
     `base_lrs` is captured ONCE, right after the optimizer is built
     (`[g['lr'] for g in opt.param_groups]`) -- this function overwrites
@@ -551,11 +534,8 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
     # ALWAYS fp32, never `args.dtype`. This head is trained by Adam with no
     # GradScaler, and fp16 there is not a slower-but-safe choice, it is a
     # guaranteed eventual NaN -- `HeadConfig.dtype`'s own docstring has the
-    # mechanism. The 2026-09-16 full run hit exactly this: `--dtype` defaults
-    # to 'fp16' and this line used to pass that straight through to
-    # `head_cfg`, so the dataclass default fixed nothing -- every construction
-    # site overrode it right back to fp16. Hardcoding it here is what makes
-    # that impossible to regress on again by way of a CLI default.
+    # mechanism. `--dtype` defaults to 'fp16', so passing it through would
+    # override the dataclass default at every construction site.
     # PER HEAD, not one shared `head_cfg` -- see `_head_cfg_for`'s own
     # docstring: mlp/mlp_deep/mlp_wide/mlp_deep_wide each need their own
     # depth/width, and a single shared config could only ever give them all
@@ -601,8 +581,7 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
                          heads=list(names))
     # Which blocks a mix_ head read is not in its NAME, so a registry edit that
     # kept the name would otherwise resume onto weights for other blocks. Only
-    # heads that mix are listed, and the key only exists when one does, so a
-    # resume file from before this is still the same identity.
+    # heads that mix are listed, and the key only exists when one does.
     mixed = {n: list(c.encoder_layers) for n, c in head_cfgs.items()
              if c.encoder_layers}
     if mixed:
@@ -764,18 +743,14 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
         # THE TRUNK IS TRAINED, SO IT IS FP32. `ConvNeXtV2EncoderConfig` sets
         # dtype='fp16', which is right for the frozen use it was written for
         # and wrong here for the same reason `HeadConfig.dtype` is fp32: Adam
-        # updating fp16 parameters without a GradScaler produces NaN, and the
-        # 2026-09-16 smoke run showed exactly that on the (much smaller) head.
+        # updating fp16 parameters without a GradScaler produces NaN.
         # 28M parameters in fp32 is ~112 MB of weights plus optimizer state --
         # nothing, on this card.
         base = encoder_config(BASELINE3_ENCODER)
         cfg = replace(base, model=replace(base.model, dtype='fp32'))
         encoder = cfg.build(device)
         # ALWAYS fp32, never `args.dtype` -- same reasoning as `run_baseline2`'s
-        # `head_cfg`, and the same bug this used to have: passing `args.dtype`
-        # through here silently reintroduced fp16-under-Adam the moment
-        # `--dtype`'s default (fp16) was left in place, regardless of what
-        # `HeadConfig`'s own dataclass default said.
+        # `head_cfg`.
         head_cfg = _head_cfg_for(name, int(encoder.model_spec.dim), args)
         head = Head(head_cfg, reduction, classifier).to(device)
         print(f'baseline 3  head {name} (reduction={reduction}, '
@@ -976,21 +951,14 @@ def _merge_val_scores(path: Path, out_rows: List[Dict]) -> List[Dict]:
     is a plain append. `path` not existing yet is just `out_rows` alone --
     the first run has nothing to merge with.
 
-    `loss_kind` (2026-09-22) joined the key the same day `Checkpoints.
-    weight_filename` gained a `loss` segment -- without it, a `bal` run and
-    an `ord_a` run of the SAME (baseline, encoder, head) would --merge into
-    ONE row per epoch instead of two, one silently overwriting the other's
-    history, exactly the gap `PrototypicalRoutingHead/cli/train.py`'s own
-    `_IDENTITY_FIELDS` closed for `support_context`/`query_context` a day
-    earlier. `.get(..., 'bal')`, not `[...]`: a row written before this
-    field existed has no `loss_kind` column at all, and 'bal' was every
-    run's behaviour before `--loss` existed, so it is the correct default
-    for an old row, not a guess.
+    `loss_kind` is in the key: without it, a `bal` run and an `ord_a` run of
+    the SAME (baseline, encoder, head) would --merge into ONE row per epoch,
+    one silently overwriting the other's history. `.get(..., 'bal')`: a row
+    without a `loss_kind` column was trained bal.
 
-    `read_level` (2026-10-02) joined the key for the same reason `loss_kind`
-    did: a `resampled` run of a (baseline, encoder, head, loss) would otherwise
-    replace the `pyramid` run's rows. A row without it, or with it empty, is
-    `pyramid` -- the only read mode before it existed.
+    `read_level` is in the key for the same reason: a `resampled` run of a
+    (baseline, encoder, head, loss) would otherwise replace the `pyramid`
+    run's rows. A row without it, or with it empty, is `pyramid`.
 
     `csv.DictReader` reads every value as a str (`baseline` is `'2'`/`'3'`,
     not `2`/`3`) -- the key comparison normalizes `out_rows`' own values to
@@ -1165,8 +1133,7 @@ def main() -> int:
     # Reads WANDB_MODE, same convention as SuperPathPoint/FewShotEoMT's own
     # --wandb-mode: `wandb.init(mode=...)` takes an EXPLICIT argument, which
     # beats the env var, so the default has to read it rather than hardcode a
-    # literal -- a literal here would be the exact bug fixed elsewhere on
-    # 2026-09-16 (jobscripts/_env.sh has the full note).
+    # literal (jobscripts/_env.sh has the full note).
     ap.add_argument('--wandb-mode', default=os.environ.get('WANDB_MODE', 'online'),
                     choices=('online', 'offline', 'disabled'))
     ap.add_argument('--run-name', default='',

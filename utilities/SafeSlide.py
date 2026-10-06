@@ -28,15 +28,13 @@ Two properties of that failure make it worse than an ordinary exception.
    openslide.background-color using alpha as the mask. read_region_rgb below
    does the same, and exists so that callers stop reaching for .convert('RGB').
 
-3. A FAILED READ USED TO COST THE WHOLE RECTANGLE. openslide fails the entire
-   requested rect when any tile inside it is missing, and the retired
-   WsiTissuesContainer read one rect per tissue region. On S1137178 that blanked a 32500x15232 px
-   region -- 7.9 x 3.7 mm of tissue -- at both level 0 and level 1, and since
-   retrieval scores windows on those features, it could never propose anywhere
-   inside it. None of that slide's 189 predictions land in that rectangle.
-   read_region now halves the rect and re-reads each side on failure, down to
-   `min_chunk`, so only the parts with genuinely no image come back blank. It
-   costs nothing on a slide without holes, because it is on the failure path.
+3. OPENSLIDE FAILS THE WHOLE RECTANGLE when any tile inside it is missing. One
+   rect per tissue region on S1137178 blanks a 32500x15232 px region -- 7.9 x
+   3.7 mm of tissue -- at levels 0 and 1, and retrieval can then never propose
+   inside it. read_region halves the rect and re-reads each side on failure,
+   down to `min_chunk`, so only the parts with genuinely no image come back
+   blank. It costs nothing on a slide without holes, because it is on the
+   failure path.
 
 A blank returned because a read FAILED is alpha 0, exactly like a region
 openslide knew was never scanned. Downstream cannot tell those apart, which is
@@ -77,8 +75,7 @@ Size = Tuple[int, int]
 # Colour openslide itself falls back to when a slide declares no background.
 _DEFAULT_BACKGROUND = 'ffffff'
 
-# The slack a requested downsample is compared against the pyramid with --
-# ReadGeometry's, the one definition (a copy of its own until 2026-10-06).
+# The slack a requested downsample is compared against the pyramid with.
 from ReadGeometry import LEVEL_REL_TOL as _LEVEL_REL_TOL   # noqa: E402
 
 
@@ -181,10 +178,8 @@ class SafeSlide(openslide.OpenSlide):
         """As OpenSlide.read_region, but a failure costs a hole, not the rect.
 
         openslide fails the WHOLE requested rectangle when any tile inside it is
-        missing, so a single bad 128 px tile used to blank an entire tissue
-        region -- 32500x15232 px on one Ki67 slide, 7.9 x 3.7 mm of tissue that
-        retrieval could then never propose because its features were all blank.
-        On failure this splits the rect and re-reads each half, so only the
+        missing, so a single bad 128 px tile would blank an entire tissue
+        region. On failure this splits the rect and re-reads each half, so only the
         parts that genuinely have no image come back blank.
 
         Splitting happens only on the failure path: a slide with no holes never
@@ -259,33 +254,14 @@ class SafeSlide(openslide.OpenSlide):
 
     @property
     def base_mpp(self) -> float:
-        """Level-0 micrometres per pixel. The mean of x and y.
+        """Level-0 micrometres per pixel: the mean of mpp-x and mpp-y, with
+        `aperio.MPP` as the fallback for slides that carry no openslide.mpp-*.
 
-        THE definition. It was written out four times with three different
-        formulas, and they disagree on every slide in this project:
-
-            query_sim/source/wsi_query.py   (mpp-x + mpp-y)/2, aperio fallback
-            utilities/LocaScopePipeline.py  mpp-x only, default 0
-            utilities/PatchingLib.py        mpp-x only, default 0
-            (and resolve_scale was about to add a fourth)
-
-        All seven slides in use have mpp-x != mpp-y, so `QueryFromWSI` and
-        `WsiTissuesContainer` had been disagreeing about the slide's scale
-        everywhere -- and ds = mpp / base_mpp, so a disagreement here becomes a
-        disagreement in ds, which `int(w / ds)` turns into a whole missing tile
-        at a region boundary. That is the same mechanism behind three separate
-        failures logged on 2026-08-13.
-
-        The mean wins over mpp-x for two reasons. It is what QueryFromWSI uses,
-        and the query is the thing whose physical field of view everything else
-        exists to match -- so the container is aligned to the query rather than
-        the other way round. And a single number is already an approximation
-        when the pixel is not square: WsiTissuesContainer sized both axes with
-        one ds, `int(w / ds)` and `int(h / ds)`. Under that approximation the
-        mean is the honest choice; mpp-x is one axis pretending to be both.
-
-        `aperio.MPP` is the fallback because some slides carry it and no
-        openslide.mpp-*; the two mpp-x-only versions would raise on those.
+        THE definition: ds = mpp / base_mpp, so two definitions are two ds,
+        and `int(w / ds)` turns that into a whole missing tile at a region
+        boundary. Every slide in use has mpp-x != mpp-y, and one number for a
+        non-square pixel is an approximation either way; the mean is the
+        honest one, where mpp-x is one axis pretending to be both.
         """
         properties = self.properties
         mx = properties.get(openslide.PROPERTY_NAME_MPP_X)

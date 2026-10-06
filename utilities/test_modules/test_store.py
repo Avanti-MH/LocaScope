@@ -119,8 +119,8 @@ def t_meta_round_trips_through_strings():
     assert a_meta(ds=4.00003).to_strings()['ds'] != a_meta(ds=4.0).to_strings()['ds']
     # A pyramid's own ds (BRACS level 1) has more digits than 12: the reader
     # compares it with `!=`, so it has to come back as the same float. The
-    # decoy is the 12-digit encoding the store used until 2026-10-06, under
-    # which every non-integer level missed its cache.
+    # decoy is a 12-digit encoding, under which every non-integer level would
+    # miss its cache.
     real = 4.00003374274531
     back = FS.Meta.from_strings(a_meta(ds=real).to_strings()).ds
     assert back == real, f'{real!r} came back as {back!r}'
@@ -293,8 +293,7 @@ class _Recipe:
         return self.region
 
 
-#: The geometry every FeatureMapCache read takes alongside the regions -- what
-#: a WsiTissuesContainer used to be passed for.
+#: The geometry every FeatureMapCache read takes alongside the regions.
 GEO = dict(ds=DS, level=LEVEL, tile_size=TILE, overlap=True)
 PATH = dict(ds=DS, tile_size=TILE, overlap=True)
 

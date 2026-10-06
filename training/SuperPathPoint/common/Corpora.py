@@ -6,9 +6,9 @@
 A corpus is one extraction: a mask, a sampler config, a rung plan and a context
 factor (`Store.PreTileCorpus`). Every one of those is known before a slide is
 opened, so a reader computes the directory it needs instead of searching a root
-for something that looks right. The search is what used to go wrong -- a root
-holds stage A and stage B of the same slides on purpose, and a lookup by
-(slide, ds) either read the union or picked whichever sorted first.
+for something that looks right: a root holds stage A and stage B of the same
+slides on purpose, and a lookup by (slide, ds) would read the union or pick
+whichever sorted first.
 
 THE ONE DEFINITION OF EACH CORPUS'S KNOBS. `extract_pretiles` samples with
 `sampler_config`, `prepare_chain_stack` names its three axes' corpora through
@@ -58,8 +58,7 @@ def sampler_config(*, n: int, seed: int = 0,
     ONE SAMPLER OVER ALL RUNGS, NOT ONE PER RUNG. `_choose_centres` runs once,
     before any rung is filled, and `_place_inherited` then validates each
     centre at each rung; a sampler per rung would choose its own centres and no
-    two rungs would share one. The corpus of 2026-08-27 has `inherit_id = -1`
-    on all 6,388 rows for exactly that reason.
+    two rungs would share one.
 
     `stack_kind` is always 'F': every plan an extraction builds comes from
     DsLadder, which tags itself 'F' (TileSampler's native_plans); 'R' cannot
@@ -77,8 +76,8 @@ def sampler_config(*, n: int, seed: int = 0,
                               source_rung=inherit_source_rung))
 
 
-#: The named corpora. `stageA` is the 2026-08-27 training corpus
-#: (ExtractPreTiles.sh's defaults); the other two are F's and C's own tiles for
+#: The named corpora. `stageA` is the training corpus (ExtractPreTiles.sh's
+#: defaults); the other two are F's and C's own tiles for
 #: the survival analysis (prepare_chain_stack.py). All three take
 #: RichnessConfig's default floors and caps and differ in the rest.
 RECIPES = {

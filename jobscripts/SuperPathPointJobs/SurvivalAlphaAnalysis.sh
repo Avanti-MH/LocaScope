@@ -126,7 +126,9 @@ QUANTILES="${QUANTILES:-0.5 0.9 0.99}"
 # Which pre-tile cache the three axes' corpora are read from
 # (prepare_chain_stack.py's addresses; nothing is extracted here).
 PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
-CACHE_ROOT="${CACHE_ROOT:-}"
+# CHAINSTACK_CACHE_JOB: whose result/cache/<job>_chainstack/ tile cache to use
+# (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
+CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
 
 # Unset -> job_result_dir('SurvivalAlphaAnalysis') (the single-run default).
 # A sweep (many decoy/alive/WSI combinations under one SLURM_JOB_NAME) MUST
@@ -172,7 +174,7 @@ python training/SuperPathPoint/cli/survival_alpha_analysis.py \
   --decoy-magnitude "$DECOY_MAGNITUDE" \
   --decoy-seed "$DECOY_SEED" \
   --quantiles $QUANTILES \
-  ${CACHE_ROOT:+--cache-root "$CACHE_ROOT"} \
+  ${CHAINSTACK_CACHE_JOB:+--chainstack-cache-job "$CHAINSTACK_CACHE_JOB"} \
   ${OUT:+--out "$OUT"}
 status=$?
 

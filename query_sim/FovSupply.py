@@ -20,14 +20,6 @@ camera's (`ReadSpec`), how it looks is the Render's. The one choice of its own
 is the photo's rng, `photo_rng(seed, x, y, ds, 0)` -- the draw's seed and the
 position -- so a FoV is the same picture in any order, in any subset, in any
 process.
-
-HISTORY. `generator.py` until 2026-10-06. There FovSupply took one camera at
-one magnification, derived its plan from it (`fov_plan_of`, over
-`TileSampler.camera_plan`), and redrew with the next seed / repeated with a
-fresh gap for the batch CLI. The CLI, the policy, the derived default plan,
-`sampler=` and `CameraShot` all went; a shot is `(meta, image, params)`. The
-rng key keeps its old trailing pass `0`, so a position at the same ds is the
-same photo it always was.
 """
 
 from __future__ import annotations

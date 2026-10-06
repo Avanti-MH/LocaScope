@@ -21,7 +21,7 @@ A Render decides what a FoV LOOKS like: the domain gap, its reproducibility,
 and the ground truth that inverts its geometry (`output_to_level0`). It reads
 nothing itself -- the pixels come from its `SlideReader`, at its spec -- and
 knows no mask. WHERE the FoVs are is a `TileSampler` draw; `FovSupply(camera,
-mask, ...)` strings the draw, the read and this render together. A read with
+plan, cfg, mask)` strings the draw, the read and this render together. A read with
 no effects is not a renderer's job: `reader.read(..., ReadSpec(t, t))`
 (reference tiles, pre-tiles, support tiles).
 
@@ -31,10 +31,6 @@ at that one magnification for life -- `rect_w_l0`, `spec` and
 `output_to_level0` all depend on it. Another magnification is another
 objective on the same microscope: `camera.at(ds)`, which shares the reader
 and the config and is cached, so asking twice is one Render.
-
-HISTORY. This was `Camera` until 2026-10-03, which read through
-`QueryFromWSI` and `Render.py`; the reading is `SlideReader`'s now, and
-`diag_read_exp.py` checked every flow pixel-identical before the move.
 """
 
 from __future__ import annotations
@@ -92,9 +88,7 @@ def photo_rng(*key) -> random.Random:
     The key's parts are joined with '|'; a caller writes each the way it wants
     it compared (a ds as `:g`, say). sha256 and not `hash()`, which Python
     randomises per process for a str. THE ONE DEFINITION: `FovSupply` and
-    MppRoutingHead's eval render (`Datasets.render_row`) both draw through it.
-    (Three copies until 2026-10-06 -- FovSupply's, bench_stage1_mpp's
-    `fov_rng`, `Datasets._eval_seed` -- the last on 8 hex digits, not 16.)"""
+    MppRoutingHead's eval render (`Datasets.render_row`) both draw through it."""
     text = '|'.join(str(k) for k in key)
     return random.Random(int(hashlib.sha256(text.encode()).hexdigest()[:16], 16))
 
@@ -139,12 +133,9 @@ class Render:
         # so `a.at(4).at(1)` is `a` and nothing is built twice.
         self._objectives: Dict[float, 'Render'] = {self.ds: self}
         self._py_rng = random.Random(seed)
-        # There used to be an `np.random.seed(seed)` in the constructor, for
-        # augment fns using np.random.*. There are none left (2026-09-16): the
-        # whole augment chain draws off this object's own generators. That
-        # line made a CONSTRUCTOR mutate process-global state, so the last one
-        # built decided the noise of every other, and forked DataLoader
-        # workers got neither reproducibility nor independence.
+        # No `np.random.seed` here: the whole augment chain draws off this
+        # object's own generators, and a constructor that seeded the global
+        # state would decide the noise of every other Render.
 
     # ── what it is ─────────────────────────────────────────────────────────
 

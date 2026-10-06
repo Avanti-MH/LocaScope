@@ -25,7 +25,7 @@ source jobscripts/_env.sh
 #  cli/demo_survival_analysis.py -- merged 2026-09-11 from two standalone
 #  jobscripts (DemoChainsStack.sh, DemoMergeGrid.sh) whose underlying CLIs
 #  had grown into one file each with almost nothing shared beyond WSI_NAME/
-#  TILE/C_RUNGS/CACHE_ROOT/OUT, plus a third part (visualize) added the same
+#  TILE/C_RUNGS/CHAINSTACK_CACHE_JOB/OUT, plus a third part (visualize) added the same
 #  day. PARTS selects which demo(s) actually run -- all three by default.
 # =============================================================================
 #
@@ -63,7 +63,9 @@ PARTS="${PARTS:-chains_stack merge_grid visualize}"
 WSI_NAME="${WSI_NAME:-}"
 TILE="${TILE:-256}"
 C_RUNGS="${C_RUNGS:-1.0 2.0 4.0 8.0 16.0}"
-CACHE_ROOT="${CACHE_ROOT:-}"
+# CHAINSTACK_CACHE_JOB: whose result/cache/<job>_chainstack/ tile cache to use
+# (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
+CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
 PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-}"   # empty = ExtractPreTiles
 
 # ── chains_stack only ────────────────────────────────────────────────────
@@ -145,7 +147,7 @@ python training/SuperPathPoint/cli/demo_survival_analysis.py \
   --tile "$TILE" \
   --c-rungs $C_RUNGS \
   ${PRETILE_CACHE_JOB:+--pretile-cache-job "$PRETILE_CACHE_JOB"} \
-  ${CACHE_ROOT:+--cache-root "$CACHE_ROOT"} \
+  ${CHAINSTACK_CACHE_JOB:+--chainstack-cache-job "$CHAINSTACK_CACHE_JOB"} \
   --rungs $RUNGS \
   --lineage-index "$LINEAGE_INDEX" \
   --n-clusters "$N_CLUSTERS" \

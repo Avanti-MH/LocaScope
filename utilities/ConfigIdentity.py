@@ -24,9 +24,8 @@ The three rules
 
 2. ONLY QUANTITIES WHOSE DEFINITION IS STABLE.
    The values vary freely; that is the point. What must not vary is what the
-   NAME means. SafeSlide.base_mpp failed this on 2026-08-13 -- its definition
-   changed from mpp-x to the mean of mpp-x and mpp-y, and every store took a
-   new hash while the tiles and the vectors were unchanged.
+   NAME means: a quantity whose definition changes gives every store a new
+   hash while the tiles and the vectors are unchanged.
 
 3. THE HASH SEPARATES FILES; IT DOES NOT PROVE CORRECTNESS.
    Every id here is built from strings a caller composed. Getting the hash
@@ -158,9 +157,9 @@ def unwrapped(module: torch.nn.Module) -> torch.nn.Module:
     and they nest (compiled, then split across cards). How many cards run a
     model, or whether it is compiled, does not change one of its weights, so
     nothing that names the weights may see the wrapper -- its `module.` and
-    `_orig_mod.` key prefixes are what made one encoder two ids until
-    2026-10-06. `TileEncoder._set_model` keeps `self.model` bare; this is the
-    same rule for any module handed in from outside (a trainer's DDP copy)."""
+    `_orig_mod.` key prefixes would make one encoder two ids.
+    `TileEncoder._set_model` keeps `self.model` bare; this is the same rule for
+    any module handed in from outside (a trainer's DDP copy)."""
     import torch                                                  # noqa: PLC0415
     wrappers = (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)
     while True:
@@ -476,17 +475,15 @@ def _field_types(cls) -> dict:
 
     THIS IS NOT A REFINEMENT, IT IS THE WHOLE NESTED PATH. Under PEP 563 --
     which every module in this project turns on -- `dataclasses.fields(cls)`
-    reports `f.type` as the STRING `'HomographyConfig'`, never the class. The
-    `isinstance(f.type, type)` test that used to guard the nested branch is
-    therefore False for every config in the repo, and a nested config came back
-    as a plain dict. Silently: `PairDatasetConfig(**...)` accepts it, and the
-    failure surfaces later and elsewhere as `'dict' object has no attribute
-    'kwargs'`, inside a DataLoader worker.
+    reports `f.type` as the STRING `'HomographyConfig'`, never the class, so an
+    `isinstance(f.type, type)` test is False for every config in the repo and a
+    nested config would come back as a plain dict -- silently:
+    `PairDatasetConfig(**...)` accepts it, and the failure surfaces later as
+    `'dict' object has no attribute 'kwargs'`, inside a DataLoader worker.
 
     `get_type_hints` re-evaluates the strings in the defining module's
     namespace. It can still fail for a class defined inside a function body, so
-    the raw annotations are the fallback -- that path was already correct
-    before PEP 563 and stays correct for anything it can resolve.
+    the raw annotations are the fallback.
     """
     try:
         return typing.get_type_hints(cls)
@@ -519,8 +516,7 @@ def _from_plain(cls, fields: dict):
         if isinstance(value, dict):
             nested = _config_type(hints.get(name, by_name[name].type))
             if nested is None:
-                # LOUD, because the silent version is what this cost. No
-                # registered config has a plain dict field -- `_as_plain` only
+                # LOUD. No registered config has a plain dict field -- `_as_plain` only
                 # ever writes one for a nested config -- so a dict whose type
                 # cannot be resolved means the annotation did not come back,
                 # and returning it unconverted builds a config that is wrong in

@@ -9,7 +9,7 @@ out below.
 
 WHAT THIS DEFENDS
 -----------------
-    the order of the means (user, 2026-09-24)
+    the order of the means
         rung in a combo   mean over the K x K pairs
         combo             mean of its rungs
         dataset           mean of its combos

@@ -98,13 +98,11 @@ def _fake_upstream(in_channels=1):
             out[key] = torch.rand_like(value) + 0.5
         else:
             # SMALL, so the detector's softmax does not saturate. At randn
-            # scale it does: the first version of this file reported `gap 0,
-            # decoy 1` -- both exact integers, which a float32 network cannot
-            # produce -- because every prob_map had collapsed to one-hot. The
-            # comparison then tested WHERE the peak was and not what the
-            # probabilities were, and a wrong divisor that leaves the argmax
-            # alone would have passed. `check_fixture` below is what refuses
-            # to let that happen silently again.
+            # scale it does (`gap 0, decoy 1`, exact integers a float32 network
+            # cannot produce): every prob_map collapses to one-hot, the
+            # comparison tests WHERE the peak is and not the probabilities, and
+            # a wrong divisor that leaves the argmax alone passes.
+            # `check_fixture` below refuses that.
             out[key] = torch.randn_like(value) * 0.05
     return out
 
@@ -187,18 +185,10 @@ def t_the_rename_moves_no_values():
 
 # ── 2. rgb ───────────────────────────────────────────────────────────────────
 
-# `t_repeat_and_divide_is_exact_on_luma` MOVED TO `with_weights` on 2026-08-31.
-# A fake state dict cannot carry it. Three attempts: `randn` saturated the
-# detector softmax to one-hot and compared only where the peak was (`gap 0,
-# decoy 1`, two exact integers a float32 network cannot produce); `randn * 0.05`
-# flattened the softmax so every difference compressed toward zero (decoy
-# 9e-10); reading the trunk instead of prob_map hit the same scaling attenuating
-# through four stages (decoy 7e-9). Each fix was a different weight scale, and
-# choosing a scale that lands the output in a readable regime is calibrating the
-# fixture, not testing the code. Real weights have a real scale.
-#
-# What stays here is everything that needs NO forward -- the rename, the
-# inflation's refusals, strict -- and those passed unchanged through all three.
+# `t_repeat_and_divide_is_exact_on_luma` is in `with_weights`: a fake state
+# dict has no real weight scale, and choosing one that lands the output in a
+# readable regime is calibrating the fixture, not testing the code. What is
+# here needs NO forward -- the rename, the inflation's refusals, strict.
 
 
 def t_an_undefined_inflation_is_refused():

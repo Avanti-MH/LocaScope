@@ -69,7 +69,9 @@ C_CORPUS="${C_CORPUS:-}"
 # -- RStack.from_own's docstring: degrade is cheap, not worth the disk IO at
 # scale. Set for a small/demo run where re-generating the same few tiles
 # repeatedly is worth not recomputing at all.
-CACHE_ROOT="${CACHE_ROOT:-}"
+# CHAINSTACK_CACHE_JOB: whose result/cache/<job>_chainstack/ tile cache to use
+# (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
+CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
 
 # result/cache/<PRETILE_CACHE_JOB>_pretiles/: where stageA already is, and
 # where F's and C's own corpora are written beside it.
@@ -98,7 +100,7 @@ python training/SuperPathPoint/cli/prepare_chain_stack.py \
   ${F_CORPUS:+--f-corpus "$F_CORPUS"} \
   ${R_CORPUS:+--r-corpus "$R_CORPUS"} \
   ${C_CORPUS:+--c-corpus "$C_CORPUS"} \
-  ${CACHE_ROOT:+--cache-root "$CACHE_ROOT"}
+  ${CHAINSTACK_CACHE_JOB:+--chainstack-cache-job "$CHAINSTACK_CACHE_JOB"}
 status=$?
 
 echo ""

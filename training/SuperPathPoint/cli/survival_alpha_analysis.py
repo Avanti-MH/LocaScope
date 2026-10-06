@@ -32,7 +32,8 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
 if _HERE not in sys.path:            # prepare_chain_stack.py, reeval_density.py
     sys.path.insert(0, _HERE)
 
-from cli import add_pretile_args, job_result_dir, setup_import_paths  # noqa: E402
+from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
+                 chainstack_root, job_result_dir, setup_import_paths)
 
 setup_import_paths()
 
@@ -317,9 +318,7 @@ def _one_c_tree_probability_map(mother, mother_image, groups_by_ds, images_by_ds
     origin genuinely does vary per rung; C's happens not to, but the caller
     should not have to know that).
     `map_overlap_mode` is `assemble_generation_map`'s own union/intersection
-    (probability-field max/min) -- unrelated to the `anchors_of_
-    generations` overlap handling `_one_c_tree` uses (that one was removed
-    2026-09-11; this one still exists, a different mechanism).
+    (probability-field max/min) -- unrelated to `anchors_of_generations`' point-list overlap handling.
     """
     order = sorted(float(r) for r in c_rungs)
     per_rung_tiles, per_rung, per_rung_maps = SurvivalProcess.detect_all_generations(
@@ -848,7 +847,7 @@ def main():
                     help='decoy shift, in units of ds -- matches how tau '
                          'itself scales')
     ap.add_argument('--decoy-seed', type=int, default=0)
-    ap.add_argument('--cache-root', default=None)
+    add_chainstack_args(ap, 'SurvivalAlphaAnalysis', on=True)
     ap.add_argument('--quantiles', type=float, nargs='+',
                     default=[0.5, 0.9, 0.99])
     ap.add_argument('--out', default=None)
@@ -946,7 +945,7 @@ def main():
                 forest = CStack.from_own(
                     corpus['C'], args.wsi_stem, args.c_rungs, wsi,
                     tile=args.tile,
-                    cache_root=args.cache_root or ChainStack.DEFAULT_CACHE_ROOT)
+                    cache_root=chainstack_root(args))
                 chainstacks = [forest[i] for i in forest]
                 if probability_map_method:
                     per_chainstack = lambda args_tuple: _one_c_tree_probability_map(  # noqa: E731

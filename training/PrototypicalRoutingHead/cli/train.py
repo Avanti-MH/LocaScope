@@ -27,7 +27,7 @@ was the default and which was chosen.
 The frozen encoder runs ONCE per batch; the pairs reuse its tokens and only
 the trainable part (pooling, G, F, Collapse, head) runs per pair.
 
-VALIDATION, K x K (user, 2026-09-24). For each eval dataset and each held-out
+VALIDATION, K x K. For each eval dataset and each held-out
 combination: K support batches and K query batches, every one of the K x K
 pairs scored. A rung's accuracy in a combination is its accuracy averaged over
 the pairs; a combination's accuracy is the mean of its rungs'; a dataset's is
@@ -218,7 +218,7 @@ def val_episode_detail(rendered, logits: torch.Tensor, target: torch.Tensor,
     `RUNGS.index`), not the episode's own LOCAL N-way index -- `rescore`'s
     own `score()` looks up `RUNGS[pred_class]`/`RUNGS[true_class]`
     directly, so a local index from a 3-way episode would silently name
-    the wrong rung. `combo` (2026-09-21) records WHICH `HELD_OUT_COMBOS`
+    the wrong rung. `combo` records WHICH `HELD_OUT_COMBOS`
     entry this episode drew -- see `combo_report`'s own docstring for why
     this has to be tracked per row rather than assumed from the rung alone
     (one rung appears in more than one combo).
@@ -244,15 +244,12 @@ def combo_report(detail_by_dataset, epoch: int, **identity):
     per_combo.csv` (one row per dataset+combo), `rung_rows` for
     `val_scores_per_rung.csv` (one row per dataset+combo+rung).
 
-    THE ONLY val report (2026-09-21) -- there used to be a separate
-    `val_report` producing an "all, n-weighted"/"all, dataset-avg" summary
-    ABOVE the per-dataset numbers, and a `rung_report` pooling every combo
-    together per rung. Both were REMOVED: a summary that blends 3-way,
-    4-way and the full 6-way DEPLOYMENT task into one number answers no
-    single question cleanly (a rung scored alongside 2 other candidates
+    No summary blends combos: one that mixes 3-way, 4-way and the full
+    6-way DEPLOYMENT task into one number answers no single question
+    cleanly (a rung scored alongside 2 other candidates
     and the same rung scored alongside 5 are different questions, and the
     SAME is true one level up -- "accuracy" blended across combos is not
-    one thing either). Every number this file now reports is scoped to
+    one thing either). Every number this file reports is scoped to
     ONE combo, which is a question with an actual, specific answer.
     Used by `cli/evaluate.py`'s ORIGINAL test table (random full 6-way
     episodes, pooled per combo). Training's own val is `kxk_report`.
@@ -441,7 +438,7 @@ def _nanmean(values) -> float:
 
 def kxk_report(results, epoch: int, *, k: int, header: bool = True,
                scope: str = 'val', **identity):
-    """The user's definition (2026-09-24), in order:
+    """The user's definition, in order:
 
         rung in a combo   mean over the K x K pairs of that rung's accuracy
         combo             mean of its rungs
@@ -516,25 +513,15 @@ def _prototype_weight_filename(encoder_name: str, pooling: str,
     <head>_<tag>.pt`), and this checkpoint holds FIVE modules (pooling/
     support_context/query_context/collapse/head) plus axes (`pooling`,
     `cross_domain_dataset`, `loss`) that function's own world has no name
-    for. `support_context`/`query_context` joined 2026-09-22, same day
-    `ContextEncoders.py` was -- `identity` (both, by default) trains
-    nothing, but `bilstm`/`attnlstm` do, and a run with one of those
+    for. `support_context`/`query_context`: `identity` (both, by default)
+    trains nothing, but `bilstm`/`attnlstm` do, and a run with one of those
     enabled vs one without is a different experiment even when every other
-    flag matches; before this they would have silently shared one
-    `_best.pt`, same class of gap `cross_domain_dataset` was added here to
-    close a day earlier.
+    flag matches.
 
-    `loss` (2026-09-22, same day `Checkpoints.weight_filename` gained the
-    identical segment for `MppRoutingHead`): `bal` gets NO segment (every
-    checkpoint before `--loss` existed, and every `bal` run since, keeps
-    its exact filename), `ord_a`/`ord_b` get a real, distinct one -- two
-    runs differing ONLY in `--loss` used to silently share one `_best.pt`
-    the moment they matched on every other axis, exactly the bug this
-    file's own `_IDENTITY_FIELDS`/`combo_report` gap for `loss` was closed
-    for a day earlier on the CSV side; the checkpoint FILE itself had the
-    same gap and is closed here.
+    `loss`: `bal` gets NO segment, `ord_a`/`ord_b` get a distinct one, the
+    same rule as `Checkpoints.weight_filename`.
 
-    `<episode_reuse>-k<K>` (2026-09-24): the three reuse modes and their K
+    `<episode_reuse>-k<K>`: the three reuse modes and their K
     are three experiments over the same modules and would otherwise share one
     `_best.pt`. The RESOLVED K, never `auto`: two `auto` runs over different
     supplies are different experiments.
@@ -548,34 +535,19 @@ def _prototype_weight_filename(encoder_name: str, pooling: str,
            f'{loss_seg}{tag}.pt')
 
 
-#: `_merge_val_scores`' merge key -- serves the role `MppRoutingHead/
-#: cli/train.py`'s own `(baseline, encoder, head)` serves for ITS
-#: `_merge_val_scores` (that codebase's own term is "head"/"baseline",
-#: never "arm" -- MppRoutingHead deliberately renamed away from "arm" to
-#: those, 2026-09-17, its own module docstring). `training_framework`
-#: (renamed from `arm` 2026-09-21) identifies WHICH of spec.md's Stage 4
-#: three-way comparison produced a row -- `'metric_based'` here, a CONSTANT
-#: (this file only ever trains that one regime). `cli/train_baseline.py`
-#: (`'baseline_prototype'`, Stage 4's own Baseline arm) existed 2026-09-20
-#: through 2026-09-22 and was deleted, its own inference-time positioning
-#: never having settled -- kept as a field here anyway, since whatever
-#: redesign replaces it should be able to write rows into the SAME
-#: `val_scores_per_combo.csv`/`val_scores_per_rung.csv` for a Stage-4
-#: comparison without a fieldname mismatch. The
-#: rest of the tuple (`--collapse`/`--routing-head`/`--pooling`/`--encoder`/
-#: `--train-dataset`/`--loss`/`--support-native`, `train_dataset`/`loss`
-#: added 2026-09-22 -- previously absent from both this key AND `combo_
-#: report`'s own call, which meant two runs differing ONLY in `--loss` or
-#: `--train-dataset` would silently share one row instead of accumulating
-#: side by side, the same class of gap `support_context`/`query_context`
-#: closed a day earlier; `support_native` joined the same day it was
-#: added -- it changes what pixels the model was actually trained to
-#: compare, exactly like a `--loss`/`--train-dataset` difference does, so
-#: it gets the same treatment) is fixed for a whole run too (spec.md's own
-#: "which arm is the main line, one at a time" discipline), so the whole
-#: tuple is constant across every row a single run produces -- the KEY
-#: still has to be here, though, because a SECOND run with different
-#: values is exactly what `--merge` exists to not overwrite.
+#: `_merge_val_scores`' merge key -- the role `MppRoutingHead/cli/train.py`'s
+#: own `(baseline, encoder, head)` plays for ITS `_merge_val_scores`.
+#: `training_framework` identifies WHICH of spec.md's Stage 4 three-way
+#: comparison produced a row -- `'metric_based'` here, a CONSTANT (this file
+#: only ever trains that one regime), kept as a field so another regime can
+#: write rows into the SAME `val_scores_per_combo.csv`/`val_scores_per_rung.csv`
+#: without a fieldname mismatch. The rest of the tuple (`--collapse`/
+#: `--routing-head`/`--pooling`/`--encoder`/`--train-dataset`/`--loss`/
+#: `--support-native`, ...) is fixed for a whole run too (spec.md's own "which
+#: arm is the main line, one at a time" discipline), so the whole tuple is
+#: constant across every row a single run produces -- the KEY still has to be
+#: here, though, because a SECOND run with different values is exactly what
+#: `--merge` exists to not overwrite.
 _IDENTITY_FIELDS = ('training_framework', 'encoder', 'pooling',
                     'support_context', 'query_context', 'collapse',
                     'routing_head', 'cross_domain_dataset',
@@ -596,15 +568,10 @@ def _merge_val_scores(path: Path, out_rows):
     lets `bench_stage1_mpp.py`-style tooling compare every
     arm the same way it already compares `MppRoutingHead`'s several heads.
 
-    `.get(k, '')`, not `r[k]` (2026-09-22, fixing a real crash): a row
-    written by an OLDER run, before `_IDENTITY_FIELDS` grew its most
-    recent field, has no column for it at all -- `csv.DictReader` then has
-    no key to raise on. Missing means "compares as `''`" for this key,
+    `.get(k, '')`, not `r[k]`: a row without a column for one of
+    `_IDENTITY_FIELDS` would raise. Missing means "compares as `''`" for this key,
     which is only ever used to tell two IDENTITY tuples apart; it does not
-    need to reconstruct that old row's true value, unlike `MppRoutingHead/
-    cli/train.py`'s own `.get('loss_kind', 'bal')`, which restores the
-    exact value every pre-`--loss` row actually had. This file has no
-    such backward-compatibility need -- delete the old CSV and rerun.
+    need to reconstruct that row's true value.
     '''
     if not path.exists():
         return out_rows

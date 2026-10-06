@@ -6,7 +6,7 @@ of the released weights, and `Teacher.py` is the only thing that loads them.
 
 Flat re-exports, matching `common/__init__.py`: with
 `training/SuperPathPoint/` on sys.path (`_paths.add_training_package(
-'SuperPathPoint')`, called after `setup_import_paths()`, 2026-09-22 -- see
+'SuperPathPoint')`, called after `setup_import_paths()` -- see
 that function's own docstring), callers spell `from SuperPoint.Teacher
 import TeacherConfig` or take the short names from here.
 

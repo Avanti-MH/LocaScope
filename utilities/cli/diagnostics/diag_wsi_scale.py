@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 """Per-slide, per-rung: is this WSI's own pyramid NATIVE at each rung, and
 how much does `base_mpp` itself vary across a dataset -- both without
-rendering anything (no GPU, no Camera, no encoder), just the level-choice
+rendering anything (no GPU, no Render, no encoder), just the level-choice
 arithmetic `SlideReader.level_of` / `native` already do.
 
-Moved here 2026-09-18 from `training/MppRoutingHead/datasets/
-diagnose_native_split.py`, which was written as a one-off to answer why
-bracs/test's val split showed n_native=220 against n_resampled=870 -- see
-`training/MppRoutingHead/spec.md`'s "QueryFromWSI.reads_natively (now Render.reads_natively) was too
-strict" for that story. Its own docstring said "kept... in case the same
-question comes up again", and it has: the native-rung question and "how
-much does base_mpp vary WSI to WSI" (2026-09-18, generalizing to any WSI
-without retraining) are the same underlying per-slide metadata scan, asked
-two ways. Generalized here: any registered dataset, not one hardcoded id;
-every WSI in it by default, not only a recorded val split; plus a
-`base_mpp` distribution summary. Refactored again the same day into
-`WsiScaleCheck`, the shape `wsi_health_check.py` calls this and every other
-diagnostic in this directory through -- see `WsiSelection.py`'s own
-docstring for the "which WSIs" half of that shape.
+The native-rung question (why a val split shows n_native=220 against
+n_resampled=870) and "how much does base_mpp vary WSI to WSI" are the same
+per-slide metadata scan, asked two ways: any registered dataset, every WSI in
+it by default, plus a `base_mpp` distribution summary. `WsiScaleCheck` is the
+shape `wsi_health_check.py` calls this and every other diagnostic in this
+directory through -- see `WsiSelection.py`'s own docstring for the "which
+WSIs" half of that shape.
 
 Read-only, cheap: opens each WSI once for its pyramid metadata (`base_mpp`,
 `level_downsamples`) plus `SlideReader`'s own level-choice arithmetic --

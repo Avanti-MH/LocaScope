@@ -1,13 +1,11 @@
 '''The registry of every selectable Stage 2/Stage 3 arm for `training/
-PrototypicalRoutingHead`'s metric-based main line -- moved here from that
-package's own `Runtime.py` (2026-09-22) specifically so the GENERIC
-checkpoint layer (`aiNNModel/models/common/Checkpoints.py`'s
+PrototypicalRoutingHead`'s metric-based main line. It lives in aiNNModel so the
+GENERIC checkpoint layer (`aiNNModel/models/common/Checkpoints.py`'s
 `build_prototype_from_checkpoint`) can read it too, without importing a
-training package into `aiNNModel/models/` -- the same reason `1_estimate_
-query_mpp/ClassifierEstMpp.py` reads `Heads._CLASSIFIER_REGISTRY`/
+training package into `aiNNModel/models/` -- the same reason `stage1_estimation/
+ClassifierEstMpp.py` reads `Heads._CLASSIFIER_REGISTRY`/
 `TileEncoderFunc.encoder_config` rather than anything under `training/`.
-`Runtime.py` re-exports these four names unchanged, so `cli/train.py`'s
-own `from Runtime import (...)` did not need to change at all.
+`Runtime.py` re-exports these four names.
 
 Stage 2 is the pipeline `pool -> G (support-context) -> F (query-context)
 -> Collapse -> Stage 3` (`training/PrototypicalRoutingHead/spec.md`), each
@@ -16,14 +14,8 @@ sub-stage:
 
     SUPPORT_CONTEXT_CHOICES   G, `--support-context`
     QUERY_CONTEXT_CHOICES     F, `--query-context`
-    COLLAPSE_CHOICES          Collapse, `--collapse` (renamed from
-                              `--generator`/`GENERATOR_CHOICES` 2026-09-22:
-                              "generator" stopped being accurate once this
-                              stage was ONE OF THREE Stage 2 sub-stages
-                              rather than all of Stage 2 -- it does not
-                              generate anything G/F do not already touch,
-                              it specifically COLLAPSES a support set to
-                              one prototype, or (`off`) does not)
+    COLLAPSE_CHOICES          Collapse, `--collapse`: COLLAPSES a support set
+                              to one prototype, or (`off`) does not
 
 `identity` is the off switch for G and F (`aiNNModel/models/
 ContextEncoders.py`); `COLLAPSE_CHOICES` has a matching `off` entry
@@ -39,14 +31,8 @@ mechanism, so both share `Losses.compute_loss` unchanged), and
 Q/K projections, pairs with EITHER shape -- its own `ACCEPTS_EITHER` flag
 skips `cli/train.py`'s usual Collapse/head compatibility check).
 
-`matching_net`/`matching_net_prototype`/`matching_net_raw` (2026-09-22,
-same day as they were added) are GONE: forcing G+F+the Stage-3 kernel
-into one bespoke "Matching Net" class was the wrong shape once G/F became
-their own sub-stages with their own instances -- "Matching Net" is now a
-COMPOSITION (`--support-context bilstm --query-context attnlstm --collapse
+"Matching Net" is a COMPOSITION (`--support-context bilstm --query-context attnlstm --collapse
 off --routing-head cosine_logsumexp`), not a name in any registry.
-`matching_net_prototype` specifically degenerated to exactly `cosine_tau`
-and added nothing under any name.
 
 `mean` is the zero-parameter floor (`PrototypeGenerators.TrivialPrototype`
 -- `median` cut from the comparison surface, see `COLLAPSE_CHOICES`'s own
@@ -117,8 +103,7 @@ def _build_collapse_off(in_dim: int, device) -> Tuple[nn.Module, None]:
     return PassthroughCollapse().to(device), None
 
 
-#: `cli/train.py`'s `--collapse` (renamed from `--generator` 2026-09-22 --
-#: see this module's own docstring). `median`: dropped from the
+#: `cli/train.py`'s `--collapse`. `median`: dropped from the
 #: comparison surface, not from `PrototypeGenerators.TrivialPrototype`/
 #: `TRIVIAL_KINDS` itself -- the class still supports it, just not
 #: reachable via `--collapse` -- the arm count was cut to what can

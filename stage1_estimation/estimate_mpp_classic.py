@@ -15,14 +15,11 @@
 
 baseline:不用任何深度學習表徵,存在的價值是拿來比較(README 的狀態標籤)。
 
-2026-10-05 起是 `EstMppResult` 介面的估計器,讓 bench_stage1_mpp 能和其他方法
-在同一批 FoV 上比較。和原本腳本版的差別:
+`EstMppResult` 介面的估計器,讓 bench_stage1_mpp 能和其他方法在同一批 FoV 上比較:
   - 參考 tile 的位置由 TileSampler 在 tissue mask 內放、讀圖走 SlideReader,
-    不再在整層上無種子地隨機抽、自己 read_region。原本只靠 `min_std` 擋背景,
-    隨機位置大多落在玻片空白處;現在位置在組織內,`min_std` 只剩擋極淡的 tile。
-    seed 固定,同一張片兩次 build 得到同一張參考表。
-  - 只保留兩個指紋融合的 KNN 版本(原 `estimate_knn`);單一指紋最近層 + 內插
-    的版本只會 print、不回傳數字,沒有呼叫端,刪除。
+    所以位置在組織內,`min_std` 只擋極淡的 tile。seed 固定,同一張片兩次 build
+    得到同一張參考表。
+  - 兩個指紋融合後做 KNN。
 """
 from __future__ import annotations
 

@@ -1,18 +1,10 @@
 """Where this project writes, and how its packages find each other.
 
-The ONE definition of OUTPUT_ROOT. It lived under utilities/test_modules/ and
-was reachable only by scripts in that directory, so everything else either
-inserted a test directory into sys.path to reach it -- nine CLI entry points
-did -- or derived the rule again. query_sim/cli/__init__.py derived it again,
-and said so: keep the two in step. They did not stay in step, and the proof was
-inside that same package: three of its four files used the local copy while
-diag_camera_skip.py (retired 2026-09-30) inserted utilities/test_modules to import this one.
-
-It sits in utilities/ because that is the library layer every package already
-depends on -- utilities/cli, query_sim/cli, test_modules and bench_modules all
-point DOWN at it, and none of them points sideways at another. What each of
-those legitimately owns is its default job name, which is already the argument
-to job_result_dir.
+The ONE definition of OUTPUT_ROOT. It sits in utilities/ because that is the
+library layer every package already depends on -- utilities/cli, test_modules
+and bench_modules all point DOWN at it, and none of them points sideways at
+another. What each of those legitimately owns is its default job name, which
+is the argument to job_result_dir.
 
 It imports os and sys and nothing else on purpose. Files that are careful about
 their startup cost -- analyze_locascope_metrics is one -- can import this
@@ -27,7 +19,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(UTILITIES_DIR, '..'))
 
 #: Where runs write. One level ABOVE the repo, so that outputs are not inside
 #: the working tree: an `rm -rf` of the checkout, a `git clean`, or a fresh
-#: clone no longer takes 60 GB of results with it, and nothing under `result/`
+#: clone does not take 60 GB of results with it, and nothing under `result/`
 #: can ever be staged by accident. Override with LOCASCOPE_OUTPUT_ROOT.
 OUTPUT_ROOT = os.environ.get(
     'LOCASCOPE_OUTPUT_ROOT', os.path.abspath(os.path.join(PROJECT_ROOT, '..')))
@@ -35,7 +27,7 @@ RESULT_DIR = os.path.join(OUTPUT_ROOT, 'result')
 LOG_DIR = os.path.join(OUTPUT_ROOT, 'log')
 QUERY_SIM_DIR = os.path.join(PROJECT_ROOT, 'query_sim')
 # stage1_estimation/, stage2_retrieval/ and stage3_localization/ are real
-# packages (2026-10-05): imported as `stage2_retrieval.X` off PROJECT_ROOT, so
+# packages: imported as `stage2_retrieval.X` off PROJECT_ROOT, so
 # none of them is a sys.path entry and none has a constant here.
 AINM_DIR = os.path.join(PROJECT_ROOT, 'aiNNModel')
 
@@ -75,27 +67,13 @@ def setup_import_paths():
     the stage packages (`stage1_estimation`, `stage2_retrieval`,
     `stage3_localization`) and `training` importable by their full names.
 
-    Does NOT add any training package's own directory (2026-09-22 --
-    before this, it added all three: SUPERPATHPOINT_DIR/MPPROUTINGHEAD_DIR/
-    PROTOTYPICALROUTINGHEAD_DIR, unconditionally, every time ANY caller
-    anywhere called this function). `SuperPathPoint`/`MppRoutingHead`/
-    `PrototypicalRoutingHead` each have their OWN `Runtime.py` (the first
-    two) or `Datasets.py`/`Losses.py`/etc, and having all three on
-    `sys.path` at once makes a bare `from Runtime import ...` resolve to
-    whichever one `sys.path`'s own order happens to put first -- NOT
-    necessarily the one the calling file is actually a sibling of.
-
-    `MppRoutingHead`/`PrototypicalRoutingHead` (2026-09-22, same day,
-    later) no longer touch this mechanism at all: `training/`, `training/
-    MppRoutingHead/` and `training/PrototypicalRoutingHead/` are now real
-    Python packages (each with its own `__init__.py`), so their own
-    cross-file imports are fully-qualified (`from training.MppRoutingHead.
-    Runtime import ...`) and resolve unambiguously by import path, with no
-    `sys.path` ordering involved -- see `training/__init__.py`'s own
-    docstring. Only `SuperPathPoint` still calls `add_training_package`
-    (naming itself alone, right after this) -- it has no top-level bare
-    file that collides with anything in the other two, so a plain
-    `sys.path` entry was never actually ambiguous for it.
+    Does NOT add any training package's own directory: the packages each
+    have their own `Runtime.py` / `Datasets.py` / ..., and with all of them
+    on `sys.path` a bare `from Runtime import ...` resolves to whichever comes
+    first, not the caller's sibling. `MppRoutingHead` and
+    `PrototypicalRoutingHead` are real packages imported by full name
+    (`training/__init__.py`); `SuperPathPoint` adds itself with
+    `add_training_package`.
     """
     for path in (UTILITIES_DIR, QUERY_SIM_DIR,
                 AINM_DIR, AINM_MODELS_DIR, AINM_MODELS_COMMON_DIR,
@@ -115,25 +93,13 @@ TRAINING_PACKAGE_DIRS = {
 
 def add_training_package(*names: str) -> None:
     """Put ONE OR MORE training packages' own directories on `sys.path`,
-    by name (`TRAINING_PACKAGE_DIRS`' own keys) -- never all three by
-    default the way `setup_import_paths` used to, see that function's own
-    docstring for the bare-`from Runtime import ...` collision this
-    avoids.
+    by name (`TRAINING_PACKAGE_DIRS`' own keys); see `setup_import_paths`
+    for the bare-`from Runtime import ...` collision this avoids.
 
     ORDER MATTERS when a caller names more than one: each `insert(0, ...)`
     pushes the previous ones DOWN, so the LAST name given ends up FIRST in
     `sys.path` and wins any bare-import collision. Put the caller's OWN
-    package last.
-
-    Only `SuperPathPoint` calls this today, naming itself alone -- nothing
-    to order with one name. `MppRoutingHead`/`PrototypicalRoutingHead`
-    used to call this in combination (`add_training_package('MppRoutingHead',
-    'PrototypicalRoutingHead')`, `MppRoutingHead` first/lower-priority,
-    `PrototypicalRoutingHead` last/winning `Runtime`, the one name both
-    directories had) until 2026-09-22, when both became real Python
-    packages with fully-qualified cross-file imports instead -- see
-    `training/__init__.py`'s own docstring. The ordering rule above still
-    applies to any FUTURE caller that names more than one.
+    package last. Only `SuperPathPoint` calls this, naming itself alone.
     """
     for name in names:
         path = TRAINING_PACKAGE_DIRS[name]

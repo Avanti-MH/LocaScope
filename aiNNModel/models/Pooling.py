@@ -19,7 +19,7 @@ agree.
 Stage 2 main line (`SetTransformerPrototype`) wants the whole per-tile
 token grid, unreduced, which is `passthrough`.
 
-`Cls` (added 2026-09-21) takes the backbone's own pretrained prefix token
+`Cls` takes the backbone's own pretrained prefix token
 (`raw[:, 0]`) instead of reducing the patch grid at all -- the simplest of
 the five, no learned parameters and no grid computation, a floor to compare
 `avg`/`max`/`attn` against the same way `TrivialPrototype` is Stage 2's own

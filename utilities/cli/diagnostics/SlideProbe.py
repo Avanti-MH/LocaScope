@@ -1,13 +1,5 @@
 """Shared low-level WSI-probing primitives for this directory's diagnostics.
 
-Extracted 2026-09-18 from `scan_wsi_holes.py` and `diag_wsi_coverage.py`
-(now `diag_mask_validity.py`), which had each written their own copy of
-`SlideProbe` -- byte-for-byte the same class, twice. `bounds_rect` and
-`get_mpp` were the same story one level down: `slide_rect()` (scan_wsi_holes),
-the inline bx/by/bw/bh extraction (diag_mask_validity), and `wsi_info.py`'s
-own `get_mpp` were three hand-written takes on "read this slide's own scale
-off its properties."
-
 Lives IN `cli/diagnostics/`, not up in `utilities/`, because every caller so
 far is a diagnostic in this directory -- the production pipeline
 (`SafeSlide`, `TissueMask`, ...) has its own, DELIBERATELY DIFFERENT

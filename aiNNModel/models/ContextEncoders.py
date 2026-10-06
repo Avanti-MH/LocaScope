@@ -33,10 +33,8 @@ import torch.nn as nn
 #  off switch for F -- G's own off switch is PLAIN `nn.Identity()`
 #  (`PrototypeChoices._build_context_identity_support`), not a class of
 #  its own here: `forward(support) -> support` unchanged is exactly what
-#  `nn.Identity` already is, so writing it a second time would be the same
-#  mistake `CrossAttentionMatch.collapse` was (byte-for-byte reimplementing
-#  `Heads.AttentionPoolHead`) -- caught 2026-09-22, fixed here before it
-#  shipped rather than after. F cannot reuse `nn.Identity` the same way:
+#  `nn.Identity` already is, so writing it a second time would be a second
+#  definition of it. F cannot reuse `nn.Identity` the same way:
 #  its own call takes TWO positional args (`query`, `support_by_rung`),
 #  `nn.Identity.forward` takes exactly one.
 # ══════════════════════════════════════════════════════════════════════════

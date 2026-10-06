@@ -10,16 +10,15 @@ been had the job not stopped.
         state.save(identity, epoch=epoch, modules=..., optimizers=...,
                    schedulers=..., best=..., extra=..., rngs=...)
 
-THE RULE (user, 2026-09-24):
+THE RULE:
     no --resume-dir        train from scratch, write nothing here
     --resume-dir, no file  train from scratch, write the file every epoch
     --resume-dir, a file   continue from the epoch after the one it records,
                            and keep writing it every epoch
 
 `--epochs` is the TOTAL. A file that already records the last epoch leaves
-nothing to run, so resuming a finished model is a no-op rather than twenty
-more epochs -- which is what the warm start this replaced did, reading
-`_best.pt` and treating `--epochs` as "this many more".
+nothing to run, so resuming a finished model is a no-op, not
+twenty more epochs.
 
 WHAT IS RESTORED, and why each piece is here:
     module / optimizer / scheduler state   the model and how it is moving

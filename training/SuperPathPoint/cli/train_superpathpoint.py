@@ -49,8 +49,8 @@ for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from cli import (RESULT_DIR, add_corpus_arg, add_pretile_args,    # noqa: E402
-                 corpus_arg, job_result_dir, setup_import_paths)
+from cli import (add_corpus_arg, add_labels_args, add_pretile_args,  # noqa: E402
+                 corpus_arg, job_result_dir, labels_root, setup_import_paths)
 
 setup_import_paths()
 
@@ -67,7 +67,6 @@ from SuperPoint.Teacher import SuperPointTeacher                  # noqa: E402
 from SuperPoint.Losses import SuperPointLossConfig                 # noqa: E402
 from SuperPoint.Trainer import TrainerConfig                       # noqa: E402
 
-DEFAULT_LABEL_ROOT = os.path.join(RESULT_DIR, 'cache', 'keypoint_labels')
 
 #: spec.md 6.5. `BRACS_1228` is deliberately in TRAIN: it is the slide
 #: `SlideWinTest`, `BenchMarkV2` and `WindowRetrievalBench` all ran on, so the
@@ -110,7 +109,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_pretile_args(ap)            # --tile: v1 is 256; 512, 1024 are separate models
     add_corpus_arg(ap)
-    ap.add_argument('--labels-root', default=DEFAULT_LABEL_ROOT)
+    add_labels_args(ap)
     ap.add_argument('--channels', type=int, default=1, choices=(1, 3),
                     help='1 = model_256_gray, 3 = model_256_rgb. Same labels')
     ap.add_argument('--cell', type=int, default=8,
@@ -172,6 +171,7 @@ def main():
                          'help"')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
+    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
 
     overlap = set(args.train_slides) & set(args.val_slides)
     if overlap:
