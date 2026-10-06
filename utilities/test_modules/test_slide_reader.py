@@ -113,6 +113,19 @@ def run_read(slide, level) -> list:
     _expect(failures, native is not None and np.array_equal(native, raw),
             'a native read is read_region_rgb of the same rectangle, untouched')
     _expect(failures, far >= TEXTURE, f'and the decoy one px over differs ({far:.2f})')
+    wide = reader.read(x, y, ReadSpec(TILE, TILE // 2), ds, level=level)
+    raw_wide = slide.read_region_rgb((x, y), level, (TILE, TILE // 2))
+    _expect(failures, wide is not None and np.array_equal(wide, raw_wide),
+            'a non-square native read at a forced level is read_region_rgb of '
+            'the same rectangle (the plane segmenter reads this way)')
+    # openslide's own consistency, measured not asserted: is a shorter read the
+    # top of a taller one? The plane segmenter's tiled read assumes so.
+    d = np.abs(raw_wide.astype(np.int16) - raw[:TILE // 2].astype(np.int16)).max(-1)
+    rows = np.flatnonzero(d.any(1))
+    print(f'  openslide {TILE}x{TILE // 2} vs top of {TILE}x{TILE}: '
+          f'{int((d > 0).sum())} px differ, max {int(d.max())}, '
+          f'mean |diff| {float(d.mean()):.3f}, rows '
+          f'{(int(rows[0]), int(rows[-1])) if len(rows) else "none"}')
 
     w0, h0 = slide.dimensions
     _expect(failures, reader.read(w0 - 10, h0 - 10, spec, ds) is None,

@@ -147,7 +147,8 @@ import torch                                                # noqa: E402
 from PIL import Image                                       # noqa: E402
 
 from ConfigIdentity import register                         # noqa: E402
-from ReadGeometry import level_for                          # noqa: E402
+from ReadGeometry import ReadSpec, level_for                # noqa: E402
+from SlideReader import SlideReader                         # noqa: E402
 from TissueMask import SlideMask                    # noqa: E402
 from TissueSegFunc import (TissueSegConfig, TissueSegmenter,  # noqa: E402
                            scanned_rect)
@@ -211,7 +212,7 @@ _UNI2_PCA_BASELINE = {
 def tile_saturation(wsi, origin, span, tile: int, ds: float = 32.0) -> np.ndarray:
     """Mean saturation per tile position, from ONE thumbnail read.
 
-    `test_EoMT.tile_saturation:431`. The cheap content signal: one read_region
+    `test_EoMT.tile_saturation:431`. The cheap content signal: one read
     rather than one per tile.
 
     Saturation rather than luminance because glass and a pale section differ far
@@ -225,7 +226,12 @@ def tile_saturation(wsi, origin, span, tile: int, ds: float = 32.0) -> np.ndarra
     got = float(wsi.level_downsamples[level])
     level_w = max(1, int(span[0] / got))
     level_h = max(1, int(span[1] / got))
-    small = _read_rgb(wsi, origin, level, (level_w, level_h)).astype(np.float32)
+    small = SlideReader(wsi).read(int(origin[0]), int(origin[1]),
+                                  ReadSpec(level_w, level_h), got, level=level)
+    if small is None:
+        raise RuntimeError(f'{_path_of(wsi)}: the saturation thumbnail runs off '
+                           f'the slide')
+    small = small.astype(np.float32)
 
     high, low = small.max(axis=2), small.min(axis=2)
     saturation = np.where(high > 0, (high - low) / np.maximum(high, 1e-6), 0.0)
@@ -296,24 +302,6 @@ def stratified_positions(saturation: np.ndarray, n: int, bins: int = 10,
     unique = np.unique(np.array(picked, dtype=np.int64))
     return [(int(k // saturation.shape[1]), int(k % saturation.shape[1]))
             for k in unique]
-
-
-def _read_rgb(wsi, location, level, size) -> np.ndarray:
-    """`SafeSlide.read_region_rgb`, and a sentence if the handle is not one.
-
-    `.convert('RGB')` merely drops alpha, and pixels the scanner never wrote
-    carry RGB 0 -- so every hole becomes a black rectangle. A ViT reading a
-    black rectangle sees a hard edge that exists in no tissue, and a PCA fitted
-    with those in the sample spends a component on them.
-    """
-    reader = getattr(wsi, 'read_region_rgb', None)
-    if reader is None:
-        raise TypeError(
-            f'{type(wsi).__name__} has no read_region_rgb; open the slide with '
-            f'utilities/SafeSlide.SafeSlide. A plain OpenSlide handle returns '
-            f'unphotographed pixels as transparent, and dropping the alpha '
-            f'paints them black -- see SafeSlide.read_region_rgb')
-    return reader(location, level, size)
 
 
 def _path_of(wsi) -> str:

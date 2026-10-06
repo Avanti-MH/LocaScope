@@ -3264,3 +3264,26 @@ front of whoever flips it.
       舊 uni2_pca mask（以及用它切的 SuperPathPoint pre-tile / label）不會再被讀到。
     - 驗證：test_read_geometry `levels` 凍結舊的寫法，在 4 種金字塔 × 27 個 ds 上逐一比對；
       level_for 和 openslide 規則的差異必須剛好是「某層在請求之上 slack 內」的那些。
+
+[x] 2026-10-07 | 讀像素一律走 SlideReader.read（階段 3）
+    - 原本 SlideWinSift 的 window crop、slide_win_sift 背景、TissueMask.read_matching_rgb、
+      TissueSegFunc 平面分塊、UNI2-PCA saturation 縮圖、_sift_plot 放大圖、demo_homography、
+      demo_survival_analysis 各自叫 read_region_rgb（三處還有 .convert('RGB') 的退路，
+      洞會變黑）。
+    - 改：全部 SlideReader(slide).read(x, y, ReadSpec(w, h), ds, level=...)；退路刪除，
+      非 SafeSlide 直接 TypeError（SlideReader 只要求有 read_region_rgb，duck typing）。
+      TissueMask 背景圖用 mask ds 的 min（平均值在 SVS 上會讀出 slide 外）。
+      _sift_plot 的放大圖靠右/下緣時夾在 slide 內（變窄，不是補背景色）；
+      demo_survival_analysis 的裁切夾進 slide。
+    - 保留 raw read：SafeSlide / SlideReader 本身、診斷（diag_read_exp、SlideProbe、
+      diag_mask_validity）、測試裡當參考值的讀取、window bench 的列讀取 gate。
+    - 像素：原生 ds 讀取 = read_region_rgb 同一矩形（test_slide_reader `read`，新增非方形
+      + 強制 level 一條，平面分塊就是這樣讀）；平面 tiled == whole 由 test_tissue_mask
+      t_seg_plane_read_tiled_equals_whole 保證。
+    - 附帶量測（job 374401，TestLocaScopeStages fp16）：建 feature 67,348 tiles 97 s =
+      694 tiles/s，fp32 97 tiles/s，約 7 倍。
+    - openslide 自己的量測（test_slide_reader `read` 印出，不斷言）：Ki67 MRXS level 1
+      （ds 2）讀 256x128 和讀 256x256 取上半，9957 px 不同（約 30%）、最大差 1、平均 0.30、
+      遍布每一列；level 0 為 0。是 openslide 在粗層合成的捨入，跟讀取框大小有關，不是邊緣
+      濾波。所以平面分割器分塊讀在 MRXS 粗層上不會和整塊讀逐位元相同（差 ±1 灰階，只翻
+      閾值邊上的像素）；合成的 tiled == whole 測試照樣成立。不改。

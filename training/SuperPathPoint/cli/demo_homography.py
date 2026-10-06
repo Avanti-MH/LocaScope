@@ -98,38 +98,32 @@ def synthetic_tile(size: int) -> np.ndarray:
 
 
 def wsi_tile(path: str, ds: float, size: int, seed: int) -> np.ndarray:
-    """One tile at the requested rung, through the ladder that will feed training.
-
-    Uses `read_region_rgb`, never `.convert('RGB')`: the latter merely drops
-    alpha, and unphotographed pixels carry RGB 0, so every scanner hole becomes
-    a black rectangle. A black rectangle's border is a perfect corner, which is
-    the last thing a keypoint demo should be showing (spec.md 6.1).
-    """
+    """One tile at the requested rung: `SlideReader.read` with INTER_AREA,
+    the ladder's level (`DsLadder` prints which). Area averaging because this
+    is a downsample, and aliasing would put high-frequency artefacts into the
+    very texture the detector learns on. A scanner hole is the background
+    colour, never a black rectangle whose border is a perfect corner
+    (spec.md 6.1)."""
+    import math
     from SafeSlide import SafeSlide
+    from SlideReader import SlideReader
+    from ReadGeometry import ReadSpec
     from DsLadder import DsLadder
 
-    wsi = SafeSlide(path)
-    try:
+    with SafeSlide(path) as wsi:
         plan = next(p for p in DsLadder(rungs=(float(ds),)).plan_for(wsi, size))
         print(f'  {plan.summary()}')
         width, height = wsi.level_dimensions[0]
-        span = plan.footprint_l0
+        span = math.ceil(size * float(ds))
         rng = np.random.default_rng(seed)
-        origin = (int(rng.integers(0, max(1, int(width - span)))),
-                  int(rng.integers(0, max(1, int(height - span)))))
-        tile = wsi.read_region_rgb(origin, plan.level,
-                                   (plan.read_size, plan.read_size))
+        origin = (int(rng.integers(0, max(1, width - span))),
+                  int(rng.integers(0, max(1, height - span))))
+        tile = SlideReader(wsi, resize='area').read(
+            origin[0], origin[1], ReadSpec(size, size), float(ds))
+        if tile is None:
+            raise RuntimeError(f'{path}: a {span} px tile does not fit the slide')
         print(f'  read at level-0 {origin}, {plan.read_size} px of level '
               f'{plan.level}')
-    finally:
-        wsi.close()
-
-    if plan.read_size != size:
-        import cv2
-        # INTER_AREA, not the default bilinear: this is a downsample, and area
-        # averaging is the one that does not alias. Aliasing here would put
-        # high-frequency artefacts into the very texture the detector learns on.
-        tile = cv2.resize(tile, (size, size), interpolation=cv2.INTER_AREA)
     return tile
 
 

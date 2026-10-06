@@ -97,6 +97,8 @@ class _FakeSlide:
         height, width = image.shape[:2]
         self.level_dimensions = [(width, height)]
         self.level_downsamples = [1.0]
+        self.dimensions = (width, height)
+        self.base_mpp = 0.25
         self.properties = {}
         if bounds is not None:
             x, y, w, h = bounds
@@ -318,20 +320,20 @@ def t_stratified_is_deterministic():
     return f'{len(a)} positions, stable under the seed'
 
 
-def t_read_rgb_refuses_a_plain_openslide():
-    """A handle without read_region_rgb is refused, by name.
+def t_tile_saturation_refuses_a_plain_openslide():
+    """A handle without read_region_rgb is refused, by name (`SlideReader`).
 
     `.convert("RGB")` only drops alpha, and pixels the scanner never wrote carry
     RGB 0 -- so every hole becomes a black rectangle. A ViT reading one sees a
     hard edge that exists in no tissue, and the PCA spends a component on it.
     """
-    from Uni2PcaSegFunc import _read_rgb
-
     class _Bare:
-        pass
+        level_downsamples = [1.0]
+        level_dimensions = [(512, 512)]
+        dimensions = (512, 512)
 
     try:
-        _read_rgb(_Bare(), (0, 0), 0, (16, 16))
+        tile_saturation(_Bare(), (0, 0), (512, 512), tile=128, ds=1.0)
     except TypeError as e:
         assert 'SafeSlide' in str(e), f'unhelpful message: {e}'
         return 'refused, and names SafeSlide'
@@ -581,7 +583,7 @@ _SECTIONS = {
                 't_tile_saturation_finds_the_coloured_half',
                 't_stratified_covers_every_band_where_uniform_misses_some',
                 't_stratified_is_deterministic',
-                't_read_rgb_refuses_a_plain_openslide'],
+                't_tile_saturation_refuses_a_plain_openslide'],
 }
 
 _MODEL_CHECKS = ['t_unfitted_call_refuses', 't_cells_have_the_shape_the_grid_implies',

@@ -22,7 +22,8 @@ import cv2
 import numpy as np
 import matplotlib.patches as mpatches
 
-from ReadGeometry import level_for
+from ReadGeometry import ReadSpec, level_for
+from SlideReader import SlideReader
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -144,21 +145,17 @@ def read_anchored_crop(wsi, x0_l0: float, y0_l0: float, ds: float,
     crop_y0 = max(0, int(y0_l0 - zoom_pad * tile_l0))
     crop_level = level_for(wsi.level_downsamples, ds)
     crop_ds    = wsi.level_downsamples[crop_level]
-    crop_w = int((query_cols + zoom_pad * 2) * tile_size * ds / crop_ds)
-    crop_h = int((query_rows + zoom_pad * 2) * tile_size * ds / crop_ds)
-    # read_region_rgb when the handle offers it. Kept as a fallback rather
-    # than a refusal because this is a plotting helper with three callers
-    # (bench_locascope, slide_win_sift, locate_photo) and it does not open the
-    # slide itself -- what it gets is whoever called it. `.convert('RGB')`
-    # merely drops the alpha, so a hole would come out pure black.
-    if hasattr(wsi, 'read_region_rgb'):
-        crop_img = wsi.read_region_rgb((crop_x0, crop_y0), crop_level,
-                                       (crop_w, crop_h))
-    else:
-        crop_img = np.array(
-            wsi.read_region((crop_x0, crop_y0), crop_level,
-                            (crop_w, crop_h)).convert('RGB')
-        )
+    # Clipped to the slide: a crop near the right or bottom edge is narrower
+    # rather than padded. The panels take their extent from the image shape.
+    slide_w, slide_h = wsi.dimensions
+    crop_w = min(int((query_cols + zoom_pad * 2) * tile_size * ds / crop_ds),
+                 int((slide_w - crop_x0) / crop_ds))
+    crop_h = min(int((query_rows + zoom_pad * 2) * tile_size * ds / crop_ds),
+                 int((slide_h - crop_y0) / crop_ds))
+    crop_img = SlideReader(wsi).read(crop_x0, crop_y0, ReadSpec(crop_w, crop_h),
+                                     crop_ds, level=crop_level)
+    if crop_img is None:
+        raise RuntimeError(f'zoom crop at ({crop_x0}, {crop_y0}) runs off the slide')
     return crop_img, crop_x0, crop_y0, crop_ds
 
 

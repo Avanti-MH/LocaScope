@@ -210,6 +210,8 @@ import cv2                                                       # noqa: E402
 
 import AccessDatasets                                              # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
+from SlideReader import SlideReader                              # noqa: E402
+from ReadGeometry import ReadSpec                                # noqa: E402
 from SurvivalAnalysis import ChainStack, SurvivalProcess          # noqa: E402
 FStack, RStack, CStack = ChainStack.FStack, ChainStack.RStack, ChainStack.CStack
 from SurvivalAnalysis.AlphaCalibration import merge_anchors        # noqa: E402
@@ -1997,8 +1999,8 @@ def _animate_alive(anchors: np.ndarray, anchor_pattern: List[str],
 
 def _run_visualize_real_example(args, out_dir: str) -> None:
     """A single static real-data figure closing the synthetic story: a
-    native-resolution crop of the actual tissue (read directly via
-    `wsi.read_region` at level 0 -- NOT the C-tree's own coarser mother
+    native-resolution crop of the actual tissue (`SlideReader.read` at
+    ds 1 -- NOT the C-tree's own coarser mother
     image, which is downsampled and would render as a couple of blurry
     blown-up pixels at a crop this small) as the BOTTOM layer, with the
     real per-rung detections and the anchors `anchors_of_generations`
@@ -2040,7 +2042,7 @@ def _run_visualize_real_example(args, out_dir: str) -> None:
 
         # Crop centred on the anchors' own centroid (falls back to the
         # mother's centre if this tree produced none) -- a native, level-0
-        # read via openslide's own `read_region`, NOT `mother_image` (which
+        # `SlideReader.read` at ds 1, NOT `mother_image` (which
         # is downsampled to `args.tile` px covering the WHOLE mother
         # footprint, so a crop this small into it would be a couple of
         # blown-up, blurry source pixels).
@@ -2048,9 +2050,10 @@ def _run_visualize_real_example(args, out_dir: str) -> None:
             cx, cy = float(anchors[:, 0].mean()), float(anchors[:, 1].mean())
         else:
             cx, cy = mother.x + mother.size_px / 2, mother.y + mother.size_px / 2
-        x0, y0 = int(cx - crop / 2), int(cy - crop / 2)
-        crop_img = np.asarray(
-            wsi.read_region((x0, y0), 0, (crop, crop)).convert('RGB'))
+        slide_w, slide_h = wsi.dimensions
+        x0 = min(max(0, int(cx - crop / 2)), slide_w - crop)
+        y0 = min(max(0, int(cy - crop / 2)), slide_h - crop)
+        crop_img = SlideReader(wsi).read(x0, y0, ReadSpec(crop, crop), 1.0)
 
     fig_in = 7.0
     # Scaled to THIS crop, not the synthetic canvas's constants -- `crop`

@@ -99,6 +99,8 @@ class _Slide:
         self.level_dimensions[0] = (int(width), int(height))
         self.properties = {'openslide.mpp-x': str(mpp),
                            'openslide.mpp-y': str(mpp)}
+        self.base_mpp = float(mpp)
+        self.dimensions = self.level_dimensions[0]
         if bounds is not None:
             for key, value in zip(('x', 'y', 'width', 'height'), bounds):
                 self.properties[f'openslide.bounds-{key}'] = str(value)

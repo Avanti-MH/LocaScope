@@ -77,6 +77,7 @@ _ROOT = _HERE.parent.parent.parent
 sys.path.insert(0, str(_ROOT / 'utilities'))
 from _paths import job_result_dir                                   # noqa: E402
 
+from ReadGeometry import ReadSpec, coarser_level                    # noqa: E402
 from SlideWinSift import SlideWinSift          # noqa: E402
 from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
                                       warp_query_into,
@@ -169,21 +170,16 @@ def gt_center(row: dict, base_mpp: float) -> tuple:
 def backdrop(sws: SlideWinSift, max_side: int = 2500) -> tuple:
     """(rgb, ds) of the scanned rectangle, small enough to draw on.
 
-    Read from the deepest pyramid level that is still above max_side, so the
-    cost is a thumbnail's rather than a level-0 read. ds is level-0 px per
+    Read from the finest level whose sides fit max_side (`coarser_level`), so
+    the cost is a thumbnail's rather than a level-0 read. ds is level-0 px per
     backdrop px, which is all a caller needs to place a point on it.
     """
-    n = len(sws.wsi.level_dimensions)
-    lv = n - 1
-    for i in range(n):
-        d = sws.wsi.level_downsamples[i]
-        if max(sws.span_w / d, sws.span_h / d) <= max_side:
-            lv = i
-            break
-    d = sws.wsi.level_downsamples[lv]
+    lds = sws.reader.level_downsamples
+    lv = coarser_level(lds, max(sws.span_w, sws.span_h) / float(max_side))
+    d = lds[lv]
     w = max(1, int(sws.span_w / d))
     h = max(1, int(sws.span_h / d))
-    rgb = sws.wsi.read_region_rgb((sws.origin_x, sws.origin_y), lv, (w, h))
+    rgb = sws.reader.read(sws.origin_x, sws.origin_y, ReadSpec(w, h), d, level=lv)
     return rgb, d
 
 

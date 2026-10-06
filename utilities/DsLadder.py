@@ -1,9 +1,9 @@
 """A fixed ds ladder, resolved to a per-slide reading plan.
 
     ladder = DsLadder()                         # (1, 2, 4, 8, 16, 32)
-    for plan in ladder.plan(wsi, tile_size=256):
-        tile = wsi.read_region_rgb((x, y), plan.level, plan.read_size)
-        tile = cv2.resize(tile, (256, 256), interpolation=cv2.INTER_AREA)
+    reader = SlideReader(wsi, resize='area')
+    for plan in ladder.plan_for(wsi, tile_size=256):
+        tile = reader.read(x, y, ReadSpec(256, 256), plan.rung_ds)
 
 WHY A FIXED LADDER AND NOT THE SLIDE'S OWN LEVELS
 --------------------------------------------------

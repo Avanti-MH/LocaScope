@@ -65,7 +65,9 @@ from typing import Callable, List, Optional
 import cv2
 import numpy as np
 
+from ReadGeometry import ReadSpec
 from SafeSlide import SafeSlide
+from SlideReader import SlideReader
 
 # The one exception to the dependency list above. is_invertible lives with the
 # other RANSAC caller, and reaching it pulls stage3_localization -> stage2_retrieval ->
@@ -230,6 +232,7 @@ class SlideWinSift:
         self.keep_crops = int(keep_crops) if keep_crops else 4 * self.top_k
 
         self.wsi: Optional[SafeSlide] = None
+        self.reader: Optional[SlideReader] = None
         self.lv = level
         self.ds_lv = 1.0
         self.origin_x = self.origin_y = 0    # level-0 top-left of the scan rect
@@ -245,10 +248,11 @@ class SlideWinSift:
         Three coordinate systems meet here and are deliberately kept apart:
         origin_*/span_* are LEVEL-0 absolute, plane_* is that same rectangle
         counted in level-lv pixels, and every window position below is a
-        level-lv offset inside it. read_region wants a level-0 location and a
-        level-lv size, which is exactly the mix that makes this worth naming.
+        level-lv offset inside it. A window is read at level lv, its level-0
+        top-left and its level-lv size (`read_plane`).
         """
-        self.wsi = SafeSlide(self.wsi_path)
+        self.reader = SlideReader(SafeSlide(self.wsi_path))
+        self.wsi = self.reader.slide
         p = self.wsi.properties
         w0, h0 = self.wsi.level_dimensions[0]
 
@@ -277,7 +281,16 @@ class SlideWinSift:
     def close(self) -> None:
         if self.wsi is not None:
             self.wsi.close()
-            self.wsi = None
+            self.wsi = self.reader = None
+
+    def read_plane(self, x0: int, y0: int, w: int, h: int) -> np.ndarray:
+        """`w x h` level-lv px at level lv, from level-0 top-left (x0, y0):
+        `SlideReader.read` at the level's own ds, so no pixel is resampled."""
+        img = self.reader.read(x0, y0, ReadSpec(w, h), self.ds_lv, level=self.lv)
+        if img is None:
+            raise RuntimeError(f'{self.wsi_path} ({x0}, {y0}) {w}x{h} at level '
+                               f'{self.lv}: the read runs off the slide')
+        return img
 
     # ── the window grid ──────────────────────────────────────────────────────
 
@@ -366,8 +379,7 @@ class SlideWinSift:
             win_x0, win_y0 = self._to_level0(x_ln, y_ln)
 
             t = time.time()
-            crop = self.wsi.read_region_rgb((win_x0, win_y0), self.lv,
-                                            (win_w, win_h))
+            crop = self.read_plane(win_x0, win_y0, win_w, win_h)
             res.t_read_s += time.time() - t
 
             c_gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)

@@ -40,7 +40,7 @@ from safetensors import safe_open
 from safetensors.numpy import save_file
 
 from Cache import CacheMismatch, atomic_file
-from ReadGeometry import level_for
+from ReadGeometry import ReadSpec
 
 
 # Ceiling on what may be handed to cv2.connectedComponentsWithStats in one call.
@@ -433,35 +433,22 @@ class TissueMask:
         the mask uses for the scanned rectangle alone -- the picture looks
         plausible and every overlay is wrong.
 
-        `read_region_rgb` when the handle offers it, never a bare
-        `.convert('RGB')`: convert merely drops the alpha, unphotographed pixels
-        carry RGB 0, and every MIRAX hole comes out pure black -- which under a
-        set of region boxes reads as densely stained tissue the mask missed.
-
-        The READ SIZE is in level-`lv` pixels and the mask's shape is in mask
-        pixels, and those are the same number only when mask_ds happens to BE a
-        pyramid level. The PCA masks are ds 14 -- UNI2's patch grid, not a
-        pyramid step -- and reading (W, H) directly once zoomed the backdrop
-        3.5x under every overlay.
+        Read by `SlideReader` at the mask's ds -- the smaller of its two axes,
+        so the read stays inside the span the mask covers (they differ by less
+        than a mask px) even where that span is the whole slide. The level is `level_for` (never upsampled), and the read is resampled to
+        the mask's shape with INTER_AREA -- anything else invents
+        high-frequency texture under a mask being judged against the tissue.
+        At ds 14 (UNI2's patch grid, not a pyramid step) the read is level px,
+        not mask px, so the resample is what keeps the backdrop at the mask's
+        scale.
         """
+        from SlideReader import SlideReader                    # noqa: PLC0415
         H, W = self.main_mask.shape
-        # At or finer than the mask, then INTER_AREA down: a coarser level
-        # would have to be upsampled, a backdrop blurrier than its mask.
-        lv = level_for(wsi.level_downsamples, self.mask_ds_x)
-        ds_lv = float(wsi.level_downsamples[lv])
-        read_w = max(1, int(round(W * self.mask_ds_x / ds_lv)))
-        read_h = max(1, int(round(H * self.mask_ds_y / ds_lv)))
-        loc = (self.origin_x, self.origin_y)
-        if hasattr(wsi, 'read_region_rgb'):
-            img = wsi.read_region_rgb(loc, lv, (read_w, read_h))
-        else:
-            img = np.array(
-                wsi.read_region(loc, lv, (read_w, read_h)).convert('RGB'))
-        if (read_h, read_w) != (H, W):
-            # INTER_AREA down, which is what the ds ladder uses: anything else
-            # invents high-frequency texture, and this is a backdrop for judging
-            # a mask against the tissue under it.
-            img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+        reader = SlideReader(getattr(wsi, 'slide', wsi), resize='area')
+        ds = min(self.mask_ds_x, self.mask_ds_y)
+        img = reader.read(self.origin_x, self.origin_y, ReadSpec(W, H), ds)
+        if img is None:
+            raise RuntimeError(f'the mask\'s span runs off the slide at ds {ds:g}')
         return img
 
     # ── tissue queries ──────────────────────────────────────────────────────

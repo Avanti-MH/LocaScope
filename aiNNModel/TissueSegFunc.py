@@ -64,7 +64,8 @@ from PIL import Image                                       # noqa: E402
 from ConfigIdentity import (IdentifiedBuild, IdentifiedConfig,  # noqa: E402
                             register)
 from Cache import wsi_stem_of                               # noqa: E402
-from ReadGeometry import nearest_level                      # noqa: E402
+from ReadGeometry import ReadSpec, nearest_level            # noqa: E402
+from SlideReader import SlideReader                         # noqa: E402
 from TissueMask import SlideMask                            # noqa: E402
 
 # Type hints only: hsv and otsu run no network, and a torch import at the top
@@ -356,29 +357,26 @@ class PlaneSegmenter(TissueSegmenter):
         code."""
         rows, cols = g.shape
         ox, oy = g.origin
+        reader = SlideReader(wsi)
 
         def read(y0: int, x0: int, y1: int, x1: int) -> np.ndarray:
-            """One (y0:y1, x0:x1) rect of the level, as RGB.
+            """One (y0:y1, x0:x1) rect of the level, as RGB: `SlideReader.read`
+            at the level's own ds, so the level px are the output px.
 
-            read_region takes a LEVEL-0 location but a level-n size, so the
-            offset is scaled on its way into the location and must NOT be on its
-            way into the size -- the same asymmetry SafeSlide._read_halved
-            documents. Rounding rather than truncating, because a MIRAX
+            The offset is scaled into a LEVEL-0 location, the size stays in
+            level px. Rounding rather than truncating, because a MIRAX
             level_downsample is a float near but not equal to 2 and a truncated
-            offset would drift the grid by a pixel every few tiles.
-
-            read_region_rgb, not .convert('RGB'), whenever the handle offers it.
-            convert() merely drops the alpha channel, and unphotographed pixels
-            carry RGB 0, so every MIRAX hole comes out pure black. HSV and Otsu
-            happen to reject black; a segmentation model has no such rule and
-            will call a black field tissue. Compositing onto the background
-            colour makes those pixels what they physically are, blank glass.
+            offset would drift the grid by a pixel every few tiles. A hole is
+            the background colour (`read_region_rgb`), never black: a
+            segmentation model would call a black field tissue.
             """
-            loc = (ox + int(round(x0 * g.level_ds)), oy + int(round(y0 * g.level_ds)))
-            size = (x1 - x0, y1 - y0)
-            if hasattr(wsi, 'read_region_rgb'):
-                return wsi.read_region_rgb(loc, g.level, size)
-            return np.array(wsi.read_region(loc, g.level, size).convert('RGB'))
+            img = reader.read(ox + int(round(x0 * g.level_ds)),
+                              oy + int(round(y0 * g.level_ds)),
+                              ReadSpec(x1 - x0, y1 - y0), g.level_ds, level=g.level)
+            if img is None:
+                raise RuntimeError(f'{wsi_stem_of(wsi)}: plane rect ({y0}, {x0}, '
+                                   f'{y1}, {x1}) at level {g.level} runs off the slide')
+            return img
 
         seg_px, read_px = self.cfg.seg_chunk_px, self.cfg.read_chunk_px
         overlap = self.cfg.stitch_overlap

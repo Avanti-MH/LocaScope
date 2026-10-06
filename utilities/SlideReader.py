@@ -321,12 +321,12 @@ class SlideReader:
             raise ValueError(f'resize must be one of {RESIZE}, got {resize!r}')
         if isinstance(slide, (str, Path)):
             slide = SafeSlide(str(slide))
-        if not isinstance(slide, SafeSlide):
+        if not hasattr(slide, 'read_region_rgb'):
             raise TypeError(
-                'SlideReader needs a SafeSlide, not a bare openslide.OpenSlide: '
-                'it reads `base_mpp` and `read_region_rgb` off the handle, and a '
-                'plain handle turns a scanner hole into black. SafeSlide(path) '
-                'subclasses OpenSlide, so nothing else about the handle changes.')
+                f'SlideReader needs a SafeSlide, not a {type(slide).__name__}: it '
+                f'reads `base_mpp` and `read_region_rgb` off the handle, and a '
+                f'plain openslide handle turns a scanner hole into black. '
+                f'SafeSlide(path) subclasses OpenSlide, so nothing else changes.')
         self.slide = slide
         self.path = getattr(slide, '_filename', None)
         self.resize = resize
