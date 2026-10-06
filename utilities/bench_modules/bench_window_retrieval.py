@@ -304,7 +304,7 @@ from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E40
                              encoder_cfg_from_args, encoder_config,
                              encoder_names, pooling_kinds)
 from FovSupply import FovSupply                                  # noqa: E402
-from ReadGeometry import LEVEL_REL_TOL, REAL_PHOTO_SENSOR        # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR, levels_up_to         # noqa: E402
 from ConfigArgs import add_config_args, config_from_args, describe  # noqa: E402
 from ConfigIdentity import ModelConfig                           # noqa: E402
 from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
@@ -1099,7 +1099,7 @@ def gate_row_reads(path: str, mask=None, max_ds: float = 16.0) -> tuple:
         width0, height0 = slide.dimensions
         need_w, need_h = 4 * TILE, 3 * TILE
         measured, flat = [], []
-        for level in native_levels(slide, max_ds):
+        for level in levels_up_to(slide.level_downsamples, max_ds):
             ds = float(slide.level_downsamples[level])
             w_lv, h_lv = slide.level_dimensions[level]
             if w_lv < need_w + TILE or h_lv < need_h + TILE:
@@ -1228,12 +1228,6 @@ def pick_slides(dataset_ids, n_wsi: int, seed: int, split_job=None) -> list:
             out.append((dataset, name, locate(name, dataset=dataset,
                                               split_job=job).path))
     return out
-
-
-def native_levels(slide, max_ds: float) -> list:
-    """The pyramid levels this slide really has, from the finest up to `max_ds`."""
-    return [lv for lv, d in enumerate(slide.level_downsamples)
-            if float(d) <= max_ds * (1 + LEVEL_REL_TOL)]
 
 
 def region_of(regions, x0: int, y0: int, w: int, h: int):
@@ -2059,7 +2053,7 @@ def main() -> int:
                       f'{len(mask.tissue_regions)} regions', flush=True)
                 if not mask.tissue_regions:
                     continue
-                for level in native_levels(slide, args.max_ds):
+                for level in levels_up_to(slide.level_downsamples, args.max_ds):
                     part = part_path(parts_dir, stem, level)
                     if part.exists():
                         print(f'  L{level}  already done -- skipped', flush=True)

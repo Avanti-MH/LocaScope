@@ -78,7 +78,7 @@ from _paths import job_result_dir                                   # noqa: E402
 
 from TissueMask import TissueMask                      # noqa: E402
 from TissueMaskConfig import add_mask_args, mask_cfg_from_args  # noqa: E402
-from TissueSegFunc import nearest_level                 # noqa: E402
+from ReadGeometry import nearest_level                  # noqa: E402
 from SlideProbe import SlideProbe, bounds_rect         # noqa: E402
 from WsiSelection import resolve_wsi_paths             # noqa: E402
 
@@ -200,7 +200,7 @@ class MaskValidityCheck:
 
         # The level nearest the mask's resolution -- for a plane segmenter the
         # level it read -- so alpha is sampled the same way.
-        lv = nearest_level(wsi, base.mask_ds_x)
+        lv = nearest_level(wsi.level_downsamples, base.mask_ds_x)
         Wl, Hl = wsi.level_dimensions[lv]
         rgba = np.array(wsi.read_region((0, 0), lv, (Wl, Hl)))
         alpha = rgba[:, :, 3]

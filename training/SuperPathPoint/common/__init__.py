@@ -8,8 +8,7 @@ call) and then spell `from common.Homography import
 sample_homography`, or take the short names from here.
 """
 
-from DsLadder import (DEFAULT_RUNGS, DsLadder, LEVEL_REL_TOL, RungPlan,
-                             finer_level_for_downsample)
+from DsLadder import DEFAULT_RUNGS, DsLadder, LEVEL_REL_TOL, RungPlan
 from common import KeypointLabelStore
 from common.KeypointLabelStore import (LabelBatch, LabelMeta, LabelMismatch,
                                        batch_from_lists, cap_for,
@@ -43,7 +42,6 @@ __all__ = [
     'ShapeMismatch',
     # DsLadder
     'DEFAULT_RUNGS', 'DsLadder', 'RungPlan', 'LEVEL_REL_TOL',
-    'finer_level_for_downsample',
     # Pre-tiles (utilities/Store.py). `PreTileStore` is a namespace class --
     # `.create` / `.save_tile` / `.load_index` -- and `PreTileCorpus` is the
     # key a reader passes to find one extraction.

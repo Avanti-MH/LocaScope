@@ -32,7 +32,8 @@ setup_import_paths()
 
 from DsLadder import RungPlan                                    # noqa: E402
 from ReadGeometry import (ReadSpec, FovGeometry, ReadRect,     # noqa: E402
-                          level_for, level_px, reserve_margin)
+                          coarser_level, finer_levels, is_native, level_for,
+                          level_px, levels_up_to, nearest_level, reserve_margin)
 from TileSampler import PlanSpec, _margin_of, with_camera       # noqa: E402
 
 RUNGS = (1, 2, 4, 8, 16, 32)
@@ -241,6 +242,100 @@ def t_plan_spec_key_names_the_camera():
     raise AssertionError('a PlanSpec with no camera was accepted')
 
 
+# ── which level: the rules gathered here, against the copies they replaced ──
+
+#: Pyramids the project reads: BRACS's 4x levels as measured, one ending at 64,
+#: one with three levels, Ki67's 2x MIRAX ladder.
+PYRAMIDS = ((1.0, 4.00003, 16.0017, 32.006),
+            (1.0, 4.0, 16.0, 64.0),
+            (1.0, 4.00014, 16.0011),
+            tuple(float(2 ** k) for k in range(10)))
+#: Requests: the rungs, the levels exactly, a hair either side, the awkward.
+DS_GRID = sorted({0.5, 0.9995, 1.0, 1.0005, 2.0, 3.9, 3.9999, 4.0, 4.004,
+                  5.0, 7.3, 8.0, 14.0, 15.99, 16.0, 16.0017, 16.02, 24.0,
+                  31.99, 32.0, 32.006, 33.0, 48.0, 64.0, 100.0, 512.0, 1000.0})
+
+
+def _old_nearest(lds, ds):
+    """FROZEN: SafeSlide.nearest_level_for_downsample (TissueSegFunc.nearest_level
+    was the same arithmetic)."""
+    import numpy as np
+    d = [float(v) for v in lds]
+    return min(range(len(d)), key=lambda i: abs(np.log(d[i] / float(ds))))
+
+
+def _old_coarser(lds, ds):
+    """FROZEN: SafeSlide.coarser_level_for_downsample."""
+    d = [float(v) for v in lds]
+    thresh = float(ds) * (1.0 - 1e-3)
+    return next((i for i, v in enumerate(d) if v >= thresh), len(d) - 1)
+
+
+def _old_openslide(lds, ds):
+    """FROZEN: openslide's get_best_level_for_downsample -- the last level whose
+    downsample does not exceed the request, no slack."""
+    cand = [i for i, v in enumerate(lds) if float(v) <= float(ds)]
+    return max(cand) if cand else 0
+
+
+def _old_levels_up_to(lds, max_ds):
+    """FROZEN: the window bench's native_levels, bench_locascope's and
+    probe_tile_yield's copies."""
+    return [i for i, v in enumerate(lds) if float(v) <= max_ds * (1 + 1e-3)]
+
+
+def _old_finer(lds, rung):
+    """FROZEN: choose_read_level's list."""
+    return [i for i, v in enumerate(lds) if v * (1.0 + 1e-3) < rung]
+
+
+def _old_native_reader(lds_level, ds):
+    """FROZEN: SlideReader.native."""
+    return abs(lds_level - float(ds)) / float(ds) < 1e-3
+
+
+def _old_native_rung(lds_level, ds):
+    """FROZEN: RungPlan.is_native (|shrink - 1| <= tol, shrink = ds / level_ds)."""
+    return abs(float(ds) / lds_level - 1.0) <= 1e-3
+
+
+def t_merged_rules_answer_as_their_copies_did():
+    n = 0
+    for lds in PYRAMIDS:
+        for ds in DS_GRID:
+            assert nearest_level(lds, ds) == _old_nearest(lds, ds), (lds, ds)
+            assert coarser_level(lds, ds) == _old_coarser(lds, ds), (lds, ds)
+            assert levels_up_to(lds, ds) == _old_levels_up_to(lds, ds), (lds, ds)
+            assert finer_levels(lds, ds) == _old_finer(lds, ds), (lds, ds)
+            for lv in range(len(lds)):
+                new = is_native(lds[lv], ds)
+                assert new == _old_native_rung(lds[lv], ds), (lds, lv, ds)
+                assert new == _old_native_reader(lds[lv], ds), (lds, lv, ds)
+            n += 1
+    assert levels_up_to(PYRAMIDS[0]) == [0, 1, 2, 3]
+    return (f'{n} (pyramid, ds): nearest, coarser, levels_up_to, finer_levels '
+            f'and both native copies identical')
+
+
+def t_level_for_differs_from_openslide_only_inside_the_slack():
+    """The openslide rule is replaced by `level_for` where it was used; the
+    two must disagree exactly where a level sits less than LEVEL_REL_TOL
+    above the request -- BRACS's 4.00003 / 16.0017 / 32.006 at 4 / 16 / 32 --
+    and nowhere else."""
+    differ, predicted = set(), set()
+    for p, lds in enumerate(PYRAMIDS):
+        for ds in DS_GRID:
+            if ds < lds[0]:
+                continue
+            if level_for(lds, ds) != _old_openslide(lds, ds):
+                differ.add((p, ds))
+            if any(ds < v <= ds * (1 + 1e-3) for v in lds):
+                predicted.add((p, ds))
+    assert differ == predicted, (sorted(differ), sorted(predicted))
+    assert (0, 4.0) in differ and (0, 16.0) in differ and (0, 32.0) in differ, differ
+    return f'{len(differ)} cases, all inside the slack: {sorted(differ)}'
+
+
 _SECTIONS = {
     'read': ['t_fov_geometry_is_query_from_wsi_arithmetic',
              't_the_level_and_its_pixels',
@@ -250,6 +345,8 @@ _SECTIONS = {
               't_the_old_manifest_reserve_does_not_hold_it',
               't_the_old_fov_reserve_misses_somewhere',
               't_plan_spec_key_names_the_camera'],
+    'levels': ['t_merged_rules_answer_as_their_copies_did',
+               't_level_for_differs_from_openslide_only_inside_the_slack'],
 }
 
 

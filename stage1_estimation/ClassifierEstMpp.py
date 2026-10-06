@@ -42,10 +42,7 @@ PROCEDURE (`estimate`)
    directory, for the five other choices and the reasoning behind each).
 4. `estimated_ds = rungs[predicted_class]`, `estimated_mpp = wsi.base_mpp *
    estimated_ds` -- the RELATIVE-to-ABSOLUTE step `build(wsi)` exists for.
-5. Snap to a level this WSI actually has:
-   `wsi.coarser_level_for_downsample(estimated_ds)` -- see `StageInterface`'s
-   own docstring for why that call is inlined here rather than wrapped in a
-   function of its own.
+5. Snap to a level this WSI actually has: `StageInterface.routed_level`.
 '''
 from __future__ import annotations
 
@@ -73,7 +70,7 @@ from SafeSlide import SafeSlide                                         # noqa: 
 from Checkpoints import build_from_checkpoint                          # noqa: E402
 from Features import encode_raw, trunk_raw                              # noqa: E402
 
-from stage1_estimation.StageInterface import EstMppResult                                 # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
 from stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
 
 
@@ -310,9 +307,8 @@ class ClassifierEstMpp(IdentifiedBuild):
         estimated_ds = self.rungs[predicted_class]
         estimated_mpp = base_mpp * estimated_ds
 
-        chosen_level = self.wsi.coarser_level_for_downsample(estimated_ds)
-        chosen_ds = float(self.wsi.level_downsamples[chosen_level])
-        chosen_mpp = base_mpp * chosen_ds
+        chosen_level, chosen_ds, chosen_mpp = routed_level(
+            self.wsi.level_downsamples, base_mpp, estimated_ds)
 
         return ClassifierEstMppResult(
             estimated_ds=estimated_ds, estimated_mpp=estimated_mpp,

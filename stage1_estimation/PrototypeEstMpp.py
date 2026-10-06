@@ -82,7 +82,7 @@ PROCEDURE
 5. `self.level_ds[predicted_idx]` -> `estimated_ds`/`estimated_mpp` (THIS
   slide's own downsample/mpp at that level, not a value off an external
   ladder), then snapped to a level the WSI actually has
-  (`wsi.coarser_level_for_downsample`) exactly like the other two methods.
+  (`StageInterface.routed_level`) exactly like the other methods.
 '''
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ from SafeSlide import SafeSlide                                         # noqa: 
 from Checkpoints import build_prototype_from_checkpoint                  # noqa: E402
 from Features import encode_raw, trunk_raw                              # noqa: E402
 
-from stage1_estimation.StageInterface import EstMppResult                                 # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
 from stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
@@ -438,9 +438,8 @@ class PrototypeEstMpp(IdentifiedBuild):
         estimated_ds = self.level_ds[predicted_idx]
         estimated_mpp = base_mpp * estimated_ds
 
-        chosen_level = self.wsi.coarser_level_for_downsample(estimated_ds)
-        chosen_ds = float(self.wsi.level_downsamples[chosen_level])
-        chosen_mpp = base_mpp * chosen_ds
+        chosen_level, chosen_ds, chosen_mpp = routed_level(
+            self.wsi.level_downsamples, base_mpp, estimated_ds)
 
         return PrototypeEstMppResult(
             estimated_ds=estimated_ds, estimated_mpp=estimated_mpp,

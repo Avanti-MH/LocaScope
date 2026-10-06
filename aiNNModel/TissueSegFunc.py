@@ -64,6 +64,7 @@ from PIL import Image                                       # noqa: E402
 from ConfigIdentity import (IdentifiedBuild, IdentifiedConfig,  # noqa: E402
                             register)
 from Cache import wsi_stem_of                               # noqa: E402
+from ReadGeometry import nearest_level                      # noqa: E402
 from TissueMask import SlideMask                            # noqa: E402
 
 # Type hints only: hsv and otsu run no network, and a torch import at the top
@@ -137,27 +138,6 @@ def scanned_rect(wsi, limit_bounds: bool = True) -> Tuple[Tuple[int, int],
              int(p.get('openslide.bounds-height', h0))))
 
 
-def nearest_level(wsi, ds: float) -> int:
-    """The level whose downsample is closest to `ds` by RATIO, either side.
-
-    Not openslide's `get_best_level_for_downsample`, whose rule is "the last
-    level whose downsample does not exceed ds" -- a strict comparison, so a
-    level reporting 4.00003 loses to a request for 4.0 and segmentation happens
-    one level finer. On BRACS_1228 that was 6.58 Gpx instead of 411 Mpx: 646 s
-    instead of about 40. It stayed the default for a while so old masks could
-    be reproduced; there is no old mask left to reproduce.
-
-    By ratio because pyramid levels are geometric: an absolute metric would
-    call 1-vs-4 nearer than 16-vs-64 though both are one level apart. Computed
-    here rather than through SafeSlide so any handle works.
-    """
-    if ds <= 0:
-        raise ValueError(f'downsample must be positive, got {ds}')
-    downsamples = [float(d) for d in wsi.level_downsamples]
-    return min(range(len(downsamples)),
-               key=lambda i: abs(np.log(downsamples[i] / float(ds))))
-
-
 class PlaneGeometry(NamedTuple):
     """Which level to read, and which rectangle of it.
 
@@ -175,7 +155,7 @@ class PlaneGeometry(NamedTuple):
 
 
 def plane_geometry(wsi, ds: float, limit_bounds: bool = True) -> PlaneGeometry:
-    level = nearest_level(wsi, ds)
+    level = nearest_level(wsi.level_downsamples, ds)
     origin, span = scanned_rect(wsi, limit_bounds)
     level_ds = float(wsi.level_downsamples[level])
     return PlaneGeometry(level=level, level_ds=level_ds, origin=origin, span=span,

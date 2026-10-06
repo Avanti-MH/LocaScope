@@ -37,11 +37,14 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #                budget, with the tile grid drawn
 # =============================================================================
 
-# Ki67 paths contain commas, so do NOT put WSI=... inside --export=... (comma
-# splits). Export in the shell instead:
-#   WSI='.../S1104043,G7E,110207.mrxs' SEG='hsv hest' \
-#     sbatch --export=ALL,WSI,SEG jobscripts/TestTissueMask.sh
-WSI="${WSI:-/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs}"
+# WSI_NAME is resolved through AccessDatasets.locate, which lists every known
+# name if it is not one. Ki67 names contain commas, so do NOT put WSI_NAME=...
+# inside --export=... (comma splits). Export in the shell instead:
+#   WSI_NAME='S1104043,G7E,110207' SEG='hsv hest' \
+#     sbatch --export=ALL,WSI_NAME,SEG jobscripts/TestTissueMask.sh
+WSI_NAME="${WSI_NAME:-S1104233,G7E,110208}"
+WSI=$(python -c 'import sys; sys.path.insert(0, "utilities"); from AccessDatasets import locate; print(locate(sys.argv[1]).path)' "$WSI_NAME") \
+  || { echo "could not resolve $WSI_NAME"; exit 1; }
 SEG="${SEG:-hsv hest uni2_pca}"
 # 1000 = Uni2PcaSegConfig's own fit_tiles, i.e. the production mask. This used
 # to be 200 (2026-09-24 and earlier), and 200 is NOT the production mask: on the

@@ -50,7 +50,7 @@ import numpy as np
 import torch
 
 from ReadGeometry import (LEVEL_REL_TOL, FovGeometry, ReadRect, ReadSpec,
-                          level_for, level_px)
+                          is_native, level_for, level_px, nearest_level)
 from SafeSlide import SafeSlide
 
 #: The resampling filters a reader can be built with.
@@ -339,7 +339,7 @@ class SlideReader:
     def native_scale(self, *, mpp: Optional[float] = None,
                      ds: Optional[float] = None) -> Tuple[int, float]:
         """A requested scale -> (level, that level's own downsample): the
-        level nearest by ratio (`SafeSlide.nearest_level_for_downsample`).
+        level nearest by ratio (`ReadGeometry.nearest_level`).
 
         Not `level_of`, and the two answer different questions. `level_of`
         keeps `ds` and picks where to read it from. This REPLACES `ds` with a
@@ -354,7 +354,7 @@ class SlideReader:
             raise ValueError('give exactly one of mpp / ds')
         if ds is None:
             ds = mpp / self.base_mpp
-        level = self.slide.nearest_level_for_downsample(ds)
+        level = nearest_level(self.level_downsamples, ds)
         return level, self.level_downsamples[level]
 
     def level_of(self, ds: float, level: Optional[int] = None) -> int:
@@ -378,8 +378,7 @@ class SlideReader:
         every power of two is native, on a 4x one the odd ones are not, so a
         resampling signature correlates with the rung -- the routing heads
         split their accuracy on it."""
-        lds = self.level_downsamples[self.level_of(ds, level)]
-        return abs(lds - float(ds)) / float(ds) < LEVEL_REL_TOL
+        return is_native(self.level_downsamples[self.level_of(ds, level)], ds)
 
     # ── one position ───────────────────────────────────────────────────────
 

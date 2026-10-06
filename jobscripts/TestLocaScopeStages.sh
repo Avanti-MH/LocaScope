@@ -84,11 +84,13 @@ FILTER_SWEEP="${FILTER_SWEEP:-0}"
 # against a feature-cache read, bit for bit (check_sims). Both modes take it;
 # with FILTER_SWEEP=1 it covers no-filter (many regions) and no-overlap too.
 CHECK_SIMS="${CHECK_SIMS:-0}"
+# PRECISION: the stage 2 encoder, fp16 (production) or fp32.
+PRECISION="${PRECISION:-fp16}"
 
 BASE_ARGS="
   --dataset $DATASET --rung $RUNG --pick-seed $PICK_SEED
   --sensor $SENSOR
-  --tile $TILE --samples $SAMPLES --k $K --batch $BATCH
+  --tile $TILE --samples $SAMPLES --k $K --batch $BATCH --precision $PRECISION
   --min-region-ratio $MIN_REGION_RATIO
   --padding $PADDING --min-inliers $MIN_INLIERS
 "

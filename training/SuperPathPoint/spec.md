@@ -1131,14 +1131,14 @@ class DsLadder(IdentifiedConfig):
 
 `SafeSlide` 現有的兩個選擇器都不是這個：
 
-- `nearest_level_for_downsample`（`SafeSlide.py:333`）取比值最近的，兩邊都可能
-- `coarser_level_for_downsample`（`:349`）取「≥ 目標 ds 的最細層」，也就是**偏粗**
+- `ReadGeometry.nearest_level` 取比值最近的，兩邊都可能
+- `ReadGeometry.coarser_level` 取「≥ 目標 ds 的最細層」，也就是**偏粗**
   那一側。在 4x 金字塔上問 ds=2 會拿到 level 1（ds=4），比想要的粗，得上採樣
 
 兩者都有各自的理由（後者的 docstring 附了 1398 shots 的量測，說明對 retrieval
-而言偏粗和偏細不對稱），但它們回答的是別的問題。`DsLadder` 需要自己的
-`finer_level_for_downsample`。**這是新寫的，不是重用**，寫的時候把上面這段理由
-放進 docstring，否則下一個人會以為漏用了現成的東西。
+而言偏粗和偏細不對稱），但它們回答的是別的問題。`DsLadder` 用的是讀圖的規則
+`ReadGeometry.level_for`（不比目標粗的最粗層，不上採樣）；三條規則都在
+`ReadGeometry`，各自回答一個問題。
 
 **`ChainStack`** — Stage B 的三個軸（`FStack`/`RStack`/`CStack`）。`FStack`/
 `RStack` 是 co-registered stack 的取樣與讀取，同一個 level-0 中心、每階各一張；
@@ -2099,7 +2099,7 @@ CLAUDE.md 的規則：在任何以小時或數十 GB 計的執行之前，先寫
 | `test_detector_decoder` | depth-to-space 來回：已知 argmax 的 cell 張量，解碼後最大值落在對應像素；dustbin 是被丟掉而不是被算進去 | 通道排列錯（`(cell,cell)` 的 row-major/col-major），keypoint 會轉置 |
 | `test_mpp_stack` | 同中心兩階 tile，細的降採樣後與粗的算正規化互相關 > 0.9，且贏過位移一 tile 的誘餌 | co-registration 的中心算錯。這是 `test_camera` 在 Stage B 的對應物，那個測試找到過真 bug |
 | `test_keypoint_label_store` | 存讀來回；`require=` 對不上時拒絕；`n_kp` 與 `kp_xy` 的 padding 一致 | 兩個設定的 label 互相覆蓋。照 `test_store` |
-| `test_ds_ladder` | 每個 rung 挑到的 level 的 ds ≤ 目標；在 4x 與 2x 兩種金字塔上各驗一次 | 挑到偏粗的一側 -> 靜靜地上採樣。這正是不能重用 `coarser_level_for_downsample` 的原因 |
+| `test_ds_ladder` | 每個 rung 挑到的 level 的 ds ≤ 目標；在 4x 與 2x 兩種金字塔上各驗一次 | 挑到偏粗的一側 -> 靜靜地上採樣。這正是不能重用 `coarser_level` 的原因 |
 | `test_tile_sampler --only pretile`、`test_store` | 中心裁切取回植入的方塊，而偏 ±1 格的裁切取不回（誘餌）；PNG 來回逐位元相同（雜訊圖，連 RGB 順序一起驗）；遮罩、抽樣、plan、倍率各自改動都會換位址；沒寫完 index 的 rung 讀不到 | 裁切偏一格 -> 每張圖對每個 label 都偏一像素，訓練照樣收斂，模型只是「差一點」。這條是擋在 3c 那 32 GB 前面的秒級斷言 |
 
 再加一個不是單元測試但同等重要的：**第一輪 HA 的 label 產出來之後，先跑

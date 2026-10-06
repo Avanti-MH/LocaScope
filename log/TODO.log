@@ -3249,3 +3249,18 @@ front of whoever flips it.
     - 驗證：test_camera `reach`：最壞一次抽樣，依 spec 讀的照片 vs 讀寬 400 px，角落一致；
       不加 margin 的讀取當對照，角落要不一致；畸變兩種框 margin 給同一個 sensor 裁切，
       以框正規化當對照要不同。
+
+[x] 2026-10-07 | 選層規則收進 ReadGeometry（階段 2）
+    - 原本 5 條選層規則、4 種 native 判定散在 SafeSlide（nearest/coarser）、TissueSegFunc
+      （nearest 第二份）、stage 1 四個估計器（各寫一次路由三行）、openslide 原生規則 3 處、
+      window bench / bench_locascope / probe_tile_yield / choose_read_level 各自的寫法。
+    - 改：ReadGeometry 的 level_for / nearest_level / coarser_level / finer_levels /
+      levels_up_to / is_native 是唯一定義；SafeSlide 不再選層；stage 1 走
+      StageInterface.routed_level；DsLadder 的別名 finer_level_for_downsample 刪除。
+    - 行為改變只有 openslide 原生規則 → level_for 的三處（TissueMask 背景圖、_sift_plot、
+      UNI2-PCA 的 saturation 縮圖）：差異只在某層落在請求之上 LEVEL_REL_TOL 內時
+      （BRACS 4.00003 / 16.0017 / 32.006）。UNI2-PCA 的 fit_ds=32 在 BRACS 從 L2 改讀 L3，
+      fit 的 tile 可能不同，所以 Uni2PcaSegConfig 加 fit_read='level_for'，seg_id 換掉，
+      舊 uni2_pca mask（以及用它切的 SuperPathPoint pre-tile / label）不會再被讀到。
+    - 驗證：test_read_geometry `levels` 凍結舊的寫法，在 4 種金字塔 × 27 個 ds 上逐一比對；
+      level_for 和 openslide 規則的差異必須剛好是「某層在請求之上 slack 內」的那些。

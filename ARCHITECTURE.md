@@ -133,7 +133,11 @@ class ReadSpec:                      # 原 CameraSpec，欄位與行為不變
     margin_out: int = 0              # 讀取範圍（長方形或外接正方形）四周多讀的輸出像素
     long_side / square / key() / geometry(ds) / fov_offset(box, fw, fh)
     place(footprint_l0, ds) -> (fov_w_l0, fov_h_l0, reserve_l0)    # sampler 預留範圍
-# level_for / level_px / FovGeometry / ReadRect / reserve_margin：不動
+# 選層（都吃 level_downsamples，共用 LEVEL_REL_TOL）：
+#   level_for 讀圖：不比 ds 粗的最粗層（不放大）    nearest_level 分割、取樣：比例最近
+#   coarser_level 路由：不比 ds 細的最細層          finer_levels 可從哪些更細的層縮放
+#   levels_up_to 到 max_ds 為止的層                  is_native 這層就是這個 ds
+# level_px / FovGeometry / ReadRect / reserve_margin
 
 # ── utilities/SlideReader.py（原 GridReader.py，大改）───────────────────────
 @dataclass(frozen=True)
@@ -353,7 +357,7 @@ window bench
 
 - **沒有要寫 cache 或寫檔，就不搬到 CPU。** encoder 的輸出在哪裡產生，就在哪裡用。
 - **sampler 和 SlideReader 對同一次讀取只有一個定義**，也就是 ReadGeometry（ReadSpec）。
-- **讀哪一層、讀幾個像素、用哪個濾鏡，整個專案各只有一個定義**：`level_for`、`level_px`、`SlideReader._read`。
+- **讀哪一層、讀幾個像素、用哪個濾鏡，整個專案各只有一個定義**：ReadGeometry 的選層函式、`level_px`、`SlideReader._read`。
   之前 Camera 會取比目標粗 5% 以內的層再放大，並把 level 像素截斷（BRACS ds 4.00014 讀 255 再放大成 256）。
 - **CPU 預算由入口決定**，函式庫模組不自己改 thread 數。
 - **共用層提供能力**（整張 grid 的特徵、任意範圍的像素、分散抽樣），選擇交給 stage 方法。

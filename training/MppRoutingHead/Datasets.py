@@ -64,7 +64,7 @@ from Cache import cache_root, job_name                               # noqa: E40
 from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
                          SamplerConfig, TileSampler)
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
-from ReadGeometry import LEVEL_REL_TOL                              # noqa: E402
+from ReadGeometry import finer_levels                               # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
 from WsiSplit import SPLIT_JOB                                       # noqa: E402
 from camera import Render, photo_rng, render_spec                    # noqa: E402
@@ -622,7 +622,7 @@ def choose_read_level(wsi, rung: float, cfg: RenderConfig,
     if cfg.read_level == 'mixed' and rng.random() >= cfg.resampled_share:
         return None
     ds = wsi.level_downsamples
-    finer = [lv for lv, d in enumerate(ds) if d * (1.0 + LEVEL_REL_TOL) < rung]
+    finer = finer_levels(ds, rung)
     if cfg.resample_from == 'l0':
         finer = [lv for lv in finer if lv == 0]
     if cfg.max_resample_factor is not None:

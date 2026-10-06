@@ -75,7 +75,7 @@ from TileEncoderFunc   import encoder_config, encoder_names             # noqa: 
 from CpuBudget         import CpuBudget                                 # noqa: E402
 from TileSampler       import (PlanSpec, SamplerConfig,             # noqa: E402
                                add_sampler_args, sampler_from_args)
-from ReadGeometry      import LEVEL_REL_TOL, REAL_PHOTO_SENSOR         # noqa: E402
+from ReadGeometry      import REAL_PHOTO_SENSOR, levels_up_to          # noqa: E402
 from TissueMaskConfig  import MASK_RECIPES, MaskMaker                   # noqa: E402
 from config            import DomainGapConfig                           # noqa: E402
 from ConfigArgs        import add_config_args, config_from_args        # noqa: E402
@@ -125,8 +125,8 @@ def split_shots(datasets, split: str, n_wsi: int, sampler_cfg: SamplerConfig,
             path = str(locate(name, dataset=dataset_split).path)
             reader = SlideReader(path)
             mask, _ = masks.mask(reader.slide)
-            rungs = tuple(float(d) for d in reader.level_downsamples
-                          if max_ds is None or d <= max_ds * (1 + LEVEL_REL_TOL))
+            rungs = tuple(float(reader.level_downsamples[lv])
+                          for lv in levels_up_to(reader.level_downsamples, max_ds))
             microscope = Render(reader, SENSOR, camera_cfg, ds=1.0,
                                 seed=sampler_cfg.seed)
             supply = FovSupply(microscope, PlanSpec('ladder', rungs,

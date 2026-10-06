@@ -22,6 +22,8 @@ import cv2
 import numpy as np
 import matplotlib.patches as mpatches
 
+from ReadGeometry import level_for
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -140,7 +142,7 @@ def read_anchored_crop(wsi, x0_l0: float, y0_l0: float, ds: float,
     tile_l0 = tile_size * ds
     crop_x0 = max(0, int(x0_l0 - zoom_pad * tile_l0))
     crop_y0 = max(0, int(y0_l0 - zoom_pad * tile_l0))
-    crop_level = wsi.get_best_level_for_downsample(ds)
+    crop_level = level_for(wsi.level_downsamples, ds)
     crop_ds    = wsi.level_downsamples[crop_level]
     crop_w = int((query_cols + zoom_pad * 2) * tile_size * ds / crop_ds)
     crop_h = int((query_rows + zoom_pad * 2) * tile_size * ds / crop_ds)

@@ -45,23 +45,18 @@ construction time. Keeping every field on every level required sidesteps that
 trap entirely rather than relying on remembering the ordering rule correctly
 in every subclass, forever.
 
-NO `snap_to_wsi_level()` HERE. The operation exists already and is exactly
-right for this: `SafeSlide.coarser_level_for_downsample(downsample)` is the
-repo's own measured, purpose-built "route a query to a pyramid level" method
-(1398-shot comparison against the finer-biased alternative, in its own
-docstring). With exactly one caller today (`ClassifierEstMpp.estimate()`),
-wrapping that call plus the two-line `chosen_ds`/`chosen_mpp` derivation in a
-function of its own here would be a second name for a three-line composition
-with no second caller yet to justify sharing it — see the estimator for the
-inline version. Extract it the day a second caller needs the identical
-composition, not before.
+`routed_level` is the one place an estimate becomes a pyramid level:
+`ReadGeometry.coarser_level`, the measured routing rule, and the level's own
+ds and mpp. Every estimator returns its `chosen_*` fields through it.
 '''
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, Sequence, Tuple, runtime_checkable
 
 import numpy as np
+
+from ReadGeometry import coarser_level
 
 
 @dataclass(frozen=True)
@@ -102,3 +97,13 @@ class MppEstimator(Protocol):
 
     def estimate(self, query: np.ndarray) -> EstMppResult:
         ...
+
+
+def routed_level(level_downsamples: Sequence[float], base_mpp: float,
+                 estimated_ds: float) -> Tuple[int, float, float]:
+    """`(chosen_level, chosen_ds, chosen_mpp)`: the level a query estimated at
+    `estimated_ds` is routed to (`ReadGeometry.coarser_level`), its own
+    downsample, and that downsample's mpp."""
+    level = coarser_level(level_downsamples, estimated_ds)
+    chosen_ds = float(level_downsamples[level])
+    return level, chosen_ds, float(base_mpp) * chosen_ds

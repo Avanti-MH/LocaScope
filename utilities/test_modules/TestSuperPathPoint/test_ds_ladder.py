@@ -24,7 +24,7 @@ interpolation. Nothing raises, and the failure looks like a model that is
 slightly worse.
 
 The check that carries the weight is therefore not a tolerance but a decoy:
-`SafeSlide.coarser_level_for_downsample` rounds the OTHER way, and on a 4x
+`ReadGeometry.coarser_level` rounds the OTHER way, and on a 4x
 pyramid the two resolvers disagree at ds 2. Section 2 pins that disagreement, so
 that anyone who later "simplifies" this module by reusing the SafeSlide helper
 gets told what they broke.
@@ -62,8 +62,8 @@ from _paths import setup_import_paths                           # noqa: E402
 
 setup_import_paths()
 
-from DsLadder import (DEFAULT_RUNGS, DsLadder,           # noqa: E402
-                             LEVEL_REL_TOL, finer_level_for_downsample)
+from DsLadder import DEFAULT_RUNGS, DsLadder                # noqa: E402
+from ReadGeometry import LEVEL_REL_TOL, level_for          # noqa: E402
 
 
 #: The two pyramid shapes this project actually has, measured from the runs
@@ -106,7 +106,7 @@ def t_picks_the_coarsest_level_that_does_not_upsample():
     """
     for name, pyramid in (('BRACS', BRACS_PYRAMID), ('Ki67', KI67_PYRAMID)):
         for rung in DEFAULT_RUNGS:
-            level = finer_level_for_downsample(pyramid, rung)
+            level = level_for(pyramid, rung)
             level_ds = pyramid[level]
             assert level_ds <= rung * (1 + LEVEL_REL_TOL), (
                 f'{name} rung {rung}: picked level {level} with ds {level_ds}, '
@@ -128,7 +128,7 @@ def t_picks_the_coarsest_such_level_not_just_any():
     }
     for name, (pyramid, expected) in table.items():
         for rung, want in expected.items():
-            got = finer_level_for_downsample(pyramid, rung)
+            got = level_for(pyramid, rung)
             assert got == want, (
                 f'{name} rung {rung}: picked level {got}, expected {want} '
                 f'(pyramid {[round(d, 3) for d in pyramid]})')
@@ -143,12 +143,12 @@ def t_pyramid_noise_does_not_move_the_choice():
     reading 16x the pixels for the same tile. Silent, and only visible as the
     job being four times slower than it should be.
     """
-    exact = finer_level_for_downsample([1.0, 4.0, 16.0], 4.0)
-    noisy = finer_level_for_downsample([1.0, 4.00003, 16.00012], 4.0)
+    exact = level_for([1.0, 4.0, 16.0], 4.0)
+    noisy = level_for([1.0, 4.00003, 16.00012], 4.0)
     assert exact == noisy == 1, (
         f'exact pyramid gave level {exact}, noisy gave {noisy}; both should be 1')
     # And the slack must not be so wide that a genuinely coarser level sneaks in.
-    assert finer_level_for_downsample([1.0, 4.4, 16.0], 4.0) == 0, (
+    assert level_for([1.0, 4.4, 16.0], 4.0) == 0, (
         'a level 10% coarser than the rung was accepted -- the tolerance is '
         'meant for rounding noise, not for a different level')
     return 'noise of 1e-5 tolerated, a 10% gap is not'
@@ -159,7 +159,7 @@ def t_pyramid_noise_does_not_move_the_choice():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _coarser_level_decoy(downsamples, downsample):
-    """`SafeSlide.coarser_level_for_downsample`, transcribed (SafeSlide.py:367-369).
+    """FROZEN: the routing rule, `ReadGeometry.coarser_level`, transcribed.
 
     Copied rather than imported so this test needs no openslide, and so the
     comparison stays fixed even if that method is later changed -- the point of
@@ -174,7 +174,7 @@ def _coarser_level_decoy(downsamples, downsample):
 def t_disagrees_with_the_coarser_resolver_where_it_matters():
     """On a 4x pyramid at ds 2 the two resolvers differ, and only one is usable.
 
-    `coarser_level_for_downsample` exists for routing a QUERY to a level, and its
+    `coarser_level` exists for routing a QUERY to a level, and its
     docstring carries a 1398-shot measurement showing that rounding coarse is
     six times better than rounding fine for that job. Both facts are true and
     neither makes it the right resolver for a ladder.
@@ -182,7 +182,7 @@ def t_disagrees_with_the_coarser_resolver_where_it_matters():
     If this check ever fails because the two now agree, that is the signal to go
     read both docstrings before deleting one of them.
     """
-    ours = finer_level_for_downsample(BRACS_PYRAMID, 2.0)
+    ours = level_for(BRACS_PYRAMID, 2.0)
     theirs = _coarser_level_decoy(BRACS_PYRAMID, 2.0)
     assert ours != theirs, (
         'the two resolvers agree at BRACS ds 2, so one of them has changed '
@@ -304,7 +304,7 @@ def t_footprint_is_tile_times_ds():
 def t_finer_than_level_zero_raises():
     """Asking for a rung the slide does not have must not quietly upsample."""
     try:
-        finer_level_for_downsample(BRACS_PYRAMID, 0.5)
+        level_for(BRACS_PYRAMID, 0.5)
     except ValueError as e:
         assert 'upsampl' in str(e).lower(), f'unhelpful message: {e}'
         return 'ds 0.5 on a level-0-is-1.0 pyramid raises and says why'

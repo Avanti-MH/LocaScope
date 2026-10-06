@@ -60,8 +60,8 @@ from TissueMaskConfig import (MASK_RECIPES, MaskMaker,           # noqa: E402
                               TissueMaskConfig, add_mask_args,
                               mask_cfg_from_args)
 from TissueSegFunc import (PlaneSegConfig, TissueSegConfig,      # noqa: E402
-                           TissueSegmenter, nearest_level, plane_geometry,
-                           tiled_apply)
+                           TissueSegmenter, plane_geometry, tiled_apply)
+from ReadGeometry import nearest_level                           # noqa: E402
 
 _RESULTS = []
 
@@ -409,13 +409,14 @@ def t_slide_mask_components():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def t_seg_level_is_nearest_by_ratio():
-    """A level reporting 4.00003 is the level for ds 4. openslide's strict
-    rule picked level 0 there, and BRACS_1228 was segmented over 6.58 Gpx in
-    646 s instead of 411 Mpx in about 40."""
+    """A level reporting 4.00003 is the level for ds 4; openslide's strict rule
+    (the decoy) picks level 0, which on BRACS_1228 is 6.58 Gpx to segment
+    instead of 411 Mpx."""
     wsi = _Slide(4096, 4096, downsamples=(1.0, 4.00003, 16.0001))
     assert wsi.get_best_level_for_downsample(4.0) == 0, 'the decoy did not bite'
-    assert nearest_level(wsi, 4.0) == 1
-    assert nearest_level(wsi, 7.0) == 1 and nearest_level(wsi, 9.0) == 2
+    lds = wsi.level_downsamples
+    assert nearest_level(lds, 4.0) == 1 and plane_geometry(wsi, 4.0).level == 1
+    assert nearest_level(lds, 7.0) == 1 and nearest_level(lds, 9.0) == 2
     return '4.0 -> level 1 (openslide: 0)'
 
 

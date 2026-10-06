@@ -126,6 +126,7 @@ from Cache import cache_root, find, read_meta, wsi_stem_of      # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 from PatchingLib import region_grids                             # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
+from ReadGeometry import levels_up_to                        # noqa: E402
 from TileSampler import (PRE_TILE_FACTOR, OverlapConfig,      # noqa: E402
                          SamplerConfig, TileSampler)
 from TissueMask import SlideMask                # noqa: E402
@@ -333,8 +334,7 @@ class TileYieldProbe:
         none_mask = MaskMaker(MASK_RECIPES['none']).mask(wsi)[0]
         masks = {'nomask': none_mask, 'mask': trm}
         top = max(self.ds_values)
-        levels = [lv for lv, d in enumerate(wsi.level_downsamples)
-                  if float(d) <= top * (1 + 1e-3)]
+        levels = levels_up_to(wsi.level_downsamples, top)
         # One aligned table per slide. The tile counts are `len` of the PatchGrid
         # `region_grids` builds (PatchingLib.PatchGrid.for_region, geometry only);
         # the GB columns are the OVERLAP grid, which is what FeatureMapCache

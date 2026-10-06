@@ -68,7 +68,7 @@ on a stale file.
 
 Scored on `estimated_*`, NOT `chosen_*`. `chosen_ds`/`chosen_level` already
 went through the shared "snap to this WSI's own pyramid" step
-(`SafeSlide.coarser_level_for_downsample`) that every method shares, so
+(`StageInterface.routed_level`) that every method shares, so
 scoring on it would measure that shared step as much as the method. Same
 convention `bench_mpp_feature_decomposition.py`'s own `score()` uses.
 

@@ -14,12 +14,20 @@ the sampler offers is one the reader can read:
     level_for(level_downsamples, ds)                    which level to read
     level_px(out_px, ds, level_ds)                      how many of its px
 
+and which level answers each question a caller asks of a pyramid:
+
+    level_for       read: the coarsest not coarser than ds (never upsample)
+    nearest_level   segment or sample: the closest by ratio
+    coarser_level   route a query: the finest not finer than ds
+    finer_levels    resample from: every level strictly finer
+    levels_up_to    the pyramid's own levels, finest to max_ds
+    is_native       no resampling between a level and a ds
+
 Everything is in `ds`, a downsample relative to the slide's own level 0. An
 mpp enters once, where a caller has one (`ds = mpp / base_mpp`), and is not
 converted back.
 
-One level rule: read the coarsest level not coarser than asked (never
-upsample), and round the level px.
+All within one slack, `LEVEL_REL_TOL`, and the level px rounded.
 
 Pure arithmetic, no IO, no imports from the rest of the project: `TileSampler`
 and `SlideReader` both depend on this, and a sampler must know what a read
@@ -29,11 +37,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 #: Pyramid downsamples are derived from rounded level dimensions, so a "4x"
 #: level reports 4.00003 as readily as 4.0, and an exact comparison lands a
-#: level away over a part in 1e5. THE ONE DEFINITION: SafeSlide imports it.
+#: level away over a part in 1e5.
 LEVEL_REL_TOL = 1e-3
 
 
@@ -67,6 +75,60 @@ def level_for(level_downsamples: Sequence[float], ds: float) -> int:
             f'reaching it would mean upsampling, which is refused. '
             f'Available: {[round(d, 4) for d in downsamples]}')
     return max(candidates)
+
+
+def _positive(ds: float) -> float:
+    if ds <= 0:
+        raise ValueError(f'downsample must be positive, got {ds}')
+    return float(ds)
+
+
+def nearest_level(level_downsamples: Sequence[float], ds: float) -> int:
+    """The level whose downsample is closest to `ds` by RATIO, either side --
+    for deciding where to segment or sample, where a level out costs
+    resolution and time but not correctness. By ratio because pyramid levels
+    are geometric: an absolute metric would call 1-vs-4 nearer than 16-vs-64
+    though both are one level apart."""
+    ds = _positive(ds)
+    downsamples = [float(d) for d in level_downsamples]
+    return min(range(len(downsamples)),
+               key=lambda i: abs(math.log(downsamples[i] / ds)))
+
+
+def coarser_level(level_downsamples: Sequence[float], ds: float) -> int:
+    """The finest level at least as coarse as `ds` (within `LEVEL_REL_TOL`):
+    where a query is routed. The two directions are not symmetric -- one level
+    COARSE, the window covers more than the FoV and stage 3 still recovers
+    91.1%; one level FINE, retrieval cannot frame it, 15.7% (1398 shots) --
+    so it rounds up. The coarsest level when `ds` is coarser than the pyramid."""
+    ds = _positive(ds)
+    downsamples = [float(d) for d in level_downsamples]
+    threshold = ds * (1.0 - LEVEL_REL_TOL)
+    return next((i for i, d in enumerate(downsamples) if d >= threshold),
+                len(downsamples) - 1)
+
+
+def finer_levels(level_downsamples: Sequence[float], ds: float) -> list:
+    """Every level strictly finer than `ds`, past the slack `level_for` allows
+    before it calls a level native: the levels `ds` can be resampled down from."""
+    ds = _positive(ds)
+    return [i for i, d in enumerate(level_downsamples)
+            if float(d) * (1.0 + LEVEL_REL_TOL) < ds]
+
+
+def levels_up_to(level_downsamples: Sequence[float],
+                 max_ds: Optional[float] = None) -> list:
+    """The pyramid's own levels from the finest up to `max_ds` (within
+    `LEVEL_REL_TOL`); every level when `max_ds` is None."""
+    return [i for i, d in enumerate(level_downsamples)
+            if max_ds is None or float(d) <= float(max_ds) * (1.0 + LEVEL_REL_TOL)]
+
+
+def is_native(level_ds: float, ds: float) -> bool:
+    """Does `ds` come off a level of downsample `level_ds` with no resampling:
+    the two agree within `LEVEL_REL_TOL`. On a 2x pyramid every power of two is
+    native, on a 4x one the odd ones are not."""
+    return abs(float(ds) / float(level_ds) - 1.0) <= LEVEL_REL_TOL
 
 
 def _ceil(x: float) -> int:

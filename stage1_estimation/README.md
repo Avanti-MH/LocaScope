@@ -37,7 +37,7 @@ challenger 還沒升上去。
 | 欄位 | 意義 |
 |---|---|
 | `estimated_ds` / `estimated_mpp` | 方法自己算出來的原始答案（ds、mpp 兩種單位都給） |
-| `chosen_ds` / `chosen_mpp` / `chosen_level` | 貼到目標 WSI 實際存在的 pyramid level 後的答案，`SafeSlide.coarser_level_for_downsample()` 算的 |
+| `chosen_ds` / `chosen_mpp` / `chosen_level` | 貼到目標 WSI 實際存在的 pyramid level 後的答案，`StageInterface.routed_level`（`ReadGeometry.coarser_level`）算的 |
 
 沒有 `method: str` 欄位——`type(result)` 本身就是方法識別。`MppEstimator`
 （一個 `typing.Protocol`）只規定 `estimate(query: np.ndarray) -> EstMppResult`

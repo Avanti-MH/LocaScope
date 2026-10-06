@@ -29,10 +29,7 @@ PROCEDURE (`estimate`)
    not a table lookup the way `ClassifierEstMpp`'s `rungs` lookup is: the two
    methods answer in different native units and only agree once both are
    converted to the same one.
-5. Snap to a level this WSI actually has -- same inlined
-   `wsi.coarser_level_for_downsample` call, same reasoning, as
-   `ClassifierEstMpp.estimate` (see `StageInterface`'s docstring for why it
-   is inlined rather than a shared function).
+5. Snap to a level this WSI actually has: `StageInterface.routed_level`.
 '''
 from __future__ import annotations
 
@@ -64,7 +61,7 @@ from TissueMask import TissueMask                        # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
                          TileSampler, native_plans)
 
-from stage1_estimation.StageInterface import EstMppResult                                 # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
 
@@ -306,9 +303,8 @@ class KnnEstMpp(IdentifiedBuild):
         # relative rung and multiplies by base_mpp instead.
         estimated_ds = estimated_mpp / base_mpp
 
-        chosen_level = self.wsi.coarser_level_for_downsample(estimated_ds)
-        chosen_ds = float(self.wsi.level_downsamples[chosen_level])
-        chosen_mpp = base_mpp * chosen_ds
+        chosen_level, chosen_ds, chosen_mpp = routed_level(
+            self.wsi.level_downsamples, base_mpp, estimated_ds)
 
         return KnnEstMppResult(
             estimated_ds=estimated_ds, estimated_mpp=estimated_mpp,

@@ -19,10 +19,10 @@ level" means 4x on one and 2x on the other.
 
 THE LEVEL RULE
 ---------------
-`finer_level_for_downsample` is `ReadGeometry.level_for`: the COARSEST level
+The level is `ReadGeometry.level_for`: the COARSEST level
 whose native downsample is at most the target, then shrink the rest of the way
 in software. On a 4x pyramid ds 2 becomes "read level 0, shrink by 2". The
-coarse side (`SafeSlide.coarser_level_for_downsample`, for routing a query)
+coarse side (`ReadGeometry.coarser_level`, for routing a query)
 would reach ds 2 from ds 4 by UPSAMPLING, which creates interpolation texture
 a keypoint detector will happily learn to fire on.
 
@@ -40,10 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
-# The level rule and its slack are ReadGeometry's; this module and
-# SuperPathPoint call it `finer_level_for_downsample`.
-from ReadGeometry import LEVEL_REL_TOL, level_px                 # noqa: F401
-from ReadGeometry import level_for as finer_level_for_downsample
+from ReadGeometry import LEVEL_REL_TOL, is_native, level_for, level_px  # noqa: F401
 
 #: spec.md 6.5. ds 32 is the coarsest rung with measured evidence that tiles
 #: exist at it (Ki67 level 5 and BRACS level 3 both sampled 100/100 at tile 256);
@@ -112,7 +109,7 @@ class RungPlan:
     @property
     def is_native(self) -> bool:
         """True when the pyramid has this rung and no shrinking is needed."""
-        return abs(self.shrink - 1.0) <= LEVEL_REL_TOL
+        return is_native(self.level_ds, self.rung_ds)
 
     def summary(self) -> str:
         native = 'native' if self.is_native else f'shrink {self.shrink:g}x'
@@ -159,7 +156,7 @@ class DsLadder:
         downsamples = [float(d) for d in level_downsamples]
         plans: List[RungPlan] = []
         for rung in self.rungs:
-            level = finer_level_for_downsample(downsamples, rung)
+            level = level_for(downsamples, rung)
             level_ds = downsamples[level]
             shrink = float(rung) / level_ds
             read_size = level_px(tile_size, rung, level_ds)

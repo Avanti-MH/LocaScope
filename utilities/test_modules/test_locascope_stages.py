@@ -67,7 +67,7 @@ from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
 from Cache import cache_root, job_name                               # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from ReadGeometry import ReadSpec                                   # noqa: E402
+from ReadGeometry import ReadSpec, coarser_level                    # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import (                     # noqa: E402
@@ -155,7 +155,7 @@ def crop_query(args):
 def stage2_encoder_cfg(args):
     over = {'head': args.head} if args.head else {}
     return encoder_config(args.encoder, batch_size=args.batch, **over)\
-        .with_model(dtype='fp32')
+        .with_model(dtype=args.precision)
 
 
 def run_stage1(wsi, mask, query_qc, args, device):
@@ -177,11 +177,16 @@ def run_stage1(wsi, mask, query_qc, args, device):
 def run_stage2(wsi, mask, query_np, estimate, args, device):
     """Stage 2 on stage 1's output (or its ground-truth substitute). Builds
     its own encoder, as stage 1 does."""
+    t0 = time.perf_counter()
     retriever = SlidingWinSimRot(
         SlidingWinSimRotConfig(stage2_encoder_cfg(args), tile_size=args.tile,
                                        overlap=args.overlap),
         device, read_workers=CpuBudget.for_job(processes=1).apply().workers
     ).build(wsi, mask)
+    built = time.perf_counter() - t0
+    n_tiles = sum(len(fm.features) for fm in retriever.wsi_features)
+    print(f'  features: {n_tiles:,} tiles in {built:.1f}s = '
+          f'{n_tiles / max(built, 1e-9):.0f} tiles/s ({args.precision})', flush=True)
     cs = retriever.retrieve(query_np, estimate)
     best = cs.best
     x0, y0 = cs.origin_l0(best)
@@ -326,6 +331,8 @@ def main() -> int:
                          '--no-filter hands the stages the raw components')
     add_mask_args(ap, default='hest')
     ap.add_argument('--batch',   type=int,   default=1024)
+    ap.add_argument('--precision', choices=['fp16', 'fp32'], default='fp16',
+                    help='stage 2 encoder precision; fp16 is the production setting')
     ap.add_argument('--encoder', default='gigapath', choices=encoder_names())
     ap.add_argument('--head',    default='')
     ap.add_argument('--samples', type=int, default=40, help='stage 1: reference tiles per level')
@@ -358,7 +365,7 @@ def main() -> int:
     # the true mpp, routed by the rule KnnEstMpp routes by.
     estimate = SimpleNamespace(
         estimated_mpp=args.mpp,
-        chosen_level=wsi.coarser_level_for_downsample(args.mpp / base_mpp))
+        chosen_level=coarser_level(wsi.level_downsamples, args.mpp / base_mpp))
     ok = True
 
     # ONE mask, built once, whichever stages run -- stage 1's own reference

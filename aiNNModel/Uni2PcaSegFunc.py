@@ -147,6 +147,7 @@ import torch                                                # noqa: E402
 from PIL import Image                                       # noqa: E402
 
 from ConfigIdentity import register                         # noqa: E402
+from ReadGeometry import level_for                          # noqa: E402
 from TissueMask import SlideMask                    # noqa: E402
 from TissueSegFunc import (TissueSegConfig, TissueSegmenter,  # noqa: E402
                            scanned_rect)
@@ -189,6 +190,9 @@ _UNI2_PCA_BASELINE = {
     'fit_bins': 10,
     'fit_seed': 0,
     'fit_ds': 32.0,
+    # the zero point is openslide's level rule, which the thumbnail used; the
+    # default 'level_for' differs from it, so it is in every seg_id
+    'fit_read': 'openslide',
     'limit_bounds': True,
 }
 
@@ -217,7 +221,7 @@ def tile_saturation(wsi, origin, span, tile: int, ds: float = 32.0) -> np.ndarra
     Only a proxy, and only used to CHOOSE what the model looks at. Nothing it
     decides reaches the mask.
     """
-    level = wsi.get_best_level_for_downsample(ds)
+    level = level_for(wsi.level_downsamples, ds)
     got = float(wsi.level_downsamples[level])
     level_w = max(1, int(span[0] / got))
     level_h = max(1, int(span[1] / got))
@@ -435,6 +439,10 @@ class Uni2PcaSegConfig(TissueSegConfig):
     fit_bins: int = 10
     fit_seed: int = 0
     fit_ds: float = 32.0
+    #: How the thumbnail's level is picked: `ReadGeometry.level_for`, the
+    #: coarsest not coarser than `fit_ds`. The only rule there is; named so the
+    #: rule is part of `seg_id`, since it decides which tiles the PCA sees.
+    fit_read: str = 'level_for'
 
     #: Restrict everything to `openslide.bounds-*`. See `scanned_rect`.
     limit_bounds: bool = True
@@ -635,6 +643,8 @@ class Uni2PcaSegmenter(TissueSegmenter):
         # The tile side in LEVEL-0 pixels, so positions can be addressed in the
         # coordinate system read_region actually takes.
         tile_l0 = int(round(cfg.tile * level_ds))
+        if cfg.fit_read != 'level_for':
+            raise ValueError(f'fit_read {cfg.fit_read!r}: the only rule is level_for')
         saturation = tile_saturation(wsi, origin, span, tile_l0, cfg.fit_ds)
         positions = stratified_positions(saturation, cfg.fit_tiles,
                                          cfg.fit_bins, cfg.fit_seed)

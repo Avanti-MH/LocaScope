@@ -16,9 +16,9 @@ Design:
   18.6 GiB. The chunk budgets are fields of the recipe's segmenter config.
 * A retriever is built lazily on first use for each pyramid level; the
   routed level is the estimator's own `chosen_level` --
-  `wsi.coarser_level_for_downsample`, the repo's measured, coarse-biased
-  routing rule (`SafeSlide.py`'s own docstring: 91.1% recovered by stage 3 at
-  one level coarse against 15.7% at one level fine, 1398 shots). It is read
+  `StageInterface.routed_level` over `ReadGeometry.coarser_level`, the
+  measured, coarse-biased routing rule (91.1% recovered by stage 3 at one
+  level coarse against 15.7% at one level fine, 1398 shots). It is read
   off the Result, never recomputed here.
 * If a level's retriever build fails (e.g. `patchable` emptied the mask
   because tiles are too big at that level), the shot is marked

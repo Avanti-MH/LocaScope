@@ -40,6 +40,7 @@ from safetensors import safe_open
 from safetensors.numpy import save_file
 
 from Cache import CacheMismatch, atomic_file
+from ReadGeometry import level_for
 
 
 # Ceiling on what may be handed to cv2.connectedComponentsWithStats in one call.
@@ -446,7 +447,7 @@ class TissueMask:
         H, W = self.main_mask.shape
         # At or finer than the mask, then INTER_AREA down: a coarser level
         # would have to be upsampled, a backdrop blurrier than its mask.
-        lv = wsi.get_best_level_for_downsample(self.mask_ds_x)
+        lv = level_for(wsi.level_downsamples, self.mask_ds_x)
         ds_lv = float(wsi.level_downsamples[lv])
         read_w = max(1, int(round(W * self.mask_ds_x / ds_lv)))
         read_h = max(1, int(round(H * self.mask_ds_y / ds_lv)))

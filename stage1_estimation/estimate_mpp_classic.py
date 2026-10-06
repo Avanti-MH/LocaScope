@@ -41,7 +41,7 @@ setup_import_paths()
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SafeSlide import SafeSlide                                         # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
-from stage1_estimation.StageInterface import EstMppResult                                 # noqa: E402
+from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
                          TileSampler, native_plans)
 from TissueMaskConfig import MASK_RECIPES                                # noqa: E402
@@ -188,11 +188,11 @@ class ClassicEstMpp:
 
         base_mpp = float(self.wsi.base_mpp)
         estimated_ds = estimated_mpp / base_mpp
-        chosen_level = self.wsi.coarser_level_for_downsample(estimated_ds)
-        chosen_ds = float(self.wsi.level_downsamples[chosen_level])
+        chosen_level, chosen_ds, chosen_mpp = routed_level(
+            self.wsi.level_downsamples, base_mpp, estimated_ds)
         return ClassicEstMppResult(
             estimated_ds=estimated_ds, estimated_mpp=estimated_mpp,
-            chosen_ds=chosen_ds, chosen_mpp=base_mpp * chosen_ds,
+            chosen_ds=chosen_ds, chosen_mpp=chosen_mpp,
             chosen_level=chosen_level,
             query_fingerprint=[float(v) for v in q_feat],
             neighbour_levels=[self.ref_levels[i] for i in idx])
