@@ -380,8 +380,18 @@ class PatchGrid:
         return self.grid_cols
 
     def _flat_prefix(self, r: int) -> int:
-        '''QueryPreprocessor._flat_prefix — main row r 之前的 flat slot 總數。'''
-        return sum(self._row_scan_width(i) for i in range(r))
+        '''QueryPreprocessor._flat_prefix — main row r 之前的 flat slot 總數。
+
+        Closed form of `sum(_row_scan_width(i) for i in range(r))`: the first
+        overlap_rows main rows each carry an overlap row beside them. The sum
+        was O(rows) per call and every tile lookup made one, which made
+        arranging a slide's feature grid quadratic in its tile count (the
+        BenchLocaScope profile, 2026-10-06).'''
+        if not self.has_overlap:
+            return r * self.grid_cols
+        with_overlap = min(r, self.overlap_rows)
+        return (with_overlap * (self.grid_cols + self.overlap_cols)
+                + (r - with_overlap) * self.grid_cols)
 
     def flat_to_unified(self, flat_idx: int) -> Tuple[int, int]:
         '''
@@ -517,7 +527,7 @@ class PatchGrid:
         '''可索引的 patch slot 總數（main + overlap，以 flat 順序計）。'''
         if not self.has_overlap:
             return len(self.main_patch_infos)
-        return sum(self._row_scan_width(r) for r in range(self.grid_rows))
+        return self._flat_prefix(self.grid_rows)
 
     # ── Pixel ↔ grid ──────────────────────────────────────────────────────────
 
@@ -677,20 +687,21 @@ class FeaturesMap:
         for idx in range(len(self)):
             yield self.features[idx]
 
+    def _lattice_grid(self, rows: int, cols: int, flat_index) -> Any:
+        '''`[rows, cols, D]`: one lattice's features in grid order, gathered
+        in ONE index_select on the device the features live on -- not a copy
+        per cell, which on a slide's grid was hundreds of thousands of them.'''
+        idx = torch.tensor([flat_index(r, c) for r in range(rows) for c in range(cols)],
+                           dtype=torch.long, device=self.features.device)
+        return self.features.index_select(0, idx).view(rows, cols, self.feat_dim)
+
     def main_feature_grid(self) -> Any:
-        rows, cols = self.grid.grid_rows, self.grid.grid_cols
-        out = self.features.new_empty(rows, cols, self.feat_dim)
-        for r in range(rows):
-            for c in range(cols):
-                out[r, c] = self[self.grid.flat_index_for_main(r, c)]
-        return out
+        return self._lattice_grid(self.grid.grid_rows, self.grid.grid_cols,
+                                  self.grid.flat_index_for_main)
+
     def overlap_feature_grid(self) -> Any:
-        rows, cols = self.grid.overlap_rows, self.grid.overlap_cols
-        out = self.features.new_empty(rows, cols, self.feat_dim)
-        for r in range(rows):
-            for c in range(cols):
-                out[r, c] = self[self.grid.flat_index_for_overlap(r, c)]
-        return out
+        return self._lattice_grid(self.grid.overlap_rows, self.grid.overlap_cols,
+                                  self.grid.flat_index_for_overlap)
 
     def summary(self) -> FeaturesMap:
         print(f'Source       : {self.source or "<unknown>"}')
@@ -768,7 +779,12 @@ class WsiFeaturesMap:
         `grid.flat_index_for_main/overlap(r, c)` names, so the result is in
         exactly the order a container's `to_features` produced. Every slot
         must be written exactly once, or this raises: a block lost, or read
-        twice, would otherwise leave zeros that score like a real tile.'''
+        twice, would otherwise leave zeros that score like a real tile.
+
+        The features stay on the device `encoder` returns them on -- a
+        TileEncoder's, since its exits no longer move to the host -- because
+        the similarity runs there; nothing here moves them to the host. A cache
+        write moves them, once, when it writes (`Store.to_store_tensors`).'''
         feats: List[Any] = [None] * len(grids)
         hits = [torch.zeros(len(g), dtype=torch.int32) for g in grids]
         for b in blocks:
@@ -784,19 +800,31 @@ class WsiFeaturesMap:
                 f = encoder(tiles)
                 f = f.unsqueeze(0) if f.ndim == 1 else f
                 if feats[b.region] is None:
-                    feats[b.region] = torch.empty(len(grid), f.shape[1], dtype=f.dtype)
-                feats[b.region][idx] = f.detach().cpu()
+                    feats[b.region] = torch.empty(len(grid), f.shape[1],
+                                                  dtype=f.dtype, device=f.device)
+                feats[b.region][idx.to(f.device)] = f.detach()
                 hits[b.region][idx] += 1
         dim = next((f.shape[1] for f in feats if f is not None), 0)
+        device = next((f.device for f in feats if f is not None), None)
         for r, (grid, h) in enumerate(zip(grids, hits)):
             if len(grid) and not bool((h == 1).all()):
                 raise RuntimeError(
                     f'region {r}: {int((h == 0).sum())} of {len(grid)} tiles never '
                     f'read and {int((h > 1).sum())} read more than once')
             if feats[r] is None:
-                feats[r] = torch.empty(0, dim)
+                feats[r] = torch.empty(0, dim, device=device)
         return cls(regions, [FeaturesMap(g, f) for g, f in zip(grids, feats)],
                    ds=ds, level=level, tile_size=tile_size, overlap=overlap)
+
+    def to(self, device) -> 'WsiFeaturesMap':
+        '''The same maps with their features on `device` -- one move per
+        region, for features read back from a cache onto the host.'''
+        return WsiFeaturesMap(
+            self.regions,
+            [FeaturesMap(m.grid, m.features.to(device), source=m.source)
+             for m in self.maps],
+            ds=self.ds, level=self.level, tile_size=self.tile_size,
+            overlap=self.overlap)
 
     @property
     def feat_dim(self) -> int:

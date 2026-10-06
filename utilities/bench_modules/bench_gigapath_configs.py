@@ -213,7 +213,7 @@ def encode_config(images, device, dtype, batch_size, label):
 
 def level1_stats(base, other):
     '''Per-patch cos sim vs baseline. Inputs are unit-normalized.'''
-    cos = (base * other).sum(dim=-1).numpy()
+    cos = (base * other).sum(dim=-1).cpu().numpy()
     p = np.nanpercentile(cos, [1, 5, 50, 95, 99])
     return {'mean': float(np.nanmean(cos)), 'std': float(np.nanstd(cos)),
            'p1': float(p[0]), 'p5': float(p[1]), 'p50': float(p[2]),
@@ -244,8 +244,8 @@ def level2_ranking(base, other, ks=_TOPK):
     if bad_rows.any():
         print(f'  [WARN] level2: zeroing {int(bad_rows.sum())} NaN/Inf rows in other')
         other[bad_rows] = 0.0
-    m_b = (base  @ base.T ).numpy()
-    m_o = (other @ other.T).numpy()
+    m_b = (base  @ base.T ).cpu().numpy()
+    m_o = (other @ other.T).cpu().numpy()
     np.fill_diagonal(m_b, -np.inf)
     np.fill_diagonal(m_o, -np.inf)
 

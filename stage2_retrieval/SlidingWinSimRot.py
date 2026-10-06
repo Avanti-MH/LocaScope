@@ -111,6 +111,18 @@ def _sim_tensors(q_grid: torch.Tensor, wsi_grid: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _grid_sims(q_grid: torch.Tensor, wsi_main: torch.Tensor,
+               wsi_ov: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    '''(main_sim, overlap_sim) of one query kernel against one region's two
+    lattices, every grid already on the device the work runs on. What
+    `SlidingWindowSimilarity` computes once its grids are built, and what the
+    retriever computes from the grids it keeps per level.'''
+    main_sim = _sim_tensors(q_grid, wsi_main)
+    overlap_sim = (_sim_tensors(q_grid, wsi_ov) if wsi_ov.numel() > 0
+                   else torch.empty(0))
+    return main_sim, overlap_sim
+
+
 def SlidingWindowSimilarity(
     qFeatureMap: FeaturesMap,
     WsiFeatureMap: FeaturesMap,
@@ -130,14 +142,11 @@ def SlidingWindowSimilarity(
 
     `device` moves the three grids before the similarity runs, so the einsum and
     the window slicing happen there. None leaves them where the FeaturesMap put
-    them. The retrieval path (`SlidingWinSimRot.compute_sim_maps`)
-    passes one unconditionally.
-
-    ORDER MATTERS, and not for style. The grid builders are Python double
-    loops -- one `out[r, c] = self[idx]` per cell in PatchingLib -- so they are
-    built on whatever device the features already live on and moved
-    AFTERWARDS, in one transfer each. Building them on a GPU instead would turn
-    a few thousand memory copies into a few thousand kernel launches, per call.
+    them. Each grid is ONE gather on the features' own device
+    (`FeaturesMap.main_feature_grid`), so features already on the GPU are
+    arranged there and never cross to the host. The retriever does not come
+    through here: it keeps each level's two WSI grids, arranged once
+    (`SlidingWinSimRot.wsi_grids`), and calls `_grid_sims` per query.
     '''
     q_grid  = qFeatureMap.main_feature_grid()       # fixed: always main query kernel
     wsi_main = WsiFeatureMap.main_feature_grid()
@@ -147,12 +156,7 @@ def SlidingWindowSimilarity(
         q_grid   = q_grid.to(device)
         wsi_main = wsi_main.to(device)
         wsi_ov   = wsi_ov.to(device)
-
-    main_sim = _sim_tensors(q_grid, wsi_main)
-    overlap_sim = _sim_tensors(q_grid, wsi_ov) if wsi_ov.numel() > 0 \
-                  else torch.empty(0)
-
-    return main_sim, overlap_sim
+    return _grid_sims(q_grid, wsi_main, wsi_ov)
 
 
 # ── the retriever ─────────────────────────────────────────────────────────────
@@ -245,7 +249,11 @@ class SlidingWinSimRot(IdentifiedBuild):
         #: frame a CandidateSet is expressed in.
         self.grids:   Optional[list[PatchGrid]]    = None
         self.wsi_features: Optional[WsiFeaturesMap] = None
-        #: {ds: (regions, grids, features)} for every scale built so far.
+        #: Per region of `regions`, its (main, offset) feature grids
+        #: [rows, cols, D] on the device, arranged ONCE per level -- every
+        #: query and every rotation slides over these.
+        self.wsi_grids: Optional[list] = None
+        #: {ds: (regions, grids, features, wsi_grids)} for every scale built so far.
         self._by_ds: Dict[float, tuple] = {}
 
         # Per-rotation state (dict keyed by rotation degree)
@@ -266,7 +274,7 @@ class SlidingWinSimRot(IdentifiedBuild):
         self.wsi, self.mask, self.feature_store = wsi, mask, feature_store
         self.reader = SlideReader(wsi, workers=self.read_workers)
         self.level = self.ds = None
-        self.regions = self.grids = self.wsi_features = None
+        self.regions = self.grids = self.wsi_features = self.wsi_grids = None
         self._by_ds = {}
         self.qc_by_rot, self.query_features_by_rot, self.sim_maps_by_rot = {}, {}, {}
         return self
@@ -304,7 +312,8 @@ class SlidingWinSimRot(IdentifiedBuild):
             self.level, self.ds = self.reader.native_scale(mpp=mpp, ds=ds)
 
         if self.ds in self._by_ds:
-            self.regions, self.grids, self.wsi_features = self._by_ds[self.ds]
+            (self.regions, self.grids, self.wsi_features,
+             self.wsi_grids) = self._by_ds[self.ds]
         else:
             if self.mask is not None:
                 self.regions = self.mask.patchable(self.tile_size * self.ds).tissue_regions
@@ -320,6 +329,9 @@ class SlidingWinSimRot(IdentifiedBuild):
             self.wsi_features = None
             if self.feature_store is not None:
                 self.wsi_features = self.feature_store.load(self.regions, **geo)
+                if self.wsi_features is not None:
+                    # read onto the host; moved to the device once, here
+                    self.wsi_features = self.wsi_features.to(self.device)
             if self.wsi_features is None:
                 blocks = self.reader.read_grid(
                     self.regions, self.grids, self.ds, tile=self.tile_size,
@@ -328,7 +340,10 @@ class SlidingWinSimRot(IdentifiedBuild):
                     blocks, self.regions, self.grids, self.encoder, **geo)
                 if self.feature_store is not None:
                     self.feature_store.save(self.wsi_features)
-            self._by_ds[self.ds] = (self.regions, self.grids, self.wsi_features)
+            self.wsi_grids = [(fm.main_feature_grid(), fm.overlap_feature_grid())
+                              for fm in self.wsi_features]
+            self._by_ds[self.ds] = (self.regions, self.grids, self.wsi_features,
+                                    self.wsi_grids)
 
         # Similarity maps belong to the scale that produced them.
         self.sim_maps_by_rot = {}
@@ -369,15 +384,13 @@ class SlidingWinSimRot(IdentifiedBuild):
             raise RuntimeError('call build_wsi_features() first')
         if not self.query_features_by_rot:
             raise RuntimeError('call build_query_features() first')
-        # The similarity runs on the encoder's device; the grids are built on
-        # the host and moved once each (SlidingWindowSimilarity says why).
-        device = getattr(self.encoder, 'device', None)
+        # Everything is on the encoder's device already: the WSI grids were
+        # arranged there once per level, the query's features came back there.
         self.sim_maps_by_rot = {}
         for rot, qfm in self.query_features_by_rot.items():
-            self.sim_maps_by_rot[rot] = [
-                SlidingWindowSimilarity(qfm, wf, device=device)
-                for wf in self.wsi_features
-            ]
+            q_grid = qfm.main_feature_grid()
+            self.sim_maps_by_rot[rot] = [_grid_sims(q_grid, main, offset)
+                                         for main, offset in self.wsi_grids]
         return self.sim_maps_by_rot
 
     def _window_scores(self, sim_maps):
@@ -414,9 +427,8 @@ class SlidingWinSimRot(IdentifiedBuild):
         if not raw:
             # No region holds a single window: the sliding kernel needs a
             # region grid at least as large as the query's.
-            biggest = max(((fm.main_feature_grid().shape[0],
-                            fm.main_feature_grid().shape[1])
-                           for fm in self.wsi_features), default=(0, 0))
+            biggest = max(((main.shape[0], main.shape[1])
+                           for main, _ in self.wsi_grids), default=(0, 0))
             raise ValueError(
                 f'query does not fit any tissue region at this level: query grid '
                 f'is {q_grid.grid_rows}x{q_grid.grid_cols} tiles '

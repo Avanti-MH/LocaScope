@@ -47,7 +47,7 @@ from _paths import job_result_dir, setup_import_paths
 
 setup_import_paths()
 
-from PatchingLib import PatchGrid, PatchInfo, QueryPatchContainer
+from PatchingLib import FeaturesMap, PatchGrid, PatchInfo, QueryPatchContainer
 from TissueMask import TissueRegion
 
 
@@ -766,9 +766,66 @@ def show_patch_grid(ax, patches, n_cols: int = 4, title: str = ''):
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Closed-form index sums and one-gather grids, against the old loops ──────
+
+def _old_prefix(grid: PatchGrid, r: int) -> int:
+    '''FROZEN: PatchGrid._flat_prefix before 2026-10-06 -- a sum over rows.'''
+    return sum(grid._row_scan_width(i) for i in range(r))
+
+
+def _old_len(grid: PatchGrid) -> int:
+    '''FROZEN: PatchGrid.__len__ before 2026-10-06.'''
+    if not grid.has_overlap:
+        return len(grid.main_patch_infos)
+    return sum(grid._row_scan_width(r) for r in range(grid.grid_rows))
+
+
+def _old_lattice_grid(fm: FeaturesMap, lattice: str):
+    '''FROZEN: FeaturesMap.main/overlap_feature_grid before 2026-10-06 -- one
+    copy per cell, each through __getitem__.'''
+    g = fm.grid
+    if lattice == 'main':
+        rows, cols, flat = g.grid_rows, g.grid_cols, g.flat_index_for_main
+    else:
+        rows, cols, flat = g.overlap_rows, g.overlap_cols, g.flat_index_for_overlap
+    out = fm.features.new_empty(rows, cols, fm.feat_dim)
+    for r in range(rows):
+        for c in range(cols):
+            out[r, c] = fm[flat(r, c)]
+    return out
+
+
+def validate_closed_form_index(tile: int):
+    '''`__len__` and `_flat_prefix` in closed form, and the feature grids as
+    one gather, must give exactly what the loops gave: the same counts, and
+    bit-identical grids. Shapes cover overlap on and off, one row, one column,
+    a non-divisible edge, and no tile at all.'''
+    import torch
+    shapes = [(4 * tile, 3 * tile), (5 * tile + 7, 2 * tile + 3), (tile, 4 * tile),
+              (4 * tile, tile), (tile, tile), (tile - 1, tile), (0, 0),
+              (13 * tile, 9 * tile)]
+    n = 0
+    for W, H in shapes:
+        for overlap in (True, False):
+            g = PatchGrid.from_size(W, H, tile, overlap=overlap)
+            assert len(g) == _old_len(g), (W, H, overlap, len(g), _old_len(g))
+            for r in range(g.grid_rows + 1):
+                assert g._flat_prefix(r) == _old_prefix(g, r), (W, H, overlap, r)
+            fm = FeaturesMap(g, torch.randn(len(g), 5))
+            for lattice, new in (('main', fm.main_feature_grid()),
+                                 ('offset', fm.overlap_feature_grid())):
+                old = _old_lattice_grid(fm, lattice)
+                assert new.shape == old.shape and torch.equal(new, old), \
+                    (W, H, overlap, lattice, tuple(new.shape), tuple(old.shape))
+            n += 1
+    print(f'[PASS] closed-form len/prefix and one-gather grids == the old loops '
+          f'({n} grids)')
+
+
 def run_patchgrid_section(tile: int, out_dir: str) -> None:
     print('\n=== PatchGrid ===')
     results = run_all_patchgrid(tile)
+    validate_closed_form_index(tile)
     diagram_grid = PatchGrid.from_size(3 * tile, 3 * tile, tile, overlap=True)
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
     fig.patch.set_facecolor('#1a1a2e')

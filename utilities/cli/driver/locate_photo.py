@@ -80,6 +80,7 @@ from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
                                       blend_in_footprint,
                                       checker_in_footprint)
 from LocaScopePipeline import LocaScopePipeline                      # noqa: E402
+from CpuBudget import CpuBudget                                       # noqa: E402
 from stage1_estimation.KnnEstMpp import knn_estimator                 # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import (               # noqa: E402
     SlidingWinSimRot, SlidingWinSimRotConfig)
@@ -500,8 +501,11 @@ def main():
     # encoders (stage 1 from the registry name, stage 2 from `cfg` above).
     estimator = knn_estimator(args.encoder, mask_cfg, tile_size=256,
                               samples=100, k=5, device=device)
+    budget = CpuBudget.for_job(processes=1).apply()
+    print(f'  {budget.line()}', flush=True)
     retriever = SlidingWinSimRot(
-        SlidingWinSimRotConfig(cfg, tile_size=256, overlap=True), device)
+        SlidingWinSimRotConfig(cfg, tile_size=256, overlap=True), device,
+        read_workers=budget.workers)
     localizer = SiftRansacLocalizer(min_inliers=10, padding=2)
     pl = LocaScopePipeline(args.wsi, estimator, retriever, localizer,
                            mask_cfg=mask_cfg).build()

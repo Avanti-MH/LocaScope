@@ -187,7 +187,7 @@ class KnnClassifier:
         topk = sims.topk(k, dim=1)
         self.last_indices = topk.indices               # [M, k]
         self.last_patch_labels = np.median(
-            self.ref_labels[self.last_indices.numpy()], axis=1
+            self.ref_labels[self.last_indices.cpu().numpy()], axis=1
         )                                              # [M]
         return float(np.median(self.last_patch_labels))
 
