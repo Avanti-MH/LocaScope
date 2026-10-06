@@ -17,7 +17,7 @@ of them can be measured before and after against the same numbers:
     fov       FovSupply.bank() of the window bench's still FoV: shots/s
 
 Each is run --repeats times and the best kept. Nothing is compared with
-anything: the correctness of each path is its tests' (ReadPathTest.sh).
+anything: the correctness of each path is its tests' (TestReadPath.sh).
 
 HISTORY. Until 2026-10-03 this file held the planned refactor written out
 whole beside the production code, and ran every flow through both: 566/566

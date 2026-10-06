@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ReadPathTest            # -> log/%x
+#SBATCH --job-name=TestReadPath            # -> log/%x
 #SBATCH --partition=dev                    # tests go to dev
 #SBATCH --time=01:30:00                    # the slide reads and the renders dominate
 #SBATCH --account=MST114560                # Account
@@ -45,10 +45,10 @@ source jobscripts/_env.sh
 #  is MIRAX and steps 2x. A test on one format leaves the other's level
 #  arithmetic unexercised.
 #
-#    sbatch jobscripts/ReadPathTest.sh
-#    SLIDES="BRACS_1228" LEVELS=0 sbatch jobscripts/ReadPathTest.sh
-#    ONLY="map seed" sbatch jobscripts/ReadPathTest.sh      # test_camera sections
-#    NO_SLIDES=1 sbatch jobscripts/ReadPathTest.sh          # the slide-free tests only
+#    sbatch jobscripts/TestReadPath.sh
+#    SLIDES="BRACS_1228" LEVELS=0 sbatch jobscripts/TestReadPath.sh
+#    ONLY="map seed" sbatch jobscripts/TestReadPath.sh      # test_camera sections
+#    NO_SLIDES=1 sbatch jobscripts/TestReadPath.sh          # the slide-free tests only
 #
 #  Output: the log; test_camera's augment section writes
 #  result/<job>/augment_equivalence_<slide>.csv. Nothing goes to any cache.
@@ -63,7 +63,7 @@ ONLY="${ONLY:-}"             # test_camera sections: "map seed augment"; empty =
 CAMERA_ARGS=()
 [ -n "$ONLY" ] && CAMERA_ARGS+=(--only $ONLY)
 
-echo "======== ReadPathTest ========"
+echo "======== TestReadPath ========"
 echo "  slides  $SLIDES"
 echo "  levels  $LEVELS (slide reader)   $CAMERA_LEVEL (camera, generator)"
 echo "  seed $SEED   shots $SHOTS   camera sections ${ONLY:-all}"

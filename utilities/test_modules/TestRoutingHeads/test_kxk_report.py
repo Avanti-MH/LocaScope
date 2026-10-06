@@ -2,7 +2,7 @@
 """Tests for `kxk_report` and `improves_everywhere` in training/PrototypicalRoutingHead/cli/train.py --
 the validation accuracy the checkpoints are chosen on.
 
-    python utilities/test_modules/RoutingHeadsTest/test_kxk_report.py
+    python utilities/test_modules/TestRoutingHeads/test_kxk_report.py
 
 No model: hand-written per-pair, per-rung accuracies whose answer is worked
 out below.

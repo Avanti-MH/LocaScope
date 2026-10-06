@@ -7,12 +7,12 @@
 One row per stored mask: the mask itself, the tissue regions drawn on it, and
 optionally the slide thumbnail beside it at the same extent.
 
-WHY THIS IS NOT `TissueMaskTest.sh` AND NOT `InspectPcaSeg.sh`
+WHY THIS IS NOT `TestTissueMask.sh` AND NOT `InspectPcaSeg.sh`
 ---------------------------------------------------------------
 Three tools, three different questions, and the difference is which mask each
 of them is looking at:
 
-    TissueMaskTest.sh    runs test_tissue_mask.py, which SEGMENTS the
+    TestTissueMask.sh    runs test_tissue_mask.py, which SEGMENTS the
                          slide itself with Otsu, HSV or HEST. It never touches
                          Uni2PcaSegFunc and it never touches the store, so its
                          pictures are of a mask nothing downstream ever used

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=TissueMaskTest         # Job name
+#SBATCH --job-name=TestTissueMask         # Job name
 #SBATCH --partition=dev               # Partition
 #SBATCH --time=02:00:00                   # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560               # Account
@@ -40,7 +40,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # Ki67 paths contain commas, so do NOT put WSI=... inside --export=... (comma
 # splits). Export in the shell instead:
 #   WSI='.../S1104043,G7E,110207.mrxs' SEG='hsv hest' \
-#     sbatch --export=ALL,WSI,SEG jobscripts/TissueMaskTest.sh
+#     sbatch --export=ALL,WSI,SEG jobscripts/TestTissueMask.sh
 WSI="${WSI:-/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs}"
 SEG="${SEG:-hsv hest uni2_pca}"
 # 1000 = Uni2PcaSegConfig's own fit_tiles, i.e. the production mask. This used

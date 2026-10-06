@@ -31,8 +31,8 @@ clean: clean-results clean-logs clean-cache
 # pair so a rerun starts clean.
 #
 #   make list-jobs
-#   make clean-job JOB=TissueMaskTest
-#   make clean-job JOB="TissueMaskTest RealTest"
+#   make clean-job JOB=TestTissueMask
+#   make clean-job JOB="TestTissueMask RealTest"
 #
 # An empty JOB aborts rather than expanding to rm -rf $(RESULT_DIR)/.
 clean-job:

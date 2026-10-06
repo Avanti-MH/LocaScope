@@ -246,7 +246,7 @@ stage 3           候選    → reader.read（臨時 ReadSpec） → 無      �
 | 新增 | `utilities/SlideReader.py`、`test_slide_reader.py`（read + grid） |
 | 大改 | `Camera` → `Render`：不自己讀圖，向 SlideReader 拿原始像素，只負責效果、可重現性和 GT |
 | 改名 | `CameraSpec` → `ReadSpec`；`camera_spec` → `render_spec`；`Corpora.pretile_camera` → `pretile_spec` |
-| 合併 | `CameraTest.sh` 併入 `ReadPathTest.sh`；`diag_read_exp.py` 改成讀取路徑的速度量測 |
+| 合併 | `CameraTest.sh` 併入 `TestReadPath.sh`；`diag_read_exp.py` 改成讀取路徑的速度量測 |
 | 小改（呼叫端） | 訓練 CameraBank、KnnEstMpp、PrototypeEstMpp、extract_pretiles、ChainStack、FewShotEoMT、generator、multi_batch、demo、各 bench、diag、相關測試 |
 | 不動 | TileSampler（只拿掉 degrade 的再匯出）、DsLadder、PatchGrid、TissueMask、ReadGeometry 的規則、augment、TileEncoder、CpuBudget、Store |
 | 之後才改 | WsiTileLoader、SlideWinSift 改用 SlideReader（WsiTissuesContainer 已於 2026-10-06 淘汰）；A 的命名（TileSampler、SampleMeta、FovSupply） |

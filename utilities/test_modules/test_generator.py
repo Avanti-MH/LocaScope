@@ -3,7 +3,7 @@
 
     python utilities/test_modules/test_generator.py --wsi <slide> [--level 1]
 
-Run through `jobscripts/ReadPathTest.sh`, which resolves slide names and loops.
+Run through `jobscripts/TestReadPath.sh`, which resolves slide names and loops.
 
 FoVs placed by richness bucket, reproducible whatever the camera's own seed;
 iterating draws new batches (next seed) and only repeats once the slide is

@@ -693,7 +693,7 @@ def run_precision(args) -> int:
     # The mask is read from a cache when there is one: a hit builds no
     # segmenter and reads no pixels. `--mask-cache-job` names whose cache.
     masks_root = Cache.cache_root(
-        args.mask_cache_job or Cache.job_name('StoreTest'), 'mask')
+        args.mask_cache_job or Cache.job_name('TestStore'), 'mask')
     print(f'masks: --seg {args.seg}, cache {masks_root}')
     with MaskMaker(MASK_RECIPES[args.seg], masks_root, device) as masks:
         for name in args.slides:
@@ -776,7 +776,7 @@ def run_precision(args) -> int:
     for kind, w in worst.items():
         print(f'  {kind:<10}max {w["max_abs"]:>10.1f}   values above 60000: {w["over"]}')
 
-    out = job_result_dir('StoreTest')
+    out = job_result_dir('TestStore')
     path = os.path.join(out, f'precision_{args.encoder}.csv')
     with open(path, 'w', newline='') as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]) if rows else ['group'])
@@ -809,7 +809,7 @@ def main() -> int:
     ap.add_argument('--seg', default='hest', help='mask recipe (MASK_RECIPES)')
     ap.add_argument('--mask-cache-job', default=None,
                     help='whose mask cache to read and fill: result/cache/<this>_'
-                         'mask/. Default: this job (StoreTest)')
+                         'mask/. Default: this job (TestStore)')
     ap.add_argument('--encoder', default='uni2')
     ap.add_argument('--levels', type=int, nargs='+', default=[0, 1, 2])
     ap.add_argument('--tiles', type=int, default=200, help='tiles per (slide, level)')

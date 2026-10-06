@@ -5,7 +5,7 @@ cli/train._compute_loss` -- named after the formula rather than a module
 because what it checks is that the two agree and that both weight the
 regression term (user, 2026-09-24).
 
-    python utilities/test_modules/RoutingHeadsTest/test_ordinal_loss.py
+    python utilities/test_modules/TestRoutingHeads/test_ordinal_loss.py
 
 No data, no model: hand-built logits whose answer is known.
 

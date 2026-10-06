@@ -810,7 +810,7 @@ def real_slide(args):
         for c, (kind, payload, title) in enumerate(row):
             _draw(axes[r, c], kind, payload, title, bounds, args)
     fig.tight_layout()
-    out = args.out or os.path.join(job_result_dir('TissueMaskTest'),
+    out = args.out or os.path.join(job_result_dir('TestTissueMask'),
                                    'tissue_mask.png')
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     fig.savefig(out, dpi=args.dpi, bbox_inches='tight')

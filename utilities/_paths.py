@@ -166,7 +166,7 @@ def job_result_dir(default_name: str, *, encoder: str = '') -> str:
     Creates the directory if it doesn't exist.
 
     Usage:
-        JOB_DIR = job_result_dir('TissueMaskTest')  # default when run locally
+        JOB_DIR = job_result_dir('TestTissueMask')  # default when run locally
         out = args.out or os.path.join(JOB_DIR, 'tissue_mask__regions.png')
 
     Write it as `args.out or job_result_dir(...)` and then makedirs the result

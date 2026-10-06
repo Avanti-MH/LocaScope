@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit test for the TileEncoderFunc template.
 
-    python utilities/test_modules/AiNNModelTest/test_tile_encoder.py
+    python utilities/test_modules/TestAiNNModel/test_tile_encoder.py
 
 No GPU. About a second, and one 5 MB download the first time -- vit_tiny, for
 the last section only; everything else runs on fakes. Three fake models stand

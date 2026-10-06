@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=StoreTest              # -> log/%x, result/%x/
+#SBATCH --job-name=TestStore              # -> log/%x, result/%x/
 #SBATCH --partition=dev               # Partition
 #SBATCH --time=01:00:00                   # unit tests are seconds; WITH_MODEL reads real tiles
 #SBATCH --account=MST114560               # Account
@@ -23,12 +23,12 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  utilities/test_modules/test_store.py -- utilities/Store.py: addresses,
 #  validation, the feature-map cache, pre-tile rungs. No slide, no model.
 #
-#    sbatch jobscripts/StoreTest.sh                    the unit tests
-#    WITH_MODEL=1 sbatch jobscripts/StoreTest.sh       + how far a pooling computed
+#    sbatch jobscripts/TestStore.sh                    the unit tests
+#    WITH_MODEL=1 sbatch jobscripts/TestStore.sh       + how far a pooling computed
 #                                                      live is from the same one
 #                                                      taken from a stored raw
 #                                                      output, on real tiles
-#    ONLY_MODEL=1 sbatch jobscripts/StoreTest.sh       just that measurement
+#    ONLY_MODEL=1 sbatch jobscripts/TestStore.sh       just that measurement
 #  ENCODER (default uni2), TILES (per slide and level, default 200), LEVELS, SLIDES,
 #  SEG (default hest), MASK_CACHE_JOB (default MppRoutingHead: its hest masks are
 #  reused; empty = this job's own cache).

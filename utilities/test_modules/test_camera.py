@@ -4,7 +4,7 @@
     python utilities/test_modules/test_camera.py --wsi <slide> [--level 1]
     python utilities/test_modules/test_camera.py --wsi <slide> --only map seed
 
-Run through `jobscripts/ReadPathTest.sh`, which resolves slide names and loops.
+Run through `jobscripts/TestReadPath.sh`, which resolves slide names and loops.
 
 This is `test_camera_output_to_level0.py` and `test_augment_equivalence.py`
 in one place, named after the module they test. Placing FoVs left Camera for
@@ -26,7 +26,7 @@ level; Ki67 is MIRAX and steps 2x (CLAUDE.md, "Pyramid spacing decides how hard
 stage 1 is"). `SlideReader.level_of` picks the level by searching for the coarsest
 level not coarser than the requested ds, so the two pyramids send it down different
 branches -- a test on one format alone leaves the other's arithmetic
-unexercised. `ReadPathTest.sh` runs both.
+unexercised. `TestReadPath.sh` runs both.
 """
 
 from __future__ import annotations
@@ -640,7 +640,7 @@ def run_augment(args, wsi, level_mpp) -> int:
           f'rotation {geometry._apply_rotation_fast(probe, 0.0) is probe}   '
           f'scale {geometry._apply_scale_fast(probe, 1.0) is probe}')
 
-    out_dir = Path(args.out or job_result_dir('ReadPathTest'))
+    out_dir = Path(args.out or job_result_dir('TestReadPath'))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f'augment_equivalence_{Path(args.wsi).stem}.csv'
     with open(path, 'w', newline='') as handle:
@@ -678,7 +678,7 @@ def main() -> int:
     ap.add_argument('--shots', type=int, default=5, help='augment: shots')
     ap.add_argument('--out', default=None,
                     help='augment: where the csv goes. Default: '
-                         'result/<SLURM_JOB_NAME or ReadPathTest>/')
+                         'result/<SLURM_JOB_NAME or TestReadPath>/')
     args = ap.parse_args()
     only = args.only or list(SECTIONS)
 

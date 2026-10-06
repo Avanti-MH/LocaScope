@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=AiNNModelTest                  # Job name
+#SBATCH --job-name=TestAiNNModel                  # Job name
 #SBATCH --partition=dev                        # Partition
 #SBATCH --time=00:30:00                           # three real encoders, weights loaded once each
 #SBATCH --account=MST114560                       # Account
@@ -21,11 +21,11 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # =============================================================================
 #  aiNNModel/ -- the shared model code, in one job.
 #
-#    sbatch jobscripts/AiNNModelTest.sh
-#    ONLY="tile_encoder resume" sbatch jobscripts/AiNNModelTest.sh
-#    ENCODER=uni2 NO_DUAL_LOAD=1 ONLY=encoders sbatch jobscripts/AiNNModelTest.sh
+#    sbatch jobscripts/TestAiNNModel.sh
+#    ONLY="tile_encoder resume" sbatch jobscripts/TestAiNNModel.sh
+#    ENCODER=uni2 NO_DUAL_LOAD=1 ONLY=encoders sbatch jobscripts/TestAiNNModel.sh
 #
-#  The tests live in utilities/test_modules/AiNNModelTest/, named after this script.
+#  The tests live in utilities/test_modules/TestAiNNModel/, named after this script.
 #
 #    tile_encoder  TileEncoderFunc, the template, against fake models (a vector,
 #                  a token and a spatial one): no GPU, seconds. Its last section
@@ -43,7 +43,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #    DTYPE         fp16 or fp32 for the encoders check; default per encoder
 # =============================================================================
 
-TESTS=utilities/test_modules/AiNNModelTest
+TESTS=utilities/test_modules/TestAiNNModel
 ONLY="${ONLY:-tile_encoder resume encoders}"
 
 ENCODERS_ARGS=""
@@ -59,7 +59,7 @@ run () {   # run <label> <command...>
   "$@" || status=1
 }
 
-echo "======== AiNNModelTest  tests: $ONLY ========"
+echo "======== TestAiNNModel  tests: $ONLY ========"
 
 for t in $ONLY; do
   case "$t" in

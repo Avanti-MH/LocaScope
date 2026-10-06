@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=LocaScopeStagesTest    # Job name
+#SBATCH --job-name=TestLocaScopeStages    # Job name
 #SBATCH --partition=dev               # Partition
 #SBATCH --time=02:00:00                   # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560               # Account

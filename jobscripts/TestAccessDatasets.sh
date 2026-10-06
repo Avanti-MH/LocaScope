@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=AccessDatasetsTest              # Job name
+#SBATCH --job-name=TestAccessDatasets              # Job name
 #SBATCH --partition=dev                         # Partition
 #SBATCH --time=00:10:00                            # registry checks + a disk stat per file
 #SBATCH --account=MST114560                        # Account
@@ -35,7 +35,7 @@ source jobscripts/_env.sh
 # rename, then organize_mrxs.py --rename-existing's container-naming
 # migration).
 
-echo "======== AccessDatasetsTest ========"
+echo "======== TestAccessDatasets ========"
 python utilities/test_modules/test_access_datasets.py
 status=$?
 

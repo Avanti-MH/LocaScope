@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=RoutingHeadsTest               # Job name
+#SBATCH --job-name=TestRoutingHeads               # Job name
 #SBATCH --partition=dev                        # Partition
 #SBATCH --time=00:10:00                           # toy data, no slide, no model
 #SBATCH --account=MST114560                       # Account
@@ -20,10 +20,10 @@ source jobscripts/_env.sh
 # =============================================================================
 #  The tests of the two routing-head training packages, one job.
 #
-#    sbatch jobscripts/PrototypicalRoutingHead/RoutingHeadsTest.sh
-#    ONLY="ordinal" sbatch jobscripts/PrototypicalRoutingHead/RoutingHeadsTest.sh
+#    sbatch jobscripts/PrototypicalRoutingHead/TestRoutingHeads.sh
+#    ONLY="ordinal" sbatch jobscripts/PrototypicalRoutingHead/TestRoutingHeads.sh
 #
-#  They live in utilities/test_modules/RoutingHeadsTest/, named after this
+#  They live in utilities/test_modules/TestRoutingHeads/, named after this
 #  script: one job owns all three.
 #
 #    episodes   training/PrototypicalRoutingHead/Episodes.py -- the mixed-pool
@@ -39,12 +39,12 @@ source jobscripts/_env.sh
 #  is there because this cluster wants one, not because the assertions need it.
 #
 #  crash-resume state (Resume.py), which both packages use, is tested in
-#  jobscripts/AiNNModelTest.sh -- it belongs to the shared aiNNModel code.
+#  jobscripts/TestAiNNModel.sh -- it belongs to the shared aiNNModel code.
 #
 #  ONLY picks a subset, space separated; the default is all three.
 # =============================================================================
 
-TESTS=utilities/test_modules/RoutingHeadsTest
+TESTS=utilities/test_modules/TestRoutingHeads
 ONLY="${ONLY:-episodes kxk ordinal}"
 
 status=0
@@ -55,7 +55,7 @@ run () {   # run <label> <command...>
   "$@" || status=1
 }
 
-echo "======== RoutingHeadsTest  tests: $ONLY ========"
+echo "======== TestRoutingHeads  tests: $ONLY ========"
 
 for t in $ONLY; do
   case "$t" in

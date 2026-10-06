@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=PatchingLibTest        # -> log/%x, result/%x/
+#SBATCH --job-name=TestPatchingLib        # -> log/%x, result/%x/
 #SBATCH --partition=dev               # Partition
 #SBATCH --time=02:00:00                   # the containers section reads a WSI
 #SBATCH --account=MST114560               # Account
@@ -25,7 +25,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # One script for what used to be four. PatchGridIndexTest, PatchInfoCoordsTest
 # and TissuePatchContainerTest all invoked THIS SAME test_patching_lib.py with
 # a different `--only`, and had said so in their own job-name comments for a
-# while ("legacy alias -> PatchingLibTest grid"). Four files that differ by one
+# while ("legacy alias -> TestPatchingLib grid"). Four files that differ by one
 # flag are four places to update when an argument changes, and the arguments
 # had already drifted: two of them carried the real-data paths, two did not.
 #
@@ -38,18 +38,18 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # ONLY picks a subset; the default is all three. The names are checked by
 # argparse, so a typo fails at parse time rather than silently running nothing:
 #
-#   sbatch jobscripts/PatchingLibTest.sh                        # all three
-#   ONLY=grid sbatch jobscripts/PatchingLibTest.sh              # was PatchGridIndexTest
-#   ONLY=coords sbatch jobscripts/PatchingLibTest.sh            # was PatchInfoCoordsTest
-#   ONLY=containers sbatch jobscripts/PatchingLibTest.sh        # was TissuePatchContainerTest
-#   ONLY="grid coords" sbatch jobscripts/PatchingLibTest.sh     # the synthetic pair
+#   sbatch jobscripts/TestPatchingLib.sh                        # all three
+#   ONLY=grid sbatch jobscripts/TestPatchingLib.sh              # was PatchGridIndexTest
+#   ONLY=coords sbatch jobscripts/TestPatchingLib.sh            # was PatchInfoCoordsTest
+#   ONLY=containers sbatch jobscripts/TestPatchingLib.sh        # was TissuePatchContainerTest
+#   ONLY="grid coords" sbatch jobscripts/TestPatchingLib.sh     # the synthetic pair
 #
 # TWO SUBSETS WRITE TO ONE PLACE unless you say otherwise. The log is `%x` and
 # _paths.job_result_dir reads SLURM_JOB_NAME, so --job-name moves BOTH at once
 # -- one knob, no pair of names that has to be kept in agreement:
 #
-#   ONLY=grid sbatch --job-name=PatchingLibTest_grid --time=01:00:00 \
-#       jobscripts/PatchingLibTest.sh
+#   ONLY=grid sbatch --job-name=TestPatchingLib_grid --time=01:00:00 \
+#       jobscripts/TestPatchingLib.sh
 #
 # --time on the command line overrides the directive above, which is set for
 # the containers section. grid and coords are synthetic and finish in seconds;
@@ -62,7 +62,7 @@ RSIZE=256
 QUERY=/work/u26130998/datasets/Ki67_with_photo/S1103037_G7E_110122_mrxs/S1103037_ki67/2.bmp
 ROI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png
 
-echo "======== PatchingLibTest  sections: $ONLY ========"
+echo "======== TestPatchingLib  sections: $ONLY ========"
 echo ""
 
 # $ONLY unquoted on purpose: --only takes nargs='+', so ONLY="grid coords" has

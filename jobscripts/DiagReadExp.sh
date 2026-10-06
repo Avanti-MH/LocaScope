@@ -29,7 +29,7 @@ source jobscripts/_env.sh
 #    tiles     SlideReader.read_samples, native reference tiles (tiles/s)
 #    fov       FovSupply.bank, the window bench's still FoV (shots/s)
 #  Best of REPEATS. Run it before and after a change to the read path and
-#  compare the two speed.csv files. Correctness is ReadPathTest.sh's.
+#  compare the two speed.csv files. Correctness is TestReadPath.sh's.
 #
 #    sbatch jobscripts/DiagReadExp.sh
 #    FLOWS="grid" GRID_LEVELS="1" sbatch --job-name=DiagReadExpGridL1 jobscripts/DiagReadExp.sh

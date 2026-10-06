@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for aiNNModel/models/common/Resume.py -- crash-resume state.
 
-    python utilities/test_modules/AiNNModelTest/test_resume.py
+    python utilities/test_modules/TestAiNNModel/test_resume.py
 
 No slide, no encoder: a two-layer toy model trained on data drawn from every
 generator Resume.py saves (python's `random`, numpy, torch, and a named

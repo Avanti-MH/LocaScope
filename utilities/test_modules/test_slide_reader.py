@@ -2,7 +2,7 @@
 
     python utilities/test_modules/test_slide_reader.py --wsi <path> [--level 1]
 
-Run through `jobscripts/ReadPathTest.sh`. Needs a slide; no GPU, no model.
+Run through `jobscripts/TestReadPath.sh`. Needs a slide; no GPU, no model.
 
     read   one position. A native read is `read_region_rgb` of the same
            rectangle, untouched; a read off the slide is None; a forced level

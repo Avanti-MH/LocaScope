@@ -102,7 +102,7 @@ def pick_fov(args, masks) -> None:
     name = args.slide or random.Random(args.pick_seed).choice(names)
     entry = locate(name, dataset=args.dataset, split_job=args.split_cache_job)
     sampler_root = cache_root(
-        args.sampler_cache_job or job_name('LocaScopeStagesTest'), 'sampler')
+        args.sampler_cache_job or job_name('TestLocaScopeStages'), 'sampler')
     sampler = TileSampler.cached(
         entry.path,
         SamplerConfig(n_per_rung=1, seed=args.pick_seed,

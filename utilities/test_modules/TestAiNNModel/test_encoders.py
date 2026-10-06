@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The three real encoders, asked the same questions.
 
-    python utilities/test_modules/AiNNModelTest/test_encoders.py                  # all three
-    python utilities/test_modules/AiNNModelTest/test_encoders.py --encoder uni2
-    python utilities/test_modules/AiNNModelTest/test_encoders.py --no-dual-load    # skip the 4.5 GB
+    python utilities/test_modules/TestAiNNModel/test_encoders.py                  # all three
+    python utilities/test_modules/TestAiNNModel/test_encoders.py --encoder uni2
+    python utilities/test_modules/TestAiNNModel/test_encoders.py --no-dual-load    # skip the 4.5 GB
 
 test_tile_encoder checks the TEMPLATE against fake models, which is what makes
 it a second. This file checks the implementations against the weights they

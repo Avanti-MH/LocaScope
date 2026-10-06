@@ -18,7 +18,7 @@ Usage:
   python utilities/test_modules/test_patching_lib.py --only grid coords
   python utilities/test_modules/test_patching_lib.py --only containers --size 64
 
-Outputs (under result/PatchingLibTest/ by default):
+Outputs (under result/TestPatchingLib/ by default):
   patch_grid__index.png
   patch_info__coords.png
   patch_container__grid.png
@@ -953,7 +953,7 @@ def main() -> int:
     ap.add_argument('--out-dir', default=None, help='figure output directory')
     args = ap.parse_args()
     tile = args.tile if args.tile is not None else args.size
-    out_dir = args.out_dir or job_result_dir('PatchingLibTest')
+    out_dir = args.out_dir or job_result_dir('TestPatchingLib')
     sections = set(args.only)
     if 'grid' in sections:
         run_patchgrid_section(tile, out_dir)
