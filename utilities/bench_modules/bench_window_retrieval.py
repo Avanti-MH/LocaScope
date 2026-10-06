@@ -308,8 +308,7 @@ from ConfigArgs import add_config_args, config_from_args, describe  # noqa: E402
 from ConfigIdentity import ModelConfig, enc, short_id             # noqa: E402
 from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
-                         PlanSpec, RichnessConfig, SamplerConfig, add_sampler_args,
-                         sampler_from_args)
+                         PlanSpec, RichnessConfig, SamplerConfig)
 from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
                                            attach_baseline, frac_label, grid_table,
                                            group_by, group_levels, k_at, pct,
@@ -325,7 +324,7 @@ from _paths import encoder_tag, job_result_dir                   # noqa: E402
 #
 #  Each value below is the one the run uses, unless the command line says
 #  otherwise: every field of the sampler, camera and encoder configs is a flag
-#  (`--richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...; see
+#  (`--sampler-richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...; see
 #  ConfigArgs), and the shorthand flags (`--n-fov`, `--seed`, `--rotation`, `--scale-min`,
 #  `--scale-max`, `--richness`, `--batch-size`, `--fp16`) name one field each. What
 #  a run really used is printed at its start, and everything that changes a
@@ -1751,7 +1750,7 @@ def main() -> int:
                         help='= the high end of --camera-scale-range')
     parser.add_argument('--white-max', type=float, default=None,
                         help=argparse.SUPPRESS)      # refused: use --richness
-    add_sampler_args(parser, SAMPLER)
+    add_config_args(parser, SAMPLER, 'sampler')
     add_config_args(parser, CAMERA, 'camera')
     add_mask_args(parser, default=None)              # None: the CONFIG `MASK`
     parser.add_argument('--mask-cache-job', default=MASK_CACHE_JOB,
@@ -1894,7 +1893,7 @@ def main() -> int:
                                                n_per_rung=args.n_fov)
         if args.seed is not None:
             sampler_base = dataclasses.replace(sampler_base, seed=args.seed)
-        sampler_cfg = sampler_from_args(args, sampler_base)
+        sampler_cfg = config_from_args(args, sampler_base, 'sampler')
 
         camera_base = CAMERA
         if args.rotation is not None:

@@ -3366,3 +3366,12 @@ front of whoever flips it.
     - stage 1 bench 用 classifier/prototype checkpoint 估真實分布的照片（PHOTO_GAP），本來就和
       訓練資料不同，不做 data_record 比對；那邊靠 estimator_id。
     - window bench / stage 1 bench 的組合 id 已在 4a 改為元件 id 組成。
+
+[x] 2026-10-07 | TileSampler 的 CLI 包裝刪除（階段 5）
+    - add_/…_from_args 八個函式（richness、overlap、inherit 各兩個一行包裝，sampler 兩個組合）
+      刪除。ConfigArgs 本身就會走進巢狀 config，sampler 和 camera、encoder 一樣直接用
+      add_config_args(ap, SAMPLER, 'sampler') / config_from_args(args, SAMPLER, 'sampler')。
+    - flag 改名：--richness-* / --overlap-* / --inherit-* 變成 --sampler-richness-* /
+      --sampler-overlap-* / --sampler-inherit-*；--sampler-n-per-rung 等頂層不變。實際在跑的
+      jobscript 沒有用到改名的 flag；WindowRetrievalBench.sh 只有註解範例，已改。
+      extract_pretiles、build_reference_store 的 --inherit-share 是它們自己的 flag，不受影響。

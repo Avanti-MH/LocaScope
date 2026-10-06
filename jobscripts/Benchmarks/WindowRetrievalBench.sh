@@ -111,9 +111,9 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 #
 # and EXTRA_ARGS takes ANY flag of the bench, which is how a single field is
 # changed from sbatch -- every field of the sampler, camera and encoder configs
-# has one (`--richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...):
+# has one (`--sampler-richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...):
 #
-#   EXTRA_ARGS="--richness-caps 0.15 0.25 0.6 0 0 0 0 --camera-noise-sigma 0" \
+#   EXTRA_ARGS="--sampler-richness-caps 0.15 0.25 0.6 0 0 0 0 --camera-noise-sigma 0" \
 #       sbatch jobscripts/Benchmarks/WindowRetrievalBench.sh
 #
 # DATASETS names pools the way AccessDatasets does: a real dataset (the whole

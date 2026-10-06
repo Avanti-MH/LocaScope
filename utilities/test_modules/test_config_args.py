@@ -41,8 +41,7 @@ setup_import_paths()
 
 import ConfigArgs as C                                         # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,         # noqa: E402
-                         RichnessConfig, SamplerConfig, add_sampler_args,
-                         sampler_from_args)
+                         RichnessConfig, SamplerConfig)
 from config import DomainGapConfig                             # noqa: E402
 
 _RESULTS = []
@@ -212,14 +211,14 @@ def t_richness_with_the_wrong_number_of_caps_is_refused():
 def t_sampler_flags_reach_the_nested_configs():
     base = SamplerConfig()
     ap = _ap()
-    add_sampler_args(ap, base)
+    C.add_config_args(ap, base, 'sampler')
     args = ap.parse_args(
-        ['--sampler-n-per-rung', '50', '--richness-caps', '0.15', '0.25', '0.6',
-         '0', '0', '0', '0', '--overlap-step', '0.5',
-         '--overlap-jitter-offsets', '0.5,1.0', '1.0,0.5',
-         '--inherit-source-rung', 'none'])
+        ['--sampler-n-per-rung', '50', '--sampler-richness-caps', '0.15', '0.25',
+         '0.6', '0', '0', '0', '0', '--sampler-overlap-step', '0.5',
+         '--sampler-overlap-jitter-offsets', '0.5,1.0', '1.0,0.5',
+         '--sampler-inherit-source-rung', 'none'])
     try:
-        got = sampler_from_args(args, base)
+        got = C.config_from_args(args, base, 'sampler')
     except ValueError as exc:
         # step 0.5 with a disjoint bound is a contradiction the config
         # refuses (OverlapConfig.check); that IS the point of going through it
@@ -231,16 +230,17 @@ def t_sampler_flags_reach_the_nested_configs():
 def t_sampler_without_overlap_change_is_the_base():
     base = SamplerConfig()
     ap = _ap()
-    add_sampler_args(ap, base)
-    got = sampler_from_args(ap.parse_args(['--sampler-n-per-rung', '50']), base)
+    C.add_config_args(ap, base, 'sampler')
+    got = C.config_from_args(ap.parse_args(['--sampler-n-per-rung', '50']),
+                             base, 'sampler')
     assert got.n_per_rung == 50
     assert got.richness is base.richness and got.overlap is base.overlap
-    assert sampler_from_args(ap.parse_args([]), base) is base
+    assert C.config_from_args(ap.parse_args([]), base, 'sampler') is base
 
 
 def t_the_sampler_has_no_tile_flag():
     ap = _ap()
-    add_sampler_args(ap, SamplerConfig())
+    C.add_config_args(ap, SamplerConfig(), 'sampler')
     assert _refused(ap, ['--sampler-tile', '512']), \
         "--sampler-tile exists, but the tile is the camera's, not the sampler's"
 

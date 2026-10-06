@@ -73,8 +73,7 @@ from TissueMaskConfig import add_mask_args, mask_cfg_from_args           # noqa:
 from stage3_localization.SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names             # noqa: E402
 from CpuBudget         import CpuBudget                                 # noqa: E402
-from TileSampler       import (PlanSpec, SamplerConfig,             # noqa: E402
-                               add_sampler_args, sampler_from_args)
+from TileSampler       import PlanSpec, SamplerConfig              # noqa: E402
 from ReadGeometry      import REAL_PHOTO_SENSOR, levels_up_to          # noqa: E402
 from TissueMaskConfig  import MASK_RECIPES, MaskMaker                   # noqa: E402
 from config            import DomainGapConfig                           # noqa: E402
@@ -693,7 +692,7 @@ def main():
     # One --sampler-* flag per SAMPLER field (--sampler-n-per-rung,
     # --sampler-seed, ...) and one --camera-* flag per CAMERA field, as the
     # window bench has them.
-    add_sampler_args(ap, SAMPLER)
+    add_config_args(ap, SAMPLER, 'sampler')
     add_config_args(ap, CAMERA, 'camera')
     ap.add_argument('--out',        default=None,
                     help='Output dir, used verbatim. Default: '
@@ -815,7 +814,7 @@ def main():
     enc_tag = encoder_tag(args.encoder, args.head)
     out_dir = args.out or job_result_dir('BenchLocaScope', encoder=enc_tag)
     os.makedirs(out_dir, exist_ok=True)
-    sampler_cfg = sampler_from_args(args, SAMPLER)
+    sampler_cfg = config_from_args(args, SAMPLER, 'sampler')
     camera_cfg = config_from_args(args, CAMERA, 'camera')
     print(f'shots      : {" ".join(args.datasets)}  #{args.split}  n_wsi={args.n_wsi}  '
           f'per level {sampler_cfg.n_per_rung}  seed {sampler_cfg.seed}  '
