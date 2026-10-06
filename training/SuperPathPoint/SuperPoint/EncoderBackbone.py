@@ -313,7 +313,7 @@ class TileEncoderBackbone(nn.Module):
                 f'{trunk.cfg.transform.preprocess!r}. The identity would record '
                 f'one and the forward would do the other')
 
-        model = getattr(trunk.model, 'module', trunk.model)
+        model = trunk.model                 # never a wrapper (TileEncoder._set_model)
         self.stride = _patch_stride(model, cfg.encoder)
         self.out_channels = int(trunk.model_spec.dim)
         self.device = trunk.device

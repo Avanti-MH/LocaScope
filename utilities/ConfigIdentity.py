@@ -152,6 +152,27 @@ def short_id(parts: List[str]) -> str:
     return hashlib.sha256('|'.join(parts).encode()).hexdigest()[:8]
 
 
+def unwrapped(module: torch.nn.Module) -> torch.nn.Module:
+    """The network inside whatever runs it: DataParallel and
+    DistributedDataParallel hold it as `.module`, torch.compile as `._orig_mod`,
+    and they nest (compiled, then split across cards). How many cards run a
+    model, or whether it is compiled, does not change one of its weights, so
+    nothing that names the weights may see the wrapper -- its `module.` and
+    `_orig_mod.` key prefixes are what made one encoder two ids until
+    2026-10-06. `TileEncoder._set_model` keeps `self.model` bare; this is the
+    same rule for any module handed in from outside (a trainer's DDP copy)."""
+    import torch                                                  # noqa: PLC0415
+    wrappers = (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)
+    while True:
+        if isinstance(module, wrappers):
+            module = module.module
+        elif hasattr(module, '_orig_mod') and isinstance(module._orig_mod,
+                                                           torch.nn.Module):
+            module = module._orig_mod
+        else:
+            return module
+
+
 def weights_id(module: Optional[torch.nn.Module]) -> str:
     """sha256 of the parameters a module actually holds. '' for no module.
 
@@ -169,7 +190,8 @@ def weights_id(module: Optional[torch.nn.Module]) -> str:
     the digest with the bytes: two tensors can hold identical bytes under
     different shapes, and a .half() model is genuinely different numbers, so
     both have to move it. Device and stride are normalised away -- the same
-    parameters on the GPU are the same parameters.
+    parameters on the GPU are the same parameters. So is the wrapper
+    (`unwrapped`): the same parameters on four cards are the same parameters.
 
     memoryview and not .tobytes(): the latter copies every tensor a second time,
     and the largest in a foundation model is hundreds of MB.
@@ -177,7 +199,7 @@ def weights_id(module: Optional[torch.nn.Module]) -> str:
     if module is None:
         return ''
     h = hashlib.sha256()
-    state = module.state_dict()
+    state = unwrapped(module).state_dict()
     for name in sorted(state):
         t = state[name].detach().cpu().contiguous()
         h.update(name.encode())

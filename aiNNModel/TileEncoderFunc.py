@@ -665,6 +665,41 @@ class TileEncoder(IdentifiedBuild):
 
     cfg: TileEncoderConfig
 
+    # ── the network, and how a batch runs through it ─────────────────────────
+
+    def _set_model(self, model: torch.nn.Module, *, multi_gpu: bool = False,
+                   compile: bool = False) -> None:
+        """THE place a built network becomes this encoder's. Every subclass
+        builds its trunk and hands it here; none wraps it itself.
+
+        Two attributes, because they are two things:
+
+            self.model    the network itself, always: what identity hashes
+                          (`weights_id`), what the spec is read off, what
+                          forward_intermediates and the depth are asked of,
+                          what train()/eval() switch. Never a wrapper.
+            self.runner   how a batch is pushed through it: compiled
+                          (`compile`, a config field) and/or split across the
+                          visible cards (`multi_gpu`, which is not -- how many
+                          cards ran it does not change a single weight). Only
+                          the forwards that call the model itself use it.
+
+        Until 2026-10-06 each subclass put DataParallel (and torch.compile) on
+        `self.model`. That made the wrapper what everything else saw: seven
+        places unwrapped it by hand (`getattr(self.model, 'module', ...)`), and
+        the one that did not -- `weights_id` -- hashed `module.`-prefixed keys,
+        so the same weights were 5c4b8ed2 on one card and 881dc782 on four, and
+        the feature cache missed every time the card count changed.
+        forward_intermediates is not forward, and DataParallel replicates only
+        forward, so a ViT's spatial and layer exits run on self.model -- one
+        card -- whatever `runner` is."""
+        model = model.to(self.device).eval()
+        self.model = model
+        runner = torch.compile(model, mode='reduce-overhead') if compile else model
+        if multi_gpu and torch.cuda.device_count() > 1:
+            runner = torch.nn.DataParallel(runner)
+        self.runner = runner
+
     # ── what this model's output looks like ──────────────────────────────────
 
     @property
@@ -705,12 +740,9 @@ class TileEncoder(IdentifiedBuild):
     def _vit_model_spec(self) -> ModelOutputSpec:
         '''The four numbers for a timm VisionTransformer, none of them assumed.
 
-        Unwraps DataParallel first. nn.DataParallel defines no __getattr__ of
-        its own, so nn.Module's is used, and that searches only _parameters /
-        _buffers / _modules. `embed_dim` and `num_prefix_tokens` are plain ints
-        on the wrapped module and `patch_embed` is one of ITS submodules, so all
-        three raise AttributeError through the wrapper -- and build(multi_gpu=
-        True) is the default in the benches.
+        Read off `self.model`, which is never a wrapper (`_set_model`):
+        nn.DataParallel defines no __getattr__ of its own, so `embed_dim`,
+        `num_prefix_tokens` and `patch_embed` would all raise through one.
 
         num_prefix has no default, deliberately. `getattr(m, 'num_prefix_tokens',
         1)` is right for GigaPath and wrong for every model carrying registers --
@@ -731,7 +763,7 @@ class TileEncoder(IdentifiedBuild):
         many there are. Derive it from the output instead and they can never
         disagree -- which is exactly how Token Merging went unnoticed.
         '''
-        m = getattr(self.model, 'module', self.model)
+        m = self.model
         if not isinstance(m.head, torch.nn.Identity):
             raise ValueError(
                 f'pooling needs a feature extractor, but model.head is '
@@ -779,9 +811,10 @@ class TileEncoder(IdentifiedBuild):
     @torch.no_grad()
     def _run(self, images, reduce: Optional[Callable],
              forward: Optional[Callable] = None) -> torch.Tensor:
-        """One batch loop. `reduce` decides what crosses to the host.
+        """One batch loop. Every exit's result stays on the encoder's device.
 
-        `forward` is how the model is asked, defaulting to calling it. Only
+        `forward` is how the model is asked, defaulting to `self.runner` (the
+        network, compiled and/or split across cards; `_set_model`). Only
         spatial() passes something else: a ViT's feature map comes out of
         forward_intermediates, which is a different method rather than a
         different argument. Everything the loop is for -- the transform, the
@@ -796,12 +829,14 @@ class TileEncoder(IdentifiedBuild):
         token exactly right. The symptom is "averaging poolings do not help",
         which reads as a result rather than an error.
 
-        reduce=None moves everything to the host, which is the only safe
-        default: [N, 197, 1536] fp32 is 1.21 MB per tile, so 68k tiles would be
-        82 GB held on the device. A caller who wants it to stay there passes
-        reduce=lambda t: t and owns that decision. The choice can only be made
-        HERE -- by the time _run returns, torch.cat has already built the whole
-        thing wherever it was going to live.
+        NOTHING HERE MOVES A RESULT TO THE HOST (2026-10-06). Whether it goes
+        there is the caller's decision: a cache write or numpy moves it, a
+        similarity on the GPU does not. Before, every exit ended in .cpu() and
+        the GPU callers moved it straight back. The size is the caller's too:
+        [N, 197, 1536] fp32 is 1.21 MB per tile, so 68k tiles at once would be
+        82 GB on the device -- a caller that encodes that many either chunks its
+        calls or passes `reduce` (applied per batch, so `lambda t: t.cpu()` moves
+        each batch as it is made).
 
         `images` is a list (PIL images or `[H, W, 3]` arrays) or a uint8 batch
         `[N, H, W, 3]` -- one interface, one preprocessing. Either is moved to
@@ -811,7 +846,7 @@ class TileEncoder(IdentifiedBuild):
         rendering beside it turned 10.6 s of encode into 33 s
         (`diag_render_reads.py`, combined train, 2026-10-03).
         """
-        forward = forward or self.model
+        forward = forward or self.runner
         dtype = self.cfg.model.torch_dtype()
         ctx = (torch.autocast(device_type=self.device.type, dtype=dtype)
                if dtype is not torch.float32 else nullcontext())
@@ -822,7 +857,7 @@ class TileEncoder(IdentifiedBuild):
             with ctx:
                 raw = forward(batch)
             raw = raw.float()
-            out.append(raw.cpu() if reduce is None else reduce(raw))
+            out.append(raw if reduce is None else reduce(raw))
         return torch.cat(out, dim=0)
 
     def _uint8_batch(self, chunk) -> torch.Tensor:
@@ -1006,7 +1041,7 @@ class TileEncoder(IdentifiedBuild):
         one set of weights may differ in -- mode is not on it because a mode
         is not a second view, it is a state of the one model both views share.
         """
-        self.model.train(mode)      # DataParallel recurses; no unwrap needed
+        self.model.train(mode)      # `runner` wraps these same modules
         return self
 
     def eval(self) -> 'TileEncoder':
@@ -1022,11 +1057,10 @@ class TileEncoder(IdentifiedBuild):
 
     def features(self, images) -> torch.Tensor:
         """[N, D] L2-normalised, reduced the way cfg says. Every encoder has it.
-
-        The reduction runs inside the batch loop, so what crosses to the host is
-        a few KB per tile rather than the full output.
+        On the encoder's device -- see `_run`: whether it goes to the host is
+        the caller's decision.
         """
-        return self._run(images, lambda t: self.vector_from(t).cpu())
+        return self._run(images, self.vector_from)
 
     def tokens(self, images, reduce: Optional[Callable] = None) -> torch.Tensor:
         """[N, T, D] fp32, not L2-normalised, NO head. Token models only.
@@ -1068,7 +1102,7 @@ class TileEncoder(IdentifiedBuild):
         """How many transformer blocks the trunk has: what a fraction in
         `Heads.resolve_encoder_layers` is a fraction of. Token models only."""
         self._require('tokens', 'depth')
-        m = getattr(self.model, 'module', self.model)
+        m = self.model
         blocks = getattr(m, 'blocks', None)
         if blocks is None:
             raise TypeError(f'{type(self).__name__}: the trunk has no `blocks`, '
@@ -1091,7 +1125,7 @@ class TileEncoder(IdentifiedBuild):
         indices = [int(i) for i in indices]
 
         def forward(batch):
-            m = getattr(self.model, 'module', self.model)
+            m = self.model
             got = m.forward_intermediates(batch, indices=indices, norm=True,
                                           output_fmt='NLC',
                                           return_prefix_tokens=True,
@@ -1117,15 +1151,15 @@ class TileEncoder(IdentifiedBuild):
         needs no twin here -- pooling and L2-normalising a map or a token
         sequence is differentiable tensor arithmetic the caller can do itself.
 
-        WHY THE PUBLIC EXITS CANNOT BE USED FOR THIS. Four things `_run` does
-        are each independently disqualifying:
+        WHY THE PUBLIC EXITS CANNOT BE USED FOR THIS. Three things `_run` does
+        are each independently disqualifying (a fourth, `raw.cpu()`, is gone:
+        since 2026-10-06 the exits leave their result on the device):
 
             @torch.no_grad()            no gradient reaches the trunk
             _to_pil(img) per image      takes a LIST of images, not a batch
             self._transform             Resize(scale) then CenterCrop(crop),
                                         so a 256 px tile silently becomes a
                                         224 px centre crop
-            raw.cpu()                   the result comes back to the host
 
         None of that is wrong for inference; all of it is wrong for a trunk
         being fine-tuned. What IS shared is the forward itself, so that is the
@@ -1162,8 +1196,8 @@ class TileEncoder(IdentifiedBuild):
         elif exit_name == 'tokens':
             self._require('tokens', "features_with_grad(exit_name='tokens')")
             # The trunk's own forward, which is what tokens() runs too:
-            # `_run`'s `forward or self.model`. No head, not normalised.
-            forward = self.model
+            # `_run`'s `forward or self.runner`. No head, not normalised.
+            forward = self.runner
         else:
             raise ValueError(
                 f"exit_name must be 'spatial' or 'tokens', got {exit_name!r}. "
@@ -1208,11 +1242,11 @@ class TileEncoder(IdentifiedBuild):
         which for a 40-layer ViT-g at batch 1024 is 40 copies of the map held at
         once to use one of them.
 
-        Unwrapped, so this runs on a single card even under DataParallel:
-        forward_intermediates is not forward, and DataParallel replicates only
-        the latter. The free-function token dump (GigaPathFunc_old, removed) made the same trade.
+        On `self.model`, so this runs on a single card even when `runner` is
+        split across several: forward_intermediates is not forward, and
+        DataParallel replicates only the latter. The free-function token dump (GigaPathFunc_old, removed) made the same trade.
         """
-        m = getattr(self.model, 'module', self.model)
+        m = self.model
         return m.forward_intermediates(batch, indices=1, norm=True,
                                        output_fmt='NCHW',
                                        intermediates_only=True)[-1]
@@ -1228,8 +1262,7 @@ class TileEncoder(IdentifiedBuild):
         no tensor needed, so a caller writing a store does not run the reduction
         twice to learn the names.
         """
-        return self._run(images,
-                         lambda t: self.pool(self.apply_head(t), mode).cpu())
+        return self._run(images, lambda t: self.pool(self.apply_head(t), mode))
 
     def __call__(self, images) -> torch.Tensor:
         """features(), under the name EncodeFn expects.

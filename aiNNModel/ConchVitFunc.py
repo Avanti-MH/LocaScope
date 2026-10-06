@@ -432,10 +432,7 @@ class ConchVitEncoder(TileEncoder):
             self.head = self.head.to(device).eval()
 
         del state
-        if multi_gpu and torch.cuda.device_count() > 1:
-            model = torch.nn.DataParallel(model)
-
-        self.model = model
+        self._set_model(model, multi_gpu=multi_gpu)
         self._transform = cfg.transform.build()
         self._weights_id = None
 

@@ -172,7 +172,7 @@ class _FakeEncoder(TileEncoder):
     def __init__(self, cfg, device, **kw):
         self.cfg = cfg
         self.device = device
-        self.model = _FakeVit(**kw).to(device).eval()
+        self._set_model(_FakeVit(**kw))
         self._transform = cfg.transform.build()
 
     def _compute_model_spec(self) -> ModelOutputSpec:

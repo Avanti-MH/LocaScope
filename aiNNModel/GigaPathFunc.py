@@ -175,16 +175,6 @@ class GigaPathEncoderConfig(TileEncoderConfig):
     def build(self, device: torch.device, multi_gpu: bool = False):
         return GigaPathEncoder(self, device, multi_gpu=multi_gpu)
 
-# ── Model ────────────────────────────────────────────────────────────────────
-
-def _compile(model: torch.nn.Module,
-             mode: str = 'reduce-overhead') -> torch.nn.Module:
-    '''torch.compile. Private, and reached through EncoderConfig.compile, so a
-    caller cannot apply it out of order with whatever else build() does to the
-    model.'''
-    return torch.compile(model, mode=mode)
-
-
 # ── Tokens and pooling ───────────────────────────────────────────────────────
 #
 # The production feature keeps one vector per tile: pool(pool_type='token') is
@@ -232,15 +222,8 @@ class GigaPathEncoder(TileEncoder):
         # .env and the token are resolved at IMPORT, not here -- see the block
         # above `import timm`. Doing it at construction was too late for
         # HF_TOKEN_GIGAPATH to be visible when that block ran.
-        model = cfg.model.build(num_classes=0, global_pool='')
-        model = model.to(device).eval()
-
-        if cfg.compile:
-            model = _compile(model)
-        if multi_gpu and torch.cuda.device_count() > 1:
-            model = torch.nn.DataParallel(model)
-
-        self.model = model
+        self._set_model(cfg.model.build(num_classes=0, global_pool=''),
+                        multi_gpu=multi_gpu, compile=cfg.compile)
         self._transform = cfg.transform.build()
         self._weights_id = None
 

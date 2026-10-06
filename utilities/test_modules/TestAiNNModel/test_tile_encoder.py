@@ -153,8 +153,8 @@ class FakeEncoder(TileEncoder):
 
     def __init__(self, cfg, device):
         self.cfg, self.device = cfg, device
-        self.model = {'vector': _Vector, 'tokens': _Tokens,
-                      'spatial': _Spatial}[cfg.kind]().eval()
+        self._set_model({'vector': _Vector, 'tokens': _Tokens,
+                         'spatial': _Spatial}[cfg.kind]())
         self._transform = cfg.transform.build()
         self._weights_id = None
 
@@ -763,13 +763,26 @@ class _VitProbe(TileEncoder):
         return self._vit_model_spec()
 
 
-def t_spec_unwraps_dataparallel():
+def t_the_model_is_never_the_wrapper():
+    """`_set_model` keeps the network on `model` and the wrapper on `runner`, so
+    the spec and the identity read the network and neither moves when the
+    forward is split across cards. Until 2026-10-06 the wrapper WAS `model`:
+    the spec unwrapped it by hand and weights_id did not, so one encoder had
+    one id on one card and another on four."""
     m = _Fake()
-    dp = torch.nn.DataParallel(m)
-    # The pit itself: DataParallel defines no __getattr__, so nn.Module's is
-    # used and it searches only _parameters / _buffers / _modules.
-    rejects(lambda: dp.embed_dim, 'embed_dim')
-    assert _VitProbe(dp).model_spec == _VitProbe(m).model_spec
+    probe = _VitProbe(torch.nn.Identity())
+    probe.device = torch.device('cpu')
+    probe._set_model(m, multi_gpu=True)
+    assert probe.model is m, '_set_model did not keep the network itself'
+    spec, wid = probe.model_spec, probe.weights_id
+    # what four cards give: the forward wrapped, nothing else
+    probe.runner = torch.nn.DataParallel(probe.model)
+    probe._weights_id = None
+    # the pit is still there, on the runner only: DataParallel defines no
+    # __getattr__, so nn.Module's searches only _parameters / _buffers / _modules
+    rejects(lambda: probe.runner.embed_dim, 'embed_dim')
+    assert probe.model is m and probe.model_spec == spec, 'the spec saw the wrapper'
+    assert probe.weights_id == wid, 'the identity saw the wrapper'
 
 
 def t_spec_refuses_a_classifier():
@@ -1069,7 +1082,7 @@ def main() -> int:
     check('every cell is kept',               t_no_prefix_keeps_every_cell_as_a_patch)
 
     print('_vit_model_spec')
-    check('unwraps DataParallel',             t_spec_unwraps_dataparallel)
+    check('the model is never the wrapper',   t_the_model_is_never_the_wrapper)
     check('refuses a classifier head',        t_spec_refuses_a_classifier)
     check('reads the config, not grid_size',  t_spec_reads_the_config_not_the_grid)
     check('refuses a crop that does not divide',

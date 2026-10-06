@@ -215,6 +215,29 @@ def t_weights_id_ignores_device_and_layout():
     assert CI.weights_id(m.half()) != a
 
 
+def t_weights_id_ignores_the_wrapper():
+    """DataParallel and torch.compile prefix every key (`module.`, `_orig_mod.`);
+    the weights are the same, so the id must be. The decoy is a changed weight
+    under the same wrappers: the unwrapping must not unwrap the difference."""
+    torch.manual_seed(0)
+    m = torch.nn.Linear(4, 3)
+    a = CI.weights_id(m)
+    dp = torch.nn.DataParallel(m)
+    assert list(dp.state_dict())[0].startswith('module.'), 'the pit is not there'
+    assert CI.weights_id(dp) == a, 'DataParallel moved the id'
+    compiled = torch.compile(m)
+    assert CI.weights_id(compiled) == a, 'torch.compile moved the id'
+    assert CI.weights_id(torch.nn.DataParallel(compiled)) == a, \
+        'compiled, then split across cards, moved the id'
+    assert CI.unwrapped(torch.nn.DataParallel(compiled)) is m
+    other = torch.nn.Linear(4, 3)
+    other.load_state_dict(m.state_dict())
+    with torch.no_grad():
+        other.weight[0, 0] += 0.5
+    assert CI.weights_id(torch.nn.DataParallel(other)) != a, \
+        'a changed weight under the same wrapper kept the id'
+
+
 def t_weights_id_of_nothing():
     assert CI.weights_id(None) == '', \
         "no model means no weights to record; '' is the honest answer"
@@ -375,6 +398,7 @@ def main() -> int:
     print('weights_id')
     check('hashes content, not names',        t_weights_id_is_content)
     check('ignores device, not dtype',        t_weights_id_ignores_device_and_layout)
+    check('ignores the wrapper, not a weight', t_weights_id_ignores_the_wrapper)
     check('empty when there is no model',     t_weights_id_of_nothing)
 
     print('registry')

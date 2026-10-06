@@ -170,13 +170,8 @@ class ConvNeXtV2Encoder(TileEncoder):
                 multi_gpu: bool = False):
         self.cfg = cfg
         self.device = device
-        model = cfg.model.build(num_classes=0, global_pool='')
-        model = model.to(device).eval()
-
-        if multi_gpu and torch.cuda.device_count() > 1:
-            model = torch.nn.DataParallel(model)
-
-        self.model = model
+        self._set_model(cfg.model.build(num_classes=0, global_pool=''),
+                        multi_gpu=multi_gpu)
         self._transform = cfg.transform.build()
         self._weights_id = None
         self._feat_hw: Tuple[int, int] = self._measure_feat_hw()
@@ -193,7 +188,7 @@ class ConvNeXtV2Encoder(TileEncoder):
         Merging's broken output invisible). One forward pass at construction
         costs nothing worth avoiding.
         '''
-        m = getattr(self.model, 'module', self.model)
+        m = self.model
         crop = int(self.cfg.transform.crop_size)
         with torch.no_grad():
             dummy = torch.zeros(1, 3, crop, crop, device=self.device,
@@ -213,7 +208,7 @@ class ConvNeXtV2Encoder(TileEncoder):
         768 for Tiny), read off the model rather than hardcoded so a config
         pointed at a different tier still answers correctly.
         '''
-        m = getattr(self.model, 'module', self.model)
+        m = self.model
         return ModelOutputSpec(kind='spatial', dim=int(m.num_features),
                                feat_hw=self._feat_hw, num_prefix=0)
 
@@ -223,9 +218,9 @@ class ConvNeXtV2Encoder(TileEncoder):
         separate "ask for intermediates" path the way a ViT needs
         forward_intermediates. Unlike `_vit_spatial_forward`, this is not an
         override of what `_run` calls by default -- `_run`'s default forward
-        (`self.model`) already returns this, so `_pool` reaches it through the
+        (`self.runner`) already returns this, so `_pool` reaches it through the
         ordinary rank-4 branch without `spatial()` ever being called. Provided
-        anyway so `spatial()`/`spatial_spec()` work as a named exit too.
+        anyway so `spatial()`/`spatial_spec()` work as a named exit too --
+        through `self.runner`, so it splits across cards as the default does.
         '''
-        m = getattr(self.model, 'module', self.model)
-        return m(batch)
+        return self.runner(batch)

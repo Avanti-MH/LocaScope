@@ -372,16 +372,9 @@ class Uni2Encoder(TileEncoder):
         # .env and the token are resolved at IMPORT, not here -- see the block
         # above `import timm`. Doing it at construction was too late for
         # HF_TOKEN_UNI2 to be visible when that block ran.
-        model = cfg.model.build(num_classes=0, global_pool='',
-                                **cfg.timm_kwargs)
-        model = model.to(device).eval()
-
-        if cfg.compile:
-            model = torch.compile(model, mode='reduce-overhead')
-        if multi_gpu and torch.cuda.device_count() > 1:
-            model = torch.nn.DataParallel(model)
-
-        self.model = model
+        self._set_model(cfg.model.build(num_classes=0, global_pool='',
+                                        **cfg.timm_kwargs),
+                        multi_gpu=multi_gpu, compile=cfg.compile)
         self._transform = cfg.transform.build()
         self._weights_id = None
 
