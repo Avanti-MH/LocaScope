@@ -127,7 +127,11 @@ _CORE = ('features', 'x', 'y', 'region', 'grid_rc')
 
 
 def _enc_float(v: float) -> str:
-    return f'{v:.12g}'
+    # repr: the shortest string that reads back as the same float. The readers
+    # compare a stored ds with `!=`, and until 2026-10-06 this was `.12g`,
+    # which turned BRACS level 1 (4.00003374274531) into 4.00003374275 -- so
+    # every non-integer level missed its cache and was encoded again.
+    return repr(float(v))
 
 
 #: The pooling name of a model's unreduced output. See the module docstring.
@@ -308,10 +312,17 @@ class FeatureStore:
              grid_rc=None, extra: Optional[Dict[str, object]] = None) -> Path:
         """Validate, then write atomically to `path(root, meta)`. A truncated
         store that still loads is worse than none: it drops half the
-        distractors and every recall comes out high."""
+        distractors and every recall comes out high.
+
+        The write is where tensors move to the host: an encoder leaves its
+        output on the device, and a caller hands it here as it is."""
         import torch                                             # noqa: PLC0415
         from safetensors.torch import save_file                  # noqa: PLC0415
 
+        host = lambda t: t.detach().cpu() if isinstance(t, torch.Tensor) else t  # noqa: E731
+        features, x, y = host(features), host(x), host(y)
+        region, grid_rc = host(region), host(grid_rc)
+        extra = {k: host(v) for k, v in (extra or {}).items()}
         _validate(features, x, y, region, grid_rc, meta, extra)
         meta = dataclasses.replace(meta, created_at=meta.created_at or _stamp())
         tensors = {'features': features.contiguous(), 'x': x.contiguous(),
@@ -523,9 +534,11 @@ def to_store_tensors(wfm, dtype=None) -> dict:
     """The columns `FeatureStore.save` takes, from one slide's WsiFeaturesMap.
     features come out [N, 1, D]: this path carries one vector per tile, which
     is whatever the encoder's features() reduced to. `dtype` is fp16 unless the
-    caller says fp32."""
+    caller says fp32. The features may live on the GPU (the retriever keeps
+    them there); this is the write, so this is where they move to the host.
+    """
     import torch                                                  # noqa: PLC0415
-    parts = [m.features for m in wfm]
+    parts = [m.features.detach().cpu() for m in wfm]
     features = torch.cat(parts, dim=0) if parts else torch.empty(0, 0)
     out = _columns(wfm.grids())
     if features.shape[0] != out['x'].numel():

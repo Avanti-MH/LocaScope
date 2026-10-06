@@ -117,8 +117,16 @@ def t_meta_round_trips_through_strings():
     assert set(s) == {f.name for f in dataclasses.fields(m)}, 'a field has no codec'
     assert FS.Meta.from_strings(s) == m, 'a value changed across the round trip'
     assert a_meta(ds=4.00003).to_strings()['ds'] != a_meta(ds=4.0).to_strings()['ds']
+    # A pyramid's own ds (BRACS level 1) has more digits than 12: the reader
+    # compares it with `!=`, so it has to come back as the same float. The
+    # decoy is the 12-digit encoding the store used until 2026-10-06, under
+    # which every non-integer level missed its cache.
+    real = 4.00003374274531
+    back = FS.Meta.from_strings(a_meta(ds=real).to_strings()).ds
+    assert back == real, f'{real!r} came back as {back!r}'
+    assert float(f'{real:.12g}') != real, 'the decoy no longer tells the two apart'
     rejects(lambda: a_meta(slots=('cls', 'a,b')).to_strings(), 'comma')
-    return 'every field, 4.00003 kept apart from 4'
+    return 'every field, 4.00003 kept apart from 4, 4.00003374274531 exact'
 
 
 def t_path_is_the_key():
@@ -656,7 +664,7 @@ def _sample_tiles(slide, mask, level, n, rng, tile=256):
 
 def _gap(a: torch.Tensor, b: torch.Tensor) -> np.ndarray:
     """1 - cos over every (tile, slot); both are unit slots."""
-    return (1.0 - (a.float() * b.float()).sum(-1)).clamp_min(0.0).flatten().numpy()
+    return (1.0 - (a.float() * b.float()).sum(-1)).clamp_min(0.0).flatten().cpu().numpy()
 
 
 def _row(name, comparison, gap):
@@ -740,7 +748,7 @@ def run_precision(args) -> int:
                     stored = FS.load(path)[0]['features']
                     chunked = torch.cat([c for _, c in FS.iter_chunks(path, rows=97)])
                     assert torch.equal(stored, chunked), 'chunked read differs on real data'
-                stored = stored.float()
+                stored = stored.float().to(raw.device)   # read onto the host; raw is on the device
                 for a in arms:
                     live = pooling_kinds(raw, a, spec)
                     g_store = _gap(live, pooling_kinds(stored, a, spec))

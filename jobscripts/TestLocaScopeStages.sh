@@ -5,7 +5,7 @@
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # GPUs per node (不要設0)
-#SBATCH --cpus-per-task=2                 # CPU cores per task
+#SBATCH --cpus-per-task=8                 # read_workers = CpuBudget workers (7), reading alongside the encoder
 #SBATCH --mem=600G                        # see the FILTER_SWEEP note below
 #SBATCH --ntasks-per-node=1               # Tasks per node
 #SBATCH -o /work/u26130998/log/%x      # STDOUT
@@ -81,6 +81,10 @@ PADDING="${PADDING:-2}"
 MIN_INLIERS="${MIN_INLIERS:-10}"
 STAGES="${STAGES:-1,2,3}"
 FILTER_SWEEP="${FILTER_SWEEP:-0}"
+# CHECK_SIMS=1: stage 2's maps against the frozen pre-2026-10-06 path and
+# against a feature-cache read, bit for bit (check_sims). Both modes take it;
+# with FILTER_SWEEP=1 it covers no-filter (many regions) and no-overlap too.
+CHECK_SIMS="${CHECK_SIMS:-0}"
 
 BASE_ARGS="
   --dataset $DATASET --rung $RUNG --pick-seed $PICK_SEED
@@ -89,6 +93,7 @@ BASE_ARGS="
   --min-region-ratio $MIN_REGION_RATIO
   --padding $PADDING --min-inliers $MIN_INLIERS
 "
+[ "$CHECK_SIMS" = "1" ] && BASE_ARGS="$BASE_ARGS --check-sims"
 
 if [ "$FILTER_SWEEP" -eq 1 ]; then
   echo "======== [1/4] overlap + filter ========"
