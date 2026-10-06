@@ -43,3 +43,40 @@ class FOVRecord:
     stage_shift_dy:    int
     noise_sigma:       float
     jpeg_quality:      int
+
+    @classmethod
+    def from_capture(cls, filename: str, wsi_path: str, camera, x: int, y: int,
+                     params: dict, level: int = 0) -> 'FOVRecord':
+        """The row of one photo: `camera` (a `Render`) took it at the FoV
+        rectangle's level-0 top-left (x, y), and `params` is what
+        `capture_with_gt` returned with it. The sensor and the nominal mpp are
+        the camera's own (`camera.cfg`, `output_w/h`)."""
+        cfg, p = camera.cfg, params
+        return cls(
+            filename      = filename,
+            wsi_path      = wsi_path,
+            level         = level,
+            wh_ratio      = cfg.wh_ratio,
+            MPixels       = cfg.MPixels,
+            query_mpp     = cfg.query_mpp,
+            nominal_mpp   = cfg.query_mpp,
+            effective_mpp = float(p['effective_mpp']),
+            fov_width     = camera.output_w,
+            fov_height    = camera.output_h,
+            gt_x          = int(x),
+            gt_y          = int(y),
+            rot_deg           = int(p['rot_deg']),
+            angle_jitter      = round(float(p['angle_jitter']), 3),
+            scale             = round(float(p['scale']), 4),
+            vignette_strength = round(float(p['vignette_strength']), 3),
+            color_temp        = round(float(p['color_temp']), 3),
+            brightness        = round(float(p['brightness']), 3),
+            contrast          = round(float(p['contrast']), 3),
+            distortion_k1     = round(float(p['distortion_k1']), 4),
+            defocus_radius    = int(p['defocus_radius']),
+            chromatic_shift   = int(p['chromatic_shift']),
+            stage_shift_dx    = int(p['stage_shift_dx']),
+            stage_shift_dy    = int(p['stage_shift_dy']),
+            noise_sigma       = float(p['noise_sigma']),
+            jpeg_quality      = int(p['jpeg_quality']),
+        )

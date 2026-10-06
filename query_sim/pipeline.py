@@ -4,18 +4,27 @@
 so existing callers (test_gigapath_knn_esti_mpp, notebooks) don't break.
 
 `simulate_with_gt(img, cfg)` — returns (img, dict) with every sampled value,
-which `generator.py` folds into a FOVRecord row.
+which `FOVRecord.from_capture` folds into a row.
 """
 
 from __future__ import annotations
 
+import os
 import random
+import sys
 from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image
 
-from config import DomainGapConfig
+# utilities/ so ReadGeometry imports when this is used alone
+_UTILITIES = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          '..', 'utilities'))
+if _UTILITIES not in sys.path:
+    sys.path.insert(0, _UTILITIES)
+
+from ReadGeometry import SENSOR_MARGIN   # noqa: E402 -- the crops below
+from config import DomainGapConfig       # noqa: E402
 from augment.color    import (
     apply_color, apply_color_temp, apply_brightness_contrast, apply_jpeg,
 )
@@ -121,29 +130,6 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
     }
 
 
-#: Pixels kept outside the sensor frame while the ops that read a neighbourhood
-#: run, then dropped. `apply_defocus` reaches `radius` px and `apply_chromatic`
-#: reaches `shift` -- both 2 by default, both trivial. `apply_distortion` is
-#: what sets this number, and it is derived rather than guessed.
-#:
-#: Under pincushion (k1 < 0) `remap` samples OUTWARD, and `src_x` is clipped to
-#: the frame, so a frame that is too tight smears its own corner. The output
-#: corner sits (719.5, 511.5) from the centre whatever the margin is -- the
-#: margin moves the centre, not the corner -- while the frame's half-width is
-#: 719.5 + M. Nothing is clipped when
-#:
-#:     719.5 / factor + cx <= 2*cx      i.e.   factor >= 719.5 / (719.5 + M)
-#:     factor = 1 + k1*r2,  worst case k1 = -0.04 (distortion_k1_range's floor)
-#:
-#: at 1440x1024:   M=32 gives factor 0.9279 against 0.9574 needed -- CLIPPED.
-#:                 M=56 is the crossing.  M=64 gives 0.9347 against 0.9183,
-#:                 13.7 px of headroom, and is what is used.
-#:
-#: The old order never hit this: distortion ran on the 1767^2 bounding square,
-#: where the output corner sampled at 1632 against a 1766 edge. Cropping first
-#: is what makes the margin load-bearing, so it is sized to the same worst case
-#: the square used to absorb for free.
-SENSOR_MARGIN = 64
 
 
 def _centre_crop(img: np.ndarray, width: int, height: int) -> np.ndarray:

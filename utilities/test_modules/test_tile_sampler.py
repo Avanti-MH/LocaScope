@@ -68,7 +68,7 @@ from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
                          PlanSpec, RichnessConfig, Sample, SampleMeta,
                          SamplerConfig, TileSampler, assign_buckets,
                          resolution_plan, PRE_TILE_FACTOR, centre_crop,
-                         centre_margin, pre_tile_px, camera_plan, native_plans,
+                         centre_margin, pre_tile_px, native_plans,
                          score_background, FOV_CELL)
 from TissueMask import SlideMask, TissueMask                      # noqa: E402
 
@@ -1377,8 +1377,10 @@ def _fov_cfg(n=16, richness=None, overlap=None, seed=0):
 
 
 def _fov_plan(wsi, rotates=False, sensor=FOV):
-    return camera_plan(wsi.level_downsamples, ReadSpec(*sensor, rotates=rotates),
-                       ds=1.0, level=0)
+    """The rectangular camera's one rung at ds 1, through the PlanSpec every
+    caller uses (camera_plan, which built it directly, went 2026-10-06)."""
+    camera = ReadSpec(*sensor, rotates=rotates)
+    return PlanSpec('ladder', (1.0,), camera=camera).plans_for(wsi)[0]
 
 
 def _fov_strip():

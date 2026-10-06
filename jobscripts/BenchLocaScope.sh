@@ -27,7 +27,10 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- End-to-end bench, with the stage-2 ranking exposed ---------
 #
-# Runs every shot of a query_sim corpus through LocaScopePipeline and records
+# Renders synthetic shots with known positions (bench_locascope.split_shots: the
+# first N_WSI slides of each dataset's recorded SPLIT, PER_LEVEL FoVs at every
+# native level, the window bench's FovSupply + Render, nothing stored) and runs
+# every one through LocaScopePipeline, recording
 # per-stage error. Two extra measurements answer a question the winner-only
 # metrics cannot: when retrieval picks the wrong window, was the right one
 # further down the list, or was it never proposed at all? Those two call for
@@ -54,8 +57,10 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # 262144 (see utilities/cli/diagnostics/analyze_sift_keypoints.py). Set LIMIT to 30 first
 # and read t_verify_s out of metrics.csv, rather than estimating.
 
-GT_CSV="$RESULT_ROOT"/MultiBatch1440/gt.csv
-IMAGES="$RESULT_ROOT"/MultiBatch1440/images
+DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
+SPLIT="${SPLIT:-test}"
+N_WSI="${N_WSI:-5}"          # per dataset; BRACS test's first 5 are the masked ones
+PER_LEVEL="${PER_LEVEL:-50}"  # FoVs per native level per slide
 
 TOPK="${TOPK:-20}"               # candidates enumerated per shot (free)
 SIFT_TOPK="${SIFT_TOPK:-5}"           # candidates SIFT actually verifies (K passes per shot)
@@ -65,7 +70,7 @@ RESUME=1              # 1 = keep the existing metrics.csv and skip what is in it
                       # append to it. A resumed run is the only way to keep the
                       # rows a walltime kill left behind.
 DRAW_FIGURES="${DRAW_FIGURES:-0}"        # 4-panel diagnostics for the first N shots, -1 = all.
-                      # -1 on a 2500-shot corpus is ~6 GB of png; prefer
+                      # -1 on a few thousand shots is several GB of png; prefer
                       # DRAW_FAILURES below, which draws only what went wrong.
 DRAW_FAILURES="confident-wrong wrong no-recall"
                       # "" = off. Files land in figures/<category>/ :
@@ -77,11 +82,6 @@ DRAW_FAILURES="confident-wrong wrong no-recall"
                       #                    RETRIEVAL figure, not the SIFT one
 FAIL_TOL_UM=100       # centre error above which a shot counts as wrong
 
-if [ ! -f "$GT_CSV" ]; then
-  echo "[abort] $GT_CSV not found -- run jobscripts/MultiBatch1440.sh first"
-  exit 1
-fi
-
 LIMIT_FLAG=""
 [ "$LIMIT" -gt 0 ] && LIMIT_FLAG="--limit $LIMIT"
 RESUME_FLAG=""
@@ -89,8 +89,7 @@ RESUME_FLAG=""
 FAIL_FLAG=""
 [ -n "$DRAW_FAILURES" ] && FAIL_FLAG="--draw-failures $DRAW_FAILURES --fail-tol-um $FAIL_TOL_UM"
 
-echo "======== gt=$GT_CSV  topk=$TOPK  sift-topk=$SIFT_TOPK ========"
-echo "shots: $(( $(wc -l < "$GT_CSV") - 1 ))"
+echo "======== $DATASETS #$SPLIT  n_wsi=$N_WSI  per_level=$PER_LEVEL  topk=$TOPK  sift-topk=$SIFT_TOPK ========"
 echo
 
 # ---------------- WSI feature cache ----------------
@@ -117,11 +116,23 @@ FEATURE_STORE_MODE="${FEATURE_STORE_MODE:-rw}"
 echo "feature cache: result/cache/${FEATURES_CACHE_JOB}_features/  (mode=$FEATURE_STORE_MODE)"
 echo ""
 
+# PROFILE=1 runs the bench under cProfile, writes result/<job>/profile.prof
+# and prints it into this log at the end: by cumulative time (which call a
+# shot's time goes through) and by own time (where it is actually spent).
+# Use it with a small LIMIT -- the profile is of the whole run.
+PY=(python)
+if [ "${PROFILE:-0}" = "1" ]; then
+  PROF_DIR="$RESULT_ROOT/${SLURM_JOB_NAME:-BenchLocaScope}"
+  mkdir -p "$PROF_DIR"
+  PY=(python -m cProfile -o "$PROF_DIR/profile.prof")
+  echo "profile -> $PROF_DIR/profile.prof"
+fi
+
 # --out is omitted on purpose: bench_locascope falls back to
 # result/<SLURM_JOB_NAME>/, keeping the run beside its own log.
-python utilities/bench_modules/bench_locascope.py \
-  --gt-csv     "$GT_CSV" \
-  --images-dir "$IMAGES" \
+"${PY[@]}" utilities/bench_modules/bench_locascope.py \
+  --datasets $DATASETS --split "$SPLIT" --n-wsi "$N_WSI" \
+  --sampler-n-per-rung "$PER_LEVEL" \
   --topk       $TOPK \
   --sift-topk  $SIFT_TOPK \
   --draw-figures $DRAW_FIGURES \
@@ -131,6 +142,14 @@ python utilities/bench_modules/bench_locascope.py \
   --features-cache-job "$FEATURES_CACHE_JOB" \
   --feature-store-mode "$FEATURE_STORE_MODE" \
   $LIMIT_FLAG $RESUME_FLAG $FAIL_FLAG
+
+if [ "${PROFILE:-0}" = "1" ]; then
+  echo ""
+  echo "======== profile: cumulative ========"
+  python -c "import pstats; pstats.Stats('$PROF_DIR/profile.prof').sort_stats('cumulative').print_stats(40)"
+  echo "======== profile: own time ========"
+  python -c "import pstats; pstats.Stats('$PROF_DIR/profile.prof').sort_stats('tottime').print_stats(30)"
+fi
 
 echo ""
 echo "======== done -> result/BenchLocaScope/ ========"

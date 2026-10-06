@@ -12,7 +12,8 @@ A 決定位置（只是座標）
   A1 隨機：在組織內，並預留相機要讀的範圍（mask + CameraSpec）
   A2 有序：grid（main + offset 格點）
   A3 指定：manifest、pipeline 候選、手動
-  A4 連續供應：一批用完再抽下一批，抽完就重複（只有合成 query 用）
+  （A4 連續供應——一批用完再抽下一批、抽完就重複——2026-10-06 隨舊的 batch CLI 刪除；
+   FovSupply 現在只是 A1 → B → C 的串接，抽一次、每個位置拍一張）
   A5 mask：決定「組織內」在哪裡（位置的輸入）
 
 B 讀出像素
@@ -51,7 +52,7 @@ flowchart LR
 
   subgraph A["A 位置（只是座標）"]
     TM["TissueMask"] --> TS["TileSampler<br/>隨機、有界"]
-    FS["FovSupply<br/>連續供應"]
+    FS["FovSupply<br/>TileSampler → Render 的串接"]
     PG["PatchGrid<br/>有序格點"]
     GV["指定位置<br/>manifest / 候選"]
   end
@@ -82,6 +83,7 @@ flowchart LR
   LP --> PR
   FG --> RD
   TS --> RD
+  TS --> FS
   FS --> CP
   GV --> RD
   PG --> RG
@@ -103,7 +105,7 @@ flowchart LR
 A 位置                          B 讀取（唯一）                     C 畫成照片（可選）          D 下游
 TissueMask ─► TileSampler ──┐   SlideReader  ← 原 GridReader      Render  ← 原 Camera
               (隨機、有界)   │   [吸收 QueryFromWSI、               [只剩效果 + GT]
-FovSupply（連續供應）────────┼─►  Render.py 的讀取]                 ├─ capture(pos)          ┌► TileEncoder（GPU）
+FovSupply（串接，見下）─────┼─►  Render.py 的讀取]                 ├─ capture(pos)          ┌► TileEncoder（GPU）
 PatchGrid（有序格點）────────┤   ├─ read(pos, spec, ds,            │    = 效果(reader.read)  │   → head / KNN /
 指定位置（manifest、候選）───┘   │        margin, stack)  單點      ├─ at(ds)  換物鏡        │     retrieval
                                 ├─ read_grid(region, grid, ds)    ├─ output_to_level0  GT  │
@@ -177,10 +179,11 @@ def resample(img, w, h, method) -> np.ndarray          # 原 Render.py
 def degrade_resolution(img, ds, out_side) -> np.ndarray  # 原 Render.py；ChainStack 直接從這裡匯入
 
 # ── query_sim/camera.py（Camera → Render，大改）─────────────────────────────
-def sensor_size(wh_ratio, MPixels) -> (w, h)           # 原 source/wsi_query.py
+#   sensor_size(wh_ratio, MPixels) 與 SENSOR_MARGIN 於 2026-10-06 搬到 ReadGeometry（純幾何）
 def rotates_for(cfg, rotation=None) -> bool             # 不動
 def render_spec(cfg, sensor) -> ReadSpec                # 原 camera_spec
-def tile_spec(tile, margin_out=0) -> ReadSpec           # 不旋轉的 tile（參考、pre-tile）
+def photo_rng(*key) -> random.Random                  # 一張照片的 rng，由它自己的身分決定（2026-10-06）
+#   不旋轉的 tile（參考、pre-tile）直接 ReadSpec(t, t, margin_out=m)；tile_spec 於 2026-10-06 刪除
 
 class Render:                        # 實例名 camera
     def __init__(self, reader: SlideReader, cfg: DomainGapConfig, *,
@@ -194,12 +197,16 @@ class Render:                        # 實例名 camera
         #   （是否旋轉由 rotates_for(cfg, rotation) 決定 spec.rotates）
         # → simulate_with_gt(raw, cfg, rng, rotation, output_wh)
     def output_to_level0(...) / output_tile_origins(...)   # 不動
-    # 沒有 read()：不要效果就直接 reader.read(x, y, tile_spec(...), ds)
+    # 沒有 read()：不要效果就直接 reader.read(x, y, ReadSpec(...), ds)
 
-# ── query_sim/generator.py（FovSupply：只換型別）─────────────────────────────
-class FovSupply:
-    def __init__(self, camera: Render, mask, cfg=None, plan=None)   # 其餘不動
-def fov_plan_of(camera: Render) -> RungPlan
+# ── query_sim/FovSupply.py（2026-10-06：只把基礎 module 串起來）──────────────
+class FovSupply:                     # PlanSpec 抽一次 → 各 rung 的物鏡讀 → Render 拍
+    def __init__(self, microscope: Render, plan: PlanSpec, cfg=None, mask=None)
+    @classmethod cached(microscope, plan, cfg, sampler_root, *, masks, report_dir=None)
+    def camera_for(self, ds) -> Render                # microscope.at(ds)
+    def photo(self, meta) -> (image, params)        # stack=meta.stack_kind；rng = photo_rng(seed, x, y, ds, 0)
+    def __iter__(self) -> (meta, image, params)
+#   plan 必填、可以跨好幾個 rung；fov_plan_of、camera_plan 於 2026-10-06 刪除
 
 # ── training/MppRoutingHead/Datasets.py（CameraBank：只換建構方式）─────────────
 class CameraBank:
@@ -211,8 +218,8 @@ class CameraBank:
 
 ```python
 reader = SlideReader(wsi, resize='area')
-tiles = reader.read_samples(sampler, tile_spec(256))          # 每個 sample 用自己的 ds、stack
-pre   = reader.read(m.x, m.y, tile_spec(256, centre_margin(256, 3)), m.ds)
+tiles = reader.read_samples(sampler, ReadSpec(256, 256))          # 每個 sample 用自己的 ds、stack
+pre   = reader.read(m.x, m.y, ReadSpec(256, 256, margin_out=centre_margin(256, 3)), m.ds)
 win   = reader.read(x0, y0, ReadSpec(w_out, h_out), ds)          # 原 read_rect
 camera = Render(SlideReader(wsi), CAMERA_FULL, ds=rung); camera.capture(x, y, rng=rng)
 ```
@@ -227,7 +234,9 @@ camera = Render(SlideReader(wsi), CAMERA_FULL, ds=rung); camera.capture(x, y, rn
 訓練 query         隨機    → reader.read（旋轉正方形）   → 完整    → encoder → head
 訓練 support       隨機    → reader.read（旋轉正方形）   → 只旋轉  → encoder → head
 Stage 1 參考庫     隨機    → reader.read（area）         → 無      → encoder → KNN
-query_sim         FovSupply → reader.read                → 完整    → PNG + gt.csv
+window bench query FovSupply → reader.read                → 無幾何  → encoder → 分數
+Stage 1 bench      TileSampler.cached ladder → FovSupply(sampler=) → 完整 → stage 1 各方法
+BenchLocaScope     FovSupply → reader.read                → 完整    → pipeline
 window bench 參考  格點    → reader.read_grid            → 無      → encoder → 分數
 pre-tile          隨機    → reader.read（邊距、area）     → 無      → PreTileStore
 pipeline 參考      格點    → reader.read_grid            → 無      → retrieval   ← pipeline 遷移時改
@@ -249,7 +258,7 @@ stage 3           候選    → reader.read（臨時 ReadSpec） → 無      �
 | 合併 | `CameraTest.sh` 併入 `TestReadPath.sh`；`diag_read_exp.py` 改成讀取路徑的速度量測 |
 | 小改（呼叫端） | 訓練 CameraBank、KnnEstMpp、PrototypeEstMpp、extract_pretiles、ChainStack、FewShotEoMT、generator、multi_batch、demo、各 bench、diag、相關測試 |
 | 不動 | TileSampler（只拿掉 degrade 的再匯出）、DsLadder、PatchGrid、TissueMask、ReadGeometry 的規則、augment、TileEncoder、CpuBudget、Store |
-| 之後才改 | WsiTileLoader、SlideWinSift 改用 SlideReader（WsiTissuesContainer 已於 2026-10-06 淘汰）；A 的命名（TileSampler、SampleMeta、FovSupply） |
+| 之後才改 | SlideWinSift 改用 SlideReader（WsiTissuesContainer、WsiTileLoader 已於 2026-10-06 淘汰）；A 的命名（TileSampler、SampleMeta、FovSupply） |
 
 讀取模組從 Camera、QueryFromWSI、轉接檔、Render.py、GridReader、SlideContext 六個減為 Render、SlideReader 兩個。
 被刪掉的檔案在本次 session 的 scratchpad 有備份（`removed_2026-10-03/`），scratchpad 不是永久的。
@@ -310,7 +319,7 @@ PrototypicalRoutingHead 的渲染移到 DataLoader worker；pipeline 改用 `rea
 window bench
 ├─ 每個 shard：CpuBudget(processes = shard 數)
 └─ 每張 slide、每個 level
-    ├─ FovSupply(Render, mask, SamplerConfig).bank() → FoV shot → query 特徵（GPU）
+    ├─ FovSupply(Render, mask, SamplerConfig) → (meta, image, params) → query 特徵（GPU）
     └─ SlideReader.read_grid（N 列一塊 + worker）→ pooled_descriptors（GPU，不搬 CPU）
        → row_cosines → WindowAccumulator（GPU）
     parts 目錄的 config_id 加上 fov_reserve，舊 FoV 的 parts 不會被續跑

@@ -50,8 +50,45 @@ from typing import Sequence, Tuple
 
 #: Pyramid downsamples are derived from rounded level dimensions, so a "4x"
 #: level reports 4.00003 as readily as 4.0, and an exact comparison lands a
-#: level away over a part in 1e5. Same value as SafeSlide's `_LEVEL_REL_TOL`.
+#: level away over a part in 1e5. THE ONE DEFINITION: SafeSlide imports it.
 LEVEL_REL_TOL = 1e-3
+
+
+def sensor_size(wh_ratio: str, MPixels: float) -> Tuple[int, int]:
+    """`(output_w, output_h)` in px for an aspect ratio and a pixel count --
+    the sensor a camera produces. One definition, so a sampler placing for a
+    camera and the camera agree on its size. (query_sim/camera.py's until
+    2026-10-06: it is geometry, and the placing side needed it too.)"""
+    w_r, h_r = (int(v) for v in wh_ratio.split(':'))
+    factor = (MPixels * 1e6 / (w_r * h_r)) ** 0.5
+    return int(factor * w_r), int(factor * h_r)
+
+
+#: Pixels kept outside the sensor frame while the ops that read a neighbourhood
+#: run, then dropped. `apply_defocus` reaches `radius` px and `apply_chromatic`
+#: reaches `shift` -- both 2 by default, both trivial. `apply_distortion` is
+#: what sets this number, and it is derived rather than guessed.
+#:
+#: Under pincushion (k1 < 0) `remap` samples OUTWARD, and `src_x` is clipped to
+#: the frame, so a frame that is too tight smears its own corner. The output
+#: corner sits (719.5, 511.5) from the centre whatever the margin is -- the
+#: margin moves the centre, not the corner -- while the frame's half-width is
+#: 719.5 + M. Nothing is clipped when
+#:
+#:     719.5 / factor + cx <= 2*cx      i.e.   factor >= 719.5 / (719.5 + M)
+#:     factor = 1 + k1*r2,  worst case k1 = -0.04 (distortion_k1_range's floor)
+#:
+#: at 1440x1024:   M=32 gives factor 0.9279 against 0.9574 needed -- CLIPPED.
+#:                 M=56 is the crossing.  M=64 gives 0.9347 against 0.9183,
+#:                 13.7 px of headroom, and is what is used.
+#:
+#: The old order never hit this: distortion ran on the 1767^2 bounding square,
+#: where the output corner sampled at 1632 against a 1766 edge. Cropping first
+#: is what makes the margin load-bearing, so it is sized to the same worst case
+#: the square used to absorb for free.
+SENSOR_MARGIN = 64
+#: (query_sim/pipeline.py's until 2026-10-06. It is how much a camera READS
+#: around its sensor -- ReadSpec.margin_out, render_spec -- so it is geometry.)
 
 
 def level_for(level_downsamples: Sequence[float], ds: float) -> int:

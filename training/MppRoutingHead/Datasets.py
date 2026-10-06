@@ -41,7 +41,6 @@ rather than a simplification.
 '''
 from __future__ import annotations
 
-import hashlib
 import random
 import sys
 from dataclasses import dataclass, replace
@@ -68,7 +67,7 @@ from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from ReadGeometry import LEVEL_REL_TOL                              # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
 from WsiSplit import SPLIT_JOB                                       # noqa: E402
-from camera import Render, render_spec                               # noqa: E402
+from camera import Render, photo_rng, render_spec                    # noqa: E402
 from SlideReader import SlideReader                                  # noqa: E402
 from config import DomainGapConfig                                   # noqa: E402
 
@@ -450,8 +449,8 @@ class RenderConfig:
        and field.py:103's own early return), so no divergence is possible.
 
     Turning it off here does NOT fix that bug for anything else --
-    `query_sim/generator.py` still writes the mismatched value into every
-    synthetic corpus's GT CSV. Flagged, not fixed, 2026-09-16.
+    `FOVRecord.from_capture` (query_sim/record.py) still writes the mismatched
+    value into every GT row. Flagged, not fixed, 2026-09-16.
     '''
     tile_size: int = 256
     stage_shift_max: int = 0
@@ -540,7 +539,7 @@ class RenderConfig:
 
     @property
     def mpixels(self) -> float:
-        '''What `DomainGapConfig.MPixels` has to be for `camera.sensor_size` to
+        '''What `DomainGapConfig.MPixels` has to be for `ReadGeometry.sensor_size` to
         arrive back at `tile_size`: it computes `output_w = int(sqrt(MPixels *
         1e6 / (w_r * h_r)) * w_r)`, which at 1:1 is `int(sqrt(MPixels*1e6))`.
         Derived rather than typed so the two cannot drift; `CameraBank`
@@ -691,14 +690,13 @@ def choose_read_level(wsi, rung: float, cfg: RenderConfig,
     return rng.choice(finer) if finer else None
 
 
-def _eval_seed(row: ManifestRow) -> int:
-    '''Deterministic, stable ACROSS PROCESSES (unlike Python's built-in
-    `hash()`, which is randomised per-process for strings unless
-    `PYTHONHASHSEED` is pinned) -- derived from the sample's own identity,
-    not from worker id or call order, so the same query always renders the
-    same photo regardless of which DataLoader worker handles it or when.'''
-    key = f'{row.dataset}|{row.wsi_name}|{row.x}|{row.y}|{row.rung}'
-    return int(hashlib.sha256(key.encode()).hexdigest()[:8], 16)
+def _eval_rng(row: ManifestRow) -> random.Random:
+    '''The eval photo's rng, from the sample's own identity (`camera.photo_rng`)
+    -- not from worker id or call order, so the same query always renders the
+    same photo regardless of which DataLoader worker handles it or when.
+    Until 2026-10-06 this hashed the same key here to 8 hex digits, not
+    photo_rng's 16: eval photos from that date on are not the earlier ones.'''
+    return photo_rng(row.dataset, row.wsi_name, row.x, row.y, row.rung)
 
 
 def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
@@ -751,7 +749,7 @@ def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
     default `pyramid` nothing is drawn, so the capture is what it always was.
     '''
     if deterministic:
-        rng = random.Random(_eval_seed(row))
+        rng = _eval_rng(row)
     level = None
     if cfg.read_level != 'pyramid':
         level = choose_read_level(bank._wsi_for(row.dataset, row.wsi_name),

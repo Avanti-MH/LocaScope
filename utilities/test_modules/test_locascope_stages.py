@@ -40,6 +40,7 @@ import math
 import os
 import random
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 from typing import Tuple
@@ -49,15 +50,20 @@ sys.path.insert(0, os.path.join(
 
 import numpy as np
 import torch
-from _paths import setup_import_paths
+from _paths import job_result_dir, setup_import_paths
 setup_import_paths()
 
-from PatchingLib import QueryPatchContainer                          # noqa: E402
-from camera import sensor_size                                      # noqa: E402
+from PatchingLib import FeaturesMap, QueryPatchContainer             # noqa: E402
+from Store import FeatureMapCache                                   # noqa: E402
+from CpuBudget import CpuBudget                                     # noqa: E402
+from camera import render_spec                                      # noqa: E402
+from ReadGeometry import sensor_size                                # noqa: E402
+from config import DomainGapConfig                                  # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names             # noqa: E402
 from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
                          SamplerConfig, TileSampler)
+from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
 from Cache import cache_root, job_name                               # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
@@ -65,7 +71,7 @@ from ReadGeometry import ReadSpec                                   # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import (                     # noqa: E402
-    SlidingWinSimRot, SlidingWinSimRotConfig)
+    SlidingWinSimRot, SlidingWinSimRotConfig, _sim_tensors)
 from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer                            # noqa: E402
 
 
@@ -95,9 +101,17 @@ def parse_stages(text: str) -> Tuple[int, ...]:
 # ── steps shared by every --stages combination ────────────────────────────────
 
 def pick_fov(args, masks) -> None:
-    """Set args.wsi / x / y / mpp: a slide of `--dataset` and one FoV drawn on
-    it at `--rung`, as Stage1MppBench draws its FoVs (a TileSampler draw for
-    the query camera, cached). `x, y` is the FoV's own top-left."""
+    """Set args.wsi / x / y / mpp: a slide of `--dataset` and one FoV at
+    `--rung` out of Stage1MppBench's own draw. The SamplerConfig and the plan
+    below are written out with the values `bench_stage1_mpp --overlap` uses at
+    its defaults (--n-per-rung 20, --seed, the DsLadder rungs, and the
+    bench's camera `photo_camera`: the query sensor with `DomainGapConfig`'s
+    own gap, placed for its rotated read), so their key is the bench's and the
+    cached draw is read, not redrawn. If the two ever differ, the result is
+    still right -- the test just draws a separate set. `x, y` is the FoV's own
+    top-left. Only the positions follow the bench: the query itself stays a
+    plain read (`crop_query`), since stage 3's error is exact only without
+    rotation and lens."""
     names = list_names(dataset=args.dataset, split_job=args.split_cache_job)
     name = args.slide or random.Random(args.pick_seed).choice(names)
     entry = locate(name, dataset=args.dataset, split_job=args.split_cache_job)
@@ -105,15 +119,20 @@ def pick_fov(args, masks) -> None:
         args.sampler_cache_job or job_name('TestLocaScopeStages'), 'sampler')
     sampler = TileSampler.cached(
         entry.path,
-        SamplerConfig(n_per_rung=1, seed=args.pick_seed,
-                      richness=RichnessConfig(), overlap=OverlapConfig()),
-        PlanSpec('ladder', (args.rung,),
-                 camera=ReadSpec(*sensor_size(args.ratio, args.mpixels))),
+        SamplerConfig(n_per_rung=20, seed=args.seed,
+                      richness=RichnessConfig(),
+                      overlap=OverlapConfig(max_overlap_ratio=0.5,
+                                            overlapping_share=1.0,
+                                            jitter_cap=1.0)),
+        PlanSpec('ladder', tuple(DEFAULT_RUNGS),
+                 camera=render_spec(DomainGapConfig(wh_ratio=args.ratio,
+                                                    MPixels=args.mpixels),
+                                    sensor_size(args.ratio, args.mpixels))),
         sampler_root, masks=masks)
-    drawn = list(sampler)
-    if not drawn:
-        sys.exit(f'[FAIL] no FoV fits {name} at rung {args.rung:g}')
-    meta = drawn[0].meta
+    at_rung = [s.meta for s in sampler if float(s.meta.ds) == args.rung]
+    if not at_rung:
+        sys.exit(f'[FAIL] the draw holds no FoV of {name} at rung {args.rung:g}')
+    meta = random.Random(args.pick_seed).choice(at_rung)
     args.wsi = str(entry.path)
     args.x, args.y = int(meta.fov_rect[0]), int(meta.fov_rect[1])
     args.mpp = SafeSlide(entry.path).base_mpp * float(meta.ds)
@@ -164,13 +183,104 @@ def run_stage2(wsi, mask, query_np, estimate, args, device):
     retriever = SlidingWinSimRot(
         SlidingWinSimRotConfig(stage2_encoder_cfg(args), tile_size=args.tile,
                                        overlap=args.overlap),
-        device).build(wsi, mask)
+        device, read_workers=CpuBudget.for_job(processes=1).apply().workers
+    ).build(wsi, mask)
     cs = retriever.retrieve(query_np, estimate)
     best = cs.best
     x0, y0 = cs.origin_l0(best)
     print(f'  best=({x0}, {y0})  score={best.score:.4f}  rotation={best.rotation}  '
          f'region={best.region_index} {best.lattice}  level {cs.level}')
     return retriever, cs
+
+
+# ── --check-sims: stage 2's maps against the path they replaced ──────────────
+
+def _old_lattice_grid(fm: FeaturesMap, lattice: str) -> torch.Tensor:
+    '''FROZEN: FeaturesMap.main/overlap_feature_grid before 2026-10-06 -- one
+    copy per cell, each through __getitem__ (test_patching_lib keeps the same
+    copy for the grid alone).'''
+    g = fm.grid
+    if lattice == 'main':
+        rows, cols, flat = g.grid_rows, g.grid_cols, g.flat_index_for_main
+    else:
+        rows, cols, flat = g.overlap_rows, g.overlap_cols, g.flat_index_for_overlap
+    out = fm.features.new_empty(rows, cols, fm.feat_dim)
+    for r in range(rows):
+        for c in range(cols):
+            out[r, c] = fm[flat(r, c)]
+    return out
+
+
+def _old_sim_maps(retriever) -> dict:
+    '''FROZEN: SlidingWinSimRot.compute_sim_maps before 2026-10-06. Features
+    on the host (encoder.features() returned there), every grid arranged per
+    call from them, moved to the device, then `_sim_tensors`.'''
+    device = retriever.device
+    out = {}
+    for rot, qfm in retriever.query_features_by_rot.items():
+        q = _old_lattice_grid(FeaturesMap(qfm.grid, qfm.features.cpu()), 'main').to(device)
+        maps = []
+        for fm in retriever.wsi_features:
+            host = FeaturesMap(fm.grid, fm.features.cpu())
+            main = _old_lattice_grid(host, 'main').to(device)
+            ov = _old_lattice_grid(host, 'offset').to(device)
+            maps.append((_sim_tensors(q, main),
+                         _sim_tensors(q, ov) if ov.numel() > 0 else torch.empty(0)))
+        out[rot] = maps
+    return out
+
+
+def _same_maps(a: dict, b: dict) -> Tuple[int, int]:
+    '''(identical, compared) over every rotation x region x lattice.'''
+    same = total = 0
+    for rot in a:
+        for (am, ao), (bm, bo) in zip(a[rot], b[rot]):
+            for x, y in ((am, bm), (ao, bo)):
+                total += 1
+                same += (x.shape == y.shape and torch.equal(x.to(y.device), y))
+    return same, total
+
+
+def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
+    """Stage 2's similarity maps, every rotation x region x lattice, against
+    (a) the frozen pre-2026-10-06 path, which arranged the grids from host
+    features per call, and (b) the same retriever with its features read back
+    from a FeatureMapCache. Both must be bit-identical. The decoy: the maps at
+    rotation 0 against those at 180, which have the same shape and must differ
+    -- so an equality here is evidence the comparison compares."""
+    new = {rot: list(maps) for rot, maps in retriever.sim_maps_by_rot.items()}
+    n_regions = len(retriever.wsi_features)
+
+    old = _old_sim_maps(retriever)
+    same_old, total = _same_maps(new, old)
+    decoy = sum(torch.equal(n, o) for (n, _), (o, _) in zip(new[0], old[180])
+                if n.shape == o.shape and n.numel())
+    print(f'  frozen path : {same_old}/{total} maps identical '
+          f'({n_regions} regions x 4 rotations x 2 lattices)   '
+          f'decoy rot 0 vs 180: {decoy} identical')
+
+    with tempfile.TemporaryDirectory(
+            dir=job_result_dir('TestLocaScopeStages')) as root:
+        # verbose: a miss says why (no file, a meta field, or the geometry)
+        store = FeatureMapCache(root, getattr(wsi, '_filename', ''),
+                                retriever.encoder, mask_cfg_from_args(args))
+        store.save(retriever.wsi_features)
+        hit = store.load(retriever.regions, ds=retriever.ds, level=retriever.level,
+                         tile_size=retriever.tile_size,
+                         overlap=retriever.overlap) is not None
+        if not hit:
+            # a rebuild would re-encode on the miss and compare an encode with
+            # an encode, which says nothing about the read
+            print('  cache read  : store MISS -- not compared\n  check-sims  : FAIL')
+            return False
+        retriever.build(wsi, mask, feature_store=store)
+        retriever.retrieve(query_np, estimate)
+        cached = {rot: list(maps) for rot, maps in retriever.sim_maps_by_rot.items()}
+    same_cache, total_c = _same_maps(new, cached)
+    print(f'  cache read  : {same_cache}/{total_c} maps identical   (store hit)')
+    ok = (same_old == total and same_cache == total_c and decoy == 0)
+    print(f'  check-sims  : {"PASS" if ok else "FAIL"}')
+    return ok
 
 
 def run_stage3(wsi, query_qc, cs, args):
@@ -207,8 +317,9 @@ def main() -> int:
                     help='which slide (when --slide is not given) and which FoV')
     ap.add_argument('--mask-cache-job', default='MppRoutingHead',
                     help='whose mask cache is read')
-    ap.add_argument('--sampler-cache-job', default=None,
-                    help="whose sampler cache the FoV draw goes in; default this job's")
+    ap.add_argument('--sampler-cache-job', default='Stage1MppBench',
+                    help="whose sampler cache the FoV draw is read from; "
+                         'Stage1MppBench\'s, which this test shares')
     ap.add_argument('--split-cache-job', default=None,
                     help='whose recorded split --dataset is read from; default MakeSplit')
     ap.add_argument('--ratio',   default='45:32')
@@ -224,9 +335,13 @@ def main() -> int:
     ap.add_argument('--head',    default='')
     ap.add_argument('--samples', type=int, default=40, help='stage 1: reference tiles per level')
     ap.add_argument('--k',       type=int, default=5,  help='stage 1: KNN neighbours')
-    ap.add_argument('--seed',    type=int, default=42, help='stage 1: reference bank sampling')
+    ap.add_argument('--seed',    type=int, default=42,
+                    help="stage 1's reference bank, and the FoV draw (Stage1MppBench's --seed)")
     ap.add_argument('--padding', type=int, default=2,  help='stage 3: tiles of context around the match')
     ap.add_argument('--min-inliers', type=int, default=10)
+    ap.add_argument('--check-sims', action='store_true',
+                    help='stage 2: its maps against the frozen pre-2026-10-06 '
+                         'path and against a feature-cache read (check_sims)')
     args = ap.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -289,6 +404,11 @@ def main() -> int:
         tol_um = args.tile * retrieval_result.ds * base_mpp
         print(f'  distance to GT: {ret_err:.1f} um  (tolerance {tol_um:.1f} um)')
         ok &= ret_err <= tol_um
+        if args.check_sims:
+            print('\n[2b] check-sims...')
+            t0 = time.perf_counter()
+            ok &= check_sims(retriever, wsi, mask, query_np, estimate, args)
+            timings['2b. check sims'] = time.perf_counter() - t0
 
     if 3 in args.stages:
         print('\n[3] SIFT + RANSAC...')

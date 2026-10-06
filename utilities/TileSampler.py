@@ -360,20 +360,6 @@ def with_camera(plan: RungPlan, camera) -> RungPlan:
                                fov_h_l0=fh if rect else 0)
 
 
-def camera_plan(level_downsamples, camera, ds: float, level: int) -> RungPlan:
-    """The one 'F' rung a single camera shoots: footprint `long_side * ds`,
-    read at `level` (the camera's own choice), placed with `with_camera`.
-    What `generator.FovSupply` hands its sampler."""
-    from ReadGeometry import level_px                           # noqa: PLC0415
-    tile = camera.long_side
-    level_ds = float(level_downsamples[level])
-    plan = RungPlan(rung_ds=float(ds), level=int(level), level_ds=level_ds,
-                    shrink=float(ds) / level_ds, tile_size=tile,
-                    read_size=level_px(tile, ds, level_ds),
-                    footprint_l0=float(tile) * float(ds), stack_kind='F')
-    return with_camera(plan, camera)
-
-
 def _scanned_rect(mask) -> Tuple[int, int, int, int]:
     """(x0, y0, x1, y1) level-0: the part of the slide that HAS image data.
 

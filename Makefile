@@ -1,8 +1,7 @@
 .PHONY: clean clean-results clean-logs clean-cache clean-job list-jobs lint
 
 # Runs write OUTSIDE the checkout. OUTPUT_ROOT is the repo's parent, matching
-# utilities/_paths.py -- the one definition on the python side, which
-# query_sim/cli/__init__.py re-exports rather than deriving again -- and it is
+# utilities/_paths.py -- the one definition on the python side -- and it is
 # overridable the same way. Keeping results out of the working tree
 # means an `rm -rf` of the checkout, a `git clean`, or a fresh clone cannot
 # take 60 GB of feature stores with them, and nothing under result/ can be

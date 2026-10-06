@@ -66,11 +66,13 @@ else:
 # this script then runs utilities/cli/metrics/analyze_stage1_metrics.py on it,
 # which owns the CSV schema and the scoring.
 #
-# CACHES: masks and draws go to result/cache/Stage1MppBench_{mask,sampler}/.
-# To reuse another job's instead (say the masks ExtractPreTiles already made):
-#   MASK_CACHE_JOB=ExtractPreTiles SAMPLER_CACHE_JOB=ExtractPreTiles sbatch ...
+# CACHES: masks are read from MppRoutingHead's cache; the FoV draw is
+# Stage1MppBench's whatever the job name, so a smoke, a timing run and the
+# stages test (TestLocaScopeStages) read the FoVs the full run scores -- one
+# draw, one key, as long as STAGE1_N_PER_RUNG, SEED and OVERLAP are left alone.
+# A smoke scores a subset of it with FOV_PER_RUNG rather than drawing others.
 MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # its masks cover every val slide and the first test slides; "" = this job's own
-SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB:-}"
+SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB-Stage1MppBench}"   # "" = this job's own
 TILE="${TILE:-256}"
 MPIXELS="${MPIXELS:-1.475}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
@@ -145,8 +147,10 @@ STAGE1_ARGS=(--seg "$SEG")
 [ -n "$MASK_CACHE_JOB" ] && STAGE1_ARGS+=(--mask-cache-job "$MASK_CACHE_JOB")
 [ -n "$SAMPLER_CACHE_JOB" ] && STAGE1_ARGS+=(--sampler-cache-job "$SAMPLER_CACHE_JOB")
 [ "${NATIVE_ONLY:-0}" = "1" ] && STAGE1_ARGS+=(--native-only)
-# avoids coarse rungs (huge footprint, little disjoint room) coming up short
-[ "${OVERLAP:-0}" = "1" ] && STAGE1_ARGS+=(--overlap)
+# avoids coarse rungs (huge footprint, little disjoint room) coming up short;
+# on by default since the val and test runs both use it (OVERLAP=0 turns it off)
+[ "${OVERLAP:-1}" = "1" ] && STAGE1_ARGS+=(--overlap)
+[ -n "${FOV_PER_RUNG:-}" ] && STAGE1_ARGS+=(--fov-per-rung "$FOV_PER_RUNG")
 [ -n "$KNN_ENCODER" ] && STAGE1_ARGS+=(--knn-encoder $KNN_ENCODER)
 [ -n "$CLASSIFIER_WEIGHTS" ] && STAGE1_ARGS+=(--classifier-weights $CLASSIFIER_WEIGHTS)
 [ -n "$PROTOTYPE_WEIGHTS" ] && STAGE1_ARGS+=(--prototype-weights $PROTOTYPE_WEIGHTS)

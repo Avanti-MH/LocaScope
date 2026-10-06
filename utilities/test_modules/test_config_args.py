@@ -44,7 +44,6 @@ from TileSampler import (InheritConfig, OverlapConfig,         # noqa: E402
                          RichnessConfig, SamplerConfig, add_sampler_args,
                          sampler_from_args)
 from config import DomainGapConfig                             # noqa: E402
-from generator import add_domain_gap_args, domain_gap_from_args  # noqa: E402
 
 _RESULTS = []
 
@@ -249,11 +248,11 @@ def t_the_sampler_has_no_tile_flag():
 def t_camera_flags():
     base = DomainGapConfig()
     ap = _ap()
-    add_domain_gap_args(ap, base, skip=('query_mpp',))
+    C.add_config_args(ap, base, 'camera', skip=('query_mpp',))
     args = ap.parse_args(['--camera-rotation-choices', '0', '90',
                           '--camera-scale-range', '0.9', '1.1',
                           '--no-camera-photometric', '--camera-noise-sigma', '0'])
-    got = domain_gap_from_args(args, base, skip=('query_mpp',))
+    got = C.config_from_args(args, base, 'camera', skip=('query_mpp',))
     assert got.rotation_choices == (0, 90) and got.scale_range == (0.9, 1.1)
     assert got.photometric is False and got.noise_sigma == 0.0
     assert got.jpeg_quality == base.jpeg_quality
@@ -267,10 +266,10 @@ def t_camera_flags():
 def t_camera_scale_range_with_low_above_high_is_refused():
     base = DomainGapConfig()
     ap = _ap()
-    add_domain_gap_args(ap, base)
+    C.add_config_args(ap, base, 'camera')
     try:
-        domain_gap_from_args(ap.parse_args(['--camera-scale-range', '1.2', '0.9']),
-                             base)
+        C.config_from_args(ap.parse_args(['--camera-scale-range', '1.2', '0.9']),
+                           base, 'camera')
     except ValueError:
         return
     raise AssertionError('a scale range with low above high was accepted')

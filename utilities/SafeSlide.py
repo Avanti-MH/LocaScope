@@ -77,10 +77,9 @@ Size = Tuple[int, int]
 # Colour openslide itself falls back to when a slide declares no background.
 _DEFAULT_BACKGROUND = 'ffffff'
 
-# Pyramid downsamples are derived from rounded level dimensions, so a "4x" level
-# reports 4.00003 as readily as 4.0. Anything comparing a requested downsample
-# against them needs slack, or it lands a level away over a part in 1e5.
-_LEVEL_REL_TOL = 1e-3
+# The slack a requested downsample is compared against the pyramid with --
+# ReadGeometry's, the one definition (a copy of its own until 2026-10-06).
+from ReadGeometry import LEVEL_REL_TOL as _LEVEL_REL_TOL   # noqa: E402
 
 
 class SafeSlide(openslide.OpenSlide):

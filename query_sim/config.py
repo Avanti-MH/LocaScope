@@ -1,6 +1,6 @@
 """Unified microscope-FOV simulation config.
 
-Every knob is expressed as a `(lo, hi)` range so `generator.generate()` can
+Every knob is expressed as a `(lo, hi)` range so each photo (`Render`) can
 sample per FOV. For a fixed / deterministic run, set `lo == hi`.
 
 `pipeline.simulate_microscope_photo` treats a config as either:
@@ -14,7 +14,7 @@ from typing import Tuple
 
 @dataclass
 class DomainGapConfig:
-    # ── Source (sensor shape, camera.sensor_size) ─────────────────────────────
+    # ── Source (sensor shape, ReadGeometry.sensor_size) ─────────────────────────────
     wh_ratio: str = '4:3'
     MPixels: float = 12.0
     query_mpp: float = 0.25

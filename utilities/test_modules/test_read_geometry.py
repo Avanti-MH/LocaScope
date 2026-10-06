@@ -33,7 +33,7 @@ setup_import_paths()
 
 from DsLadder import RungPlan                                    # noqa: E402
 from ReadGeometry import (ReadSpec, FovGeometry, ReadRect,     # noqa: E402
-                          level_for, level_px, reserve_margin)
+                          SENSOR_MARGIN, level_for, level_px, reserve_margin)
 from TileSampler import PlanSpec, _margin_of, with_camera       # noqa: E402
 
 RUNGS = (1, 2, 4, 8, 16, 32)
@@ -41,7 +41,6 @@ RUNGS = (1, 2, 4, 8, 16, 32)
 #: arbitrary query magnification, and one whose products are never integers
 DS_AWKWARD = (4.00014, 3.9, 7.3)
 TILE = 256
-SENSOR_MARGIN = 64
 
 _RESULTS = []
 

@@ -9,7 +9,7 @@ Run through `jobscripts/TestReadPath.sh`, which resolves slide names and loops.
 This is `test_camera_output_to_level0.py` and `test_augment_equivalence.py`
 in one place, named after the module they test. Placing FoVs left Camera for
 `generator.FovSupply` on 2026-10-03, and its checks (the former `fov` section)
-went with it to `test_generator.py`.
+went with it to `test_generator.py` (`test_fov_supply.py` since 2026-10-06).
 Each section runs on its own and the exit status is the worst of them -- the old
 map check returned on its first failure and never reached the seed check.
 
@@ -50,7 +50,8 @@ setup_import_paths()
 import numpy as np                                               # noqa: E402
 import openslide                                                 # noqa: E402
 
-from camera import Render, SENSOR_MARGIN                         # noqa: E402
+from camera import Render                                        # noqa: E402
+from ReadGeometry import SENSOR_MARGIN                           # noqa: E402
 from ReadGeometry import ReadSpec                                # noqa: E402
 from SlideReader import SlideReader                              # noqa: E402
 from config import DomainGapConfig                               # noqa: E402

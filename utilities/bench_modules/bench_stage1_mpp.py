@@ -8,7 +8,7 @@
 
 Every stage-1 method, each run on the SAME synthetic FoVs (drawn once per
 slide, from the RECORDED test split) across --n-wsi slides of every
---datasets, and shown the same photo of each (`fov_rng`):
+--datasets, and shown the same photo of each (`FovSupply.photo`):
 
     KnnEstMpp          one per --knn-encoder
     ClassifierEstMpp   one per --classifier-weights checkpoint (MppRoutingHead)
@@ -44,7 +44,6 @@ import csv
 import hashlib
 import json
 import math
-import random
 import os
 import resource
 import sys
@@ -73,14 +72,24 @@ from training.MppRoutingHead.Datasets import (                      # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
 from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
-                         SamplerConfig, TileSampler)
+                         SamplerConfig)
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
-from camera import sensor_size                                       # noqa: E402
+from camera import Render, render_spec                               # noqa: E402
+from ReadGeometry import sensor_size                                # noqa: E402
+from FovSupply import FovSupply                                      # noqa: E402
+from config import DomainGapConfig                                  # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
-from ReadGeometry import ReadSpec                                 # noqa: E402
-from simulate_microscope_photo import simulate_microscope_photo       # noqa: E402
 
 JOB_NAME = 'Stage1MppBench'
+
+
+def photo_camera(args) -> DomainGapConfig:
+    """The microscope every FoV of this bench is photographed with: the query
+    sensor (--ratio, --mpixels) and `DomainGapConfig`'s own domain gap. The
+    same config places the positions (`render_spec`) and renders them
+    (`Render`), so a FoV is read with the headroom its rotation needs.
+    `test_locascope_stages.pick_fov` builds the same one to read this draw."""
+    return DomainGapConfig(wh_ratio=args.ratio, MPixels=args.mpixels)
 
 
 def write_csv(rows, path) -> None:
@@ -127,7 +136,12 @@ def _sampling_recipe_id(args) -> str:
         # it and a test run with it shared one name, and the test analysis
         # read thresholds fitted on another draw. Appended only when set, so
         # a run without it keeps the name it always had.
-        + (['overlap=True'] if args.overlap else []))
+        + (['overlap=True'] if args.overlap else [])
+        # A subset of the same draw: the first k positions of every rung.
+        + ([f'fov_per_rung={args.fov_per_rung}'] if args.fov_per_rung else [])
+        # The photos are `Render`'s since 2026-10-06, placed for its rotated
+        # read: other FoVs and other pixels, so not the files made before.
+        + ['photo=render'])
     sampler_id = hashlib.sha256(parts.encode()).hexdigest()[:8]
     mask_cfg = MASK_RECIPES[args.seg]
     # split last and outside the hash: a val and a test run of one recipe
@@ -347,14 +361,6 @@ def fov_stats(probs: torch.Tensor, classes_ds, gt_ds: float) -> dict:
     return out
 
 
-def fov_rng(seed: int, dataset: str, wsi_name: str, pos: dict) -> random.Random:
-    """The photo simulation's rng for one FoV, the same for every method:
-    seeded by the bench seed and the FoV's identity, through sha256 because
-    Python's hash() of a str changes per process."""
-    key = f'{seed}|{dataset}|{wsi_name}|{pos["x"]}|{pos["y"]}|{pos["rung"]!r}'
-    return random.Random(int(hashlib.sha256(key.encode()).hexdigest()[:16], 16))
-
-
 def result_row(fov: dict, result, vote: str) -> dict:
     """One csv row: the FoV and method columns, the vote rule ('' for a method
     that does not vote), and the EstMppResult."""
@@ -448,64 +454,72 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     sampler_cfg = SamplerConfig(n_per_rung=args.n_per_rung,
                                 seed=args.seed, richness=RichnessConfig(),
                                 overlap=_overlap_cfg(args.overlap))
-    # The positions are placed for the camera that photographs them: this
-    # bench's query FoV (--ratio, --mpixels), cropped without rotation --
-    # `simulate_microscope_photo` turns the crop itself. Placing a 256 px tile
-    # and then reading a 1440 px FoV there, as it did before 2026-10-03, put
-    # the photographed rectangle partly outside the tissue the sampler scored.
-    camera = ReadSpec(*sensor_size(args.ratio, args.mpixels))
+    # The positions are placed for the camera that photographs them
+    # (`photo_camera`): its sensor, and -- since it rotates -- the bounding
+    # square and sensor margin it reads, so the rotated read stays on the
+    # tissue the sampler scored. Placing a 256 px tile and then reading a
+    # 1440 px FoV there, as it did before 2026-10-03, put the photographed
+    # rectangle partly outside it.
+    cam_cfg = photo_camera(args)
+    camera = render_spec(cam_cfg, sensor_size(args.ratio, args.mpixels))
     plan = (PlanSpec('native', camera=camera) if args.native_only
             else PlanSpec('ladder', tuple(DEFAULT_RUNGS), camera=camera))
     slide_cache = {}
     for dataset_id, names in slides_by_dataset.items():
         for wsi_name in names:
             entry = locate(wsi_name, dataset=dataset_id)
-            sampler = TileSampler.cached(
-                entry.path, sampler_cfg, plan, caches.sampler_root,
-                masks=caches.masks,
-                report_dir=out_dir / 'sampler_reports' / dataset_id.replace('/', '_'))
+            # one microscope per slide, every rung through its own objective;
+            # the ladder draw through the sampler cache (FovSupply.cached)
             wsi = SafeSlide(entry.path)
+            supply = FovSupply.cached(
+                Render(SlideReader(wsi), cam_cfg, ds=1.0), plan, sampler_cfg,
+                caches.sampler_root, masks=caches.masks,
+                report_dir=out_dir / 'sampler_reports' / dataset_id.replace('/', '_'))
+            sampler = supply.sampler
             mask, _ = caches.masks.mask(wsi)
-            # `RungPlan.shrink` says which rungs are native (1.0) -- read off
-            # this slide's own plans rather than re-derived.
-            native_by_rung = {float(p.rung_ds): float(p.shrink) == 1.0
+            # `RungPlan.is_native`: the pyramid has the rung within
+            # LEVEL_REL_TOL. Until 2026-10-06 this was `shrink == 1.0` exactly,
+            # which called BRACS's 4.00003 / 16.0017 / 32.006 levels resampled.
+            native_by_rung = {float(p.rung_ds): p.is_native
                               for p in plan.plans_for(wsi)}
             # x, y are the FoV's own top-left (`fov_rect`): what is cropped,
             # centred in the footprint the sampler placed
             positions = [dict(x=int(s.meta.fov_rect[0]), y=int(s.meta.fov_rect[1]),
                               rung=float(s.meta.ds),
-                              native=native_by_rung.get(float(s.meta.ds), False))
+                              native=native_by_rung.get(float(s.meta.ds), False),
+                              meta=s.meta)
                          for s in sampler]
+            if args.fov_per_rung:
+                kept, seen = [], {}
+                for p in positions:
+                    seen[p['rung']] = seen.get(p['rung'], 0) + 1
+                    if seen[p['rung']] <= args.fov_per_rung:
+                        kept.append(p)
+                positions = kept
             print(f'  {wsi_name}: {len(positions)} positions   (mask '
                  f'{"reused" if sampler.cache_info["mask_hit"] else "segmented"}, '
                  f'draw {"reused" if sampler.cache_info["samples_hit"] else "drawn"})')
-            slide_cache[(dataset_id, wsi_name)] = (mask, positions)
-            wsi.close()
+            slide_cache[(dataset_id, wsi_name)] = (mask, positions, supply)
     caches.masks.close()
     print(f'  [after segmentation] {_mem_snapshot(device)}')
 
     # Every photo, made ONCE. The read and the domain-gap simulation depend on
-    # the FoV alone -- its rng is the FoV's own (`fov_rng`) -- so every method
+    # the FoV alone -- its rng is its position's (`FovSupply.photo`) -- so every method
     # is shown the same photos either way; made inside the method loop they
     # were redone per method, and that was ~60% of a method's time
     # (Stage1MppTiming, 2026-10-06). 816 photos of 1440x1024 are ~3.6 GB.
+    #
+    # Rendered by `Render` (ARCHITECTURE.md: position -> read -> render), one
+    # objective per rung. Until 2026-10-06 the bench read the bare sensor
+    # rectangle and handed it to `simulate_microscope_photo`, so a 90/270
+    # turn kept 1440x1024 and filled two 208 px bands by reflection, a
+    # scale < 1 padded by reflection, and the lens ops had no margin.
     t0 = time.perf_counter()
-    photo = ReadSpec(*sensor_size(args.ratio, args.mpixels))
     photos_by_slide = {}
-    for (dataset_id, wsi_name), (_, positions) in slide_cache.items():
-        wsi = SafeSlide(locate(wsi_name, dataset=dataset_id).path)
-        # the photo, straight off the slide (lanczos, as the microscope
-        # simulation always read), then the domain gap
-        reader = SlideReader(wsi)
-        made = []
-        for pos in positions:
-            image = reader.read(pos['x'], pos['y'], photo, pos['rung'])
-            if image is None:
-                continue
-            made.append((pos, simulate_microscope_photo(
-                image, rng=fov_rng(args.seed, dataset_id, wsi_name, pos))))
-        photos_by_slide[(dataset_id, wsi_name)] = made
-        wsi.close()
+    for (dataset_id, wsi_name), (_, positions, supply) in slide_cache.items():
+        photos_by_slide[(dataset_id, wsi_name)] = [
+            (pos, supply.photo(pos['meta'])[0]) for pos in positions]
+        supply.microscope.wsi.close()
     print(f'  [photos] {sum(len(v) for v in photos_by_slide.values())} made once '
           f'in {time.perf_counter() - t0:.0f}s  [{_mem_snapshot(device)}]',
           flush=True)
@@ -531,7 +545,7 @@ def run_stage1_compare(args, out_dir: Path) -> int:
         for dataset_id, names in slides_by_dataset.items():
             for wsi_name in names:
                 entry = locate(wsi_name, dataset=dataset_id)
-                mask, _ = slide_cache[(dataset_id, wsi_name)]
+                mask = slide_cache[(dataset_id, wsi_name)][0]
                 wsi = SafeSlide(entry.path)
 
                 t0 = time.perf_counter()
@@ -670,6 +684,12 @@ def main() -> int:
     parser.add_argument('--n-per-rung', type=int, default=20,
                         help='query positions per rung per '
                              'slide')
+    parser.add_argument('--fov-per-rung', type=int, default=0,
+                        help='score only the first k positions of every rung '
+                             'of the draw (0: all). A smoke run reads the SAME '
+                             'cached draw as the full run and scores a subset '
+                             'of it, instead of drawing other FoVs with a '
+                             'smaller --n-per-rung')
     # --seg / --mask-cache-job / --sampler-cache-job / --split-cache-job.
     add_cache_args(parser)
     parser.add_argument('--overlap', action='store_true',

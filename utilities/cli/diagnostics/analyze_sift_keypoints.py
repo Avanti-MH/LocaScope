@@ -53,7 +53,7 @@ sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'query_sim'))
 from _paths import job_result_dir                                   # noqa: E402
 
-from camera import sensor_size                       # noqa: E402
+from ReadGeometry import sensor_size                 # noqa: E402
 from ReadGeometry import ReadSpec                    # noqa: E402
 from SlideReader import SlideReader                  # noqa: E402
 

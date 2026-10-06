@@ -27,15 +27,30 @@ source jobscripts/_env.sh
 #    grid      SlideReader.read_grid per level (tiles/s, CpuBudget workers)
 #    capture   training render_row, CAMERA_FULL (rows/s)
 #    tiles     SlideReader.read_samples, native reference tiles (tiles/s)
-#    fov       FovSupply.bank, the window bench's still FoV (shots/s)
+#    fov       FovSupply, the window bench's still FoV (shots/s)
+#    pca       the UNI2-PCA segmenter's reads against the retired WsiTileLoader
+#              (tiles/s, and PASS only if every tile is identical); not in the
+#              default FLOWS, since it is a comparison, not a timing
+#    s1photo   bench_stage1_mpp's Render photo against the frozen sensor read
+#              it replaced: PASS only if identical with no gap; the reflected
+#              side bands of a 92 degree turn; photos/s for both. Not default
+#    phase     how openslide samples a level (floor / round / bilinear), per
+#              slide at PHASE_LEVELS, on MASK_CACHE_JOB's hest masks
+#    origins   frac(region origin / ds) over MASK_CACHE_JOB's cached masks,
+#              ORIGIN_PER_DATASET slides per dataset; no slide list
+#    (phase and origins were DiagContainerRetire.sh until 2026-10-06)
 #  Best of REPEATS. Run it before and after a change to the read path and
 #  compare the two speed.csv files. Correctness is TestReadPath.sh's.
 #
 #    sbatch jobscripts/DiagReadExp.sh
 #    FLOWS="grid" GRID_LEVELS="1" sbatch --job-name=DiagReadExpGridL1 jobscripts/DiagReadExp.sh
+#    FLOWS="pca" sbatch --job-name=DiagReadExpPca jobscripts/DiagReadExp.sh
+#    FLOWS="s1photo" sbatch --job-name=DiagReadExpS1Photo jobscripts/DiagReadExp.sh
+#    FLOWS="phase origins" sbatch --job-name=DiagReadPhase jobscripts/DiagReadExp.sh
 #
-#  Writes nothing to any cache. Output: log/DiagReadExp/<job>,
-#  result/DiagReadExp/<job>/speed.csv
+#  Writes nothing to any cache but MASK_CACHE_JOB's mask cache (phase segments
+#  a slide it lacks). Output: log/DiagReadExp/<job>,
+#  result/DiagReadExp/<job>/{speed,phase,origins}.csv
 #  (The log directory must exist before sbatch: mkdir -p log/DiagReadExp.)
 # =============================================================================
 SLIDES="${SLIDES:-BRACS_1228 S1104233,G7E,110208}"
@@ -43,13 +58,18 @@ FLOWS="${FLOWS:-grid capture tiles fov}"
 N="${N:-6}"
 GRID_LEVELS="${GRID_LEVELS:-0 1}"
 REPEATS="${REPEATS:-2}"
+PHASE_LEVELS="${PHASE_LEVELS:-1 2 3}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-MppRoutingHead}"
+ORIGIN_PER_DATASET="${ORIGIN_PER_DATASET:-8}"
 
 JOB="${SLURM_JOB_NAME:-DiagReadExp}"
 RES_DIR=/work/u26130998/result/DiagReadExp/$JOB
 mkdir -p "$RES_DIR"
 
 ARGS=(--slides $SLIDES --flows $FLOWS --n "$N" --grid-levels $GRID_LEVELS
-      --repeats "$REPEATS" --out "$RES_DIR")
+      --repeats "$REPEATS" --out "$RES_DIR"
+      --phase-levels $PHASE_LEVELS --mask-cache-job "$MASK_CACHE_JOB"
+      --origin-per-dataset "$ORIGIN_PER_DATASET")
 [ -n "${BLOCK_ROWS:-}" ] && ARGS+=(--block-rows "$BLOCK_ROWS")
 
 echo "======== DiagReadExp ========"

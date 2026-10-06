@@ -113,10 +113,10 @@ from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig,                 # noqa: E402
                          SamplerConfig, TileSampler)
 from DsLadder import DEFAULT_RUNGS, DsLadder                        # noqa: E402
-from camera import sensor_size                                       # noqa: E402
+from ReadGeometry import sensor_size                                 # noqa: E402
 from ReadGeometry import ReadSpec                                    # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
-from simulate_microscope_photo import simulate_microscope_photo       # noqa: E402
+from pipeline import simulate_microscope_photo                        # noqa: E402
 
 
 def write_csv(rows, path) -> None:
@@ -1454,7 +1454,8 @@ def run_sampler_routing(args, out_dir: Path) -> int:
     samples = list(sampler)
     ref_images = SlideReader(wsi, resize='area').read_samples(
         [samples[i] for i in ref_indices], ReadSpec(args.tile, args.tile))
-    ref_features = encoder(ref_images)
+    # numpy from here on (the SVD, the KNN labels): moved to the host once
+    ref_features = encoder(ref_images).cpu()
     ref_ds = ds_of[ref_indices]
     ref_mpp = wsi.base_mpp * ref_ds
     level_mpp_values = np.array(sorted({float(m) for m in ref_mpp}))
@@ -1498,7 +1499,7 @@ def run_sampler_routing(args, out_dir: Path) -> int:
         qc = QueryPatchContainer(photo)
         qc.extract_all(args.tile, overlap=True)
         qfm = qc.to_features(encoder)
-        query_patch_feats.append(torch.stack(list(qfm.iter_main_features())))
+        query_patch_feats.append(torch.stack(list(qfm.iter_main_features())).cpu())
         query_ds.append(ds)
     if len(query_patch_feats) < query_mask.sum():
         print(f'  {int(query_mask.sum()) - len(query_patch_feats)} query crop(s) '

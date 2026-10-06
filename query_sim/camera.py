@@ -20,9 +20,10 @@ The instance is called `camera` everywhere it is used.
 A Render decides what a FoV LOOKS like: the domain gap, its reproducibility,
 and the ground truth that inverts its geometry (`output_to_level0`). It reads
 nothing itself -- the pixels come from its `SlideReader`, at its spec -- and
-knows no mask. WHERE the FoVs are is `generator.FovSupply(camera, mask, ...)`.
-A read with no effects is not a renderer's job: `reader.read(...)` (reference
-tiles, pre-tiles, support tiles; `tile_spec`).
+knows no mask. WHERE the FoVs are is a `TileSampler` draw; `FovSupply(camera,
+mask, ...)` strings the draw, the read and this render together. A read with
+no effects is not a renderer's job: `reader.read(..., ReadSpec(t, t))`
+(reference tiles, pre-tiles, support tiles).
 
 MAGNIFICATION IS A DOWNSAMPLE. A Render is built at `ds` (relative to the
 slide's own level 0) or, failing that, at `cfg.query_mpp / base_mpp`, and is
@@ -43,7 +44,7 @@ import math
 import os
 import random
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -55,19 +56,11 @@ if _UTILITIES not in sys.path:
     sys.path.insert(0, _UTILITIES)
 
 from config      import DomainGapConfig                   # noqa: E402
-from pipeline    import simulate_with_gt, SENSOR_MARGIN   # noqa: E402
-from ReadGeometry import FovGeometry, ReadSpec           # noqa: E402
+from pipeline    import simulate_with_gt                  # noqa: E402
+from ReadGeometry import (FovGeometry, ReadSpec, SENSOR_MARGIN,  # noqa: E402
+                          sensor_size)
 from SafeSlide   import SafeSlide                        # noqa: E402
 from SlideReader import SlideReader                      # noqa: E402
-
-
-def sensor_size(wh_ratio: str, MPixels: float) -> Tuple[int, int]:
-    """`(output_w, output_h)` in px for an aspect ratio and a pixel count --
-    the sensor a Render produces. One definition, so a sampler placing for a
-    camera and the camera agree on its size."""
-    w_r, h_r = (int(v) for v in wh_ratio.split(':'))
-    factor = (MPixels * 1e6 / (w_r * h_r)) ** 0.5
-    return int(factor * w_r), int(factor * h_r)
 
 
 def rotates_for(cfg: DomainGapConfig, rotation: Optional[float] = None) -> bool:
@@ -90,27 +83,20 @@ def render_spec(cfg: DomainGapConfig, sensor: Tuple[int, int]) -> ReadSpec:
                     margin_out=SENSOR_MARGIN)
 
 
-def tile_spec(tile: int, margin_out: int = 0) -> ReadSpec:
-    """A plain `tile x tile` read, straight off the slide: reference tiles,
-    support tiles, and with `margin_out` a pre-tile around its tile."""
-    return ReadSpec(int(tile), int(tile), rotates=False, margin_out=int(margin_out))
+def photo_rng(*key) -> random.Random:
+    """The rng of ONE photo, from that photo's own identity: the same key is
+    the same domain gap, in any process, in any order, on any worker.
 
+        camera.capture_with_gt(x, y, rng=photo_rng(seed, x, y, f'{ds:g}', 0))
 
-@dataclass
-class CameraShot:
-    image:  np.ndarray   # uint8 RGB, augmented
-    gt_x:   int          # level-0 top-left of the FoV rectangle
-    gt_y:   int
-    params: dict         # augment values used for THIS shot
-    # Filled only by `generator.FovSupply`, which knows where the FoV came
-    # from; None for a shot built from a bare position.
-    bucket:         Optional[str]   = None   # richness bucket, e.g. 'bg30_50'
-    fov_background: Optional[float] = None   # the FoV's background fraction
-    origin:         Optional[str]   = None   # 'grid' | 'jitter'
-    overlap_max:    Optional[float] = None   # largest overlap with another FoV
-    draw_index:     Optional[int]   = None   # which sampler draw placed it
-    pass_index:     Optional[int]   = None   # 0 = first time this FoV is shown,
-                                             # k = its k-th repeat (fresh gap)
+    The key's parts are joined with '|'; a caller writes each the way it wants
+    it compared (a ds as `:g`, say). sha256 and not `hash()`, which Python
+    randomises per process for a str. THE ONE DEFINITION: `FovSupply` and
+    MppRoutingHead's eval render (`Datasets.render_row`) both draw through it.
+    (Three copies until 2026-10-06 -- FovSupply's, bench_stage1_mpp's
+    `fov_rng`, `Datasets._eval_seed` -- the last on 8 hex digits, not 16.)"""
+    text = '|'.join(str(k) for k in key)
+    return random.Random(int(hashlib.sha256(text.encode()).hexdigest()[:16], 16))
 
 
 class Render:

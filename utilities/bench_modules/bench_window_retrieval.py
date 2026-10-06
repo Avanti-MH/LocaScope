@@ -37,7 +37,7 @@ hand-picked slides, three levels, 100 FoVs each, top-left answers). What runs no
              takes every N-th of the slides, for N processes on N cards.
   levels     each slide's own pyramid levels up to `--max-ds` (16).
   FoVs       `--n-fov` (25) per (slide, level), placed for the camera
-             (`generator.FovSupply`, a richness mix and an overlap bound) with the
+             (`FovSupply`, a richness mix and an overlap bound) with the
              domain gap on. A level too coarse for the tissue holds no FoV and is
              skipped with the sampler's per-bucket report.
   answer     the window the query's TILE GRID covers, located by
@@ -304,13 +304,13 @@ from TissueMaskConfig import (MASK_RECIPES, MaskMaker, TissueMaskConfig,  # noqa
 from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E402
                              encoder_cfg_from_args, encoder_config,
                              encoder_names, pooling_kinds)
-from generator import (RICHNESS_PRESETS, FovSupply,               # noqa: E402
-                       add_domain_gap_args, domain_gap_from_args)
-from ConfigArgs import describe                                  # noqa: E402
+from FovSupply import FovSupply                                  # noqa: E402
+from ReadGeometry import LEVEL_REL_TOL                           # noqa: E402
+from ConfigArgs import add_config_args, config_from_args, describe  # noqa: E402
 from ConfigIdentity import ModelConfig                           # noqa: E402
 from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
-                         RichnessConfig, SamplerConfig, add_sampler_args,
+                         PlanSpec, RichnessConfig, SamplerConfig, add_sampler_args,
                          sampler_from_args)
 from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
                                            attach_baseline, frac_label, grid_table,
@@ -352,6 +352,17 @@ RICHNESS = RichnessConfig(
     bucket_frame = 'per_rung',
     floor_frame  = 'ask',
 )
+#: What `--richness` can name instead of RICHNESS (query_sim/generator.py's
+#: until 2026-10-06; this bench is the one left that offers it).
+#:   default  `RichnessConfig()`: mostly tissue-dense FoVs, a share of edges,
+#:            nothing above 85 per cent background (the production contract).
+#:   open     no floors, any FoV up to 85 per cent background, first come over
+#:            the shuffle -- what "any place with tissue" means.
+RICHNESS_PRESETS = {
+    'default': RichnessConfig(),
+    'open': RichnessConfig(floors=(0.0,) * 7,
+                           caps=(1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0)),
+}
 OVERLAP = OverlapConfig(
     step              = 0.5,        # half a FoV footprint (was grid_step 720 of 1440); 1.0 disjoint
     max_overlap_ratio = 0.5,
@@ -668,7 +679,7 @@ def gate_reduce_matches_host(patches, encoder, poolings) -> tuple:
     # this encoder's patch grid admits. Gating the wider list would raise inside
     # pooling_kinds -- with a shape message, not a "this encoder cannot do
     # grid2x2" one -- before the run that would have dropped it ever started.
-    got = {k: v.cpu() for k, v in pooled_descriptors(sample, encoder, poolings).items()}
+    got = pooled_descriptors(sample, encoder, poolings)   # on the device, as `tokens` is
     tokens = encoder.tokens(sample)
 
     worst_ratio, worst_name = math.inf, ''
@@ -1230,7 +1241,7 @@ def pick_slides(dataset_ids, n_wsi: int, seed: int, split_job=None) -> list:
 def native_levels(slide, max_ds: float) -> list:
     """The pyramid levels this slide really has, from the finest up to `max_ds`."""
     return [lv for lv, d in enumerate(slide.level_downsamples)
-            if float(d) <= max_ds * (1 + 1e-3)]
+            if float(d) <= max_ds * (1 + LEVEL_REL_TOL)]
 
 
 def region_of(regions, x0: int, y0: int, w: int, h: int):
@@ -1243,7 +1254,8 @@ def region_of(regions, x0: int, y0: int, w: int, h: int):
     return None
 
 
-def answers_for(camera, shot, region, ds: float, rows_q: int, cols_q: int) -> dict:
+def answers_for(camera, x: int, y: int, params: dict, region, ds: float,
+                rows_q: int, cols_q: int) -> dict:
     """The two grid points nearest the window the query's tile grid covers.
 
     The query is cut into `rows_q x cols_q` tiles from the top-left of the shot,
@@ -1256,10 +1268,10 @@ def answers_for(camera, shot, region, ds: float, rows_q: int, cols_q: int) -> di
     lens distortion and the stage shift are not inverted (see its docstring),
     and the defaults here switch all three off.
     """
-    rot = float(shot.params['rot_deg'])
-    scale = float(shot.params['scale'])
+    rot = float(params['rot_deg'])
+    scale = float(params['scale'])
     cx0, cy0 = camera.output_to_level0(
-        shot.gt_x, shot.gt_y, cols_q * TILE / 2.0, rows_q * TILE / 2.0,
+        x, y, cols_q * TILE / 2.0, rows_q * TILE / 2.0,
         rot_deg=rot, scale=scale)
     cx_n = (cx0 - region.x) / ds
     cy_n = (cy0 - region.y) / ds
@@ -1360,13 +1372,17 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     seed and its own resolution."""
     ds = float(slide.level_downsamples[level])
     seed = sampler_cfg.seed + level
-    camera = Render(SlideReader(slide),
-                    dataclasses.replace(camera_cfg, query_mpp=slide.base_mpp * ds),
-                    seed=seed)
-    supply = FovSupply(camera, mask, dataclasses.replace(sampler_cfg, seed=seed))
+    camera = Render(SlideReader(slide), camera_cfg, ds=ds, seed=seed)
+    # the level's own rung, placed for this camera; one supply per (slide,
+    # level) because a level is this bench's unit of work and of resume
+    plan = PlanSpec('ladder', (ds,), camera=camera.spec)
+    supply = FovSupply(camera, plan, dataclasses.replace(sampler_cfg, seed=seed),
+                       mask)
     try:
-        bank = supply.bank()
+        bank = list(supply)                 # (meta, image, params), one per position
     except RuntimeError as exc:
+        if 'No FoV position' not in str(exc):
+            raise
         # No region holds a FoV this size at this level -- a coarse level on a
         # small tissue section. Not an error: say so and say what was seen.
         print(f'  L{level} (ds {ds:g}): no FoV position -- skipped\n    '
@@ -1383,21 +1399,23 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     grids = region_grids(regions, ds=ds, level=lv, tile_size=TILE, overlap=True)
     valid, n_no_region, n_no_window = [], 0, 0
     for fov_id, shot in enumerate(bank):
-        i = region_of(regions, shot.gt_x, shot.gt_y, camera.rect_w_l0,
+        meta, _, params = shot
+        gx, gy = meta.fov_rect[0], meta.fov_rect[1]
+        i = region_of(regions, gx, gy, camera.rect_w_l0,
                       camera.rect_h_l0)
         if i is None:
             n_no_region += 1
             continue
-        found = answers_for(camera, shot, regions[i], ds, rows_q, cols_q)
+        found = answers_for(camera, gx, gy, params, regions[i], ds, rows_q, cols_q)
         if not window_exists(grids[i], found, rows_q, cols_q):
             n_no_window += 1
             continue
-        if float(shot.params['rot_deg']) % 360 == 0 and float(shot.params['scale']) == 1.0:
+        if float(params['rot_deg']) % 360 == 0 and float(params['scale']) == 1.0:
             # The one place this arithmetic can be checked against something
             # else: an upright, unscaled shot has its window at the FoV's own
             # top-left. If the centre mapping is wrong it is wrong here first.
-            want_x = (shot.gt_x - regions[i].x) / ds
-            want_y = (shot.gt_y - regions[i].y) / ds
+            want_x = (gx - regions[i].x) / ds
+            want_y = (gy - regions[i].y) / ds
             if abs(found['x_n'] - want_x) > 1.5 or abs(found['y_n'] - want_y) > 1.5:
                 raise AssertionError(
                     f'{stem} L{level} FoV {fov_id}: the window centre maps to '
@@ -1412,7 +1430,7 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     # QGF: the query's tile features, once per shot and pooling.
     per_base = {b: [] for b in bases}
     for _, shot, _, _ in valid:
-        container = QueryPatchContainer(shot.image)
+        container = QueryPatchContainer(shot[1])
         container.extract_all(TILE, overlap=False)   # only the main kernel is
         if (container.grid.grid_rows, container.grid.grid_cols) != (rows_q, cols_q):
             raise AssertionError(
@@ -1456,10 +1474,10 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
                     'ds': ds, 'fov_id': fov_id, 'pool': pool,
                     'd_main': round(found['d_main'], 2),
                     'd_overlap': round(found['d_overlap'], 2),
-                    'white_frac': round(float(shot.fov_background), 4),
-                    'bucket': shot.bucket,
-                    'rot_deg': float(shot.params['rot_deg']),
-                    'scale': round(float(shot.params['scale']), 4),
+                    'white_frac': round(float(shot[0].score), 4),
+                    'bucket': shot[0].bucket,
+                    'rot_deg': float(shot[2]['rot_deg']),
+                    'scale': round(float(shot[2]['scale']), 4),
                     'source': 'stream', 'grid': grid,
                     'arm': f'{name}+{score}',
                     # rank_overlap repeats rank_main ON PURPOSE: the shared
@@ -1547,6 +1565,11 @@ def config_id(args, arm_specs, configs: dict) -> str:
             # exactly what the camera reads (ReadGeometry). Parts drawn under
             # the old reserve are other FoVs and must not be resumed into.
             'fov_reserve': 'camera-read',
+            # Since 2026-10-06 the level's rung is its own ds through a PlanSpec
+            # (it was rect_w_l0 / output_w through camera_plan): the same
+            # positions, but the photo rng's key names the level's ds, so the
+            # photos are others and the old parts must not be resumed into.
+            'fov_plan': 'ladder-level-ds',
             'configs': {name: dataclasses.asdict(cfg)
                         for name, cfg in sorted(configs.items())}}
     return hashlib.sha1(json.dumps(keys, sort_keys=True, default=str)
@@ -1733,7 +1756,7 @@ def main() -> int:
     parser.add_argument('--richness', choices=sorted(RICHNESS_PRESETS),
                         default=None,
                         help='replace the CONFIG richness by a named mix '
-                             '(query_sim/generator.RICHNESS_PRESETS); `--richness-*` '
+                             '(RICHNESS_PRESETS above); `--richness-*` '
                              'flags still apply on top')
     parser.add_argument('--rotation', type=int, choices=(0, 90, 180, 270),
                         default=None, help='= --camera-rotation-choices with one '
@@ -1747,7 +1770,7 @@ def main() -> int:
     parser.add_argument('--white-max', type=float, default=None,
                         help=argparse.SUPPRESS)      # retired: use --richness
     add_sampler_args(parser, SAMPLER)
-    add_domain_gap_args(parser, CAMERA, skip=('query_mpp',))
+    add_config_args(parser, CAMERA, 'camera', skip=('query_mpp',))
     add_mask_args(parser, default=None)              # None: the CONFIG `MASK`
     parser.add_argument('--mask-cache-job', default=MASK_CACHE_JOB,
                         help='whose mask cache to read and fill: result/cache/'
@@ -1900,7 +1923,7 @@ def main() -> int:
             camera_base = dataclasses.replace(camera_base, scale_range=(
                 low if args.scale_min is None else args.scale_min,
                 high if args.scale_max is None else args.scale_max))
-        camera_cfg = domain_gap_from_args(args, camera_base, skip=('query_mpp',))
+        camera_cfg = config_from_args(args, camera_base, 'camera', skip=('query_mpp',))
 
         encoder_cfg = encoder_base
         if args.batch_size is not None:

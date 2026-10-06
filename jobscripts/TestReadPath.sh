@@ -38,7 +38,8 @@ source jobscripts/_env.sh
 #    test_camera          Render: output_to_level0 against pixels (map), two
 #                         seeds bit-identical (seed), the augment rewrites
 #                         against the legacy bodies (augment, writes a CSV)
-#    test_generator       FovSupply: placement, reproducibility, repeats
+#    test_fov_supply      FovSupply against the frozen old one (equiv), then
+#                         reproducibility, a draw passed in, a ladder (supply)
 #
 #  Two slides, two formats, on purpose: BRACS is SVS and steps 4x per level
 #  at non-integer ds (4.00003, 16.002 -- the one-read-per-region path), Ki67
@@ -65,7 +66,7 @@ CAMERA_ARGS=()
 
 echo "======== TestReadPath ========"
 echo "  slides  $SLIDES"
-echo "  levels  $LEVELS (slide reader)   $CAMERA_LEVEL (camera, generator)"
+echo "  levels  $LEVELS (slide reader)   $CAMERA_LEVEL (camera, FovSupply)"
 echo "  seed $SEED   shots $SHOTS   camera sections ${ONLY:-all}"
 status=0
 run() {
@@ -95,7 +96,7 @@ EOF
     done
     run utilities/test_modules/test_camera.py --wsi "$path" --level "$CAMERA_LEVEL" \
         --seed "$SEED" --shots "$SHOTS" "${CAMERA_ARGS[@]}"
-    run utilities/test_modules/test_generator.py --wsi "$path" --level "$CAMERA_LEVEL"
+    run utilities/test_modules/test_fov_supply.py --wsi "$path" --level "$CAMERA_LEVEL"
 done
 echo ""
 echo "======== done (exit $status) ========"
