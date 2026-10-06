@@ -137,8 +137,8 @@ def add_config_args(ap: argparse.ArgumentParser, base, prefix: str, *,
 
     The parser must be made with `allow_abbrev=False`. argparse otherwise takes any
     unique PREFIX of a flag for the flag, and these flags are prefixes of each
-    other by construction: with `query_mpp` skipped, `--camera-query-mpp 0.5` would
-    quietly set `--camera-query-mpp-jitter`. A typo that changes a different field
+    other by construction: `--camera-query-mpp 0.5` would quietly set
+    `--camera-query-mpp-jitter`. A typo that changes a different field
     and prints nothing is the failure this whole module exists to avoid."""
     if ap.allow_abbrev:
         raise ValueError('add_config_args needs a parser made with '

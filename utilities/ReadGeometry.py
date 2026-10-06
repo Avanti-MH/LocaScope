@@ -37,13 +37,14 @@ from typing import Sequence, Tuple
 LEVEL_REL_TOL = 1e-3
 
 
-def sensor_size(wh_ratio: str, MPixels: float) -> Tuple[int, int]:
-    """`(output_w, output_h)` in px for an aspect ratio and a pixel count --
-    the sensor a camera produces. One definition, so a sampler placing for a
-    camera and the camera agree on its size."""
-    w_r, h_r = (int(v) for v in wh_ratio.split(':'))
-    factor = (MPixels * 1e6 / (w_r * h_r)) ** 0.5
-    return int(factor * w_r), int(factor * h_r)
+#: The real microscope photographs' sensor, `(w, h)` px: 1440x1024 BMP. A
+#: sensor is given in whole pixels, never derived from a ratio and a pixel
+#: count, so a sampler placing for a camera and the camera cannot disagree.
+REAL_PHOTO_SENSOR = (1440, 1024)
+
+#: The encoder's input tile side, px -- what a reference tile, a query tile and
+#: a routing-head sensor all are.
+TILE_PX = 256
 
 
 #: Pixels kept outside the sensor frame while the ops that read a neighbourhood

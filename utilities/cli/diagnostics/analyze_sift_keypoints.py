@@ -53,7 +53,6 @@ sys.path.insert(0, str(_ROOT / 'utilities'))
 sys.path.insert(0, str(_ROOT / 'query_sim'))
 from _paths import job_result_dir                                   # noqa: E402
 
-from ReadGeometry import sensor_size                 # noqa: E402
 from ReadGeometry import ReadSpec                    # noqa: E402
 from SlideReader import SlideReader                  # noqa: E402
 
@@ -109,8 +108,8 @@ def load_gt_cases(gt_csv: str, images_dir: str, names: List[str]) -> List[Case]:
         # This is the un-augmented content SIFT was asked to match against.
         reader = SlideReader(r['wsi_path'])
         crop = reader.read(int(r['gt_x']), int(r['gt_y']),
-                           ReadSpec(*sensor_size(r['wh_ratio'], float(r['MPixels']))),
-                           float(r['query_mpp']) / reader.base_mpp)
+                           ReadSpec(int(r['fov_width']), int(r['fov_height'])),
+                           float(r['nominal_mpp']) / reader.base_mpp)
         reader.slide.close()
 
         cases.append(Case(

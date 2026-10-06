@@ -248,16 +248,16 @@ def t_the_sampler_has_no_tile_flag():
 def t_camera_flags():
     base = DomainGapConfig()
     ap = _ap()
-    C.add_config_args(ap, base, 'camera', skip=('query_mpp',))
+    C.add_config_args(ap, base, 'camera')
     args = ap.parse_args(['--camera-rotation-choices', '0', '90',
                           '--camera-scale-range', '0.9', '1.1',
                           '--no-camera-photometric', '--camera-noise-sigma', '0'])
-    got = C.config_from_args(args, base, 'camera', skip=('query_mpp',))
+    got = C.config_from_args(args, base, 'camera')
     assert got.rotation_choices == (0, 90) and got.scale_range == (0.9, 1.1)
     assert got.photometric is False and got.noise_sigma == 0.0
     assert got.jpeg_quality == base.jpeg_quality
     # `--camera-query-mpp` is a PREFIX of `--camera-query-mpp-jitter`: with
-    # abbreviations on, this would have set the jitter instead of failing
+    # abbreviations on, this would set the jitter instead of failing
     assert _refused(ap, ['--camera-query-mpp', '0.5']), \
         '--camera-query-mpp was taken for another flag or exists'
     assert got.query_mpp_jitter == base.query_mpp_jitter

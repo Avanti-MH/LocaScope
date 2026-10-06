@@ -57,7 +57,7 @@ from PatchingLib import FeaturesMap, QueryPatchContainer             # noqa: E40
 from Store import FeatureMapCache                                   # noqa: E402
 from CpuBudget import CpuBudget                                     # noqa: E402
 from camera import render_spec                                      # noqa: E402
-from ReadGeometry import sensor_size                                # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names             # noqa: E402
@@ -105,8 +105,7 @@ def pick_fov(args, masks) -> None:
     `--rung` out of Stage1MppBench's own draw. The SamplerConfig and the plan
     below are written out with the values `bench_stage1_mpp --overlap` uses at
     its defaults (--n-per-rung 20, --seed, the DsLadder rungs, and the
-    bench's camera `photo_camera`: the query sensor with `DomainGapConfig`'s
-    own gap, placed for its rotated read), so their key is the bench's and the
+    bench's camera `PHOTO_GAP` on the query sensor, placed for its rotated read), so their key is the bench's and the
     cached draw is read, not redrawn. If the two ever differ, the result is
     still right -- the test just draws a separate set. `x, y` is the FoV's own
     top-left. Only the positions follow the bench: the query itself stays a
@@ -125,9 +124,7 @@ def pick_fov(args, masks) -> None:
                                             overlapping_share=1.0,
                                             jitter_cap=1.0)),
         PlanSpec('ladder', tuple(DEFAULT_RUNGS),
-                 camera=render_spec(DomainGapConfig(wh_ratio=args.ratio,
-                                                    MPixels=args.mpixels),
-                                    sensor_size(args.ratio, args.mpixels))),
+                 camera=render_spec(DomainGapConfig(), tuple(args.sensor))),
         sampler_root, masks=masks)
     at_rung = [s.meta for s in sampler if float(s.meta.ds) == args.rung]
     if not at_rung:
@@ -141,7 +138,7 @@ def pick_fov(args, masks) -> None:
 def crop_query(args):
     reader = SlideReader(args.wsi)
     query_np = reader.read(args.x, args.y,
-                           ReadSpec(*sensor_size(args.ratio, args.mpixels)),
+                           ReadSpec(*args.sensor),
                            args.mpp / reader.base_mpp)
     if query_np is None:
         sys.exit('[FAIL] SlideReader.read returned None (off the slide)')
@@ -149,7 +146,7 @@ def crop_query(args):
     qc.extract_all(args.tile, overlap=args.overlap)
     if qc.grid.grid_rows == 0 or qc.grid.grid_cols == 0:
         sys.exit('[FAIL] query too small for even one patch -- use a larger '
-                 '--mpixels or a smaller --tile')
+                 '--sensor or a smaller --tile')
     print(f'  query {query_np.shape[1]}x{query_np.shape[0]}  '
          f'patches={qc.grid.grid_rows}x{qc.grid.grid_cols}')
     return reader.slide, query_np, qc
@@ -320,8 +317,8 @@ def main() -> int:
                          'Stage1MppBench\'s, which this test shares')
     ap.add_argument('--split-cache-job', default=None,
                     help='whose recorded split --dataset is read from; default MakeSplit')
-    ap.add_argument('--ratio',   default='45:32')
-    ap.add_argument('--mpixels', type=float, default=1.475)
+    ap.add_argument('--sensor', type=int, nargs=2,
+                    default=list(REAL_PHOTO_SENSOR), metavar=('W', 'H'))
     ap.add_argument('--tile',    type=int,   default=256)
     ap.add_argument('--overlap', action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument('--filter', action=argparse.BooleanOptionalAction, default=True,

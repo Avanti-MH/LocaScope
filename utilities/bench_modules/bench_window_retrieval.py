@@ -304,7 +304,7 @@ from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E40
                              encoder_cfg_from_args, encoder_config,
                              encoder_names, pooling_kinds)
 from FovSupply import FovSupply                                  # noqa: E402
-from ReadGeometry import LEVEL_REL_TOL                           # noqa: E402
+from ReadGeometry import LEVEL_REL_TOL, REAL_PHOTO_SENSOR        # noqa: E402
 from ConfigArgs import add_config_args, config_from_args, describe  # noqa: E402
 from ConfigIdentity import ModelConfig                           # noqa: E402
 from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
@@ -379,10 +379,10 @@ SAMPLER = SamplerConfig(
     max_tries_per_tile = 5,
 )
 
-# ── the camera: query_sim DomainGapConfig ────────────────────────────────────
+# ── the camera: the real photos' sensor, a query_sim DomainGapConfig ────────
+#: Each level is photographed at its own ds.
+SENSOR = REAL_PHOTO_SENSOR
 CAMERA = DomainGapConfig(
-    wh_ratio='45:32', MPixels=1.47456,            # 1440 x 1024, like the real photos
-    query_mpp=None,                               # not used: each level's own mpp
     rotation_choices=(0,), angle_jitter_deg=0.0,
     scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
     brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
@@ -1364,7 +1364,7 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     seed and its own resolution."""
     ds = float(slide.level_downsamples[level])
     seed = sampler_cfg.seed + level
-    camera = Render(SlideReader(slide), camera_cfg, ds=ds, seed=seed)
+    camera = Render(SlideReader(slide), SENSOR, camera_cfg, ds=ds, seed=seed)
     # the level's own rung, placed for this camera; one supply per (slide,
     # level) because a level is this bench's unit of work and of resume
     plan = PlanSpec('ladder', (ds,), camera=camera.spec)
@@ -1560,7 +1560,7 @@ def config_id(args, arm_specs, configs: dict) -> str:
             # The level's rung is its own ds through a PlanSpec, and the photo
             # rng's key names it: parts under another rung are other photos
             # and must not be resumed into.
-            'fov_plan': 'ladder-level-ds',
+            'fov_plan': 'ladder-level-ds', 'sensor': list(SENSOR),
             'configs': {name: dataclasses.asdict(cfg)
                         for name, cfg in sorted(configs.items())}}
     return hashlib.sha1(json.dumps(keys, sort_keys=True, default=str)
@@ -1761,7 +1761,7 @@ def main() -> int:
     parser.add_argument('--white-max', type=float, default=None,
                         help=argparse.SUPPRESS)      # refused: use --richness
     add_sampler_args(parser, SAMPLER)
-    add_config_args(parser, CAMERA, 'camera', skip=('query_mpp',))
+    add_config_args(parser, CAMERA, 'camera')
     add_mask_args(parser, default=None)              # None: the CONFIG `MASK`
     parser.add_argument('--mask-cache-job', default=MASK_CACHE_JOB,
                         help='whose mask cache to read and fill: result/cache/'
@@ -1914,7 +1914,7 @@ def main() -> int:
             camera_base = dataclasses.replace(camera_base, scale_range=(
                 low if args.scale_min is None else args.scale_min,
                 high if args.scale_max is None else args.scale_max))
-        camera_cfg = config_from_args(args, camera_base, 'camera', skip=('query_mpp',))
+        camera_cfg = config_from_args(args, camera_base, 'camera')
 
         encoder_cfg = encoder_base
         if args.batch_size is not None:

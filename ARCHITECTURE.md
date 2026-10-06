@@ -179,18 +179,18 @@ def resample(img, w, h, method) -> np.ndarray          # 原 Render.py
 def degrade_resolution(img, ds, out_side) -> np.ndarray  # 原 Render.py；ChainStack 直接從這裡匯入
 
 # ── query_sim/camera.py（Camera → Render，大改）─────────────────────────────
-#   sensor_size(wh_ratio, MPixels) 與 SENSOR_MARGIN 於 2026-10-06 搬到 ReadGeometry（純幾何）
+#   REAL_PHOTO_SENSOR、TILE_PX 與 SENSOR_MARGIN 在 ReadGeometry（純幾何）
 def rotates_for(cfg, rotation=None) -> bool             # 不動
 def render_spec(cfg, sensor) -> ReadSpec                # 原 camera_spec
 def photo_rng(*key) -> random.Random                  # 一張照片的 rng，由它自己的身分決定（2026-10-06）
 #   不旋轉的 tile（參考、pre-tile）直接 ReadSpec(t, t, margin_out=m)；tile_spec 於 2026-10-06 刪除
 
 class Render:                        # 實例名 camera
-    def __init__(self, reader: SlideReader, cfg: DomainGapConfig, *,
-                 ds=None, seed=None, read_level=None): ...
-        # ds=None → cfg.query_mpp / base_mpp；sensor 由 cfg.wh_ratio / MPixels
-    reader; cfg; ds; level; spec -> ReadSpec; output_w/h; rect_w_l0/h_l0; reads_natively
-    def at(self, ds) -> 'Render'                       # 同一個 reader、同一份 cfg，快取
+    def __init__(self, reader: SlideReader, sensor: (w, h), cfg: DomainGapConfig = None, *,
+                 ds, seed=None, read_level=None): ...
+        # sensor 與 ds 都必填；DomainGapConfig 只有 domain gap，沒有尺寸與倍率
+    reader; sensor; cfg; ds; mpp; level; spec -> ReadSpec; output_w/h; rect_w_l0/h_l0; reads_natively
+    def at(self, ds) -> 'Render'                       # 同一個 reader、sensor、cfg，快取
     def capture(self, x, y, rotation=None, rng=None, stack='F') -> np.ndarray | None
     def capture_with_gt(self, x, y, rotation=None, rng=None, stack='F') -> (img, params)
         # raw = reader.read(x, y, self.spec, self.ds, stack=stack, level=read_level)

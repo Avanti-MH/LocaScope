@@ -74,7 +74,7 @@ from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E4
                          SamplerConfig)
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from camera import Render, render_spec                               # noqa: E402
-from ReadGeometry import sensor_size                                # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
 from FovSupply import FovSupply                                      # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
@@ -82,13 +82,12 @@ from SlideReader import SlideReader                                 # noqa: E402
 JOB_NAME = 'Stage1MppBench'
 
 
-def photo_camera(args) -> DomainGapConfig:
-    """The microscope every FoV of this bench is photographed with: the query
-    sensor (--ratio, --mpixels) and `DomainGapConfig`'s own domain gap. The
-    same config places the positions (`render_spec`) and renders them
-    (`Render`), so a FoV is read with the headroom its rotation needs.
-    `test_locascope_stages.pick_fov` builds the same one to read this draw."""
-    return DomainGapConfig(wh_ratio=args.ratio, MPixels=args.mpixels)
+#: The domain gap every FoV of this bench is photographed with:
+#: `DomainGapConfig`'s own. With the sensor (--sensor) it places the positions
+#: (`render_spec`) and renders them (`Render`), so a FoV is read with the
+#: headroom its rotation needs. `test_locascope_stages.pick_fov` builds the same
+#: one to read this draw.
+PHOTO_GAP = DomainGapConfig()
 
 
 def write_csv(rows, path) -> None:
@@ -128,7 +127,7 @@ def _sampling_recipe_id(args) -> str:
     parts = '|'.join([
         f'native_only={args.native_only}', f'tile={args.tile}',
         f'n_per_rung={args.n_per_rung}', f'seed={args.seed}',
-        f'mpixels={args.mpixels}', f'ratio={args.ratio}',
+        f'sensor={args.sensor[0]}x{args.sensor[1]}',
         f'datasets={",".join(sorted(args.datasets))}', f'n_wsi={args.n_wsi}']
         # --overlap draws other FoVs (jitter top-up at the coarse rungs), so it
         # is part of "which FoVs": without it a val run and a test run would
@@ -441,11 +440,11 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                                 seed=args.seed, richness=RichnessConfig(),
                                 overlap=_overlap_cfg(args.overlap))
     # The positions are placed for the camera that photographs them
-    # (`photo_camera`): its sensor, and -- since it rotates -- the bounding
-    # square and sensor margin it reads, so the rotated read stays on the
+    # (`PHOTO_GAP` on --sensor): its sensor, and -- since it rotates -- the
+    # bounding square and sensor margin it reads, so the rotated read stays on the
     # tissue the sampler scored.
-    cam_cfg = photo_camera(args)
-    camera = render_spec(cam_cfg, sensor_size(args.ratio, args.mpixels))
+    sensor = tuple(args.sensor)
+    camera = render_spec(PHOTO_GAP, sensor)
     plan = (PlanSpec('native', camera=camera) if args.native_only
             else PlanSpec('ladder', tuple(DEFAULT_RUNGS), camera=camera))
     slide_cache = {}
@@ -456,7 +455,8 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             # the ladder draw through the sampler cache (FovSupply.cached)
             wsi = SafeSlide(entry.path)
             supply = FovSupply.cached(
-                Render(SlideReader(wsi), cam_cfg, ds=1.0), plan, sampler_cfg,
+                Render(SlideReader(wsi), sensor, PHOTO_GAP, ds=1.0), plan,
+                sampler_cfg,
                 caches.sampler_root, masks=caches.masks,
                 report_dir=out_dir / 'sampler_reports' / dataset_id.replace('/', '_'))
             sampler = supply.sampler
@@ -636,16 +636,10 @@ def main() -> int:
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device',
                         default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--mpixels', type=float, default=1.475,
-                        help='query size -- 1.475 MPixels at 45:32 matches '
-                             "CLAUDE.md's real-photo spec (1440x1024), not "
-                             "query_sim's 4:3/12MP default")
-    parser.add_argument('--ratio', default='45:32',
-                        help='query W:H ratio (camera.sensor_size). Defaulted '
-                             "explicitly to CLAUDE.md's real-photo spec; "
-                             "bench_mpp_feature_decomposition's run_sampler_"
-                             "routing still reads 4:3 (flagged, not fixed, "
-                             "2026-09-16)")
+    parser.add_argument('--sensor', type=int, nargs=2, default=list(REAL_PHOTO_SENSOR),
+                        metavar=('W', 'H'),
+                        help='query sensor, px. Default: the real photos, '
+                             f'{REAL_PHOTO_SENSOR[0]}x{REAL_PHOTO_SENSOR[1]}')
     parser.add_argument('--datasets', nargs='+',
                         default=['bracs/test', 'ki67_with_photo'],
                         help='which datasets to draw slides '

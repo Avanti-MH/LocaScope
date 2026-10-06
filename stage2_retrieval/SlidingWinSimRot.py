@@ -433,7 +433,7 @@ class SlidingWinSimRot(IdentifiedBuild):
                 f'is {q_grid.grid_rows}x{q_grid.grid_cols} tiles '
                 f'({self.tile_size}px each), the largest region grid is '
                 f'{biggest[0]}x{biggest[1]}. Route to a finer level, lower the '
-                f'query MPixels, or relax the mask filtering.')
+                f'query sensor, or relax the mask filtering.')
         raw.sort(key=lambda c: -c.score)
 
         frame = dict(level=self.level, ds=self.ds, grids=tuple(self.grids))

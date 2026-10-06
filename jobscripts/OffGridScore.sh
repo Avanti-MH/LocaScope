@@ -136,7 +136,7 @@ python utilities/bench_modules/bench_offgrid_score.py "$STEM" \
   --step "${STEP:-16}" \
   --points "${POINTS:-5}" \
   --white-max 0.15 \
-  --fov-ratio 45:32 --fov-mpixels 1.47456 \
+  --fov-sensor 1440 1024 \
   --domain-gap \
   ${LEVELS:+--levels $LEVELS} \
   --out "$OUT_DIR"

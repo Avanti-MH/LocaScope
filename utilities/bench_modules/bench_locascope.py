@@ -75,7 +75,7 @@ from TileEncoderFunc   import encoder_config, encoder_names             # noqa: 
 from CpuBudget         import CpuBudget                                 # noqa: E402
 from TileSampler       import (PlanSpec, SamplerConfig,             # noqa: E402
                                add_sampler_args, sampler_from_args)
-from ReadGeometry      import LEVEL_REL_TOL                            # noqa: E402
+from ReadGeometry      import LEVEL_REL_TOL, REAL_PHOTO_SENSOR         # noqa: E402
 from TissueMaskConfig  import MASK_RECIPES, MaskMaker                   # noqa: E402
 from config            import DomainGapConfig                           # noqa: E402
 from ConfigArgs        import add_config_args, config_from_args        # noqa: E402
@@ -87,9 +87,10 @@ from FovSupply         import FovSupply                                 # noqa: 
 
 
 # ── the shots: FovSupply per (slide, level), the window bench's way ─────────
-#: The camera: the real photos' sensor (1440 x 1024), the full domain gap, and
-#: 5 per cent mpp jitter. query_mpp is each level's own.
-CAMERA = DomainGapConfig(wh_ratio='45:32', MPixels=1.47456, query_mpp_jitter=0.05)
+#: The camera: the real photos' sensor, the full domain gap, and 5 per cent mpp
+#: jitter. The magnification is each level's own.
+SENSOR = REAL_PHOTO_SENSOR
+CAMERA = DomainGapConfig(query_mpp_jitter=0.05)
 #: Where the FoVs go: 50 per native level under the default richness mix, every
 #: level of a slide in one draw (`split_shots`).
 SAMPLER = SamplerConfig(n_per_rung=50, seed=0)
@@ -126,7 +127,8 @@ def split_shots(datasets, split: str, n_wsi: int, sampler_cfg: SamplerConfig,
             mask, _ = masks.mask(reader.slide)
             rungs = tuple(float(d) for d in reader.level_downsamples
                           if max_ds is None or d <= max_ds * (1 + LEVEL_REL_TOL))
-            microscope = Render(reader, camera_cfg, ds=1.0, seed=sampler_cfg.seed)
+            microscope = Render(reader, SENSOR, camera_cfg, ds=1.0,
+                                seed=sampler_cfg.seed)
             supply = FovSupply(microscope, PlanSpec('ladder', rungs,
                                                     camera=microscope.spec),
                                sampler_cfg, mask)
@@ -166,7 +168,7 @@ def run_identity(args, sampler_cfg, camera_cfg, encoder, mask_cfg) -> dict:
             'datasets': list(args.datasets), 'split': args.split,
             'n_wsi': args.n_wsi, 'max_ds': args.max_ds,
             'sampler': dataclasses.asdict(sampler_cfg),
-            'camera': dataclasses.asdict(camera_cfg),
+            'sensor': list(SENSOR), 'camera': dataclasses.asdict(camera_cfg),
             'fov_mask': MASK_RECIPES['hest'].seg_id(),
             'encoder': encoder.identity_id(),
             'mask': [mask_cfg.seg_id(), mask_cfg.region_id()],
@@ -402,6 +404,14 @@ def compute_metrics(row: dict, result: LocaScopeQueryResult, base_mpp: float,
         'sift_best_inliers':    None,
         'sift_best_rank':       None,
         't_verify_s':           None,
+        # the bench's own clock around the pipeline, per shot: the photo (on
+        # a slide's first shot also its draw), the top-K enumeration, the
+        # figures; `t_build_s` is the slide's pipeline build, on its first
+        # shot only, so the column sums to the run's builds
+        't_photo_s':            None,
+        't_topk_s':             None,
+        't_fig_s':              None,
+        't_build_s':            None,
         # the pipeline's own clock, per stage of this shot (LocaScopeQueryResult)
         't_stage1_s':           _round_s(result.t_stage1_s),
         't_level_s':            _round_s(result.t_level_s),
@@ -682,9 +692,9 @@ def main():
                     help='hest masks the FoVs are placed on')
     # One --sampler-* flag per SAMPLER field (--sampler-n-per-rung,
     # --sampler-seed, ...) and one --camera-* flag per CAMERA field, as the
-    # window bench has them; query_mpp is each level's own.
+    # window bench has them.
     add_sampler_args(ap, SAMPLER)
-    add_config_args(ap, CAMERA, 'camera', skip=('query_mpp',))
+    add_config_args(ap, CAMERA, 'camera')
     ap.add_argument('--out',        default=None,
                     help='Output dir, used verbatim. Default: '
                          'result/<SLURM_JOB_NAME or BenchLocaScope>/<encoder>/ '
@@ -806,7 +816,7 @@ def main():
     out_dir = args.out or job_result_dir('BenchLocaScope', encoder=enc_tag)
     os.makedirs(out_dir, exist_ok=True)
     sampler_cfg = sampler_from_args(args, SAMPLER)
-    camera_cfg = config_from_args(args, CAMERA, 'camera', skip=('query_mpp',))
+    camera_cfg = config_from_args(args, CAMERA, 'camera')
     print(f'shots      : {" ".join(args.datasets)}  #{args.split}  n_wsi={args.n_wsi}  '
           f'per level {sampler_cfg.n_per_rung}  seed {sampler_cfg.seed}  '
           f'sampler {sampler_cfg.sampler_id()}')
@@ -909,10 +919,18 @@ def main():
     t_start = time.time()
 
     pl, cur_wsi, build_error, i = None, None, None, 0
-    for row, img in shots:
+    shot_iter = iter(shots)
+    while True:
+        t_p = time.time()
+        try:
+            row, img = next(shot_iter)
+        except StopIteration:
+            break
+        t_photo = time.time() - t_p
         if args.limit and i >= args.limit:
             break
         i += 1
+        t_build = None
         if row['wsi_path'] != cur_wsi:
             # A new slide: one pipeline per slide, built when its first shot
             # arrives (split_shots yields a slide's shots together).
@@ -920,6 +938,7 @@ def main():
             wsi_tag = os.path.splitext(os.path.basename(cur_wsi))[0]
             print(f'== {wsi_tag}  path={cur_wsi}', flush=True)
             pl, build_error = None, None
+            t_b = time.time()
             try:
                 pl = LocaScopePipeline(
                     cur_wsi, estimator, retriever, localizer, mask_cfg=mask_cfg,
@@ -932,9 +951,13 @@ def main():
             except Exception as e:
                 build_error = f'pipeline build failed: {type(e).__name__}: {e}'
                 print(f'  [{build_error}]', flush=True)
+            t_build = time.time() - t_b
         if pl is None:
-            record(compute_metrics(row, LocaScopeQueryResult(
-                None, None, False, None, None, build_error), 1.0))
+            m = compute_metrics(row, LocaScopeQueryResult(
+                None, None, False, None, None, build_error), 1.0)
+            m.update(t_photo_s=round(t_photo, 2),
+                     t_build_s=None if t_build is None else round(t_build, 2))
+            record(m)
             continue
 
         want_fig = (args.draw_figures == -1
@@ -958,12 +981,14 @@ def main():
             hit_tol = pl.localizer.padding * strict_tol
 
         cands = None
+        t_k = time.time()
         if args.topk > 0 and result.retriever is not None and tile_l0:
             try:
                 # the maps of THIS shot are still on the retriever
                 cands = result.retriever.candidate_set(k=args.topk)
             except Exception as e:
                 print(f'      [topk failed] {type(e).__name__}: {e}', flush=True)
+        t_topk = time.time() - t_k
 
         sift_topk = None
         if cands and args.sift_topk > 0 and result.query_qc is not None:
@@ -978,8 +1003,8 @@ def main():
                             candidates=cands, hit_tol_px=hit_tol,
                             hit_tol_strict_px=strict_tol,
                             sift_topk=sift_topk)
-        record(m)
 
+        t_f = time.time()
         if want_fig:
             try:
                 p = draw_shot_figure(pl, row, img, result, out_dir,
@@ -1005,6 +1030,10 @@ def main():
             except Exception as e:
                 print(f'      [fig {mode} failed] {type(e).__name__}: {e}',
                       flush=True)
+        m.update(t_photo_s=round(t_photo, 2), t_topk_s=round(t_topk, 2),
+                 t_fig_s=round(time.time() - t_f, 2),
+                 t_build_s=None if t_build is None else round(t_build, 2))
+        record(m)
 
         print(f'  [{i:4d}] {row["filename"]:36s}  '
               f'L={row["level"]:>2}  '
@@ -1020,11 +1049,20 @@ def main():
               f'({dt:.1f}s: s1 {_fmt(m["t_stage1_s"], "{:.1f}")} '
               f'lvl {_fmt(m["t_level_s"], "{:.1f}")} '
               f's2 {_fmt(m["t_stage2_s"], "{:.1f}")} '
-              f's3 {_fmt(m["t_stage3_s"], "{:.1f}")})'
+              f's3 {_fmt(m["t_stage3_s"], "{:.1f}")} '
+              f'| photo {m["t_photo_s"]:.1f} topk {m["t_topk_s"]:.1f} '
+              f'verify {_fmt(m["t_verify_s"], "{:.1f}")} fig {m["t_fig_s"]:.1f}'
+              + ('' if t_build is None else f' build {t_build:.1f}') + ')'
               + (f'\n      ERR: {m["error"]}' if m['error'] else ''),
               flush=True)
 
     print(f'\nTotal wall time: {time.time() - t_start:.1f}s', flush=True)
+    spent = {k: sum(float(m.get(k) or 0) for m in all_metrics)
+             for k in ('t_build_s', 't_photo_s', 't_stage1_s', 't_level_s',
+                       't_stage2_s', 't_stage3_s', 't_topk_s', 't_verify_s',
+                       't_fig_s')}
+    print('  where it went: ' + '  '.join(f'{k[2:-2]} {v:.0f}s'
+                                          for k, v in spent.items()), flush=True)
 
     print(f'metrics.csv -> {metrics_path}  ({len(all_metrics)} rows)')
     render_all(all_metrics, out_dir)

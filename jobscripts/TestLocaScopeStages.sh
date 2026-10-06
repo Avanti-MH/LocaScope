@@ -70,8 +70,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 DATASET="${DATASET:-bracs/test#val}"   # or ki67_with_photo#val
 RUNG="${RUNG:-1}"
 PICK_SEED="${PICK_SEED:-0}"
-RATIO=45:32
-MPIXELS=1.475
+SENSOR="1440 1024"
 TILE=256
 SAMPLES="${SAMPLES:-100}"
 K="${K:-11}"
@@ -88,7 +87,7 @@ CHECK_SIMS="${CHECK_SIMS:-0}"
 
 BASE_ARGS="
   --dataset $DATASET --rung $RUNG --pick-seed $PICK_SEED
-  --ratio $RATIO --mpixels $MPIXELS
+  --sensor $SENSOR
   --tile $TILE --samples $SAMPLES --k $K --batch $BATCH
   --min-region-ratio $MIN_REGION_RATIO
   --padding $PADDING --min-inliers $MIN_INLIERS

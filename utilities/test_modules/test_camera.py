@@ -10,6 +10,8 @@ Placing FoVs is `FovSupply`'s, tested in `test_fov_supply.py`. Each section
 runs on its own and the exit status is the worst of them, so a failing map
 check does not hide the seed check.
 
+    sensor      a sensor in pixels is the (ratio, MPixels) it replaces, and a
+                Render at (sensor, ds) photographs what the read + gap did.
     map         `Render.output_to_level0` against pixels, not against its own
                 derivation. The sign of the inverse rotation is invisible at 0
                 and 180 degrees, so all four of 0/90/180/270 are checked.
@@ -45,12 +47,12 @@ from _paths import job_result_dir, setup_import_paths            # noqa: E402
 setup_import_paths()
 
 import numpy as np                                               # noqa: E402
-import openslide                                                 # noqa: E402
 
 from camera import Render                                        # noqa: E402
-from ReadGeometry import SENSOR_MARGIN                           # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR as SENSOR, SENSOR_MARGIN  # noqa: E402
 from ReadGeometry import ReadSpec                                # noqa: E402
 from SlideReader import SlideReader                              # noqa: E402
+from pipeline import simulate_with_gt                            # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from augment import field, geometry, lens                        # noqa: E402
@@ -90,11 +92,9 @@ DECOY_RATIO = 0.5    # decoy must match at least twice as well ...
 DECOY_ABS = 1.0      # ... and by more than 1 MAD unit on a 0-255 scale
 
 
-def geometry_only_cfg(query_mpp: float) -> DomainGapConfig:
+def geometry_only_cfg() -> DomainGapConfig:
     """A camera that only moves pixels around, so a mismatch means the map is wrong."""
     return DomainGapConfig(
-        wh_ratio='45:32', MPixels=1.47456,      # the real photos' shape
-        query_mpp=query_mpp,
         photometric=False,                      # no colour / vignette / lens / noise
         angle_jitter_deg=0.0,                   # exact multiples of 90 only
         scale_range=(1.0, 1.0),
@@ -102,7 +102,7 @@ def geometry_only_cfg(query_mpp: float) -> DomainGapConfig:
     )
 
 
-def full_gap_cfg(query_mpp: float) -> DomainGapConfig:
+def full_gap_cfg() -> DomainGapConfig:
     """Every augmentation ON -- the opposite of `geometry_only_cfg`.
 
     The mapping test wants a camera that only moves pixels, so it turns the
@@ -111,8 +111,7 @@ def full_gap_cfg(query_mpp: float) -> DomainGapConfig:
     would never execute `apply_noise` at all, and a check that never runs the
     noise cannot notice the noise being irreproducible.
     """
-    return DomainGapConfig(wh_ratio='45:32', MPixels=1.47456,
-                           query_mpp=query_mpp)
+    return DomainGapConfig()
 
 
 # ==============================================================================
@@ -168,8 +167,9 @@ def beats(here: float, decoy: float) -> bool:
     return decoy < here * DECOY_RATIO and (here - decoy) > DECOY_ABS
 
 
-def run_map(args, wsi, level_mpp) -> int:
-    cam = Render(SlideReader(wsi), cfg=geometry_only_cfg(level_mpp), seed=args.seed)
+def run_map(args, wsi, level_ds) -> int:
+    cam = Render(SlideReader(wsi), SENSOR, geometry_only_cfg(), ds=level_ds,
+                 seed=args.seed)
     q = cam
     ds = q.rect_w_l0 / q.output_w            # level-0 px per output px
     print(f'output {q.output_w}x{q.output_h}  chosen_level={q.level}  '
@@ -235,7 +235,7 @@ def run_map(args, wsi, level_mpp) -> int:
 # ==============================================================================
 
 
-def check_same_seed_same_pixels(wsi, query_mpp, x, y, seed) -> list:
+def check_same_seed_same_pixels(wsi, level_ds, x, y, seed) -> list:
     """Two Renders, one seed, one position -> must be BIT-IDENTICAL.
 
     The order here is deliberate and is the part that must not be
@@ -251,10 +251,10 @@ def check_same_seed_same_pixels(wsi, query_mpp, x, y, seed) -> list:
     rung of a slide, all built before any of them shoots).
     """
     failures = []
-    cfg = full_gap_cfg(query_mpp)
+    cfg = full_gap_cfg()
 
-    cam_a = Render(SlideReader(wsi), cfg=cfg, seed=seed)
-    cam_b = Render(SlideReader(wsi), cfg=cfg, seed=seed)          # built BEFORE a shoots
+    cam_a = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=seed)
+    cam_b = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=seed)  # built BEFORE a shoots
     img_a, params_a = cam_a.capture_with_gt(x, y)
     np.random.random(1000)                            # disturb the global state
     img_b, params_b = cam_b.capture_with_gt(x, y)
@@ -276,7 +276,7 @@ def check_same_seed_same_pixels(wsi, query_mpp, x, y, seed) -> list:
     # one Render, a per-call rng derived from the sample's identity, same
     # answer every time regardless of what ran in between.
     before = len(failures)
-    cam_c = Render(SlideReader(wsi), cfg=cfg, seed=None)
+    cam_c = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=None)
     img_1 = cam_c.capture(x, y, rng=random.Random(99))
     np.random.random(1000)
     img_2 = cam_c.capture(x, y, rng=random.Random(99))
@@ -291,11 +291,12 @@ def check_same_seed_same_pixels(wsi, query_mpp, x, y, seed) -> list:
     return failures
 
 
-def run_seed(args, wsi, level_mpp) -> int:
-    cam = Render(SlideReader(wsi), cfg=geometry_only_cfg(level_mpp), seed=args.seed)
+def run_seed(args, wsi, level_ds) -> int:
+    cam = Render(SlideReader(wsi), SENSOR, geometry_only_cfg(), ds=level_ds,
+                 seed=args.seed)
     (x, y), _ = pick_textured_position(cam, wsi, seed=args.seed)
     print('\nseed reproducibility (every augmentation ON):')
-    seed_failures = check_same_seed_same_pixels(wsi, level_mpp, x, y, args.seed)
+    seed_failures = check_same_seed_same_pixels(wsi, level_ds, x, y, args.seed)
     if seed_failures:
         print('\nmismatches:')
         for what, detail in seed_failures:
@@ -327,7 +328,7 @@ REPEATS = 3
 MIN_STD = 12.0
 
 
-def augment_cfg(query_mpp: float) -> DomainGapConfig:
+def augment_cfg() -> DomainGapConfig:
     """The camera the benches use: every photometric effect on.
 
     Rotation and scale are pinned the way `bench_offgrid_score` pins them,
@@ -335,8 +336,6 @@ def augment_cfg(query_mpp: float) -> DomainGapConfig:
     optimisation is measured under the conditions that motivated it.
     """
     return DomainGapConfig(
-        wh_ratio='45:32', MPixels=1.47456,      # the real photos' shape
-        query_mpp=query_mpp,
         photometric=True,
         angle_jitter_deg=0.0,
         scale_range=(1.0, 1.0),
@@ -452,7 +451,7 @@ def set_fast(enabled: bool) -> None:
     field.USE_FAST = lens.USE_FAST = geometry.USE_FAST = enabled
 
 
-def time_captures(wsi, cfg, positions, seed: int) -> dict:
+def time_captures(wsi, cfg, positions, seed: int, level_ds: float) -> dict:
     """`Render.capture_with_gt` timed both ways, on identical parameter draws.
 
     A capture is read + augment + centre crop, and only the middle term
@@ -473,7 +472,7 @@ def time_captures(wsi, cfg, positions, seed: int) -> dict:
     """
     def capture_all(fast: bool, record: list | None):
         set_fast(fast)
-        camera = Render(SlideReader(wsi), cfg=cfg, seed=seed)
+        camera = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=seed)
         for x, y in positions:
             start = time.perf_counter()
             camera.capture_with_gt(x, y, rotation=0)
@@ -488,7 +487,8 @@ def time_captures(wsi, cfg, positions, seed: int) -> dict:
         order = (False, True) if index % 2 == 0 else (True, False)
         for use_fast in order:
             set_fast(use_fast)
-            camera = Render(SlideReader(wsi), cfg=cfg, seed=seed + index)
+            camera = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds,
+                            seed=seed + index)
             start = time.perf_counter()
             camera.capture_with_gt(x, y, rotation=0)
             elapsed = (time.perf_counter() - start) * 1e3
@@ -497,7 +497,7 @@ def time_captures(wsi, cfg, positions, seed: int) -> dict:
     # The read alone, so the report can say how much of a capture is the part
     # no rewrite in this file touches.
     set_fast(True)
-    cam = Render(SlideReader(wsi), cfg=cfg, seed=seed)
+    cam = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=seed)
     pad = ReadSpec(cam.output_w, cam.output_h, margin_out=SENSOR_MARGIN)
     reads = []
     for x, y in positions:
@@ -580,15 +580,15 @@ def print_table(summary: list) -> None:
     print(f'  * vignette f32 is knowingly inexact: reported, not gated.')
 
 
-def run_augment(args, wsi, level_mpp) -> int:
-    cfg = augment_cfg(level_mpp)
-    camera = Render(SlideReader(wsi), cfg=cfg, seed=args.seed)
+def run_augment(args, wsi, level_ds) -> int:
+    cfg = augment_cfg()
+    camera = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=args.seed)
     q = camera
 
     read_w = q.output_w + 2 * SENSOR_MARGIN
     read_h = q.output_h + 2 * SENSOR_MARGIN
     side = q.geometry.square_out
-    print(f'{Path(args.wsi).name}  L{args.level}  level_mpp={level_mpp:.4f}')
+    print(f'{Path(args.wsi).name}  L{args.level}  ds={level_ds:.4f}')
     print(f'sensor {q.output_w}x{q.output_h}   read {read_w}x{read_h} = '
           f'{read_w * read_h / 1e6:.2f} Mpx  ({read_w * read_h * 3 / 1e6:.2f} MB/op)')
     print(f'  (the {side}^2 = {side * side / 1e6:.2f} Mpx bounding square is read '
@@ -613,7 +613,8 @@ def run_augment(args, wsi, level_mpp) -> int:
     summary = summarise(rows)
     print_table(summary)
 
-    timing = time_captures(wsi, cfg, [xy for xy, _, _ in shots], args.seed)
+    timing = time_captures(wsi, cfg, [xy for xy, _, _ in shots], args.seed,
+                           level_ds)
     print_capture(timing)
     summary.append({
         'op': 'capture (whole)', 'gated': False, 'shots': timing['n'],
@@ -653,9 +654,74 @@ def run_augment(args, wsi, level_mpp) -> int:
 
 
 
+# ==============================================================================
+#  sensor -- the camera's size and magnification are its own
+# ==============================================================================
+
+def _frozen_sensor_size(wh_ratio: str, MPixels: float):
+    """FROZEN: ReadGeometry.sensor_size -- `(w, h)` from a ratio and a pixel
+    count, the way every sensor was given before it was given in pixels."""
+    w_r, h_r = (int(v) for v in wh_ratio.split(':'))
+    factor = (MPixels * 1e6 / (w_r * h_r)) ** 0.5
+    return int(factor * w_r), int(factor * h_r)
+
+
+def run_sensor(args, wsi, level_ds) -> int:
+    """Every (ratio, MPixels) the project spelled a sensor with is the pixel
+    pair that replaces it, and the 4:3 decoy is not. A Render at (sensor, ds)
+    photographs what the frozen path -- the sensor's read, then the gap --
+    did, bit for bit, at three rngs whose photos must differ from each other;
+    `effective_mpp` is `ds * base_mpp / scale`; a Render without a sensor or
+    a ds is refused."""
+    failures = []
+
+    def check(ok, what):
+        print(f'  {"ok  " if ok else "FAIL"} {what}', flush=True)
+        if not ok:
+            failures.append(what)
+
+    for (ratio, mpix), want in ((('45:32', 1.47456), SENSOR),
+                                (('45:32', 1.475), SENSOR),
+                                (('1:1', TILE * TILE / 1e6), (TILE, TILE))):
+        got = _frozen_sensor_size(ratio, mpix)
+        check(got == tuple(want), f'{ratio} at {mpix:g} MP was {got}, is {tuple(want)}')
+    decoy = _frozen_sensor_size('4:3', 1.475)
+    check(decoy != tuple(SENSOR), f'the decoy: 4:3 at 1.475 MP was {decoy}, '
+                                  f'another sensor')
+
+    reader = SlideReader(wsi)
+    cfg = full_gap_cfg()
+    cam = Render(reader, SENSOR, cfg, ds=level_ds, seed=args.seed)
+    (x, y), _ = pick_textured_position(cam, wsi, seed=args.seed)
+    spec = ReadSpec(*SENSOR, rotates=True, margin_out=SENSOR_MARGIN)
+    photos = []
+    for k in range(3):
+        new, p = cam.capture_with_gt(x, y, rng=random.Random(k))
+        raw = reader.read(x, y, spec, level_ds)
+        old, _ = simulate_with_gt(raw, cfg=cfg, rng=random.Random(k),
+                                  output_wh=tuple(SENSOR))
+        check(new is not None and np.array_equal(new, old),
+              f'rng {k}: the Render photo is the frozen read + gap, bit for bit')
+        check(abs(p['effective_mpp'] - cam.mpp / p['scale']) < 1e-12
+              and abs(cam.mpp - level_ds * wsi.base_mpp) < 1e-12,
+              f'rng {k}: effective_mpp is ds * base_mpp / scale')
+        photos.append(new)
+    check(not np.array_equal(photos[0], photos[1]),
+          'the decoy: another rng is another photo')
+
+    for bad in (lambda: Render(reader, cfg, ds=level_ds),
+                lambda: Render(reader, SENSOR, cfg)):
+        try:
+            bad()
+            check(False, 'a Render without a sensor or a ds is refused')
+        except (TypeError, ValueError):
+            check(True, 'a Render without a sensor or a ds is refused')
+    return 1 if failures else 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 
-SECTIONS = ('map', 'seed', 'augment')
+SECTIONS = ('sensor', 'map', 'seed', 'augment')
 
 
 def main() -> int:
@@ -674,15 +740,16 @@ def main() -> int:
     only = args.only or list(SECTIONS)
 
     wsi = SafeSlide(args.wsi)
-    base_mpp = (float(wsi.properties.get(openslide.PROPERTY_NAME_MPP_X, 0.25))
-                + float(wsi.properties.get(openslide.PROPERTY_NAME_MPP_Y, 0.25))) / 2
-    level_mpp = base_mpp * wsi.level_downsamples[args.level]
+    base_mpp = wsi.base_mpp
+    level_ds = float(wsi.level_downsamples[args.level])
+    level_mpp = base_mpp * level_ds
     print(f'{Path(args.wsi).name}  L{args.level}  base_mpp={base_mpp:.4f}  '
           f'level_mpp={level_mpp:.4f}')
 
-    runners = {'map': lambda: run_map(args, wsi, level_mpp),
-               'seed': lambda: run_seed(args, wsi, level_mpp),
-               'augment': lambda: run_augment(args, wsi, level_mpp)}
+    runners = {'sensor': lambda: run_sensor(args, wsi, level_ds),
+               'map': lambda: run_map(args, wsi, level_ds),
+               'seed': lambda: run_seed(args, wsi, level_ds),
+               'augment': lambda: run_augment(args, wsi, level_ds)}
     status = {}
     for name in only:
         print(f'\n======== [{name}] ========', flush=True)

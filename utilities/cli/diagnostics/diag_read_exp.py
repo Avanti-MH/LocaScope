@@ -81,7 +81,7 @@ from TissueMaskConfig import MASK_RECIPES, MaskMaker                  # noqa: E4
 from camera import Render, render_spec                                # noqa: E402
 from pipeline import simulate_microscope_photo                        # noqa: E402
 from pipeline import simulate_with_gt                                 # noqa: E402
-from ReadGeometry import SENSOR_MARGIN, sensor_size                   # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR, SENSOR_MARGIN             # noqa: E402
 from config import DomainGapConfig                                    # noqa: E402
 from FovSupply import FovSupply                                       # noqa: E402
 import Datasets                                                       # noqa: E402
@@ -179,8 +179,7 @@ def flow_tiles(t, args, name, wsi, mask):
 
 
 def flow_fov(t, args, name, wsi, mask):
-    still = DomainGapConfig(wh_ratio='45:32', MPixels=1.47456,
-                            rotation_choices=(0,), angle_jitter_deg=0.0,
+    still = DomainGapConfig(rotation_choices=(0,), angle_jitter_deg=0.0,
                             scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
                             stage_shift_max=0)
     reader = SlideReader(wsi)
@@ -189,7 +188,7 @@ def flow_fov(t, args, name, wsi, mask):
         cfg = SamplerConfig(n_per_rung=args.n, seed=21 + level)
 
         def bank():
-            cam = Render(reader, still, ds=ds, seed=21 + level)
+            cam = Render(reader, REAL_PHOTO_SENSOR, still, ds=ds, seed=21 + level)
             plan = PlanSpec('ladder', (ds,), camera=cam.spec)
             return list(FovSupply(cam, plan, cfg, mask))
         try:
@@ -315,7 +314,7 @@ def flow_pca(t, args, name, wsi, budget):
 
 # ── s1photo: the stage-1 bench's photo, against the read it made before ──────
 
-S1_SENSOR = sensor_size('45:32', 1.475)      # bench_stage1_mpp's --ratio/--mpixels
+S1_SENSOR = REAL_PHOTO_SENSOR              # bench_stage1_mpp's --sensor default
 
 
 def _old_s1photo(reader, pos, cfg, rng, rotation=None):
@@ -394,7 +393,7 @@ def flow_s1photo(t, args, name, wsi, mask):
                where both hold the same tissue -- the centre is the decoy.
       speed    the full gap (`DomainGapConfig`'s own, as the bench uses),
                photos/s for both."""
-    gap = DomainGapConfig(wh_ratio='45:32', MPixels=1.475)
+    gap = DomainGapConfig()
     plan = PlanSpec('ladder', RUNGS, camera=render_spec(gap, S1_SENSOR))
     samples = list(TileSampler(wsi, mask, SamplerConfig(n_per_rung=args.n, seed=41))
                    .sample(plan.plans_for(wsi)))
@@ -406,10 +405,10 @@ def flow_s1photo(t, args, name, wsi, mask):
         return random.Random(1000 + k)
 
     # same: no gap
-    bare = DomainGapConfig(wh_ratio='45:32', MPixels=1.475, rotation_choices=(0,),
+    bare = DomainGapConfig(rotation_choices=(0,),
                            angle_jitter_deg=0.0, stage_shift_max=0,
                            geometric=False, photometric=False)
-    still = Render(reader, bare, ds=1.0)
+    still = Render(reader, S1_SENSOR, bare, ds=1.0)
     rows, ok, worst = [], True, None
     for k, pos in enumerate(positions):
         new, _ = still.at(pos['rung']).capture_with_gt(pos['x'], pos['y'], rng=rng(k))
@@ -453,9 +452,9 @@ def flow_s1photo(t, args, name, wsi, mask):
     print(f'  s1photo  same   {"PASS" if ok else "FAIL"}', flush=True)
 
     # bands: geometry only, an explicit 92 degree turn
-    geo = DomainGapConfig(wh_ratio='45:32', MPixels=1.475, scale_range=(1.0, 1.0),
+    geo = DomainGapConfig(scale_range=(1.0, 1.0),
                           stage_shift_max=0, photometric=False)
-    turned = Render(reader, geo, ds=1.0)
+    turned = Render(reader, S1_SENSOR, geo, ds=1.0)
     w, h = S1_SENSOR
     lo, hi = (w - h) // 2, (w + h) // 2         # the turned rectangle's columns
     band, centre = [], []
@@ -481,10 +480,10 @@ def flow_s1photo(t, args, name, wsi, mask):
     # reference renders the same scene from a read with real pixels far beyond
     # it (a plain read grown by S1_CORNER_REF output px, centred alike); the
     # centre, the same tissue in both, is the decoy.
-    zoom = DomainGapConfig(wh_ratio='45:32', MPixels=1.475, scale_range=(0.9, 0.9),
+    zoom = DomainGapConfig(scale_range=(0.9, 0.9),
                            angle_jitter_deg=0.0, stage_shift_max=0,
                            photometric=False)
-    zoomed = Render(reader, zoom, ds=1.0)
+    zoomed = Render(reader, S1_SENSOR, zoom, ds=1.0)
     w, h = S1_SENSOR
     c = S1_CORNER
     corner, middle = [], []
@@ -510,7 +509,7 @@ def flow_s1photo(t, args, name, wsi, mask):
 
     # speed: the bench's own gap
     def made_new():
-        cam = Render(reader, gap, ds=1.0)
+        cam = Render(reader, S1_SENSOR, gap, ds=1.0)
         for k, pos in enumerate(positions):
             cam.at(pos['rung']).capture_with_gt(pos['x'], pos['y'], rng=rng(k))
 

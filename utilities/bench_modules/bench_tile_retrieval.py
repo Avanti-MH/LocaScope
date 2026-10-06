@@ -76,6 +76,7 @@ from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noq
 from TileEncoderFunc import (encoder_config, encoder_names,          # noqa: E402
                              pool_slots, pooling_kinds)
 from camera import Render                                           # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 
@@ -189,11 +190,10 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
 
     # queries: FoVs -> tiles -> level-0 centres -> the two grid answers
     cfg = DomainGapConfig(
-        wh_ratio='45:32', MPixels=1.47456, query_mpp=level_mpp,
         angle_jitter_deg=0.0, scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
         stage_shift_max=0,
     )
-    cam = Render(SlideReader(slide), cfg=cfg, seed=seed)
+    cam = Render(SlideReader(slide), REAL_PHOTO_SENSOR, cfg, ds=ds, seed=seed)
     per_fov = (cam.output_h // TILE) * (cam.output_w // TILE)
     n_fov = max(1, math.ceil(n_query / (per_fov * len(rots))))
 

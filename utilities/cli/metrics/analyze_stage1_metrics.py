@@ -60,7 +60,7 @@ not only one winner. Its tables also go to `<csv stem>_vote_*.csv` and
 `<csv stem>_fov_distribution.csv` next to the input.
 
 Filename: `<sampler_id>_<seg_id>.csv` -- the sampling recipe's own hash
-(rungs, n per rung, seed, native_only, tile size, wh_ratio, mpixels) plus the
+(rungs, n per rung, seed, native_only, tile size, sensor) plus the
 tissue-mask recipe's hash, so one file can hold EVERY method's rows over the
 exact same drawn FoVs (a paired comparison, same premise as
 `bench_subspace_knn.py`'s arm A/B) and a changed sampling recipe cannot land

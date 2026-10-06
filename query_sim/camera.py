@@ -3,12 +3,12 @@
     SlideReader = the slide under an ideal objective (raw read)
     Render      = the slide seen through THIS microscope (read + domain gap)
 
-Different `cfg` = different microscope (vignette strength, colour temp,
-distortion, noise floor ...). Different `seed` = different random exposures.
-The instance is called `camera` everywhere it is used.
+A camera is its SENSOR (whole px), its domain gap (`cfg`: vignette, colour
+temp, distortion, noise floor ...) and its objective (`ds`). Different `seed`
+= different random exposures. The instance is called `camera` everywhere.
 
     reader = SlideReader(wsi)
-    camera = Render(reader, cfg=DomainGapConfig(), seed=42)
+    camera = Render(reader, REAL_PHOTO_SENSOR, DomainGapConfig(), ds=4.0, seed=42)
 
     img         = camera.capture(x, y)            # np.ndarray | None
     img, params = camera.capture_with_gt(x, y)    # (np.ndarray, dict) | (None, None)
@@ -26,8 +26,7 @@ no effects is not a renderer's job: `reader.read(..., ReadSpec(t, t))`
 (reference tiles, pre-tiles, support tiles).
 
 MAGNIFICATION IS A DOWNSAMPLE. A Render is built at `ds` (relative to the
-slide's own level 0) or, failing that, at `cfg.query_mpp / base_mpp`, and is
-at that one magnification for life -- `rect_w_l0`, `spec` and
+slide's own level 0), required, and is at that one magnification for life -- `rect_w_l0`, `spec` and
 `output_to_level0` all depend on it. Another magnification is another
 objective on the same microscope: `camera.at(ds)`, which shares the reader
 and the config and is cached, so asking twice is one Render.
@@ -40,7 +39,6 @@ import math
 import os
 import random
 import sys
-from dataclasses import replace
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -53,8 +51,7 @@ if _UTILITIES not in sys.path:
 
 from config      import DomainGapConfig                   # noqa: E402
 from pipeline    import simulate_with_gt                  # noqa: E402
-from ReadGeometry import (FovGeometry, ReadSpec, SENSOR_MARGIN,  # noqa: E402
-                          sensor_size)
+from ReadGeometry import FovGeometry, ReadSpec, SENSOR_MARGIN  # noqa: E402
 from SafeSlide   import SafeSlide                        # noqa: E402
 from SlideReader import SlideReader                      # noqa: E402
 
@@ -94,18 +91,17 @@ def photo_rng(*key) -> random.Random:
 
 
 class Render:
-    def __init__(self, reader: SlideReader,
-                 cfg: Optional[DomainGapConfig] = None, *,
-                 ds: Optional[float] = None, seed: Optional[int] = None,
-                 read_level: Optional[int] = None):
+    def __init__(self, reader: SlideReader, sensor: Tuple[int, int],
+                 cfg: Optional[DomainGapConfig] = None, *, ds: float,
+                 seed: Optional[int] = None, read_level: Optional[int] = None):
         """
         `reader` is the slide's `SlideReader`; its filter is the camera's
-        ('lanczos' for a microscope). `seed` seeds the sequential draw of
-        `capture` when no per-call `rng` is given.
+        ('lanczos' for a microscope). `sensor` is `(w, h)` output px.
+        `cfg` is the domain gap, None its defaults. `seed` seeds the sequential
+        draw of `capture` when no per-call `rng` is given.
 
-        `ds` is the magnification (downsample from level 0); None takes it
-        from `cfg.query_mpp`. Given, it wins, and the config the augment chain
-        sees is told the matching mpp so `effective_mpp` is recorded right.
+        `ds` is the magnification (downsample from level 0). The nominal mpp a
+        photo records is `ds * base_mpp`.
 
         `read_level` forces the pyramid level the read comes from
         (`SlideReader.level_of` checks it is not coarser than ds); None keeps
@@ -116,15 +112,15 @@ class Render:
         if not isinstance(reader, SlideReader):
             raise TypeError(f'Render takes a SlideReader, got {type(reader).__name__}'
                             f' (SlideReader(wsi) wraps a SafeSlide or a path)')
-        cfg = cfg or DomainGapConfig()
+        w, h = (int(v) for v in sensor)
+        if w <= 0 or h <= 0:
+            raise ValueError(f'sensor must be positive, got {sensor}')
+        if ds is None or float(ds) <= 0:
+            raise ValueError(f'ds must be a positive downsample, got {ds}')
         self.reader = reader
-        self.output_w, self.output_h = sensor_size(cfg.wh_ratio, cfg.MPixels)
-        if ds is None:
-            self.ds = float(cfg.query_mpp) / reader.base_mpp
-            self.cfg = cfg
-        else:
-            self.ds = float(ds)
-            self.cfg = replace(cfg, query_mpp=self.ds * reader.base_mpp)
+        self.cfg = cfg or DomainGapConfig()
+        self.output_w, self.output_h = w, h
+        self.ds = float(ds)
         self.read_level = read_level
         self.level = reader.level_of(self.ds, read_level)
         self.geometry = FovGeometry.of(self.output_w, self.output_h, self.ds)
@@ -155,6 +151,15 @@ class Render:
         return self.reader.base_mpp
 
     @property
+    def mpp(self) -> float:
+        """The nominal mpp of this objective: `ds * base_mpp`."""
+        return self.ds * self.reader.base_mpp
+
+    @property
+    def sensor(self) -> Tuple[int, int]:
+        return self.output_w, self.output_h
+
+    @property
     def rect_w_l0(self) -> int:
         return self.geometry.rect_w_l0
 
@@ -173,8 +178,8 @@ class Render:
         return self.reader.native(self.ds, self.read_level)
 
     def at(self, ds: float) -> 'Render':
-        """This microscope through another objective: the same reader, config
-        and filter at downsample `ds`. Cached -- the same ds is the same
+        """This microscope through another objective: the same reader, sensor,
+        config and filter at downsample `ds`. Cached -- the same ds is the same
         Render, from whichever objective it is asked.
 
         Each objective has its own generator, seeded from this microscope's
@@ -186,7 +191,7 @@ class Render:
         if cam is None:
             seed = (None if self._seed is None else int(hashlib.sha256(
                 f'{self._seed}|{ds!r}'.encode()).hexdigest()[:8], 16))
-            cam = Render(self.reader, self.cfg, ds=ds, seed=seed)
+            cam = Render(self.reader, self.sensor, self.cfg, ds=ds, seed=seed)
             cam._seed = self._seed
             cam._objectives = self._objectives
             self._objectives[ds] = cam
@@ -235,7 +240,8 @@ class Render:
         # are handed, and that has to be the sensor, not the bounding square.
         return simulate_with_gt(raw, cfg=self.cfg, rng=rng or self._py_rng,
                                 rotation=rotation,
-                                output_wh=(self.output_w, self.output_h))
+                                output_wh=(self.output_w, self.output_h),
+                                mpp=self.mpp)
 
     # ── Where did this output pixel come from? ───────────────────────────────
 

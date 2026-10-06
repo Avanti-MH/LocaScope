@@ -1,6 +1,6 @@
 """Per-FOV ground-truth record (one row per synthetic FOV in gt.csv).
 
-Shape fields follow the camera's sensor spec (wh_ratio + MPixels + query_mpp), so
+The sensor (fov_width x fov_height) and the nominal mpp are the camera's, so
 one row is enough to reproduce the exact crop from the same WSI + coordinates.
 """
 
@@ -13,14 +13,11 @@ class FOVRecord:
     wsi_path: str          # full path to the source WSI file
     level:    int          # source camera's WSI pyramid level (0 for single-cam runs)
 
-    # sensor spec (the microscope-photo shape + scale)
-    wh_ratio:      str     # e.g. '4:3'
-    MPixels:       float   # total pixel budget
-    query_mpp:     float   # cfg.query_mpp (nominal, camera-level target)
-    nominal_mpp:   float   # alias of query_mpp for clarity
-    effective_mpp: float   # query_mpp / scale for THIS shot (post-jitter GT)
-    fov_width:     int     # QFW-derived output pixel width
-    fov_height:    int     # QFW-derived output pixel height
+    # the camera: sensor and objective
+    nominal_mpp:   float   # the camera's mpp, ds * base_mpp
+    effective_mpp: float   # nominal_mpp / scale for THIS shot (post-jitter GT)
+    fov_width:     int     # sensor width, output px
+    fov_height:    int     # sensor height, output px
 
     # Position (level-0 top-left of the pre-augment crop)
     gt_x: int
@@ -50,16 +47,13 @@ class FOVRecord:
         """The row of one photo: `camera` (a `Render`) took it at the FoV
         rectangle's level-0 top-left (x, y), and `params` is what
         `capture_with_gt` returned with it. The sensor and the nominal mpp are
-        the camera's own (`camera.cfg`, `output_w/h`)."""
-        cfg, p = camera.cfg, params
+        the camera's own (`camera.sensor`, `camera.mpp`)."""
+        p = params
         return cls(
             filename      = filename,
             wsi_path      = wsi_path,
             level         = level,
-            wh_ratio      = cfg.wh_ratio,
-            MPixels       = cfg.MPixels,
-            query_mpp     = cfg.query_mpp,
-            nominal_mpp   = cfg.query_mpp,
+            nominal_mpp   = camera.mpp,
             effective_mpp = float(p['effective_mpp']),
             fov_width     = camera.output_w,
             fov_height    = camera.output_h,

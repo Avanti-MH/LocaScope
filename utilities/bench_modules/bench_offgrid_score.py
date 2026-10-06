@@ -113,7 +113,7 @@ import matplotlib.pyplot as plt                                     # noqa: E402
 from mpl_toolkits.mplot3d import Axes3D                             # noqa: E402,F401
 
 from PatchingLib import PatchGrid, QueryPatchContainer             # noqa: E402
-from ReadGeometry import ReadSpec                                   # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR, ReadSpec                # noqa: E402
 import Cache                                                        # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
@@ -514,12 +514,11 @@ def analyse_slide(wsi_path, args, encoders, masks, rng) -> list:
             level_mpp = base_mpp * ds
 
             config = DomainGapConfig(
-                wh_ratio=args.fov_ratio, MPixels=args.fov_mpixels,
-                query_mpp=level_mpp,
                 angle_jitter_deg=0.0, scale_range=(1.0, 1.0),
                 query_mpp_jitter=0.0, stage_shift_max=0,
                 photometric=args.domain_gap)
-            camera = Render(SlideReader(slide), cfg=config, seed=args.seed)
+            camera = Render(SlideReader(slide), tuple(args.fov_sensor), config,
+                            ds=ds, seed=args.seed)
 
             points = pick_points(mask, level, ds, camera, args.points,
                                  args.white_max, rng)
@@ -860,8 +859,9 @@ def main() -> int:
     parser.add_argument('--white-max', type=float, default=0.15,
                         help='anchor tile must be below this background '
                              'fraction')
-    parser.add_argument('--fov-ratio', default='45:32')
-    parser.add_argument('--fov-mpixels', type=float, default=1.47456)
+    parser.add_argument('--fov-sensor', type=int, nargs=2,
+                        default=list(REAL_PHOTO_SENSOR), metavar=('W', 'H'),
+                        help='FoV sensor, px. Default: the real photos')
     parser.add_argument('--domain-gap', action=argparse.BooleanOptionalAction,
                         default=True,
                         help='apply colour/vignette/lens/noise/JPEG to the FoV')

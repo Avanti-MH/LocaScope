@@ -4,7 +4,7 @@
     read       the objective's SlideReader, at the level the plan placed it for
     render     Render.capture_with_gt, the domain gap drawn from `photo_rng`
 
-        microscope = Render(SlideReader(wsi), DomainGapConfig(...), ds=1.0)
+        microscope = Render(SlideReader(wsi), REAL_PHOTO_SENSOR, DomainGapConfig(...), ds=1.0)
         plan = PlanSpec('ladder', (1.0, 4.00003, 16.0017), camera=microscope.spec)
         for meta, image, params in FovSupply(microscope, plan, SamplerConfig(...), mask):
             ...   # meta: SampleMeta; image: uint8 RGB; params: the gap drawn

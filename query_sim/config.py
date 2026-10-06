@@ -1,11 +1,11 @@
-"""Unified microscope-FOV simulation config.
+"""The domain gap a microscope photo carries: what is done to the pixels.
 
 Every knob is expressed as a `(lo, hi)` range so each photo (`Render`) can
 sample per FOV. For a fixed / deterministic run, set `lo == hi`.
 
-`pipeline.simulate_microscope_photo` treats a config as either:
-  - ranges (samples uniformly per-call), or
-  - fixed values when both ends of a range are equal.
+NOT the sensor and NOT the magnification. Both are the camera's
+(`Render(reader, sensor, cfg, ds=...)`), given in whole pixels and as a
+downsample, so the same gap can be put on any sensor at any objective.
 """
 
 from dataclasses import dataclass
@@ -14,11 +14,6 @@ from typing import Tuple
 
 @dataclass
 class DomainGapConfig:
-    # ── Source (sensor shape, ReadGeometry.sensor_size) ─────────────────────────────
-    wh_ratio: str = '4:3'
-    MPixels: float = 12.0
-    query_mpp: float = 0.25
-
     # ── Geometry ──────────────────────────────────────────────────────────────
     rotation_choices: Tuple[int, ...] = (0, 90, 180, 270)
     angle_jitter_deg: float = 3.0
@@ -27,7 +22,7 @@ class DomainGapConfig:
     # ── mpp calibration jitter ────────────────────────────────────────────────
     # >0 turns on mpp-jitter mode: per-shot scale is drawn from
     # (1-jitter, 1+jitter) INSTEAD OF scale_range, simulating a mis-calibrated
-    # microscope. effective_mpp = query_mpp / scale is recorded per shot.
+    # microscope. effective_mpp = the camera's mpp / scale is recorded per shot.
     # 0 = off, use scale_range normally.
     query_mpp_jitter: float = 0.0
 

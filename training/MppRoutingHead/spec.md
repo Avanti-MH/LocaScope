@@ -235,12 +235,12 @@ is deliberate, not an inconsistency.
 
 `RenderConfig.tile_size` is the camera's sensor side, the sampler's window,
 and the encoder's input — one number, three roles that must agree. It renders
-`DomainGapConfig(wh_ratio='1:1', MPixels=tile²/1e6)`, so:
+`Render(reader, (tile_size, tile_size), cfg, ds=rung)`, so:
 
 | | window |
 |---|---|
 | `TileSampler` (via `DsLadder.plan`) | `footprint_l0 = tile_size * rung` |
-| `Camera` | `rect_w_l0 = output_w * query_mpp / base_mpp = tile_size * rung` |
+| `Render` | `rect_w_l0 = output_w * ds = tile_size * rung` |
 
 **What this replaced, and why.** The first draft rendered CLAUDE.md's
 real-photo frame (1440x1024, 45:32, 1.475 MPixels) and cut it into 256 patches
@@ -367,8 +367,8 @@ is directly a training example. Train and eval never share a WSI (different
 `AccessDatasets` ids), so there is no cross-split leakage to guard against
 beyond that.
 
-Each drawn position → **one** rendered patch (`Camera(wsi, cfg=DomainGapConfig(
-wh_ratio='1:1', MPixels=tile²/1e6, query_mpp=rung*base_mpp)).capture(x, y)` —
+Each drawn position → **one** rendered patch (`Render(reader, (tile, tile), cfg,
+ds=rung).capture(x, y)` —
 see "The camera's sensor is ONE TILE" above, and see below for why `Camera`
 and not the raw `QueryFromWSI`+`simulate_microscope_photo` pair the first
 draft used) carrying that position's rung label. Nothing is cut up afterwards:

@@ -74,13 +74,12 @@ else:
 MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # its masks cover every val slide and the first test slides; "" = this job's own
 SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB-Stage1MppBench}"   # "" = this job's own
 TILE="${TILE:-256}"
-MPIXELS="${MPIXELS:-1.475}"
+SENSOR="${SENSOR:-1440 1024}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
 
 DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
 N_WSI="${N_WSI:-5}"   # per dataset; val and test must match, n_wsi is in the file name the test run finds the val thresholds by
 STAGE1_N_PER_RUNG="${STAGE1_N_PER_RUNG:-20}"
-RATIO="${RATIO:-45:32}"
 # SEG: hsv (free, no model) / hest (DeepLabV3+ResNet-50) / uni2 (fits a PCA
 # across the whole scanned rectangle first, 3.5-6 GPU-min/slide -- see
 # Uni2PcaSegConfig's own docstring). Built once, shared across every slide
@@ -182,14 +181,13 @@ echo "  datasets  $DATASETS   n_wsi=$N_WSI   seg=$SEG   native_only=${NATIVE_ONL
 STAGE1_LOG_TEE="$(mktemp)"
 python -u utilities/bench_modules/bench_stage1_mpp.py \
   --tile "$TILE" \
-  --mpixels "$MPIXELS" \
+  --sensor $SENSOR \
   --seed "${SEED:-42}" \
   --datasets $DATASETS \
   --n-wsi "$N_WSI" \
   --n-per-rung "$STAGE1_N_PER_RUNG" \
   --knn-samples "$KNN_SAMPLES" \
   --knn-k "$KNN_K" \
-  --ratio "$RATIO" \
   "${STAGE1_ARGS[@]}" \
   2>&1 | tee "$STAGE1_LOG_TEE"
 status=${PIPESTATUS[0]}

@@ -84,7 +84,7 @@ from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
 from TileSampler import (OverlapConfig, RichnessConfig,                 # noqa: E402
                          SamplerConfig, TileSampler)
 from DsLadder import DEFAULT_RUNGS, DsLadder                        # noqa: E402
-from ReadGeometry import sensor_size                                 # noqa: E402
+from ReadGeometry import REAL_PHOTO_SENSOR                           # noqa: E402
 from ReadGeometry import ReadSpec                                    # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from pipeline import simulate_microscope_photo                        # noqa: E402
@@ -1433,9 +1433,8 @@ def run_sampler_routing(args, out_dir: Path) -> int:
     # ── query: SAME positions, rendered as a photo would be, not read as a
     #    plain grid tile -- SlideReader.read + simulate_microscope_photo is the
     #    exact pair test_gigapath_knn_esti_mpp.py's own load_query() uses.
-    #    MPixels=1.475 matches CLAUDE.md's own real-photo spec (1440x1024,
-    #    45:32) -- the query is sized like the real pipeline's photos, not
-    #    query_sim's 4:3/12MP default.
+    #    --sensor (default `REAL_PHOTO_SENSOR`): the query is sized like the
+    #    real photos.
     #
     #    THE PHOTO IS SPLIT INTO tile_size PATCHES BEFORE ENCODING, exactly
     #    like production's `build_query_features` (QueryPatchContainer +
@@ -1454,7 +1453,7 @@ def run_sampler_routing(args, out_dir: Path) -> int:
     query_patch_feats: list[torch.Tensor] = []   # [M_i, D] per surviving query
     query_ds = []
     photo_reader = SlideReader(wsi)                   # lanczos: the photo's filter
-    photo_spec = ReadSpec(*sensor_size('4:3', args.mpixels))
+    photo_spec = ReadSpec(*args.sensor)
     for i in query_indices:
         meta = sampler[i].meta
         ds = float(meta.ds)
@@ -1581,11 +1580,10 @@ def main() -> int:
                              'rendered as a photo (SlideReader.read + '
                              'simulate_microscope_photo), not read as a '
                              'plain grid tile')
-    parser.add_argument('--mpixels', type=float, default=1.475,
-                        help='sampler_routing: query size -- '
-                             '1.475 MPixels at 45:32 matches CLAUDE.md\'s '
-                             'real-photo spec (1440x1024), not query_sim\'s '
-                             '4:3/12MP default')
+    parser.add_argument('--sensor', type=int, nargs=2,
+                        default=list(REAL_PHOTO_SENSOR), metavar=('W', 'H'),
+                        help='sampler_routing: query sensor, px. Default: '
+                             'the real photos')
     parser.add_argument('--k', type=int, default=5)
     parser.add_argument('--batch-size', type=int, default=4096)
     parser.add_argument('--device',

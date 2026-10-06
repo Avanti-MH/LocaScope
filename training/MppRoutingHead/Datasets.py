@@ -30,13 +30,13 @@ are positions and no pixels.
 row's own identity, so the same position always renders the same photo without
 anything being stored.
 
-Every split renders through `Camera` (`query_sim/camera.py`) via `render_row`
+Every split renders through `Render` (`query_sim/camera.py`) via `render_row`
 -- ONE place that turns a `ManifestRow` into `(patch, label, native)`, so train
 and eval cannot come to mean different pixels.
 
 ONE ROW IS ONE PATCH. The camera's sensor is `RenderConfig.tile_size` square,
 which is also the sampler's window and the encoder's input -- see the
-`TILE_WH_RATIO` note below for why all three being one number is the point
+sensor note below for why all three being one number is the point
 rather than a simplification.
 '''
 from __future__ import annotations
@@ -80,32 +80,32 @@ RUNGS: Tuple[float, ...] = DEFAULT_RUNGS
 RUNG_TO_CLASS: Dict[float, int] = {r: i for i, r in enumerate(RUNGS)}
 NUM_CLASSES = len(RUNGS)
 
-#: THE CAMERA'S SENSOR IS ONE TILE, not a whole field of view. Both this
-#: package's sampler and its camera then measure the SAME window, which is the
-#: single fact everything below depends on:
-#:
-#:     TileSampler   footprint_l0 = tile_size * rung     (DsLadder.plan)
-#:     Render        rect_w_l0    = output_w * ds
-#:                                = tile_size * rung     (Render(..., ds=rung))
-#:
-#: Rendering CLAUDE.md's real-photo frame (1440x1024, 45:32, 1.475 MPixels)
-#: and cutting it up instead makes the two windows disagree by 5.6x: the
-#: sampler certifies a `256*rung` window as tissue while the camera reads
-#: `1440*rung`, so every coarse rung draws positions that `capture` then
-#: refuses (off-slide) -- silently, because
-#: `collate_routing_batch` drops a None. `DsLadder.reachable`'s own measured
-#: numbers say where that lands: footprint 8192 sampled 100/100, 16384 sampled
-#: 0/100, 32768 had no region that could hold it. At 1440 the ladder's top
-#: three rungs are 11520/23040/46080 -- i.e. classes 3, 4 and 5 were quietly
-#: near-empty. At 256 the top rung is 8192, the case measured 100/100, so all
-#: six rungs exist.
-#:
-#: What this is NOT: a claim that a 256-px photograph is realistic. It is the
-#: unit the ENCODER consumes either way -- a 1440x1024 frame reaches the model
-#: only as 20 separate 256 patches -- so rendering the tile directly is the
-#: same input by a shorter route, with two exceptions handled in
-#: `CameraBank.camera_for`.
-TILE_WH_RATIO = '1:1'
+# THE CAMERA'S SENSOR IS ONE TILE, not a whole field of view. Both this
+# package's sampler and its camera then measure the SAME window, which is the
+# single fact everything below depends on:
+#
+#     TileSampler   footprint_l0 = tile_size * rung     (DsLadder.plan)
+#     Render        rect_w_l0    = output_w * ds
+#                                = tile_size * rung     (Render(..., ds=rung))
+#
+# Rendering the real-photo frame (`REAL_PHOTO_SENSOR`, 1440x1024)
+# and cutting it up instead makes the two windows disagree by 5.6x: the
+# sampler certifies a `256*rung` window as tissue while the camera reads
+# `1440*rung`, so every coarse rung draws positions that `capture` then
+# refuses (off-slide) -- silently, because
+# `collate_routing_batch` drops a None. `DsLadder.reachable`'s own measured
+# numbers say where that lands: footprint 8192 sampled 100/100, 16384 sampled
+# 0/100, 32768 had no region that could hold it. At 1440 the ladder's top
+# three rungs are 11520/23040/46080 -- i.e. classes 3, 4 and 5 were quietly
+# near-empty. At 256 the top rung is 8192, the case measured 100/100, so all
+# six rungs exist.
+#
+# What this is NOT: a claim that a 256-px photograph is realistic. It is the
+# unit the ENCODER consumes either way -- a 1440x1024 frame reaches the model
+# only as 20 separate 256 patches -- so rendering the tile directly is the
+# same input by a shorter route, with two exceptions handled in
+# `CameraBank.camera_for`. `CameraBank` builds every Render with the sensor
+# `(tile_size, tile_size)`.
 
 #: How often the two FRAME-REFERENCED optics (vignette, lens distortion) are
 #: present on a shot -- see `CameraBank.camera_for` for why they cannot simply
@@ -115,10 +115,9 @@ TILE_WH_RATIO = '1:1'
 OPTICS_P = 0.5
 
 #: Two COMPLETE, explicit `DomainGapConfig` templates -- `CameraBank.camera_
-#: for`'s `native` switch picks one, then `replace()`s only the three fields
-#: that are genuinely per-camera (`wh_ratio`/`MPixels`/`query_mpp` -- baked in
-#: per (WSI, rung), see `camera_for`'s own docstring) plus `stage_shift_max`
-#: (from `RenderConfig`, see below). Every OTHER field is spelled out here BY
+#: for`'s `native` switch picks one and `replace()`s only `stage_shift_max`
+#: (from `RenderConfig`, see below); the sensor and the rung are the Render's
+#: own (see `camera_for`). Every OTHER field is spelled out here BY
 #: VALUE on both, not left for `DomainGapConfig`'s own dataclass defaults to
 #: silently supply, so a reader does not have to open `DomainGapConfig`'s
 #: source to know what a tile got.
@@ -150,8 +149,7 @@ OPTICS_P = 0.5
 #: deployment will actually feed the model on that side, while `query` --
 #: always `CAMERA_FULL` -- keeps simulating the real photograph a query
 #: genuinely is.
-_CAMERA_TEMPLATE_KWARGS = dict(
-    wh_ratio=TILE_WH_RATIO, MPixels=0.0, query_mpp=0.0, stage_shift_max=0)
+_CAMERA_TEMPLATE_KWARGS = dict(stage_shift_max=0)
 
 CAMERA_FULL = DomainGapConfig(
     rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
@@ -410,7 +408,7 @@ class RenderConfig:
 
     `tile_size` is ONE number doing ONE job -- the camera's sensor side,
     the sampler's window, and the encoder's input are all it (see the
-    TILE_WH_RATIO note above).
+    sensor note above).
 
     `stage_shift_max=0` turns OFF the mechanical stage-jitter augmentation
     (`DomainGapConfig`'s own default is 3): this package's label is SCALE,
@@ -501,16 +499,6 @@ class RenderConfig:
         """`read_tag`, or `pyramid` where the tag is empty: the CSV value."""
         return self.read_tag or 'pyramid'
 
-    @property
-    def mpixels(self) -> float:
-        '''What `DomainGapConfig.MPixels` has to be for `ReadGeometry.sensor_size` to
-        arrive back at `tile_size`: it computes `output_w = int(sqrt(MPixels *
-        1e6 / (w_r * h_r)) * w_r)`, which at 1:1 is `int(sqrt(MPixels*1e6))`.
-        Derived rather than typed so the two cannot drift; `CameraBank`
-        asserts the round trip anyway, because `int()` on a float square root
-        is exactly the kind of step that lands one px low without complaint.'''
-        return (self.tile_size ** 2) / 1e6
-
 
 class CameraBank:
     '''Lazily-built `{(dataset, wsi_name, rung, ...): Render}` cache, one
@@ -590,25 +578,14 @@ class CameraBank:
         if cam is None:
             reader = self.reader_for(dataset_id, wsi_name)
             template = CAMERA_GEOMETRY_ONLY if native else CAMERA_FULL
-            gap_cfg = replace(template, wh_ratio=TILE_WH_RATIO,
-                             MPixels=self.cfg.mpixels,
-                             query_mpp=reader.base_mpp * rung,
-                             stage_shift_max=self.cfg.stage_shift_max)
+            gap_cfg = replace(template, stage_shift_max=self.cfg.stage_shift_max)
             # seed=None (the default): determinism, where wanted, is handled
             # per-call via capture(..., rng=...) in render_row -- a fixed
             # camera-level seed here would apply to every caller alike and
             # give neither train nor eval what it actually needs.
-            # ds=rung, not query_mpp alone: the camera would divide the mpp
-            # by base_mpp again to get the rung back.
-            cam = Render(reader, gap_cfg, ds=rung, read_level=read_level)
-            got = (cam.output_w, cam.output_h)
-            if got != (self.cfg.tile_size, self.cfg.tile_size):
-                raise RuntimeError(
-                    f'sensor is {got[0]}x{got[1]}, not '
-                    f'{self.cfg.tile_size}x{self.cfg.tile_size}: '
-                    f'RenderConfig.mpixels did not round-trip through '
-                    f'sensor_size. Everything downstream assumes the camera, '
-                    f'the sampler window and the encoder input are one number')
+            tile = int(self.cfg.tile_size)
+            cam = Render(reader, (tile, tile), gap_cfg, ds=rung,
+                         read_level=read_level)
             self._camera[key] = cam
         return cam
 

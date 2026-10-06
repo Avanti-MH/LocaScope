@@ -42,17 +42,17 @@ from camera import Render                                        # noqa: E402
 from config import DomainGapConfig                               # noqa: E402
 from FovSupply import FovSupply                                  # noqa: E402
 from DsLadder import RungPlan                                    # noqa: E402
-from ReadGeometry import ReadSpec, level_px                      # noqa: E402
+from ReadGeometry import (REAL_PHOTO_SENSOR as SENSOR, ReadSpec,  # noqa: E402
+                          level_px)
 from SafeSlide import SafeSlide                                  # noqa: E402
 from SlideReader import SlideReader                              # noqa: E402
 from TileSampler import PlanSpec, SamplerConfig, TileSampler, with_camera  # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 
 
-def fov_cfg(query_mpp: float) -> DomainGapConfig:
+def fov_cfg() -> DomainGapConfig:
     """The camera the window bench uses: optics and colour on, geometry off."""
     return DomainGapConfig(
-        wh_ratio='45:32', MPixels=1.47456, query_mpp=query_mpp,
         rotation_choices=(0,), angle_jitter_deg=0.0, scale_range=(1.0, 1.0),
         query_mpp_jitter=0.0, stage_shift_max=0)
 
@@ -132,16 +132,16 @@ def run_equiv(cam, mask, cfg, expect) -> list:
 
 # ── supply: what it is now ──────────────────────────────────────────────────
 
-def run_supply(wsi, mask, level_mpp, new, expect) -> None:
+def run_supply(wsi, mask, level_ds, new, expect) -> None:
     reader = SlideReader(wsi)
-    cam = Render(reader, fov_cfg(level_mpp), seed=0)
+    cam = Render(reader, SENSOR, fov_cfg(), ds=level_ds, seed=0)
     shape = (cam.output_h, cam.output_w, 3)
     expect(all(tuple(img.shape) == shape and img.dtype == np.uint8 for _, img, _ in new),
            f'every FoV {shape} uint8')
 
     # One supply over several rungs, each through its own objective.
-    full = DomainGapConfig(wh_ratio='45:32', MPixels=1.475)
-    microscope = Render(reader, full, ds=1.0, seed=0)
+    full = DomainGapConfig()
+    microscope = Render(reader, SENSOR, full, ds=1.0, seed=0)
     rungs = tuple(float(d) for d in wsi.level_downsamples[:2])
     plan = PlanSpec('ladder', rungs, camera=microscope.spec)
     cfg = SamplerConfig(n_per_rung=3, seed=3)
@@ -150,7 +150,7 @@ def run_supply(wsi, mask, level_mpp, new, expect) -> None:
     seen = sorted({float(m.ds) for m, _, _ in got})
     checked = 0
     for m, img, _ in got:
-        ref = Render(reader, full, ds=float(m.ds))
+        ref = Render(reader, SENSOR, full, ds=float(m.ds))
         want, _ = ref.capture_with_gt(
             m.fov_rect[0], m.fov_rect[1],
             rng=random.Random(int(hashlib.sha256(
@@ -161,7 +161,8 @@ def run_supply(wsi, mask, level_mpp, new, expect) -> None:
            f'({checked}/{len(got)})')
 
     # The picture depends on the draw's seed and the position only.
-    other = list(FovSupply(Render(reader, full, ds=1.0, seed=99), plan, cfg, mask))
+    other = list(FovSupply(Render(reader, SENSOR, full, ds=1.0, seed=99), plan,
+                           cfg, mask))
     expect(len(other) == len(got) and all(_same(a[1], b[1]) for a, b in zip(got, other)),
            'a microscope with another seed takes the same photos')
     metas = [m for m, _, _ in got]
@@ -220,13 +221,14 @@ def main() -> int:
     args = ap.parse_args()
 
     wsi = SafeSlide(args.wsi)
-    level_mpp = wsi.base_mpp * wsi.level_downsamples[args.level]
+    level_ds = float(wsi.level_downsamples[args.level])
+    level_mpp = wsi.base_mpp * level_ds
     print(f'{Path(args.wsi).name}  L{args.level}  base_mpp={wsi.base_mpp:.4f}  '
           f'level_mpp={level_mpp:.4f}')
     with MaskMaker(MASK_RECIPES['hsv']) as masks:
         mask, _ = masks.mask(wsi)
     expect = _Expect()
-    cam = Render(SlideReader(wsi), fov_cfg(level_mpp), seed=0)
+    cam = Render(SlideReader(wsi), SENSOR, fov_cfg(), ds=level_ds, seed=0)
     cfg = SamplerConfig(n_per_rung=8, seed=5)
     rung = cam.rect_w_l0 / float(cam.output_w)
     try:
@@ -240,7 +242,7 @@ def main() -> int:
     print('\n======== [equiv] ========', flush=True)
     new = run_equiv(cam, mask, cfg, expect)
     print('\n======== [supply] ========', flush=True)
-    run_supply(wsi, mask, level_mpp, new, expect)
+    run_supply(wsi, mask, level_ds, new, expect)
     rc = 1 if expect.failures else 0
     print(f'\n======== {"ok" if rc == 0 else "FAIL"} ========')
     return rc

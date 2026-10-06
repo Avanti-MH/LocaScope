@@ -78,13 +78,15 @@ def _maybe(rng: random.Random, p: float, lo_hi: Tuple[float, float]) -> float:
     return _uniform(rng, lo_hi) if _coin(rng, p) else 0.0
 
 
-def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
-    """Sample one concrete set of augment values from a cfg's ranges."""
+def _sample_params(cfg: DomainGapConfig, rng: random.Random,
+                   mpp: Optional[float] = None) -> dict:
+    """Sample one concrete set of augment values from a cfg's ranges. `mpp` is
+    the camera's nominal mpp; `effective_mpp` is None without one."""
     dx = rng.randint(-cfg.stage_shift_max, cfg.stage_shift_max) if cfg.stage_shift_max > 0 else 0
     dy = rng.randint(-cfg.stage_shift_max, cfg.stage_shift_max) if cfg.stage_shift_max > 0 else 0
 
     # mpp jitter overrides scale_range: scale is drawn from (1-j, 1+j) so that
-    # effective_mpp = query_mpp / scale falls within +/- jitter of nominal.
+    # effective_mpp = mpp / scale falls within +/- jitter of nominal.
     if cfg.query_mpp_jitter > 0:
         j = cfg.query_mpp_jitter
         scale = _uniform(rng, (1.0 - j, 1.0 + j))
@@ -101,7 +103,7 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random) -> dict:
         'rot_deg':           rng.choice(cfg.rotation_choices),
         'angle_jitter':      _uniform(rng, (-cfg.angle_jitter_deg, cfg.angle_jitter_deg)),
         'scale':             scale,
-        'effective_mpp':     cfg.query_mpp / scale,
+        'effective_mpp':     None if mpp is None else float(mpp) / scale,
         'brightness':        _uniform(rng, cfg.brightness_range),
         'contrast':          _uniform(rng, cfg.contrast_range),
         'color_temp':        _uniform(rng, cfg.color_temp_range),
@@ -229,8 +231,10 @@ def simulate_with_gt(
     rng:      Optional[random.Random]   = None,
     rotation:  Optional[float]           = None,
     output_wh: Optional[Tuple[int, int]]  = None,
+    mpp:       Optional[float]           = None,
 ) -> Tuple[np.ndarray, dict]:
-    """Return (augmented_img, params_dict). `params_dict` is what got sampled.
+    """Return (augmented_img, params_dict). `params_dict` is what got sampled;
+    its `effective_mpp` is `mpp / scale`, None when no `mpp` is given.
 
     `output_wh` is the sensor size. Give it and the augmented image comes back
     already cropped to it, with every frame-referenced effect measured against
@@ -244,7 +248,7 @@ def simulate_with_gt(
     cfg = cfg or DomainGapConfig()
     rng = rng or random
     arr = _as_rgb_uint8(img)
-    params = _sample_params(cfg, rng)
+    params = _sample_params(cfg, rng, mpp)
     if rotation is not None:
         rot_int = int(round(float(rotation)))
         params['rot_deg']      = rot_int

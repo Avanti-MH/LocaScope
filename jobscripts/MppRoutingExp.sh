@@ -45,8 +45,8 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #   sampler_routing  Samples its OWN fresh, UNCACHED reference tiles straight
 #                   off a live WSI (TileSampler, SuperPoint stageA's own
 #                   recipe: DsLadder rungs, n=100/rung), renders a DISJOINT set
-#                   of query positions as an actual photo (QueryFromWSI +
-#                   simulate_microscope_photo, 1.475 MPixels at 45:32), and
+#                   of query positions as an actual photo (SlideReader +
+#                   simulate_microscope_photo, the 1440x1024 sensor), and
 #                   runs the CURRENT production baseline (KnnEstMpp) alongside
 #                   SubspaceKnn projected candidates on the same draw, per
 #                   rung -- the arena any future routing method drops into
@@ -151,9 +151,8 @@ RUNGS="${RUNGS:-1 2 4 8 16 32}"
 # NOT KnnEstMpp's own default of 40.
 SAMPLER_N_PER_RUNG="${SAMPLER_N_PER_RUNG:-100}"
 SAMPLER_QUERY_PER_RUNG="${SAMPLER_QUERY_PER_RUNG:-20}"
-# 1.475 MPixels at 45:32 -- CLAUDE.md's real-photo spec (1440x1024), not
-# query_sim's 4:3/12MP default.
-MPIXELS="${MPIXELS:-1.475}"
+# The query sensor, px: the real photos (1440x1024).
+SENSOR="${SENSOR:-1440 1024}"
 K="${K:-5}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
 SEG="${SEG:-hest}"
@@ -177,7 +176,7 @@ python utilities/bench_modules/bench_mpp_feature_decomposition.py \
   --rungs $RUNGS \
   --sampler-n-per-rung "$SAMPLER_N_PER_RUNG" \
   --sampler-query-per-rung "$SAMPLER_QUERY_PER_RUNG" \
-  --mpixels "$MPIXELS" \
+  --sensor $SENSOR \
   --k "$K" \
   --batch-size "$BATCH_SIZE" \
   --seg "$SEG" \
