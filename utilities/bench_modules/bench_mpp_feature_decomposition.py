@@ -1589,7 +1589,7 @@ def main() -> int:
     parser.add_argument('--device',
                         default='cuda' if torch.cuda.is_available() else 'cpu')
 
-    # --seg / --mask-cache-job / --sampler-cache-job: sampler_routing reads --seg.
+    # --seg / --mask-cache-job / --draw-cache-job: sampler_routing reads --seg.
     add_cache_args(parser)
 
     parser.add_argument(

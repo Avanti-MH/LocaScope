@@ -7,7 +7,10 @@ A split is a property of a DATASET, not of whichever package trained on it
 first, and it has one writer, so the held-out slides never depend on which job
 ran first.
 
-    result/cache/<made_by>_split/<dataset>/wsi_split.csv      split,wsi_name
+    result/cache/<made_by>/dataset=<dataset>/split/
+        split_recorded.csv     split,wsi_name
+        record_recorded.json   the spec, the seed and the files it holds
+        orig_recorded.csv      the split before an upgrade, when there was one
 
 `SPLIT_JOB` is the writer's default job name and so every reader's default
 `--split-cache-job`: a reader that names no job reads the split `make_split.py`
@@ -35,7 +38,7 @@ EXISTING WINS. A recorded split is never re-derived (see `make_split_spec`): it
 is the record of which slides a checkpoint was selected on. `check_split` says
 whether a spec would reproduce, extend or contradict a record, and
 `upgrade_split` adds `train` to a record only when it extends it, keeping the
-old file beside it.
+old split beside it in the same entry.
 """
 from __future__ import annotations
 
@@ -43,13 +46,12 @@ import csv
 import math
 import random
 import re
-import shutil
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import AccessDatasets
-from AccessDatasets import SPLIT_JOB, list_names, locate               # noqa: F401
-from Cache import atomic_file
+from AccessDatasets import SPLIT_ID, SPLIT_JOB, list_names, locate     # noqa: F401
 from DsLadder import DsLadder
 
 # `SPLIT_JOB` is defined in AccessDatasets, which reads a recorded split as the
@@ -69,8 +71,14 @@ BRACS_RUNGS: frozenset = frozenset((1.0, 4.0, 16.0, 32.0))
 
 
 def split_path(made_by: str, dataset_id: str) -> Path:
-    """`result/cache/<made_by>_split/<dataset>/wsi_split.csv`."""
+    """The recorded split of `dataset_id` in `made_by`'s cache."""
     return AccessDatasets.split_file(dataset_id, made_by)
+
+
+def _orig_path(made_by: str, dataset_id: str) -> Path:
+    """The split as it was before the first upgrade."""
+    return AccessDatasets.split_entry(dataset_id, made_by).path(
+        'orig', SPLIT_ID, '.csv')
 
 
 def native_bracs_rung_wsi_names(dataset_id: str) -> List[str]:
@@ -201,18 +209,36 @@ def split_wsi_names(dataset_id: str, n_val: int, *, seed: int = 42,
     return sets['val'], sets['test']
 
 
-def _write(sets: Dict[str, Sequence[str]], path) -> Path:
+def _write_csv(sets: Dict[str, Sequence[str]], path) -> None:
     """`split,wsi_name` rows, in `SPLIT_SETS` order. Row ORDER is part of the
     record: the names were shuffled before splitting, so a prefix of the `test`
     rows is already a random sample and callers take one instead of drawing
     again. A reader that knows only val and test skips the `train` rows."""
-    with atomic_file(path) as tmp:
-        with open(tmp, 'w', newline='') as fh:
-            writer = csv.writer(fh)
-            writer.writerow(('split', 'wsi_name'))
-            for name in SPLIT_SETS:
-                writer.writerows((name, n) for n in sets.get(name, ()))
-    return Path(path)
+    with open(path, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(('split', 'wsi_name'))
+        for name in SPLIT_SETS:
+            writer.writerows((name, n) for n in sets.get(name, ()))
+
+
+def _write(sets: Dict[str, Sequence[str]], made_by: str, dataset_id: str, *,
+           spec: Dict[str, Size], seed: int,
+           orig: Optional[Dict[str, Sequence[str]]] = None) -> Path:
+    """The split entry of `dataset_id`: the sets, the spec that made them
+    and, on an upgrade, `orig` -- the sets as they were -- all written
+    together, the record last."""
+    entry = AccessDatasets.split_entry(dataset_id, made_by)
+    stored = entry.stored(SPLIT_ID) or {}
+    rec = {'id': SPLIT_ID, 'upstream': {}, 'versions': {}, 'env': {},
+           'parts': [f'dataset={dataset_id}', f'seed={seed}'] + [
+               f'spec.{k}={v}' for k, v in sorted(spec.items())],
+           'created_at': stored.get('created_at') or time.strftime('%Y-%m-%dT%H:%M:%S'),
+           'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S')}
+    with entry.writing(SPLIT_ID, rec) as put:
+        _write_csv(sets, put('split', '.csv'))
+        if orig is not None:
+            _write_csv(orig, put('orig', '.csv'))
+    return split_path(made_by, dataset_id)
 
 
 def read_sets(path) -> Dict[str, List[str]]:
@@ -234,33 +260,34 @@ def _candidates(dataset_id: str, candidate_names):
             if dataset_id.startswith('bracs') else None)
 
 
-def make_split_spec(dataset_id: str, spec: Dict[str, Size], path, *,
+def make_split_spec(dataset_id: str, spec: Dict[str, Size], made_by: str, *,
                     seed: int = 42,
                     candidate_names: Optional[Sequence[str]] = None
                     ) -> Dict[str, List[str]]:
-    """The recorded split if `path` exists, a fresh one written there if not.
-    ONLY `make_split.py` calls this; everyone else reads the split as the
-    dataset `<id>#<split>` (AccessDatasets), which never writes.
+    """The split recorded in `made_by`'s cache if there is one, a fresh one
+    written there if not. ONLY `make_split.py` calls this; everyone else reads
+    the split as the dataset `<id>#<split>` (AccessDatasets), which never
+    writes.
 
     EXISTING WINS, always. Re-deriving on every run would mean adding or
     removing one slide silently reshuffles which ten are held out, and
     checkpoints selected on the old val split get scored against a test set
-    containing some of it. Deleting the file is how you ask for a new split,
+    containing some of it. Deleting the entry is how you ask for a new split,
     and doing that invalidates every checkpoint selected on the old one.
     `check_split` and `upgrade_split` are the two ways to touch a record."""
-    path = Path(path)
+    path = split_path(made_by, dataset_id)
     if path.exists():
         return read_sets(path)
     sets = split_sets(dataset_id, spec, seed=seed,
                       candidate_names=_candidates(dataset_id, candidate_names))
-    _write(sets, path)
+    _write(sets, made_by, dataset_id, spec=spec, seed=seed)
     return sets
 
 
-def make_split(dataset_id: str, n_val: int, path, *, seed: int = 42
+def make_split(dataset_id: str, n_val: int, made_by: str, *, seed: int = 42
                ) -> Tuple[List[str], List[str]]:
     """`make_split_spec` for `val=<n_val>,test=rest`, as `(val, test)`."""
-    sets = make_split_spec(dataset_id, {'val': n_val, 'test': 'rest'}, path,
+    sets = make_split_spec(dataset_id, {'val': n_val, 'test': 'rest'}, made_by,
                            seed=seed)
     return sets.get('val', []), sets.get('test', [])
 
@@ -272,11 +299,12 @@ def _first_difference(a: Sequence[str], b: Sequence[str]) -> str:
     return 'one is a prefix of the other'
 
 
-def check_split(dataset_id: str, spec: Dict[str, Size], path, *, seed: int = 42,
+def check_split(dataset_id: str, spec: Dict[str, Size], made_by: str, *,
+                seed: int = 42,
                 candidate_names: Optional[Sequence[str]] = None
                 ) -> Tuple[str, List[str]]:
-    """`(status, reasons)` for what `spec` would make against the record at
-    `path`, writing nothing:
+    """`(status, reasons)` for what `spec` would make against the split
+    recorded in `made_by`'s cache, writing nothing:
 
         missing      no record yet
         same         the spec reproduces the record, set for set
@@ -286,7 +314,7 @@ def check_split(dataset_id: str, spec: Dict[str, Size], path, *, seed: int = 42,
                      test, so every `test[:n]` read so far still reads the same
         mismatch     anything else, with the first difference of each set
     """
-    path = Path(path)
+    path = split_path(made_by, dataset_id)
     if not path.exists():
         return 'missing', [f'{path} does not exist']
     recorded = read_sets(path)
@@ -312,26 +340,26 @@ def check_split(dataset_id: str, spec: Dict[str, Size], path, *, seed: int = 42,
     return 'mismatch', reasons
 
 
-def upgrade_split(dataset_id: str, spec: Dict[str, Size], path, *,
+def upgrade_split(dataset_id: str, spec: Dict[str, Size], made_by: str, *,
                   seed: int = 42,
                   candidate_names: Optional[Sequence[str]] = None) -> str:
     """Add `train` to a record the spec only EXTENDS (`check_split` says
-    `upgradable`), keeping the old file as `<name>.orig` first. `'same'` when
+    `upgradable`), keeping the old split beside it as `orig`. `'same'` when
     there is nothing to do; a record the spec contradicts raises with the
-    differences, and so does an existing backup -- it is the original, and is not
-    overwritten by a later upgrade."""
-    path = Path(path)
+    differences, and so does an existing `orig` -- it is the original, and is
+    not overwritten by a later upgrade."""
     cands = _candidates(dataset_id, candidate_names)
-    status, reasons = check_split(dataset_id, spec, path, seed=seed,
+    status, reasons = check_split(dataset_id, spec, made_by, seed=seed,
                                   candidate_names=cands)
+    path = split_path(made_by, dataset_id)
     if status == 'same':
         return 'same'
     if status != 'upgradable':
         raise ValueError(f'{path}: {status}: ' + '; '.join(reasons))
-    backup = path.with_name(path.name + '.orig')
-    if backup.exists():
-        raise FileExistsError(f'{backup} exists: it is the split as it was before '
+    orig = _orig_path(made_by, dataset_id)
+    if orig.exists():
+        raise FileExistsError(f'{orig} exists: it is the split as it was before '
                               f'the first upgrade, and is not overwritten')
-    shutil.copy2(path, backup)
-    _write(split_sets(dataset_id, spec, seed=seed, candidate_names=cands), path)
+    _write(split_sets(dataset_id, spec, seed=seed, candidate_names=cands),
+           made_by, dataset_id, spec=spec, seed=seed, orig=read_sets(path))
     return 'upgraded'

@@ -81,24 +81,28 @@ from FovSupply         import (FovRecipe, FovSupply, add_fov_args,  # noqa: E402
 # ── the shots: one FovSupply per slide, every level in one draw ─────────────
 
 def split_shots(datasets, split: str, n_wsi: int, fov: FovRecipe, *, masks,
-                skip=None):
+                draw_job: str, render_job: str, save_photos: bool = False,
+                workers: int = 1, skip=None):
     """`(row, image)` per synthetic FoV, rendered on demand: `row` is the
-    FOVRecord of its ground truth, `image` uint8 RGB.
+    FOVRecord of its ground truth plus its `index` in the draw, `image` uint8
+    RGB.
 
     SLIDES: the first `n_wsi` of each dataset's recorded `split`
     (`<dataset>#<split>`), the slides Stage1MppBench and OffGridScore score,
-    every one with a cached mask in `masks` (a MaskMaker). LEVELS: the
-    recipe's (`fov.rungs_for`), all in ONE draw per slide: a microscope
-    (`Render` at ds 1) and a `FovSupply` over `PlanSpec('ladder', <the levels'
-    own ds>)`, each position photographed through the objective at its level.
-    A level with no room for a FoV comes back short in the sampler's report; a
-    slide with none at all is skipped and says so.
+    every one with a mask in `masks` (a MaskMaker). LEVELS: the recipe's
+    (`fov.rungs_for`), all in ONE draw per slide: a microscope (`Render` at
+    ds 1) and a `FovSupply` over `PlanSpec('ladder', <the levels' own ds>)`,
+    each position photographed through the objective at its level, the draw
+    from `draw_job`'s cache and the photos' record in `render_job`'s
+    (`FovSupply.cached`), `workers` photos rendered at once. A level with no
+    room for a FoV comes back short in the sampler's report; a slide with none
+    at all is skipped and says so.
 
     `row['filename']` is `<slide>_L<level>_syn<i>.png`, `i` counting within
-    the level, an id; nothing is written. `skip(filename)` true passes a shot
-    over BEFORE it is rendered -- a resumed run's done shots -- and the rest
-    are the same pictures, since a FoV's rng is its own position's
-    (`FovSupply.photo`)."""
+    the level, an id; nothing is written but the caches. `skip(filename)` true
+    passes a shot over BEFORE it is rendered -- a resumed run's done shots --
+    and the rest are the same pictures, since a FoV's rng is its own
+    position's (`FovSupply.photo`)."""
     for dataset in datasets:
         dataset_split = f'{dataset}#{split}'
         names = list_names(dataset=dataset_split)
@@ -108,30 +112,36 @@ def split_shots(datasets, split: str, n_wsi: int, fov: FovRecipe, *, masks,
         for name in names[:n_wsi]:
             path = str(locate(name, dataset=dataset_split).path)
             reader = SlideReader(path)
-            mask, _ = masks.mask(reader.slide)
             rungs = fov.rungs_for(reader.level_downsamples)
             microscope = Render(reader, fov.sensor, fov.gap, ds=1.0,
                                 seed=fov.sampler.seed)
-            supply = FovSupply(microscope, PlanSpec('ladder', rungs,
-                                                    camera=microscope.spec),
-                               fov.sampler, mask)
             try:
-                sampler = supply.sampler
+                supply = FovSupply.cached(
+                    microscope, PlanSpec('ladder', rungs, camera=microscope.spec),
+                    fov.sampler, masks=masks, draw_job=draw_job,
+                    render_job=render_job, save_photos=save_photos)
             except RuntimeError as exc:
                 print(f'  {name}: no FoV position at any level -- skipped '
                       f'({str(exc).splitlines()[0]})', flush=True)
                 continue
-            counted = {}
-            for s in sampler:
+            if not len(supply.sampler):
+                print(f'  {name}: no FoV position at any level -- skipped',
+                      flush=True)
+                continue
+            filename, counted = {}, {}
+            for s in supply.sampler:
                 m = s.meta
                 i = counted[m.level] = counted.get(m.level, -1) + 1
-                filename = f'{name}_L{m.level}_syn{i:05d}.png'
-                if skip is not None and skip(filename):
-                    continue
-                image, params = supply.photo(m)
-                yield (dataclasses.asdict(FOVRecord.from_capture(
-                    filename, path, supply.camera_for(m.ds), m.fov_rect[0],
-                    m.fov_rect[1], params, level=m.level)), image)
+                filename[id(m)] = f'{name}_L{m.level}_syn{i:05d}.png'
+            done = None if skip is None else (
+                lambda m: skip(filename[id(m)]))
+            for index, m, image, params in supply.shots(workers=workers,
+                                                        skip=done):
+                row = dataclasses.asdict(FOVRecord.from_capture(
+                    filename[id(m)], path, supply.camera_for(m.ds),
+                    m.fov_rect[0], m.fov_rect[1], params, level=m.level))
+                row['index'] = index
+                yield row, image
 
 
 # ── run identity: what a resumed metrics.csv must have been made with ────────
@@ -744,6 +754,16 @@ def main():
     ap.add_argument('--mask-cache-job', default='MppRoutingHead',
                     help="whose mask cache the pipeline's --seg mask is read "
                          'from and written to')
+    ap.add_argument('--draw-cache-job', default=None,
+                    help='whose cache the FoV draws are read from and written '
+                         'to. Default: this job')
+    ap.add_argument('--render-cache-job', default=None,
+                    help='whose cache the photo record (and, with '
+                         '--save-photos, the photos) is read from and written '
+                         'to. Default: this job')
+    ap.add_argument('--save-photos', action='store_true',
+                    help='keep every photo beside its record, so a later run '
+                         'reads it instead of rendering it')
     ap.add_argument('--resume',     action='store_true',
                     help='carry on from an existing metrics.csv instead of '
                          'replacing it: every shot already recorded there is '
@@ -868,14 +888,17 @@ def main():
             json.dump(run, f, indent=1, sort_keys=True, default=str)
 
     fov_masks = MaskMaker(MASK_RECIPES['hest'],
-                          Cache.cache_root(args.fov_mask_cache_job, 'mask'), device)
+                          args.fov_mask_cache_job, device)
     # The pipeline's own mask, through the same cache mechanism: under the
     # default --seg hest and one cache job it is the FoVs' mask, read once more
     # from the same file and never segmented twice.
-    pipeline_masks = MaskMaker(mask_cfg, Cache.cache_root(args.mask_cache_job,
-                                                          'mask'), device)
+    pipeline_masks = MaskMaker(mask_cfg, args.mask_cache_job, device)
+    own = Cache.job_name('BenchLocaScope')
     shots = split_shots(args.datasets, args.split, args.n_wsi, fov,
-                        masks=fov_masks, skip=lambda name: name in done)
+                        masks=fov_masks, draw_job=args.draw_cache_job or own,
+                        render_job=args.render_cache_job or own,
+                        save_photos=args.save_photos, workers=budget.workers,
+                        skip=(lambda name: name in done) if done else None)
     if done:
         print(f'Shots      : {len(done)} already done are passed over', flush=True)
 

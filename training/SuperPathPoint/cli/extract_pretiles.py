@@ -2,7 +2,7 @@
 """spec.md 12 step 3c: cut the pre-tiles the training set is made of.
 
     python training/SuperPathPoint/cli/extract_pretiles.py \
-        --tile 256 --n 500
+        --datasets 'bracs/test#val' --tile 256 --n 500
 
 Outputs:
     result/cache/<--pretile-cache-job>_pretiles/<seg_id>/<slide>/
@@ -70,14 +70,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
-from cli import (add_pretile_args, job_result_dir, mask_root,     # noqa: E402
+from cli import (add_pretile_args, job_result_dir,                # noqa: E402
                  pretile_root)
 
 
 import cv2                                                        # noqa: E402
 import torch                                                      # noqa: E402
 
-from Cache import find, read_meta, wsi_stem_of                    # noqa: E402
+from AccessDatasets import list_names, locate, pick_wsi_names     # noqa: E402
+from Cache import job_name, wsi_stem_of                            # noqa: E402
 from SafeSlide import SafeSlide                                    # noqa: E402
 from TileSampler import SamplerConfig, TileSampler, pre_tile_px     # noqa: E402
 from SlideReader import SlideReader                                # noqa: E402
@@ -97,8 +98,20 @@ def main():
     # models and separate extractions (spec.md 6.5). --pre-tile-factor 3 is
     # derived (spec.md 6.6, bound 2.49) and is NOT a knob to tune for disk.
     add_pretile_args(ap)
-    ap.add_argument('--wsi', nargs='*', default=None,
-                    help='slide paths. Default: every mask in the mask cache')
+    ap.add_argument('--datasets', nargs='+', default=None,
+                    help='the slides of these datasets: AccessDatasets ids, '
+                         '<id>#<split> for a recorded split')
+    ap.add_argument('--n-wsi', type=int, default=None,
+                    help='slides per dataset, a seeded pick (--seed); '
+                         'default every one')
+    ap.add_argument('--split-cache-job', default=None,
+                    help='whose recorded split a <id>#<split> dataset reads. '
+                         'Default: MakeSplit')
+    ap.add_argument('--wsi', nargs='+', default=None,
+                    help='slide paths, instead of or beside --datasets')
+    ap.add_argument('--draw-cache-job', default=None,
+                    help='whose cache the draws are read from and written to: '
+                         'result/cache/<this>/. Default: this job')
     ap.add_argument('--rungs', type=float, nargs='+', default=list(DEFAULT_RUNGS),
                     help='the ladder rungs to extract. Part of the corpus '
                          'address: a chain is only a chain over rungs sampled '
@@ -197,36 +210,29 @@ def main():
     corpus = PreTileCorpus.of(pretile_root(args), mask_cfg, cfg,
                               ladder(args.rungs, args.tile, args.pre_tile_factor),
                               args.pre_tile_factor)
-    seg_dir = mask_root(args) / mask_cfg.seg_id()
-    print(f'masks  {seg_dir}\ntiles  {corpus.root}\ncorpus {corpus.key}',
-          flush=True)
+    draw_job = args.draw_cache_job or job_name('ExtractPreTiles')
+    print(f'masks  {args.mask_cache_job} {mask_cfg.seg_id()}\ndraws  {draw_job}\n'
+          f'tiles  {corpus.root}\ncorpus {corpus.key}', flush=True)
 
-    paths = args.wsi
+    # The slides, named the way the routing heads name theirs: a dataset (or a
+    # recorded split of one) and how many, or explicit paths.
+    if not (args.datasets or args.wsi):
+        ap.error('name the slides: --datasets (an id or <id>#<split>) or --wsi')
+    paths = list(args.wsi or [])
     # A PATH, NOT A STEM, and the difference would surface four frames down
     # as openslide's "Unsupported or missing image file" -- which reads as a
-    # corrupt slide, not as a wrong argument. The stem is what every OTHER
-    # thing here is keyed by (the mask cache, the pre-tile cache, --wsi-stem in
-    # make_ha_labels), so reaching for it is the expected mistake.
-    for candidate in paths or ():
+    # corrupt slide, not as a wrong argument.
+    for candidate in paths:
         if not os.path.exists(candidate):
-            hit = find(seg_dir, '*/mask_meta.json')
-            known = sorted(read_meta(p)['wsi_path'] for p in hit)
-            match = [k for k in known if wsi_stem_of(k) == candidate]
-            ap.error(
-                f'--wsi takes slide PATHS, not stems, and {candidate!r} is not '
-                f'a file.' + (f' Did you mean {match[0]}?' if match else
-                              f' Known: {", ".join(os.path.basename(k) for k in known[:4])}'
-                              f'{" ..." if len(known) > 4 else ""}'))
-
-    if not paths:
-        found = find(seg_dir, '*/mask_meta.json')
-        if not found:
-            print(f'no masks under {seg_dir}. Run '
-                  f'utilities/cli/build_cache/build_mask_store.py first, or '
-                  f'pass --wsi and the mask is made on the way.')
-            return 1
-        paths = [read_meta(p)['wsi_path'] for p in found]
-        print(f'{len(paths)} slides from the mask cache', flush=True)
+            ap.error(f'--wsi takes slide PATHS, not stems, and {candidate!r} '
+                     f'is not a file')
+    for dataset in args.datasets or []:
+        split_job = args.split_cache_job if '#' in dataset else None
+        names = pick_wsi_names(list_names(dataset=dataset, split_job=split_job),
+                               args.n_wsi, args.seed)
+        paths += [str(locate(n, dataset=dataset, split_job=split_job).path)
+                  for n in names]
+    print(f'{len(paths)} slides', flush=True)
 
     rows, failures = [], []
     # A MISSING MASK IS MADE, NOT REFUSED: MaskMaker segments on a miss and
@@ -239,14 +245,15 @@ def main():
     # slide is finished.
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'mask segmenter on {device}', flush=True)
-    with MaskMaker(mask_cfg, mask_root(args), device) as masks:
+    with MaskMaker(mask_cfg, args.mask_cache_job, device) as masks:
         for index, wsi_path in enumerate(paths, 1):
             stem = wsi_stem_of(wsi_path)
             print(f'\n[{index}/{len(paths)}] {stem}', flush=True)
             with SafeSlide(wsi_path) as wsi:
                 rows += _extract_slide(
                     wsi, masks, cfg, corpus, args.rungs, tile=args.tile, n=args.n,
-                    overwrite=args.overwrite, failures=failures)
+                    overwrite=args.overwrite, failures=failures,
+                    draw_job=draw_job)
 
     summary = os.path.join(out_dir, 'extract_pretiles.csv')
     if rows:
@@ -326,19 +333,23 @@ def _plans_for(wsi, *, tile: int, pre_tile_factor: int, rungs):
 
 def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
                    corpus: PreTileCorpus, rungs, *, tile: int, n: int, overwrite: bool,
-                   failures: list):
+                   failures: list, draw_job: str):
     """Every rung of one slide, from ONE sampler. Returns a row per rung written.
+
+    The positions come the way the routing heads take theirs:
+    `TileSampler.cached` over the corpus's ladder, in `draw_job`'s cache, the
+    mask from `masks`.
 
     The sampler runs once and is then split by rung into the per-rung
     directories of `corpus`. Every rung carries the same `sampler_id`, which
     is the honest thing: the rungs were cut by one decision, and under
     inheritance they are not independent of each other.
 
-    RESUME IS PER RUNG AND THE SAMPLING IS NOT SKIPPED. A rung whose directory
-    is already finished is skipped at the WRITE, not at the sample -- because
-    the inheritance set is chosen across all rungs at once and cannot be
-    rebuilt from a subset. So a re-run after a walltime kill pays the sampling
-    again and none of the reads, which is where the hours are.
+    RESUME IS PER RUNG. A rung whose directory is already finished is skipped
+    at the WRITE; the draw is the whole slide's -- the inheritance set is
+    chosen across all rungs at once and cannot be rebuilt from a subset -- and
+    a re-run reads it back from the draw cache. So a re-run after a walltime
+    kill pays none of the reads, which is where the hours are.
 
     `cfg` and `corpus` ARE BUILT BY THE CALLER: `main()` from argparse,
     `cli/prepare_chain_stack.py` from `common/Corpora.RECIPES`. `rungs` must
@@ -353,8 +364,7 @@ def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
     stem = wsi_stem_of(wsi)
     tile, pre_tile_factor = int(tile), int(corpus.factor)
     mask, _hit = masks.mask(wsi)
-    segmenter_id = read_meta(
-        masks.slide_dir(stem) / 'mask_meta.json').get('segmenter_id', '')
+    segmenter_id = (masks.stored(stem) or {}).get('segmenter_id', '')
     frac = float(mask.main_mask.mean())
     print(f'    mask {mask.main_mask.shape[0]}x{mask.main_mask.shape[1]}, '
           f'tissue {frac:.1%}, {len(mask.tissue_regions)} regions   '
@@ -363,7 +373,9 @@ def _extract_slide(wsi, masks: MaskMaker, cfg: SamplerConfig,
     plans, pre_plans, pre_px = _plans_for(wsi, tile=tile,
                                           pre_tile_factor=pre_tile_factor,
                                           rungs=rungs)
-    sampler = TileSampler(wsi, mask, cfg).sample(plans)
+    sampler = TileSampler.cached(wsi._filename, cfg,
+                                 ladder(rungs, tile, pre_tile_factor), draw_job,
+                                 masks=masks)
     reader = SlideReader(wsi, resize='area')
 
     by_rung = {}

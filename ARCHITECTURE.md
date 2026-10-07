@@ -353,6 +353,71 @@ window bench
 
 訓練的下一個瓶頸是擴增（C1，CPU，8 個 worker 時約 150/s）。
 
+## Config 的來源：RECIPES 表
+
+config 的值只寫在一個地方：基礎模組裡的 RECIPES 表。每個 entry 都把所有欄位寫出來，
+其他地方一律「取一個 recipe，再用 `dataclasses.replace` 改幾個欄位」。
+
+| 表 | 模組 | entry |
+|---|---|---|
+| `MASK_RECIPES` | `utilities/TissueMaskConfig.py` | `none`、`hsv`、`hest`、`uni2_pca`（`--seg`） |
+| `SAMPLER_RECIPES` | `utilities/TileSampler.py` | `lattice`（class 預設寫出來，給 diagnostic 當起點）、`reference-bank`（stage 1 的參考庫、tile bench 的參考 store） |
+| `FOV_RECIPES` | `query_sim/FovSupply.py` | `bench`（四個 bench 共用，`--fov`）、`plain`（class 預設寫出來）、`routing-query`、`routing-support-native`（MppRoutingHead 的兩個相機模板） |
+| `RECIPES` | `training/SuperPathPoint/common/Corpora.py` | `stageA`、`stageB-fOwn`、`stageB-cOwn` |
+
+`FovRecipe` 是一批 FoV 的完整描述：`sensor`、`gap`（DomainGapConfig）、`sampler`（SamplerConfig）、
+`rungs`（`'native'` 表示每張 slide 自己的層，或明確的 ds tuple）、`max_ds`。它沒有自己的 id：
+gap 和 sampler 各有 id，sensor 和 rungs 在 plan 的 key 裡，所以兩個欄位相同的 recipe 就是同一批 FoV。
+`FovRecipe.rungs_for(level_downsamples)` 算出一張 slide 實際的 rung。
+
+`bench` 的值：真實照片的 sensor 1440×1024；完整的 domain gap，加上 5% 的 mpp jitter；
+每層 50 張、seed 0、預設的 richness；native levels 到 ds 16；overlap `step=0.5`、
+`max_overlap_ratio=0.5`、`overlapping_share=1/3`、`jitter_cap=0`，讓低解析度的層在不重疊的格點用完時，
+仍能用最多 1/3 的預算補滿。tile bench 從它出發，換成 256 的 sensor 和 `candidates='random'`
+（lattice 會和參考 grid 對齊，query 正好落在答案上）。
+
+### 用法
+
+```python
+fov = fov_from_args(args)            # --fov 選 recipe；--sampler-*、--camera-*、--max-ds 逐欄覆寫
+bank = replace(SAMPLER_RECIPES['reference-bank'], n_per_rung=40, seed=42)
+seg = replace(MASK_RECIPES['uni2_pca'].seg, workers=budget.workers)
+```
+
+覆寫任何欄位就是另一份 config、另一個 id，所以覆寫過的 config 不會拿到用原始 recipe 做的 cache。
+`add_fov_args` / `fov_from_args` 和 `add_mask_args` / `mask_cfg_from_args` 是同一種寫法，每個拍 FoV
+的工具用同一組 flag。`Render`、`FovSupply`、`simulate_with_gt`、`TileSampler` 都要求呼叫端給 config，
+沒有「沒給就用 class 預設」的路徑。
+
+### 強制的方式：`test_config_identity` 的 lint
+
+在執行時分不出一個值是寫出來的還是用了預設，只有讀原始碼才分得出來，所以用 AST 檢查：
+
+1. **recipe 寫齊**：RECIPES 表裡每一個 config 呼叫，關鍵字參數必須剛好涵蓋該 class 的全部 init 欄位，
+   巢狀的 config 也一樣，`NOT_IDENTITY` 的欄位（例如 `on_incomplete`、`weights`）也要寫。
+   不准用位置參數、不准用 `**` 展開。一個欄位可以引用另一張表的 entry（`sampler=SAMPLER_RECIPES['lattice']`），
+   因為那個 entry 本身也受同一條規則檢查。class 新增欄位時，所有 recipe 都會失敗，
+   逼每個 recipe 明確決定這個欄位的值。repo 裡新增的 RECIPES 表沒登記進測試也會失敗。
+2. **RECIPES 表以外沒有模組層級的 config 常數**：模組最上層建構 config 的語句（呼叫 config class 或 `replace`）
+   只能是 RECIPES 表的 entry。
+3. **有 recipe 的 config class 只在三個地方建構**：定義它的模組、RECIPES 表、測試。範圍是 `SamplerConfig`、
+   `RichnessConfig`、`OverlapConfig`、`InheritConfig`、`DomainGapConfig`、`TissueMaskConfig`、各個 `*SegConfig`、`FovRecipe`。
+4. **加 config flag 的 parser 必須 `allow_abbrev=False`**：用了 `add_config_args`、`add_fov_args`、
+   `add_encoder_args` 的工具，否則 `--fov` 這類較短的 flag 可能被當成另一個 flag 的縮寫。
+
+另外 `moved recipes are the same configs` 用凍結的舊寫法逐一比對：mask 四個、`lattice`、`reference-bank`、
+corpus 三個、routing 兩個，config 相等、id 相同；routing data record 寫死為 `e1b6e602ac441e1b`。
+任何一個值抄錯，這條就會失敗。
+
+### 不在 RECIPES 表裡的 config
+
+- **encoder**：一個 encoder 一個 class，`encoder_config(name)` 的登錄表本身就是 recipe 表，BASELINE 已用字面值寫齊。
+- **訓練 config**（`TrainerConfig`、`HaConfig`、`HeadConfig`、`RenderConfig` …）：由訓練腳本的 CLI 決定，
+  值寫進 checkpoint 的 record。
+- **從存檔還原的 config**：`from_checkpoint`、`config_from_json`，值來自當時的紀錄。
+- **stage config**（`KnnEstMppConfig`、`SlidingWinSimRotConfig`）：目前由 `knn_estimator` 等函式的參數預設值決定，
+  要不要做成 recipe 尚未決定（見 `log/TODO.log`）。
+
 ## 原則
 
 - **沒有要寫 cache 或寫檔，就不搬到 CPU。** encoder 的輸出在哪裡產生，就在哪裡用。
@@ -364,6 +429,5 @@ window bench
 
 ## 已知但刻意暫緩
 
-- UNI2 的前處理和 upstream 不一致：現在是中心裁切，upstream 是縮放。見 `stage1_estimation/README.md`。
 - GPU 擴增（C1）。
 - CONCH 這類需要真正縮放的 encoder：GPU 前處理和 PIL 不是逐位元相同，差異量由 `test_tile_encoder` 量測。

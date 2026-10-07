@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How many tiles does each (slide, tile_size, ds) yield, and in which buckets?
 
-    python utilities/cli/diagnostics/probe_tile_yield.py [--seg uni2_pca] [--mask-cache-job BuildMaskStore] [--n 500]
+    python utilities/cli/diagnostics/probe_tile_yield.py --dataset 'bracs/test#val' [--seg uni2_pca] [--n 500]
 
 Outputs (in result/<SLURM_JOB_NAME or ProbeTileYield>/):
     tile_yield.png
@@ -9,9 +9,9 @@ Outputs (in result/<SLURM_JOB_NAME or ProbeTileYield>/):
     tile_yield.csv            one row per cell of the grid
     feature_map_size.csv      --feature-map on|only: one row per (slide, tile, level)
 
-spec.md 12 step 3b. NO MODEL and no encoding -- it reads the masks the store
-already holds and runs the same rejection sampling the extraction will, so the
-only cost is mask arithmetic.
+spec.md 12 step 3b. No encoding: the masks come through MaskMaker (a slide
+without one is segmented) and the same rejection sampling the extraction runs
+is run on them.
 
 THE FEATURE-MAP REPORT  (--feature-map on | only)
 -------------------------------------------------
@@ -90,13 +90,10 @@ mostly near an edge is a rung whose labels will be quietly worse.
 
 WHICH WSIs
 ----------
-Default (no --dataset, no --wsi): every WSI already in the `--seg` recipe's
-mask cache (`utilities/cli/build_cache/build_mask_store.py` writes it) -- this
-tool cannot probe a slide with no mask to read, so "everything the store
-already has" is this tool's own natural default, the same way
-`diag_wsi_scale.py` defaults to every registered dataset. `--dataset`/
-`--wsi` (via `WsiSelection`) narrow to a specific set -- entries with no
-mask in the store are skipped with a message, not a crash.
+`--dataset` (an id or a recorded split, `<id>#<split>`) or `--wsi` names the
+slides (`WsiSelection`). Their masks come through `MaskMaker` from
+--mask-cache-job's cache, segmented and written back on a miss -- the way the
+routing heads take theirs.
 """
 
 from __future__ import annotations
@@ -122,7 +119,7 @@ from _paths import job_result_dir, setup_import_paths          # noqa: E402
 
 setup_import_paths()
 
-from Cache import cache_root, find, read_meta, wsi_stem_of      # noqa: E402
+from Cache import wsi_stem_of                                    # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 from PatchingLib import region_grids                             # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
@@ -217,8 +214,9 @@ class TileYieldProbe:
         if feature_map not in ('off', 'on', 'only'):
             raise ValueError(f"feature_map must be off, on or only, got {feature_map!r}")
         self.mask_cfg = MASK_RECIPES[seg]
-        self.mask_root = cache_root(mask_cache_job, 'mask')
-        self.seg_dir = self.mask_root / self.mask_cfg.seg_id()
+        import torch                                                # noqa: PLC0415
+        self.masks = MaskMaker(self.mask_cfg, mask_cache_job, torch.device(
+            'cuda' if torch.cuda.is_available() else 'cpu'))
         self.tile_sizes = list(tile_sizes)
         self.ds_values = list(ds_values)
         self.n = n
@@ -427,13 +425,6 @@ class TileYieldProbe:
                     sums.append(sum(r[col] for r in rows if r.get(col, '') != ''))
                 print(f'  {name:<26}' + ''.join(f'{v:>12,.1f}' for v in sums))
 
-    def default_entries(self) -> list:
-        """Every WSI the mask store already holds -- this tool's own
-        default when the caller names no `--dataset`/`--wsi`."""
-        found = [read_meta(p) for p in find(self.seg_dir, '*/mask_meta.json')]
-        return [dict(dataset=None, wsi_name=wsi_stem_of(m['wsi_path']),
-                     path=m['wsi_path']) for m in found]
-
     def _probe_cell(self, wsi, trm, tile_size, rung) -> dict:
         """One (tile_size, ds) cell. Returns a row dict.
 
@@ -522,37 +513,21 @@ class TileYieldProbe:
                 'clipped_frac': clipped / len(tiles) if tiles else 0.0}
 
     def run_one(self, entry: dict) -> list:
-        """One WSI -> its rows across every (tile_size, ds) cell, or `[]`
-        with a printed message if the mask store has nothing for it."""
-        stem = wsi_stem_of(entry['path'])
-        folder = self.seg_dir / stem
-        have_mask = (folder / 'mask_meta.json').exists()
-        if not have_mask:
-            print(f'    no mask under {folder}', flush=True)
-            if self.feature_map == 'off':
-                return []
-            print('    (the feature-map report still gives the no-mask columns)',
-                  flush=True)
-        slide_mask = None
-        if have_mask:
-            meta = read_meta(folder / 'mask_meta.json')
-            slide_mask = SlideMask.load(folder / 'mask.safetensors')
-            print(f'    mask {meta["rows"]}x{meta["cols"]} at ds {meta["mask_ds"]:.0f}, '
-                  f'tissue {meta["fraction"]:.1%}   ({self.mask_cfg.seg_id()})',
-                  flush=True)
-
+        """One WSI -> its rows across every (tile_size, ds) cell. The mask
+        comes through `MaskMaker`, as the routing heads take theirs: read from
+        --mask-cache-job's cache, segmented and written back on a miss."""
         rows = []
         with SafeSlide(entry['path']) as wsi:
             # The recipe's regions -- exactly what a sampler is handed; the
             # per-rung `patchable` step is the sampler's own and part of what
             # is being probed.
-            trm = (self.mask_cfg.regions(wsi, slide_mask)
-                   if slide_mask is not None else None)
-            if trm is not None:
-                print(f'    {len(trm.tissue_regions)} tissue regions', flush=True)
+            trm, hit = self.masks.mask(wsi)
+            print(f'    {len(trm.tissue_regions)} tissue regions   '
+                  f'({self.mask_cfg.seg_id()}, '
+                  f'{"cached" if hit else "segmented"})', flush=True)
             if self.feature_map != 'off':
                 self._grid_rows_for(wsi, trm, entry)
-            if self.feature_map == 'only' or trm is None:
+            if self.feature_map == 'only':
                 return rows
             for tile_size in self.tile_sizes:
                 line = []
@@ -568,7 +543,7 @@ class TileYieldProbe:
 
     def run(self, entries: list) -> list:
         rows = []
-        entries = entries or self.default_entries()
+
         for index, entry in enumerate(entries, 1):
             print(f'\n[{index}/{len(entries)}] {entry["wsi_name"]}', flush=True)
             rows += self.run_one(entry)
@@ -699,16 +674,15 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default='uni2_pca',
-                    help='mask recipe whose cached masks to probe')
+                    help='mask recipe the tiles are drawn inside')
     ap.add_argument('--mask-cache-job', default=DEFAULT_MASK_CACHE_JOB,
                     help='the job that made the mask cache: result/cache/'
-                         '<this>_mask/ (build_mask_store.py writes there)')
+                         '<this>/ (build_mask_store.py writes there)')
     ap.add_argument('--dataset', nargs='+', default=None,
-                    help='narrow to these datasets (via AccessDatasets) -- '
-                         'still needs a cached mask per slide')
+                    help='the slides of these datasets (AccessDatasets ids, '
+                         '<id>#<split> for a recorded split)')
     ap.add_argument('--wsi', nargs='+', default=None,
-                    help='explicit WSI path(s). Default (with no --dataset '
-                         'either): every mask already in the cache')
+                    help='explicit WSI path(s), instead of or beside --dataset')
     ap.add_argument('--val-only', action='store_true')
     ap.add_argument('--tile-size', dest='tile_sizes', type=int, nargs='+',
                     default=[256, 512, 1024],
@@ -755,11 +729,10 @@ def main():
 
     out_dir = args.out or job_result_dir('ProbeTileYield')
 
-    if args.dataset or args.wsi:
-        entries = resolve_wsi_paths(dataset=args.dataset, wsi=args.wsi,
-                                    val_only=args.val_only)
-    else:
-        entries = None   # TileYieldProbe.run() falls back to the mask store
+    if not (args.dataset or args.wsi):
+        ap.error('name the slides: --dataset (an id or <id>#<split>) or --wsi')
+    entries = resolve_wsi_paths(dataset=args.dataset, wsi=args.wsi,
+                                val_only=args.val_only)
 
     prober = TileYieldProbe(
         seg=args.seg, mask_cache_job=args.mask_cache_job,
@@ -770,14 +743,6 @@ def main():
         seed=args.seed, out_dir=out_dir, feature_map=args.feature_map,
         encoder=args.encoder, head=args.head,
         value_bytes=4 if args.fp32 else 2, bg_max=args.bg_max)
-
-    if entries is None:
-        entries = prober.default_entries()
-        if not entries:
-            print(f'no masks under {prober.seg_dir}. Run '
-                  f'utilities/cli/build_cache/build_mask_store.py first.')
-            return 1
-        print(f'{len(entries)} slides from the mask store', flush=True)
 
     rows = prober.run(entries)
     return 0 if (rows or prober.grid_rows) else 1

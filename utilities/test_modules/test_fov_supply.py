@@ -12,7 +12,9 @@ objective's ds), and the frozen shot's bucket / background / origin / overlap
 equal to the meta they came from.
 `supply` checks what it is now: one supply across several rungs, each through
 its own objective; reproducible whatever the camera's own seed; a photo the
-same alone or in order; the cached draw the same as the drawn one; a plan for
+same alone, in order or four at a time; the cached draw the same as the drawn
+one; the render entry written once, checked against on a hit, its stored
+photos read back exactly, a recorded parameter that drifted refused; a plan for
 another camera, or not a PlanSpec, refused; and a Render that carries no mask
 and no sampler. (The sampler's arithmetic for a rectangular camera is
 `test_tile_sampler.py`, section fov; the render is `test_camera.py`.)
@@ -168,18 +170,58 @@ def run_supply(wsi, mask, level_ds, new, expect) -> None:
     expect(all(_same(a, b[1]) for a, b in zip(alone, got)),
            'a photo is the same taken alone, in reverse order')
 
-    # The cached draw is the drawn one: a miss writes it, a hit reads it back.
-    with tempfile.TemporaryDirectory() as root:
-        with MaskMaker(MASK_RECIPES['hsv']) as masks:
-            miss = FovSupply.cached(microscope, plan, cfg, root, masks=masks)
-            first = [(m.x, m.y, m.ds) for m, _, _ in miss]
-            hit = FovSupply.cached(microscope, plan, cfg, root, masks=masks)
-            again = list(hit)
-        expect(first == [(m.x, m.y, m.ds) for m in metas]
-               and [(m.x, m.y, m.ds) for m, _, _ in again] == first
-               and all(_same(a[1], b[1]) for a, b in zip(again, got))
-               and hit.sampler.cache_info['samples_hit'],
-               'FovSupply.cached: the same positions and photos, the second a cache hit')
+    # Rendered several at a time, the same photos in the same order.
+    many = [(i, img) for i, _, img, _ in supply.shots(workers=4)]
+    expect([i for i, _ in many] == list(range(len(got)))
+           and all(_same(img, g[1]) for (_, img), g in zip(many, got)),
+           'shots(workers=4): the same photos, in draw order, indexed by row')
+
+    # The cached draw is the drawn one, and the render entry holds what was
+    # drawn: a miss writes it, a hit checks against it or reads it back.
+    import Cache
+    saved_root = Cache.RESULT_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        Cache.RESULT_DIR = tmp
+        try:
+            with MaskMaker(MASK_RECIPES['hsv']) as masks:
+                def cached(**kw):
+                    return FovSupply.cached(microscope, plan, cfg, masks=masks,
+                                            draw_job='T', render_job='T', **kw)
+                miss = cached()
+                first = list(miss.shots())
+                entry, rid = miss._render, microscope.cfg.identity_id()
+                hit = cached()
+                again = list(hit.shots(workers=4))
+                stored = list(cached(save_photos=True).shots())
+                written = entry.ids()          # read while the temp root is set
+                read_back = list(cached(save_photos=True).shots())
+
+                # the decoy: one recorded parameter changed must be refused
+                csv_path = entry.path('render', rid, '.csv')
+                lines = csv_path.read_text().splitlines()
+                head, row0 = lines[0].split(','), lines[1].split(',')
+                k = head.index('brightness')
+                row0[k] = repr(float(row0[k]) + 0.01)
+                csv_path.write_text('\n'.join([lines[0], ','.join(row0)] + lines[2:]) + '\n')
+                import shutil
+                shutil.rmtree(entry.path('photos', rid))
+                try:
+                    list(cached().shots())
+                    drift_refused = False
+                except RuntimeError:
+                    drift_refused = True
+        finally:
+            Cache.RESULT_DIR = saved_root
+    expect([(m.x, m.y, m.ds) for _, m, _, _ in first] == [(m.x, m.y, m.ds) for m in metas]
+           and [(m.x, m.y, m.ds) for _, m, _, _ in again] == [(m.x, m.y, m.ds) for m in metas]
+           and all(_same(a[2], b[1]) for a, b in zip(again, got))
+           and hit.sampler.cache_info['samples_hit'],
+           'FovSupply.cached: the same positions and photos, the second a cache hit')
+    expect(written == [rid] and len(stored) == len(got),
+           'the render entry is written once a full pass is through')
+    expect(all(_same(a[2], b[1]) and a[3] == b[2] for a, b in zip(read_back, got)),
+           'stored photos read back pixel for pixel, their parameters value for value')
+    expect(drift_refused, 'a recorded parameter that no longer matches is refused')
 
     # Plans and configs that are not this camera's.
     try:

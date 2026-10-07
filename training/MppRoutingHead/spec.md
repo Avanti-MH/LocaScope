@@ -690,7 +690,7 @@ as a plain list, since it is identity rather than a quantity.
 The split is at WSI level, so no position from one slide can land on both
 sides. `split_wsi_names` sorts before its seeded shuffle (`list_names` returns
 registry order, which nobody controls) and `write_wsi_split` records the answer
-in `wsi_split.csv`; `evaluate.py` READS that file rather than re-deriving the
+in the recorded split; `evaluate.py` READS it rather than re-deriving the
 split, because a split recomputed from `--seed` is one library version away
 from quietly putting val slides into test.
 

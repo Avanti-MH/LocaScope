@@ -178,22 +178,22 @@ TRAIN_EXTRA_ARGS=""
 [ -n "${RESAMPLED_SHARE:-}" ] && TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS --resampled-share $RESAMPLED_SHARE"
 
 # WHOSE CACHES TO READ -- train.py's and evaluate.py's --mask-cache-job /
-# --sampler-cache-job / --split-cache-job. Without them a cache is named after
+# --draw-cache-job / --split-cache-job. Without them a cache is named after
 # THIS job (SLURM_JOB_NAME), so a run under another --job-name (a smoke, a side
-# experiment) finds an empty result/cache/<that name>_mask/ and segments every
-# slide again. Mask and sampler therefore default to MppRoutingHead, the job
+# experiment) finds an empty result/cache/<that name>/ and segments every
+# slide again. Mask and draw therefore default to MppRoutingHead, the job
 # that built them -- the same default PrototypicalRoutingHead.sh's CACHE_JOB
 # has -- which is no change for a run under the default job name.
 #
-#     CACHE_JOB             both mask and sampler (default MppRoutingHead)
+#     CACHE_JOB             both mask and draws (default MppRoutingHead)
 #     MASK_CACHE_JOB        the mask alone, overriding CACHE_JOB
-#     SAMPLER_CACHE_JOB     the sampler alone, overriding CACHE_JOB
+#     DRAW_CACHE_JOB        the draws alone, overriding CACHE_JOB
 #     SPLIT_CACHE_JOB       the val/test split (unset: the readers' own
 #                           default, MakeSplit, which step [0] writes)
 CACHE_JOB="${CACHE_JOB:-MppRoutingHead}"
 MASK_CACHE_JOB="${MASK_CACHE_JOB:-$CACHE_JOB}"
-SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB:-$CACHE_JOB}"
-CACHE_ARGS="--mask-cache-job $MASK_CACHE_JOB --sampler-cache-job $SAMPLER_CACHE_JOB"
+DRAW_CACHE_JOB="${DRAW_CACHE_JOB:-$CACHE_JOB}"
+CACHE_ARGS="--mask-cache-job $MASK_CACHE_JOB --draw-cache-job $DRAW_CACHE_JOB"
 [ -n "${SPLIT_CACHE_JOB:-}" ] && CACHE_ARGS="$CACHE_ARGS --split-cache-job $SPLIT_CACHE_JOB"
 TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS $CACHE_ARGS"
 
@@ -201,7 +201,7 @@ echo "======== MppRoutingHead ========"
 echo "  out       $OUT"
 echo "  baseline  $BASELINE   parallel=$PARALLEL"
 echo "  read      ${READ_LEVEL:-pyramid}${RESAMPLE_FROM:+ from $RESAMPLE_FROM}${MAX_RESAMPLE_FACTOR:+ max x$MAX_RESAMPLE_FACTOR}${RESAMPLED_SHARE:+ share $RESAMPLED_SHARE}"
-echo "  caches    mask from $MASK_CACHE_JOB, sampler from $SAMPLER_CACHE_JOB, split from ${SPLIT_CACHE_JOB:-MakeSplit}"
+echo "  caches    mask from $MASK_CACHE_JOB, draws from $DRAW_CACHE_JOB, split from ${SPLIT_CACHE_JOB:-MakeSplit}"
 echo "  encoders  $ENCODERS"
 echo "  arms      $ARMS"
 echo "  bal on    baseline $BASELINE   ordinal passes: ${ORD_LOSSES:-(none)} on ${ORD_ENCODERS}"
@@ -241,7 +241,7 @@ elif [ "$PARALLEL" = "1" ]; then
     # a full truncate-then-write. Two processes finishing around the same
     # moment and pointed at the SAME file would have the second one's write
     # clobber the first's, silently -- one baseline's rows just vanish. The
-    # mask and sampler caches under result/cache/<job>_mask/ and <job>_sampler/
+    # mask and draw caches under result/cache/<job>/
     # ARE shared on purpose (that is the whole point of caching), and their
     # writes are atomic
     # (utilities/Cache.py) for exactly this: two processes racing to draw the

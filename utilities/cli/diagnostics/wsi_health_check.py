@@ -183,7 +183,7 @@ def main() -> int:
                          'one recipe, so both tiers look at the same mask')
     ap.add_argument('--mask-cache-job', default=DEFAULT_MASK_CACHE_JOB,
                     help='the job that made the mask cache the yield tier '
-                         'reads: result/cache/<this>_mask/')
+                         'reads: result/cache/<this>/')
     ap.add_argument('--levels', type=int, nargs='+', default=[0, 1, 2, 3],
                     help='holes tier: which pyramid levels to scan')
     ap.add_argument('--block', type=int, default=4096,

@@ -20,6 +20,8 @@ conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
+#  utilities/test_modules/test_cache.py -- utilities/Cache.py: the cache tree,
+#  addresses and entries, atomic writes, the record, the slide key.
 #  utilities/test_modules/test_store.py -- utilities/Store.py: addresses,
 #  validation, the feature-map cache, pre-tile rungs. No slide, no model.
 #
@@ -49,6 +51,12 @@ MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"
 [ -n "${SLIDES:-}" ] && ARGS+=(--slides $SLIDES)
 [ -n "${LEVELS:-}" ] && ARGS+=(--levels $LEVELS)
 
+echo "======== test_cache.py ========"
+python utilities/test_modules/test_cache.py
+rc=$?
+[ $rc -ne 0 ] && status=$rc
+
+echo ""
 echo "======== test_store.py ${ARGS[*]} ========"
 python utilities/test_modules/test_store.py "${ARGS[@]}"
 rc=$?

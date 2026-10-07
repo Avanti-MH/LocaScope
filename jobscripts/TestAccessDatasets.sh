@@ -40,5 +40,11 @@ python utilities/test_modules/test_access_datasets.py
 status=$?
 
 echo ""
+echo "======== test_wsi_split (the split's one writer) ========"
+python utilities/test_modules/test_wsi_split.py
+rc=$?
+[ $rc -ne 0 ] && status=$rc
+
+echo ""
 echo "======== done (exit $status) ========"
 exit $status

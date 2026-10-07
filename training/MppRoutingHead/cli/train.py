@@ -23,8 +23,7 @@ THREE SPLITS, SPLIT BY WSI
     test    the rest of those datasets -- NOT touched here at all
 
 The val half is drawn per dataset by `utilities/cli/build_cache/make_split.py`
-(run it first) and recorded in `result/cache/<job>_split/<dataset>/
-wsi_split.csv`, so which slides
+(run it first) and recorded in its `dataset=<dataset>/split/` entry, so which slides
 were held out is a recorded fact rather than a consequence of `--seed` -- and
 the same fact for every package that reads it. Val spans BOTH eval datasets on purpose: selecting on
 it selects for cross-dataset generalisation, which is what this package is for.
@@ -39,8 +38,8 @@ WHAT THIS WRITES
     val_scores.csv      one row per (head, epoch)
     sampler_reports/<dataset>_<split>/sampler_report_<slide>.md + samples_<slide>.csv
 
-Positions are drawn per slide through `TileSampler.cached`: masks into
-result/cache/<--mask-cache-job>_mask/, draws into <--sampler-cache-job>_sampler/
+Positions are drawn per slide through `TileSampler.cached`, with
+the masks into --mask-cache-job's cache, the draws into --draw-cache-job's
 (`--seg`, default hest; `Datasets.add_cache_args`).
 
 Optionally also one wandb run per MODEL (one per baseline-2 encoder, one per
@@ -118,7 +117,7 @@ _NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
                  'wandb_mode', 'run_name', 'merge', 'num_workers', 'cpu_processes',
                  'encoders',
                  'heads', 'baseline', 'encode_batch', 'mask_cache_job',
-                 'sampler_cache_job', 'split_cache_job',
+                 'draw_cache_job', 'split_cache_job',
                  # the read mode enters as ONE key, `read_tag`, and only when it
                  # is not the default -- see `_identity`
                  'read_level', 'resample_from', 'max_resample_factor',
@@ -172,7 +171,7 @@ def train_rows(args, caches, out_dir) -> List:
     "Camera: train vs eval"), so there is nothing here to go stale.'''
     rows = build_manifest(
         args.train_dataset, masks=caches.masks,
-        sampler_root=caches.sampler_root,
+        draw_job=caches.draw_job,
         report_dir=_report_dir(out_dir, args.train_dataset, 'train'),
         tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
         max_wsi=args.max_wsi)
@@ -191,7 +190,7 @@ def val_rows(args, caches, out_dir) -> List:
         test_names = list_names(dataset=f'{dataset_id}#test',
                                 split_job=caches.split_job)
         part = build_manifest(
-            dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
+            dataset_id, masks=caches.masks, draw_job=caches.draw_job,
             report_dir=_report_dir(out_dir, dataset_id, 'val'),
             tile_size=args.tile, n_per_rung=args.val_n_per_rung,
             seed=args.seed, wsi_names=val_names)

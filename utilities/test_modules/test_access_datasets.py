@@ -283,7 +283,7 @@ def t_every_name_from_list_names_resolves_and_exists():
 #
 # The split file is made up (real slide names, written to a temporary file) and
 # `AD.split_file` is pointed at it, so nothing here reads or writes a real
-# `result/cache/*_split/`.
+# the real cache.
 
 @contextlib.contextmanager
 def _split_file_of(rows, dataset='ki67_with_photo'):

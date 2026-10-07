@@ -7,7 +7,6 @@ writes, the sidecar, the slide key. No torch, no slide, temp dirs.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
@@ -19,9 +18,8 @@ import _paths                                                    # noqa: E402
 _paths.setup_import_paths()
 
 import Cache                                                     # noqa: E402
-from Cache import (CacheMismatch, atomic_dir, atomic_file,        # noqa: E402
-                   cache_root, check_source, find, read_meta,
-                   source_key, wsi_stem_of, write_meta)
+from Cache import (CacheMismatch, atomic_file, cache_root,          # noqa: E402
+                   check_source, source_key, wsi_stem_of)
 
 _RESULTS = []
 
@@ -73,45 +71,6 @@ def t_atomic_file_leaves_nothing_on_failure():
     return 'no target, no temp'
 
 
-def t_atomic_dir_first_writer_wins():
-    """Two jobs finishing the same entry: the second must discard its copy,
-    not merge into or replace the first one that readers may already hold."""
-    with tempfile.TemporaryDirectory() as root:
-        target = Path(root) / 'entry'
-        with atomic_dir(target) as tmp:
-            (tmp / 'who').write_text('first')
-        with atomic_dir(target) as tmp:
-            (tmp / 'who').write_text('second')
-        assert (target / 'who').read_text() == 'first'
-        assert [p.name for p in Path(root).iterdir()] == ['entry']
-    return 'first kept, second discarded, no temp left'
-
-
-def t_atomic_dir_leaves_nothing_on_failure():
-    with tempfile.TemporaryDirectory() as root:
-        target = Path(root) / 'entry'
-        try:
-            with atomic_dir(target) as tmp:
-                (tmp / 'x').write_text('half')
-                raise RuntimeError('killed')
-        except RuntimeError:
-            pass
-        assert not target.exists() and list(Path(root).iterdir()) == []
-    return 'no entry, no temp'
-
-
-def t_read_meta_refuses_a_mismatch():
-    with tempfile.TemporaryDirectory() as root:
-        path = write_meta(Path(root) / 'm.json', {'seg_id': 'hest-1', 'n': 3})
-        assert read_meta(path, require={'seg_id': 'hest-1'})['n'] == 3
-        try:
-            read_meta(path, require={'seg_id': 'hsv-2'})
-        except CacheMismatch as e:
-            assert 'seg_id' in str(e), str(e)
-            return 'refused, and named the field'
-    raise AssertionError('a mismatched require was accepted')
-
-
 def t_slide_key_survives_a_remount_and_splits_a_stem():
     a = '/work/data/Group_A/SLIDE_1.svs'
     assert wsi_stem_of(a) == 'SLIDE_1'
@@ -124,16 +83,6 @@ def t_slide_key_survives_a_remount_and_splits_a_stem():
     except CacheMismatch:
         return 'remount accepted, same stem elsewhere refused'
     raise AssertionError('a different slide with the same stem was accepted')
-
-
-def t_find_filters_on_meta_and_sorts():
-    with tempfile.TemporaryDirectory() as root:
-        for name, method in (('B', 'hest'), ('A', 'hest'), ('C', 'hsv')):
-            write_meta(Path(root) / name / 'mask_meta.json', {'method': method})
-        got = find(root, '*/mask_meta.json', method='hest')
-        assert [p.parent.name for p in got] == ['A', 'B'], got
-        assert json.loads(got[0].read_text())['method'] == 'hest'
-    return 'A, B'
 
 
 # ── the tree ──────────────────────────────────────────────────────────────────
@@ -201,6 +150,15 @@ def t_on_keeps_the_levels_and_moves_the_root():
         assert b.levels == a.levels and b.dir == res / 'cache' / 'Writer' / 'slide=s' / 'seg=g'
         assert _refused(lambda: Cache.Address(slide='s').dir)
     return 'same levels, other root; no job is no root'
+
+
+def t_a_dataset_id_is_one_path_component():
+    assert Cache.dataset_key('bracs/test') == 'bracs_test'
+    assert Cache.dataset_key('ki67_with_photo') == 'ki67_with_photo'
+    _refused(Cache.dataset_key, 'bracs/test#val')     # a split is not a dataset
+    # a Ki67 MRXS stem: commas are part of real slide names
+    assert Cache.Address('J', slide='S1104233,G7E,110208').leaf == 'slide'
+    return 'bracs/test -> bracs_test; a #split refused; a Ki67 stem accepted'
 
 
 def t_entry_sits_only_where_entries_says():

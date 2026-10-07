@@ -59,13 +59,13 @@ import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
 from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
-                 chainstack_root, corpus_from_args, job_result_dir,
-                 mask_root)
+                 chainstack_root, corpus_from_args, job_result_dir)
 
 
 import torch                                                      # noqa: E402
 
 import AccessDatasets                                              # noqa: E402
+from Cache import job_name                                        # noqa: E402
 from SafeSlide import SafeSlide                                   # noqa: E402
 from Store import PreTileCorpus                                   # noqa: E402
 from SurvivalAnalysis import ChainStack                           # noqa: E402
@@ -141,7 +141,8 @@ def _extract_own(axis: str, corpus: PreTileCorpus, wsi_path: str, args,
     with SafeSlide(wsi_path) as wsi:
         new_rows = extract_pretiles._extract_slide(
             wsi, masks, cfg, corpus, axis_rungs(axis, args), tile=args.tile,
-            n=cfg.n_per_rung, overwrite=False, failures=failures)
+            n=cfg.n_per_rung, overwrite=False, failures=failures,
+            draw_job=args.draw_cache_job or job_name('PrepareChainStack'))
     if rows is not None:
         rows.extend(new_rows)
     if failures:
@@ -278,6 +279,9 @@ def main():
     ap.add_argument('--axes', nargs='+', default=['F', 'R', 'C'],
                     choices=['F', 'R', 'C'])
     add_chainstack_args(ap, 'PrepareChainStack', on=False)   # R/C's own tiles: off
+    ap.add_argument('--draw-cache-job', default=None,
+                    help="whose cache the own corpora's draws are read from "
+                         'and written to. Default: this job')
     ap.add_argument('--out', default=None,
                     help='directory for the summary CSV (default: '
                          "job_result_dir('PrepareChainStack'), NOT "
@@ -306,7 +310,7 @@ def main():
     # The device matters: `build(None)` is CPU, which is ~250x slower for the
     # uni2_pca segmenter (see extract_pretiles.main).
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    with MaskMaker(MASK_RECIPES[args.seg], mask_root(args), device) as masks:
+    with MaskMaker(MASK_RECIPES[args.seg], args.mask_cache_job, device) as masks:
         for wsi_stem, wsi_path in slides:
             if batch:
                 print(f'\n---- {wsi_stem} ----', flush=True)

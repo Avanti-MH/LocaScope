@@ -42,7 +42,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  then gets its no-mask columns only.
 # =============================================================================
 
-DATASET="${DATASET:-}"          # empty: every slide the mask cache holds
+DATASET="${DATASET:-bracs/test#val ki67_with_photo#val}"   # ids or <id>#<split>
 SEG="${SEG:-hest}"
 MASK_CACHE_JOB="${MASK_CACHE_JOB:-MppRoutingHead}"
 FEATURE_MAP="${FEATURE_MAP:-only}"

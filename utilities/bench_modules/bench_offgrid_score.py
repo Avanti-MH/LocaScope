@@ -948,7 +948,7 @@ def main() -> int:
         name: base.variant(transform=_dc.replace(cfg.transform, preprocess=name))
         for name in PREPROCESS}
     masks = MaskMaker(mask_cfg_from_args(args), device=device,
-                      cache_root=Cache.cache_root(args.mask_cache_job, 'mask'))
+                      made_by=args.mask_cache_job)
     rng = np.random.default_rng(args.seed)
 
     all_rows, failed = [], []

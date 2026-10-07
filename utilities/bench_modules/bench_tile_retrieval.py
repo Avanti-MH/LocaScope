@@ -635,10 +635,10 @@ def eval_one(query_path: Path, query_meta, refs: dict, poolings, rec: dict = Non
     pooled_q, pooled_r = {}, {}
     for mode in poolings:
         pooled_q[mode] = pooling_kinds(query_tensors['features'].float(), mode,
-                                     query_meta)[0]
+                                     query_meta)
         for level_delta, (ref_tensors, ref_meta) in loaded.items():
             pooled_r[(mode, level_delta)] = pooling_kinds(
-                ref_tensors['features'].float(), mode, ref_meta)[0]
+                ref_tensors['features'].float(), mode, ref_meta)
 
     # One decomposition per (pooling, slot), reused by every whitening variant.
     # Only the same-level pool: whitening across scales would mix two questions.
@@ -1127,7 +1127,7 @@ def main() -> int:
     print(f'spec={spec}\n')
 
     masks = MaskMaker(mask_cfg_from_args(args), device=device,
-                      cache_root=Cache.cache_root(args.mask_cache_job, 'mask'))
+                      made_by=args.mask_cache_job)
     print(f'reference draw {reference_config(args.k, args.seed).identity_id()}_'
           f'{plan_label(args.k_floor, args.queries, args.seed)}   mask {masks.cfg.seg_id()}/'
           f'{masks.cfg.region_id()}', flush=True)

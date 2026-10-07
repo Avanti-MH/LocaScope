@@ -192,7 +192,7 @@ def val_manifests(args, caches, out_dir: Path):
         test_names = list_names(dataset=f'{dataset_id}#test',
                                 split_job=caches.split_job)
         part = build_manifest(
-            dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
+            dataset_id, masks=caches.masks, draw_job=caches.draw_job,
             report_dir=(out_dir / 'sampler_reports'
                         / f'{dataset_id.replace("/", "_")}_val'),
             tile_size=args.tile, n_per_rung=args.val_n_per_rung,
@@ -710,7 +710,7 @@ def rung_header(left: str = '') -> str:
 #: the run is in total, or how it is logged -- not what is being trained.
 _NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
                  'wandb_mode', 'run_name', 'merge', 'encode_batch', 'supply_only',
-                 'mask_cache_job', 'sampler_cache_job', 'split_cache_job',
+                 'mask_cache_job', 'draw_cache_job', 'split_cache_job',
                  'feasibility_tries', 'cpu_processes')
 
 
@@ -911,7 +911,7 @@ def main() -> int:
 
     print(f'building manifest ({args.train_dataset})...', flush=True)
     rows = build_manifest(
-        args.train_dataset, masks=caches.masks, sampler_root=caches.sampler_root,
+        args.train_dataset, masks=caches.masks, draw_job=caches.draw_job,
         report_dir=reports / f'{args.train_dataset.replace("/", "_")}_train',
         tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
         max_wsi=args.max_wsi)
@@ -929,7 +929,7 @@ def main() -> int:
                         if args.cross_domain_dataset.startswith('bracs') else None)
         cd_rows = build_manifest(
             args.cross_domain_dataset, masks=caches.masks,
-            sampler_root=caches.sampler_root,
+            draw_job=caches.draw_job,
             report_dir=(reports / f'{args.cross_domain_dataset.replace("/", "_")}'
                                   f'_cross_domain'),
             tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,

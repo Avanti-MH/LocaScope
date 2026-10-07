@@ -1656,7 +1656,7 @@ def main() -> int:
                              'a cap at or above the pool size takes all of it')
     parser.add_argument('--split-cache-job', default=SPLIT_CACHE_JOB,
                         help='whose recorded split a `<id>#<split>` dataset reads: '
-                             'result/cache/<this>_split/. Default: MakeSplit')
+                             'result/cache/<this>/. Default: MakeSplit')
     parser.add_argument('--wsi-names', nargs='*', default=None,
                         help='slide NAMES to use instead of the random pick')
     parser.add_argument('--seed', type=int, default=None,
@@ -1685,7 +1685,7 @@ def main() -> int:
     add_mask_args(parser, default=None)              # None: MASK_RECIPES['hest']
     parser.add_argument('--mask-cache-job', default=MASK_CACHE_JOB,
                         help='whose mask cache to read and fill: result/cache/'
-                             '<this>_mask/. Default: this job')
+                             '<this>/. Default: this job')
 
     # ── which arms ────────────────────────────────────────────────────────────
     parser.add_argument('--arms', nargs='+', default=None,
@@ -1933,8 +1933,8 @@ def main() -> int:
         print(f'  {dataset:<{width}}{name}')
 
     job = Cache.job_name('WindowRetrievalBench')
-    masks_root = Cache.cache_root(args.mask_cache_job or job, 'mask')
-    print(f'masks     {mask_cfg.seg_id()}  cache {masks_root}')
+    mask_job = args.mask_cache_job or job
+    print(f'masks     {mask_cfg.seg_id()}  cache {mask_job}')
 
     encoder = cfg.build(device)
     if RAW in bases and getattr(encoder.model_spec, 'kind', None) != 'tokens':
@@ -1950,7 +1950,7 @@ def main() -> int:
         print('no slides for this process (more shards than slides): nothing to do')
         return 0
     failed = []
-    with MaskMaker(mask_cfg, masks_root, device) as masks:
+    with MaskMaker(mask_cfg, mask_job, device) as masks:
         # The gates look at tissue, so the first slide's mask comes first. It is
         # the mask the run needs for that slide anyway, and is cached.
         first = SafeSlide(str(selected[0][2]))

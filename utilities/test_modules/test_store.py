@@ -714,10 +714,9 @@ def run_precision(args) -> int:
     pooled = {a: {'store': [], 'direct': [], 'run': []} for a in arms}
     # The mask is read from a cache when there is one: a hit builds no
     # segmenter and reads no pixels. `--mask-cache-job` names whose cache.
-    masks_root = Cache.cache_root(
-        args.mask_cache_job or Cache.job_name('TestStore'), 'mask')
-    print(f'masks: --seg {args.seg}, cache {masks_root}')
-    with MaskMaker(MASK_RECIPES[args.seg], masks_root, device) as masks:
+    mask_job = args.mask_cache_job or Cache.job_name('TestStore')
+    print(f'masks: --seg {args.seg}, cache {mask_job}')
+    with MaskMaker(MASK_RECIPES[args.seg], mask_job, device) as masks:
         for name in args.slides:
             slide = SafeSlide(locate(name).path)
             mask, hit = masks.mask(slide)

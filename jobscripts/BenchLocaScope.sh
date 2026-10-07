@@ -63,11 +63,13 @@ N_WSI="${N_WSI:-5}"          # per dataset; BRACS test's first 5 are the masked 
 PER_LEVEL="${PER_LEVEL:-50}"  # FoVs per native level per slide
 SEG="${SEG:-hest}"            # the mask stage 2 searches (MASK_RECIPES); read from
                               # MppRoutingHead's mask cache, written back on a miss
+SAVE_PHOTOS="${SAVE_PHOTOS:-0}"  # 1 = keep every photo beside its record (~4 MB each);
+                              # the draw and the record go to this job's cache either way
 
 TOPK="${TOPK:-20}"               # candidates enumerated per shot (free)
 SIFT_TOPK="${SIFT_TOPK:-5}"           # candidates SIFT actually verifies (K passes per shot)
 LIMIT="${LIMIT:-0}"               # 0 = every shot; set 30 for a costing run first
-RESUME=1              # 1 = keep the existing metrics.csv and skip what is in it
+RESUME="${RESUME:-1}"  # 1 = keep the existing metrics.csv and skip what is in it
                       # RESUME=0 DELETES an existing metrics.csv, it does not
                       # append to it. A resumed run is the only way to keep the
                       # rows a walltime kill left behind.
@@ -130,6 +132,10 @@ if [ "${PROFILE:-0}" = "1" ]; then
   echo "profile -> $PROF_DIR/profile.prof"
 fi
 
+# The recorded val/test split the slides are taken from. Written once, by its
+# one writer, under MakeSplit; an existing split is kept as it is.
+python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
+
 # --out is omitted on purpose: bench_locascope falls back to
 # result/<SLURM_JOB_NAME>/, keeping the run beside its own log.
 "${PY[@]}" utilities/bench_modules/bench_locascope.py \
@@ -141,6 +147,7 @@ fi
   --multi-gpu \
   --precision fp16 --batch-size 8192 \
   --seg "$SEG" \
+  $([ "$SAVE_PHOTOS" = "1" ] && echo --save-photos) \
   --features-cache-job "$FEATURES_CACHE_JOB" \
   --feature-store-mode "$FEATURE_STORE_MODE" \
   $LIMIT_FLAG $RESUME_FLAG $FAIL_FLAG

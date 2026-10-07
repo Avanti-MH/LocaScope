@@ -38,19 +38,14 @@ THE PER-OBJECT ROOTS
 ---------------------
     result/cache/<made_by>_<object>/<config level>/<config level>/...
 
-`made_by` is the job that PRODUCED the cache, not a job that reads it: every
-CLI defaults to its own job name, and a reader that wants another job's cache
-names it explicitly (`--sampler-cache-job`). Below the root there is one
-directory per config the content depends on, upstream above downstream, each
-named only by the parameters that level's content actually depends on. The
-sampler cache is the worked example -- see `TileSampler.cached`:
+The feature stores, the pre-tiles and SuperPathPoint's labels and chain stacks
+are still addressed under a root of their own (`cache_root`), one directory per
+config the content depends on, upstream above downstream. Masks, draws, renders
+and splits are `TREE` entries.
 
-    <made_by>_sampler/<seg_id>/<slide>/mask.safetensors       (seg only)
-                                      <region>_<sampler>_<plan>/   (+ sampling)
-
-Nesting by dependency is what makes invalidation a single `rm -rf`: dropping a
-segmentation recipe drops every sample drawn from it, and a sample directory
-can never outlive the mask it was drawn from.
+`made_by` is the job that PRODUCED the cache, not a job that reads it, in both
+forms: every CLI defaults to its own job name, and a reader that wants another
+job's cache names it explicitly (`--mask-cache-job`, `--draw-cache-job`, ...).
 
 WHAT IS HERE AND WHAT IS NOT
 -----------------------------
@@ -122,16 +117,22 @@ ENTRIES: Dict[str, Tuple[str, ...]] = {
 MEMBERS = 'members'
 
 #: A level value, an id or a role: one path component that cannot be read as
-#: two -- no separator, no `=`, nothing a shell glob would expand.
-_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
+#: two -- no separator, no `=`, nothing a shell glob would expand. A comma is
+#: allowed: the Ki67 MRXS slides are named `S1104233,G7E,110208`.
+_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._,-]*\Z')
 
 
 def _name(what: str, value) -> str:
     value = str(value)
     if not _NAME.match(value):
         raise ValueError(f'{what} {value!r} is not one path component of '
-                         f'[A-Za-z0-9._-] starting with a letter or digit')
+                         f'[A-Za-z0-9._,-] starting with a letter or digit')
     return value
+
+
+def dataset_key(dataset_id: str) -> str:
+    """The `dataset=` level of a dataset id: `bracs/test` -> `bracs_test`."""
+    return _name('dataset id', dataset_id.replace('/', '_'))
 
 
 def _chain(kind: str) -> Tuple[str, ...]:
@@ -389,56 +390,8 @@ def atomic_file(path) -> Iterator[Path]:
             tmp.unlink()
 
 
-@contextlib.contextmanager
-def atomic_dir(path) -> Iterator[Path]:
-    """Yield a temporary directory beside `path`; on success rename it into
-    place. If `path` already exists -- another job finished the same entry
-    first -- ours is discarded: both were computed from the same key, so they
-    hold the same thing, and the first one is already being read."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f'.{path.name}.{uuid.uuid4().hex[:8]}.tmp')
-    tmp.mkdir()
-    try:
-        yield tmp
-        if not path.exists():
-            try:
-                os.rename(tmp, path)
-            except OSError:
-                if not path.exists():
-                    raise
-    finally:
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
-
-
 def write_meta(path, meta: Dict) -> Path:
     """The JSON sidecar, written atomically."""
     with atomic_file(path) as tmp:
         tmp.write_text(json.dumps(meta, indent=2, sort_keys=True, default=str))
     return Path(path)
-
-
-def read_meta(path, *, require: Optional[Dict[str, object]] = None) -> Dict:
-    """The JSON sidecar, refused outright when `require` misses."""
-    meta = json.loads(Path(path).read_text())
-    if require:
-        bad = {k: (v, meta.get(k, '<absent>')) for k, v in require.items()
-               if meta.get(k) != v}
-        if bad:
-            raise CacheMismatch(
-                f'{path}: ' + ', '.join(f'{k} wanted {w!r}, found {g!r}'
-                                        for k, (w, g) in bad.items()))
-    return meta
-
-
-def find(root, pattern: str, **eq) -> List[Path]:
-    """Every sidecar under `root` matching the glob `pattern` whose meta has
-    each `eq` field equal to the value given. Sorted, so two runs list the same
-    entries in the same order."""
-    out = []
-    for path in sorted(Path(root).glob(pattern)):
-        meta = json.loads(path.read_text())
-        if all(meta.get(k) == v for k, v in eq.items()):
-            out.append(path)
-    return out

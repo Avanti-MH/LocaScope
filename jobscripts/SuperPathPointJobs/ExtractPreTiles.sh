@@ -153,6 +153,10 @@ MAX_TRIES=2500
 #
 DS="${DS:-}"
 WSI="${WSI:-}"
+# DATASETS: AccessDatasets ids or <id>#<split>, N_WSI of each (empty: all) --
+# the slides are named the way the routing heads name theirs. WSI adds paths.
+DATASETS="${DATASETS:-bracs/test#val ki67_with_photo#val}"
+N_WSI="${N_WSI:-}"
 # =============================================================================
 #  CHAINS, added 2026-09-01, REMOVED FROM THIS SCRIPT 2026-09-06.
 # =============================================================================
@@ -263,7 +267,7 @@ echo "  tile $TILE   pre-tile $((TILE * 3))   n $N"
 echo "  chains: share $INHERIT_SHARE   source ds $INHERIT_SOURCE_RUNG   bucket $BUCKET_FRAME"
 echo "  lattice step $GRID_STEP   max overlap $MAX_OVERLAP"
 echo "  cache : result/cache/${CACHE_JOB}_pretiles/   mask: $SEG (${MASK_CACHE_JOB})"
-echo "  slides: ${WSI:-every mask in the mask cache}   rungs: ${DS:-DsLadder default}"
+echo "  slides: ${DATASETS} ${N_WSI:+(n $N_WSI each)} ${WSI}   rungs: ${DS:-DsLadder default}"
 echo ""
 
 python training/SuperPathPoint/cli/extract_pretiles.py \
@@ -275,11 +279,13 @@ python training/SuperPathPoint/cli/extract_pretiles.py \
   --inherit-share "$INHERIT_SHARE" \
   ${INHERIT_SOURCE_RUNG:+--inherit-source-rung "$INHERIT_SOURCE_RUNG"} \
   --bucket-frame "$BUCKET_FRAME" \
-  --grid-step "$GRID_STEP" \
+  --step "$GRID_STEP" \
   --max-overlap "$MAX_OVERLAP" \
   --overlapping-share "$OVERLAPPING_SHARE" \
   ${DS:+--rungs $DS} \
   ${WSI:+--wsi $WSI} \
+  ${DATASETS:+--datasets $DATASETS} \
+  ${N_WSI:+--n-wsi $N_WSI} \
   --max-tries "$MAX_TRIES"
 
 status=$?

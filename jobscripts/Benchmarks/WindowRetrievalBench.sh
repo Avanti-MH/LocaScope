@@ -178,6 +178,10 @@ else
   OUT="$RESULT_ROOT/WindowRetrievalBench"
 fi
 
+# The recorded val/test split the slides are taken from. Written once, by its
+# one writer, under MakeSplit; an existing split is kept as it is.
+python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
+
 echo "======== mode=$MODE  encoder=$TAG ========"
 echo "out : $OUT/$TAG/window_retrieval.csv"
 echo ""

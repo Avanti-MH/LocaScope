@@ -45,7 +45,7 @@ and `list_names()` / `locate()` take it wherever they take a dataset id:
     locate(name, dataset='bracs/test#val')            # KeyError if it is not in val
     list_names(dataset='bracs/test#val', split_job='OtherJob')
 
-The split is READ from `result/cache/<split_job>_split/<dataset>/wsi_split.csv`
+The split is READ from `<split_job>`'s `dataset=<dataset>/split/split_recorded.csv`
 (`split,wsi_name`; `split_job` defaults to `SPLIT_JOB`), never written here:
 `utilities/cli/build_cache/make_split.py` is the one writer, and a missing file
 is a refusal that names it. `dataset_ids()` lists the real datasets only.
@@ -62,7 +62,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from Cache import cache_root
+from Cache import Address, Entry, dataset_key
 from _paths import DATASETS_DIR
 
 _BRACS_TEST_ROOT = os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it/BRACS_WSI/test')
@@ -245,11 +245,21 @@ SPLIT_SEP = '#'
 SPLITS = ('train', 'val', 'test')
 
 
+#: The one variant of a dataset's `split` entry. A split is a record, never
+#: re-derived from a config, so it has no config id to be named by.
+SPLIT_ID = 'recorded'
+
+
+def split_entry(dataset_id: str, split_job: Optional[str] = None) -> Entry:
+    """The `split` entry at `dataset=<dataset>/` in `split_job`'s cache."""
+    return Address(split_job or SPLIT_JOB,
+                   dataset=dataset_key(dataset_id)).entry('split')
+
+
 def split_file(dataset_id: str, split_job: Optional[str] = None) -> Path:
-    """`result/cache/<split_job>_split/<dataset>/wsi_split.csv`: where one
-    dataset's recorded split lives. The only place that path is spelled."""
-    return (cache_root(split_job or SPLIT_JOB, 'split')
-            / dataset_id.replace('/', '_') / 'wsi_split.csv')
+    """`dataset=<dataset>/split/split_recorded.csv`: where one dataset's
+    recorded split lives. The only place that path is spelled."""
+    return split_entry(dataset_id, split_job).path('split', SPLIT_ID, '.csv')
 
 
 def parse_dataset_id(dataset_id: str) -> Tuple[str, Optional[str]]:

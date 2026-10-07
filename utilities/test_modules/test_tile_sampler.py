@@ -49,6 +49,7 @@ import os
 import pickle
 import sys
 import tempfile
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
@@ -1175,14 +1176,20 @@ class _FakePlan:
 
 
 def _with_fake_opener(fn):
+    """`fn` with the slide opener faked and the cache under a temp dir."""
+    import Cache
     import SafeSlide as safe_slide_module
     original = safe_slide_module.SafeSlide
     safe_slide_module.SafeSlide = _CountingSlideOpener
     _CountingSlideOpener.opens = 0
     _FakeMasks.calls = 0
+    result_dir = Cache.RESULT_DIR
     try:
-        return fn()
+        with tempfile.TemporaryDirectory() as tmp:
+            Cache.RESULT_DIR = tmp
+            return fn()
     finally:
+        Cache.RESULT_DIR = result_dir
         safe_slide_module.SafeSlide = original
 
 
@@ -1190,9 +1197,9 @@ def t_a_cache_hit_opens_nothing_and_returns_the_same_draw():
     def run():
         with tempfile.TemporaryDirectory() as root:
             path = '/data/Group_A/SLIDE_1.svs'
-            a = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+            a = TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob',
                                masks=_FakeMasks())
-            b = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+            b = TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob',
                                masks=_FakeMasks())
             assert _CountingSlideOpener.opens == 1, _CountingSlideOpener.opens
             assert _FakeMasks.calls == 1, _FakeMasks.calls
@@ -1210,18 +1217,18 @@ def t_a_version_bump_draws_again():
     def run():
         with tempfile.TemporaryDirectory() as root:
             path = '/data/Group_A/SLIDE_1.svs'
-            TileSampler.cached(path, _cfg(), _FakePlan(), root, masks=_FakeMasks())
+            TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob', masks=_FakeMasks())
             saved = SamplerConfig.VERSION
             try:
                 SamplerConfig.VERSION = saved + 1
-                b = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+                b = TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob',
                                        masks=_FakeMasks())
             finally:
                 SamplerConfig.VERSION = saved
             assert not b.cache_info['samples_hit'], 'a bumped draw was served'
             assert _CountingSlideOpener.opens == 2, _CountingSlideOpener.opens
-            TileSampler.cached(path, _cfg(), _FakePlan(), root, masks=_FakeMasks())
-            c = TileSampler.cached(path, _cfg(), _FakePlan(), root,
+            TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob', masks=_FakeMasks())
+            c = TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob',
                                    masks=_FakeMasks())
             assert c.cache_info['samples_hit'] and _CountingSlideOpener.opens == 3
             return 'bump draws again, restore draws once, then hits'
@@ -1253,13 +1260,16 @@ def t_two_configs_on_one_slide_are_sibling_entries():
     def run():
         with tempfile.TemporaryDirectory() as root:
             path = '/data/Group_A/SLIDE_1.svs'
-            a = TileSampler.cached(path, _cfg(seed=0), _FakePlan(), root,
+            a = TileSampler.cached(path, _cfg(seed=0), _FakePlan(), 'TestJob',
                                masks=_FakeMasks())
-            b = TileSampler.cached(path, _cfg(seed=1), _FakePlan(), root,
+            b = TileSampler.cached(path, _cfg(seed=1), _FakePlan(), 'TestJob',
                                masks=_FakeMasks())
-            fa, fb = a.cache_info['folder'], b.cache_info['folder']
-            assert fa != fb and os.path.dirname(fa) == os.path.dirname(fb), (fa, fb)
-            return 'same slide directory, two draws'
+            ea, eb = a.cache_info['entry'], b.cache_info['entry']
+            assert ea == eb, (ea, eb)
+            ids = sorted(p.name for p in Path(ea).glob('record_*.json'))
+            want = sorted(f'record_{x.cfg.identity_id()}.json' for x in (a, b))
+            assert ids == want, (ids, want)
+            return 'one draw entry, two variants'
     return _with_fake_opener(run)
 
 
@@ -1268,10 +1278,10 @@ def t_the_report_is_the_same_on_a_hit_as_on_a_miss():
         with tempfile.TemporaryDirectory() as root:
             path = '/data/Group_A/SLIDE_1.svs'
             miss_dir, hit_dir = os.path.join(root, 'r1'), os.path.join(root, 'r2')
-            TileSampler.cached(path, _cfg(), _FakePlan(), root,
+            TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob',
                                masks=_FakeMasks(),
                                report_dir=miss_dir)
-            TileSampler.cached(path, _cfg(), _FakePlan(), root,
+            TileSampler.cached(path, _cfg(), _FakePlan(), 'TestJob',
                                masks=_FakeMasks(),
                                report_dir=hit_dir)
             read = lambda d, n: open(os.path.join(d, n)).read()  # noqa: E731
@@ -1289,10 +1299,10 @@ def t_a_hit_for_a_different_slide_with_the_same_stem_is_refused():
     def run():
         from Cache import CacheMismatch
         with tempfile.TemporaryDirectory() as root:
-            TileSampler.cached('/data/Group_A/SLIDE_1.svs', _cfg(), _FakePlan(), root,
+            TileSampler.cached('/data/Group_A/SLIDE_1.svs', _cfg(), _FakePlan(), 'TestJob',
                                masks=_FakeMasks())
             try:
-                TileSampler.cached('/data/Group_B/SLIDE_1.svs', _cfg(), _FakePlan(), root,
+                TileSampler.cached('/data/Group_B/SLIDE_1.svs', _cfg(), _FakePlan(), 'TestJob',
                                masks=_FakeMasks())
             except CacheMismatch:
                 return 'refused'

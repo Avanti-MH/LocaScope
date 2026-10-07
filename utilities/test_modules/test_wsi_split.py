@@ -5,7 +5,7 @@ it does to a split that is already recorded.
     python utilities/test_modules/test_wsi_split.py
 
 No slide, no model, no GPU: slide names are made up and every file lives in a
-temporary directory. Nothing here reads or writes a real `result/cache/*_split/`.
+temporary directory. Nothing here reads or writes a real the real cache.
 
 WHAT THIS DEFENDS
 -----------------
@@ -27,8 +27,8 @@ import argparse
 import os
 import random
 import sys
+import contextlib
 import tempfile
-from pathlib import Path
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -77,10 +77,22 @@ def _vt(path):
     return sets['val'], sets['test']
 
 
+@contextlib.contextmanager
+def _job():
+    """A job name whose cache lives in a temp dir for the length of a test."""
+    import Cache
+    saved = Cache.RESULT_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        Cache.RESULT_DIR = tmp
+        try:
+            yield 'TestJob'
+        finally:
+            Cache.RESULT_DIR = saved
+
+
 def _recorded(tmp, val, test):
-    path = Path(tmp) / 'wsi_split.csv'
-    W._write({'val': val, 'test': test}, path)
-    return path
+    return W._write({'val': val, 'test': test}, tmp, 'x',
+                    spec={'val': len(val), 'test': 'rest'}, seed=42)
 
 
 # ── specs ────────────────────────────────────────────────────────────────────
@@ -159,10 +171,10 @@ def t_a_spec_without_rest_leaves_the_others_in_no_set():
 def t_a_file_with_train_reads_back_set_for_set():
     sets = W.split_sets('x', {'val': 10, 'test': 20, 'train': 'rest'},
                         candidate_names=NAMES)
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / 'wsi_split.csv'
-        W._write(sets, path)
-        assert W.read_sets(path) == sets
+    with _job() as tmp:
+        path = W._write(sets, tmp, 'x', spec={'val': 10, 'test': 20, 'train': 'rest'},
+                        seed=0)
+        assert W.read_sets(W.split_path(tmp, 'x')) == sets
         assert _vt(path) == (sets['val'], sets['test'])
 
 
@@ -170,64 +182,63 @@ def t_a_file_with_train_reads_back_set_for_set():
 
 def t_check_says_same_for_the_spec_that_made_the_record():
     val, test = _legacy(NAMES, 10)
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
-        assert W.check_split('x', W.parse_spec('val=10,test=rest'), path,
+        assert W.check_split('x', W.parse_spec('val=10,test=rest'), tmp,
                              candidate_names=NAMES) == ('same', [])
 
 
 def t_check_says_upgradable_when_the_spec_only_adds_train():
     val, test = _legacy(NAMES, 10)
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
         status, why = W.check_split(
-            'x', W.parse_spec('val=10,test=20,train=rest'), path,
+            'x', W.parse_spec('val=10,test=20,train=rest'), tmp,
             candidate_names=NAMES)
         assert status == 'upgradable', (status, why)
 
 
 def t_check_says_mismatch_when_the_spec_moves_val():
     val, test = _legacy(NAMES, 10)
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
-        status, why = W.check_split('x', W.parse_spec('val=11,test=rest'), path,
+        status, why = W.check_split('x', W.parse_spec('val=11,test=rest'), tmp,
                                     candidate_names=NAMES)
         assert status == 'mismatch' and any(r.startswith('val:') for r in why), why
 
 
 def t_a_changed_pool_is_a_mismatch_which_is_why_the_record_exists():
     val, test = _legacy(NAMES, 10)
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
         grown = NAMES + ['w999']
-        status, _ = W.check_split('x', W.parse_spec('val=10,test=rest'), path,
+        status, _ = W.check_split('x', W.parse_spec('val=10,test=rest'), tmp,
                                   candidate_names=grown)
         assert status == 'mismatch', 'one new slide reshuffled the whole split'
 
 
 def t_check_says_missing_without_a_record():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         assert W.check_split('x', W.parse_spec('val=10,test=rest'),
-                             Path(tmp) / 'nope.csv',
+                             tmp,
                              candidate_names=NAMES)[0] == 'missing'
 
 
 def t_a_recorded_split_is_never_rederived():
     val, test = _legacy(NAMES, 10)
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
-        got = W.make_split_spec('x', W.parse_spec('val=5,test=rest'), path,
+        got = W.make_split_spec('x', W.parse_spec('val=5,test=rest'), tmp,
                                 candidate_names=NAMES)
         assert got == {'val': val, 'test': test}
         assert _vt(path) == (val, test), 'the file was rewritten'
 
 
 def t_a_missing_record_is_written_once():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / 'wsi_split.csv'
-        sets = W.make_split_spec('x', W.parse_spec('val=10,test=rest'), path,
+    with _job() as tmp:
+        sets = W.make_split_spec('x', W.parse_spec('val=10,test=rest'), tmp,
                                  candidate_names=NAMES)
-        assert W.read_sets(path) == sets
+        assert W.read_sets(W.split_path(tmp, 'x')) == sets
         assert (sets['val'], sets['test']) == _legacy(NAMES, 10)
 
 
@@ -236,53 +247,53 @@ def t_a_missing_record_is_written_once():
 def t_an_upgrade_adds_train_keeps_the_original_and_moves_nothing_read_so_far():
     val, test = _legacy(NAMES, 10)
     spec = W.parse_spec('val=10,test=20,train=rest')
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
         before = _vt(path)
-        assert W.upgrade_split('x', spec, path, candidate_names=NAMES) == 'upgraded'
-        backup = Path(str(path) + '.orig')
+        assert W.upgrade_split('x', spec, tmp, candidate_names=NAMES) == 'upgraded'
+        backup = W._orig_path(tmp, 'x')
         assert _vt(backup) == before, 'the backup is the old record'
         assert W.read_sets(backup).get('train') is None
         after = W.read_sets(path)
         assert after['val'] == val and after['train'] == test[20:]
         for n in (1, 5, 10, 20):
             assert _vt(path)[1][:n] == before[1][:n], n
-        assert W.check_split('x', spec, path, candidate_names=NAMES) == ('same', [])
+        assert W.check_split('x', spec, tmp, candidate_names=NAMES) == ('same', [])
 
 
 def t_a_second_upgrade_changes_nothing():
     val, test = _legacy(NAMES, 10)
     spec = W.parse_spec('val=10,test=20,train=rest')
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
-        W.upgrade_split('x', spec, path, candidate_names=NAMES)
+        W.upgrade_split('x', spec, tmp, candidate_names=NAMES)
         first = path.read_bytes()
-        assert W.upgrade_split('x', spec, path, candidate_names=NAMES) == 'same'
+        assert W.upgrade_split('x', spec, tmp, candidate_names=NAMES) == 'same'
         assert path.read_bytes() == first
 
 
 def t_an_upgrade_refuses_a_spec_that_contradicts_the_record_and_touches_nothing():
     val, test = _legacy(NAMES, 10)
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
         before = path.read_bytes()
         _refuses(lambda: W.upgrade_split(
-            'x', W.parse_spec('val=11,test=20,train=rest'), path,
+            'x', W.parse_spec('val=11,test=20,train=rest'), tmp,
             candidate_names=NAMES), contains='mismatch')
         assert path.read_bytes() == before
-        assert not Path(str(path) + '.orig').exists(), 'a backup of a refusal'
+        assert not W._orig_path(tmp, 'x').exists(), 'a backup of a refusal'
 
 
 def t_an_upgrade_never_overwrites_the_original():
     val, test = _legacy(NAMES, 10)
     spec = W.parse_spec('val=10,test=20,train=rest')
-    with tempfile.TemporaryDirectory() as tmp:
+    with _job() as tmp:
         path = _recorded(tmp, val, test)
-        Path(str(path) + '.orig').write_text('the first original')
+        W._orig_path(tmp, 'x').write_text('the first original')
         before = path.read_bytes()
-        _refuses(lambda: W.upgrade_split('x', spec, path, candidate_names=NAMES),
+        _refuses(lambda: W.upgrade_split('x', spec, tmp, candidate_names=NAMES),
                  exc=FileExistsError)
-        assert Path(str(path) + '.orig').read_text() == 'the first original'
+        assert W._orig_path(tmp, 'x').read_text() == 'the first original'
         assert path.read_bytes() == before
 
 

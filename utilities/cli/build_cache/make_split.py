@@ -12,11 +12,11 @@
     python utilities/cli/build_cache/make_split.py --check \\
         --spec bracs/test:val=10,test=20,train=rest ki67_with_photo:val=10,test=rest
 
-    # add train to a record the spec only EXTENDS; the old file is kept as .orig
+    # add train to a record the spec only EXTENDS; the old split is kept as orig
     python utilities/cli/build_cache/make_split.py --upgrade \\
         --spec bracs/test:val=10,test=20,train=rest
 
-Writes `result/cache/<cache-job>_split/<dataset>/wsi_split.csv` for each dataset
+Writes `<cache-job>`'s `dataset=<dataset>/split/` entry for each dataset
 that has none yet, and leaves every existing one alone (EXISTING WINS -- see
 `WsiSplit.make_split_spec`). `<cache-job>` defaults to SLURM_JOB_NAME, else
 `MakeSplit` -- which is also every reader's default `--split-cache-job`. Run it
@@ -92,10 +92,10 @@ def main() -> int:
                            'write nothing')
     mode.add_argument('--upgrade', action='store_true',
                       help='add train to a recorded split the spec only extends, '
-                           'keeping the old file as wsi_split.csv.orig')
+                           'keeping the old split beside it as orig_recorded.csv')
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--cache-job', default=None,
-                    help=f'the <made_by> of result/cache/<made_by>_split/. '
+                    help=f'whose cache, result/cache/<made_by>/, the split is written to. '
                          f'Default: this job (SLURM_JOB_NAME or {SPLIT_JOB})')
     args = ap.parse_args()
 
@@ -107,7 +107,7 @@ def main() -> int:
         for dataset_id in args.datasets:
             path = split_path(made_by, dataset_id)
             existed = path.exists()
-            val, test = make_split(dataset_id, args.val_n_wsi, path,
+            val, test = make_split(dataset_id, args.val_n_wsi, made_by,
                                    seed=args.seed)
             print(f'{dataset_id:17s} {"kept   " if existed else "written"} {path}\n'
                   f'{"":17s} val {len(val)}: {", ".join(val)}\n'
@@ -118,14 +118,14 @@ def main() -> int:
     for dataset_id, spec in _specs(args.spec):
         path = split_path(made_by, dataset_id)
         if args.check:
-            status, reasons = check_split(dataset_id, spec, path, seed=args.seed)
+            status, reasons = check_split(dataset_id, spec, made_by, seed=args.seed)
             print(f'{dataset_id:17s} {status.upper():10s} {path}', flush=True)
             for reason in reasons:
                 print(f'{"":17s}   {reason}')
             worst = max(worst, 1 if status == 'mismatch' else 0)
         elif args.upgrade:
             try:
-                result = upgrade_split(dataset_id, spec, path, seed=args.seed)
+                result = upgrade_split(dataset_id, spec, made_by, seed=args.seed)
             except (ValueError, FileExistsError) as exc:
                 print(f'{dataset_id:17s} REFUSED    {exc}', flush=True)
                 worst = 1
@@ -133,13 +133,13 @@ def main() -> int:
             print(f'{dataset_id:17s} {result.upper():10s} {path}', flush=True)
         else:
             existed = path.exists()
-            sets = make_split_spec(dataset_id, spec, path, seed=args.seed)
+            sets = make_split_spec(dataset_id, spec, made_by, seed=args.seed)
             print(f'{dataset_id:17s} {"kept   " if existed else "written"} {path}\n'
                   f'{"":17s} {_sizes(sets)}', flush=True)
             if 'val' in sets:
                 print(f'{"":17s} val: {", ".join(sets["val"])}')
             if existed:
-                status, reasons = check_split(dataset_id, spec, path, seed=args.seed)
+                status, reasons = check_split(dataset_id, spec, made_by, seed=args.seed)
                 print(f'{"":17s} against this spec: {status}'
                       + (f' ({"; ".join(reasons)})' if reasons else ''))
     return worst

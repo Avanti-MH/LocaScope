@@ -223,7 +223,7 @@ all six at once.
 whether the metric space generalises to a rung COMBINATION never asked about
 jointly -- every rung in them still appears in plenty of training
 combinations. A third evaluation axis alongside the held-out WSIs
-(`wsi_split.csv`) and the full-6-way deployment task.
+(the recorded split, `make_split.py`) and the full-6-way deployment task.
 
 **What changes in the loss for a variable N.** `log2_rungs`
 (`MppRoutingHead spec.md`'s ordinal-loss formulas, adopted here) must be
@@ -715,7 +715,7 @@ training/PrototypicalRoutingHead/
                                      redesigned from scratch, not resumed
                                      from that version.
         evaluate.py                   (built) scores checkpoints on the TEST
-                                     half of wsi_split.csv into two tables:
+                                     half of the recorded split into two tables:
                                      the original (random full 6-way
                                      episodes, pooled) and K x K (train.py's
                                      val definition), reusing train.py's own

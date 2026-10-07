@@ -4,7 +4,7 @@ from, cached or not.
     cfg = MASK_RECIPES['hest']
     mask = cfg.build(wsi, device)                          # one slide, no cache
 
-    with MaskMaker(cfg, cache_root, device) as masks:      # a loop over slides
+    with MaskMaker(cfg, job_name('MyJob'), device) as masks:   # a loop over slides
         for wsi in slides:
             mask, hit = masks.mask(wsi)                    # segmentation cached
 
@@ -31,13 +31,12 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from Cache import (check_source, read_meta, source_key,          # noqa: E402
-                   wsi_stem_of, write_meta)
+from Cache import (Address, Entry, check_source, source_key,   # noqa: E402
+                   wsi_stem_of)
 from ConfigIdentity import (IdentifiedConfig, ModelConfig, enc,  # noqa: E402
-                            parts_of, record, record_diff,
+                            parts_of, record,
                             register, short_id)
 from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
 from TissueMask import SlideMask, TissueMask                     # noqa: E402
@@ -108,16 +107,16 @@ class MaskMaker:
     hit, and dropped when the `with` block ends, so a HEST or UNI2 model does
     not stay on the GPU.
 
-    `cache_root` is `Cache.cache_root(<made_by>, 'mask')`; None means every
-    call segments. A slide's raw mask lives at `<cache_root>/<seg_id>/<slide>/`
-    as `mask.safetensors` and `mask_meta.json`, the sidecar written LAST: a job
-    killed between the two leaves a mask with no sidecar, which reads as a miss
-    and is redone.
+    `made_by` is the job whose cache the masks are read from and written to;
+    None means every call segments. A slide's raw mask is the `mask` entry at
+    `slide=<slide>/` (`entry`): `mask_<seg_id>.safetensors`, and its record
+    written LAST, so a job killed in between leaves a miss that is redone.
     """
 
-    def __init__(self, cfg: TissueMaskConfig, cache_root=None, device=None):
+    def __init__(self, cfg: TissueMaskConfig, made_by: Optional[str] = None,
+                 device=None):
         self.cfg = cfg
-        self.cache_root = Path(cache_root) if cache_root is not None else None
+        self.made_by = made_by
         self.device = device
         self._segmenter = None
 
@@ -148,39 +147,43 @@ class MaskMaker:
 
     # ── masks ───────────────────────────────────────────────────────────────
 
-    def slide_dir(self, slide: str) -> Path:
-        if self.cache_root is None:
-            raise ValueError('this MaskMaker has no cache_root')
-        return self.cache_root / self.cfg.seg_id() / slide
+    def entry(self, slide: str) -> Entry:
+        """The `mask` entry of `slide` in this maker's cache."""
+        if self.made_by is None:
+            raise ValueError('this MaskMaker has no cache')
+        return Address(self.made_by, slide=slide).entry('mask')
+
+    def stored(self, slide: str) -> Optional[Dict]:
+        """What the cached mask of `slide` was written with, or None."""
+        return self.entry(slide).stored(self.cfg.seg_id())
 
     def slide_mask(self, wsi, *, with_components: bool = False
                    ) -> Tuple[SlideMask, bool]:
         """The raw mask, cached when there is a cache. `(slide_mask, hit)`."""
-        if self.cache_root is None:
+        if self.made_by is None:
             return self._segment(wsi, with_components), False
 
-        folder = self.slide_dir(wsi_stem_of(wsi))
-        data, meta_path = folder / 'mask.safetensors', folder / 'mask_meta.json'
+        entry, seg_id = self.entry(wsi_stem_of(wsi)), self.cfg.seg_id()
         want = self.record()
-        if meta_path.exists():
-            meta = read_meta(meta_path)
-            check_source(meta, wsi, meta_path)
-            stale = record_diff(meta.get('identity'), want)
-            if not stale:
-                return SlideMask.load(data, with_components=with_components), True
-            print(f'  [mask] {meta_path} is stale, segmenting again: '
-                  + '; '.join(stale), flush=True)
+        state, stale = entry.status(seg_id, want)
+        if state != 'miss':
+            check_source(entry.stored(seg_id), wsi, entry.record_path(seg_id))
+        if state == 'hit':
+            return SlideMask.load(entry.path('mask', seg_id, '.safetensors'),
+                                  with_components=with_components), True
+        if state == 'stale':
+            print(f'  [mask] {entry.record_path(seg_id)} is stale, segmenting '
+                  f'again: ' + '; '.join(stale), flush=True)
 
         slide_mask = self._segment(wsi, with_components)
-        slide_mask.save(data)
-        write_meta(meta_path, dict(
-            seg_id=self.cfg.seg_id(),
-            identity=want,
-            segmenter_id=self.segmenter.identity_id(),
-            source=source_key(wsi),
-            wsi_path=str(getattr(wsi, '_filename', '') or ''),
-            created_at=time.strftime('%Y-%m-%dT%H:%M:%S'),
-            **slide_mask.geometry()))
+        with entry.writing(seg_id, dict(
+                want, seg_id=seg_id,
+                segmenter_id=self.segmenter.identity_id(),
+                source=source_key(wsi),
+                wsi_path=str(getattr(wsi, '_filename', '') or ''),
+                created_at=time.strftime('%Y-%m-%dT%H:%M:%S'),
+                **slide_mask.geometry())) as put:
+            slide_mask.save(put('mask', '.safetensors'))
         return slide_mask, False
 
     def record(self) -> Dict:

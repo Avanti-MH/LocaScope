@@ -6,7 +6,7 @@ samples from it never waits on the GPU for a mask.
     python utilities/cli/build_cache/build_mask_store.py --seg hest --wsi-names Ki67_pure_0001 ...
 
 Outputs:
-    result/cache/<cache-job>_mask/<seg_id>/<slide>/mask.safetensors + mask_meta.json
+    result/cache/<cache-job>/slide=<slide>/mask/mask_<seg_id>.safetensors + record_<seg_id>.json
     build_mask_store.csv          in result/<SLURM_JOB_NAME or BuildMaskStore>/
 
 argparse, a loop, and printed progress. Everything that decides anything is
@@ -38,7 +38,6 @@ import argparse
 import csv
 import dataclasses
 import os
-import shutil
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -54,7 +53,7 @@ setup_import_paths()
 import torch                                                    # noqa: E402
 
 from AccessDatasets import locate                                 # noqa: E402
-from Cache import cache_root, job_name, wsi_stem_of                # noqa: E402
+from Cache import job_name, wsi_stem_of                            # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 
@@ -77,7 +76,7 @@ def main():
     ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default='uni2_pca',
                     help='mask recipe (TissueMaskConfig.MASK_RECIPES)')
     ap.add_argument('--cache-job', default=None,
-                    help='the <made_by> of result/cache/<made_by>_mask/. '
+                    help='whose cache the masks go to: result/cache/<made_by>/. '
                          'Default: this job (SLURM_JOB_NAME or BuildMaskStore)')
     ap.add_argument('--fit-tiles', type=int, default=None,
                     help='uni2_pca only: tiles the PCA is fitted on. Default: '
@@ -98,7 +97,7 @@ def main():
     ap.add_argument('--overwrite', action='store_true',
                     help="delete the slide's cached mask first. Draws already "
                          'made from the old mask live under each job\'s '
-                         '<job>_sampler/<seg_id>/<slide>/ and are NOT touched: '
+                         'slide=<slide>/seg=<seg_id>/ and are NOT touched: '
                          'delete those too, or they outlive the mask they came '
                          'from')
     ap.add_argument('--out', default=None,
@@ -122,22 +121,22 @@ def main():
         mask_cfg = dataclasses.replace(
             mask_cfg, seg=dataclasses.replace(mask_cfg.seg, **overrides))
 
-    root = cache_root(args.cache_job or job_name('BuildMaskStore'), 'mask')
+    made_by = args.cache_job or job_name('BuildMaskStore')
     out_dir = args.out or job_result_dir('BuildMaskStore')
     os.makedirs(out_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'recipe    {args.seg}   seg_id {mask_cfg.seg_id()}   device {device}',
           flush=True)
-    print(f'cache     {root}', flush=True)
+    print(f'cache     {made_by}', flush=True)
 
-    masks = MaskMaker(mask_cfg, root, device)
+    masks = MaskMaker(mask_cfg, made_by, device)
     rows, failures = [], []
     for index, wsi_path in enumerate(paths, 1):
         stem = wsi_stem_of(wsi_path)
         print(f'\n[{index}/{len(paths)}] {stem}', flush=True)
         if args.overwrite:
-            shutil.rmtree(masks.slide_dir(stem), ignore_errors=True)
+            masks.entry(stem).drop(mask_cfg.seg_id())
         try:
             with SafeSlide(wsi_path) as wsi:
                 slide_mask, hit = masks.slide_mask(wsi)
@@ -159,7 +158,7 @@ def main():
                   flush=True)
         rows.append({'wsi_stem': stem, 'seg': args.seg,
                      'seg_id': mask_cfg.seg_id(),
-                     'dir': str(masks.slide_dir(stem)),
+                     'entry': str(masks.entry(stem).dir),
                      **geo,
                      'fit_cells': report.get('cells', ''),
                      'explained_top3': report.get('explained_variance_top3', ''),

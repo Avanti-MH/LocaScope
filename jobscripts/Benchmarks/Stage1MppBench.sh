@@ -72,7 +72,9 @@ else:
 # draw, one key, as long as FOV and STAGE1_N_PER_RUNG are left alone.
 # A smoke scores a subset of it with FOV_PER_RUNG rather than drawing others.
 MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # its masks cover every val slide and the first test slides; "" = this job's own
-SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB-Stage1MppBench}"   # "" = this job's own
+DRAW_CACHE_JOB="${DRAW_CACHE_JOB-Stage1MppBench}"   # "" = this job's own
+RENDER_CACHE_JOB="${RENDER_CACHE_JOB-Stage1MppBench}"   # the photo record, shared like the draw; "" = this job's own
+SAVE_PHOTOS="${SAVE_PHOTOS:-0}"   # 1 = keep every photo beside its record (~4 MB each)
 TILE="${TILE:-256}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
 
@@ -146,7 +148,9 @@ SPLIT="${SPLIT:-test}"
 
 STAGE1_ARGS=(--seg "$SEG")
 [ -n "$MASK_CACHE_JOB" ] && STAGE1_ARGS+=(--mask-cache-job "$MASK_CACHE_JOB")
-[ -n "$SAMPLER_CACHE_JOB" ] && STAGE1_ARGS+=(--sampler-cache-job "$SAMPLER_CACHE_JOB")
+[ -n "$DRAW_CACHE_JOB" ] && STAGE1_ARGS+=(--draw-cache-job "$DRAW_CACHE_JOB")
+[ -n "$RENDER_CACHE_JOB" ] && STAGE1_ARGS+=(--render-cache-job "$RENDER_CACHE_JOB")
+[ "$SAVE_PHOTOS" = "1" ] && STAGE1_ARGS+=(--save-photos)
 STAGE1_ARGS+=(--fov "$FOV")
 [ -n "$STAGE1_N_PER_RUNG" ] && STAGE1_ARGS+=(--sampler-n-per-rung "$STAGE1_N_PER_RUNG")
 [ -n "${FOV_PER_RUNG:-}" ] && STAGE1_ARGS+=(--fov-per-rung "$FOV_PER_RUNG")
@@ -170,6 +174,10 @@ python utilities/cli/diagnostics/estimate_method_memory.py \
   --batch "$BATCH_SIZE" \
   $([ -n "$KNN_ENCODER" ] && echo --knn-encoder $KNN_ENCODER) \
   $([ -n "$CLASSIFIER_WEIGHTS" ] && echo --classifier-weights $CLASSIFIER_WEIGHTS)
+
+# The recorded val/test split the slides are taken from. Written once, by its
+# one writer, under MakeSplit; an existing split is kept as it is.
+python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
 
 echo "======== Stage1MppBench ========"
 echo "  datasets  $DATASETS   n_wsi=$N_WSI   seg=$SEG   fov=$FOV"

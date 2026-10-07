@@ -34,11 +34,6 @@ of them can be measured before and after against the same numbers:
               whose residual is near the JPEG noise is how openslide reads.
               Per slide at --phase-levels, on the hest masks of
               --mask-cache-job. Writes phase.csv.
-    origins   frac(region.x / ds) per region and native level over the cached
-              masks of --mask-cache-job, --origin-per-dataset slides per
-              dataset: how far region origins fall from a level's pixel grid,
-              which is what int(region.x / ds) bookkeeping is off by.
-              Arithmetic only, no pixel read, no slide list. Writes origins.csv.
 Each is run --repeats times and the best kept. Apart from pca and s1photo, nothing is
 compared with anything: the correctness of each path is its tests'
 (TestReadPath.sh).
@@ -48,8 +43,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import glob
-import json
 import math
 import os
 import random
@@ -67,7 +60,6 @@ from _paths import job_result_dir, setup_import_paths                 # noqa: E4
 
 setup_import_paths()
 
-import Cache                                                          # noqa: E402
 from AccessDatasets import locate                                     # noqa: E402
 from CpuBudget import CpuBudget                                       # noqa: E402
 from ReadGeometry import ReadSpec                                     # noqa: E402
@@ -84,10 +76,10 @@ import training.MppRoutingHead.Datasets as Datasets                    # noqa: E
 
 TILE = 256
 RUNGS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
-#: Timings, the default. pca and s1photo compare; phase and origins measure
+#: Timings, the default. pca and s1photo compare; phase measures
 #: read geometry.
 TIMING_FLOWS = ('grid', 'capture', 'tiles', 'fov')
-FLOWS = TIMING_FLOWS + ('pca', 's1photo', 'phase', 'origins')
+FLOWS = TIMING_FLOWS + ('pca', 's1photo', 'phase')
 DATASET_OF = {'BRACS': 'bracs/test', 'S1': 'ki67_with_photo'}
 
 #: The plain gap and draw (FOV_RECIPES['plain'], SAMPLER_RECIPES['lattice']):
@@ -605,65 +597,6 @@ def check_phase(slide, mask, level, seed, rows_out) -> None:
           + f'   -> {best}', flush=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  origins: region origins against each level's pixel grid, from cached masks
-# ══════════════════════════════════════════════════════════════════════════════
-
-def check_origins(cache_job, seg, per_dataset, seed, rows_out) -> None:
-    cfg = MASK_RECIPES[seg]
-    root = Cache.cache_root(cache_job, 'mask') / cfg.seg_id()
-    metas = sorted(glob.glob(str(root / '*' / 'mask_meta.json')))
-    by_ds = {}
-    for m in metas:
-        with open(m) as fh:
-            path = json.load(fh).get('wsi_path', '')
-        if not os.path.exists(path):
-            continue
-        parts = Path(path).parts
-        dataset = parts[parts.index('datasets') + 1] if 'datasets' in parts else '?'
-        by_ds.setdefault(dataset, []).append(path)
-    rng = np.random.default_rng(seed)
-    masks = MaskMaker(cfg, cache_root=Cache.cache_root(cache_job, 'mask'))
-    print(f'  origins   {root}  ({len(metas)} masks, {per_dataset} per dataset)',
-          flush=True)
-    for dataset, paths in sorted(by_ds.items()):
-        pick = [paths[i] for i in sorted(rng.choice(len(paths),
-                                                     min(per_dataset, len(paths)),
-                                                     replace=False))]
-        for path in pick:
-            slide = SafeSlide(path)
-            mask, hit = masks.mask(slide)
-            if not hit:
-                # MaskMaker segments on a miss; a census must not, so a miss
-                # is reported and its regions are not used
-                print(f'    {Path(path).name}: not in the cache -- skipped', flush=True)
-                slide.close()
-                continue
-            base_mpp = float(slide.base_mpp)
-            for level in range(1, slide.level_count):
-                ds = float(slide.level_downsamples[level])
-                for r in mask.tissue_regions:
-                    fx, fy = (r.x / ds) % 1.0, (r.y / ds) % 1.0
-                    rows_out.append(dict(
-                        dataset=dataset, slide=Path(path).stem, level=level, ds=ds,
-                        region_x=r.x, region_y=r.y, frac_x=fx, frac_y=fy,
-                        # int(x / ds) bookkeeping's error IF openslide is bilinear
-                        old_err_um_if_bilinear=max(fx, fy) * ds * base_mpp))
-            slide.close()
-    masks.close()
-    g = {}
-    for r in rows_out:
-        g.setdefault((r['dataset'], r['level']), []).append(r)
-    for (dataset, level), grp in sorted(g.items()):
-        f = np.array([max(r['frac_x'], r['frac_y']) for r in grp])
-        um = np.array([r['old_err_um_if_bilinear'] for r in grp])
-        print(f'    {dataset:22s} L{level}  ds {grp[0]["ds"]:<9.5g} {len(grp):>5d} regions  '
-              f'frac > 0.01: {float((f > 0.01).mean()):6.1%}   frac median '
-              f'{np.median(f):.3f} max {f.max():.3f}   -> old error if bilinear: '
-              f'median {np.median(um):.2f} um, max {um.max():.2f} um', flush=True)
-
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -681,10 +614,8 @@ def main() -> int:
     ap.add_argument('--phase-levels', type=int, nargs='+', default=[1, 2, 3],
                     help='phase: levels of every slide (a level it lacks is skipped)')
     ap.add_argument('--mask-cache-job', default='MppRoutingHead',
-                    help="phase and origins: masks from this job's cache (hest)")
-    ap.add_argument('--origin-per-dataset', type=int, default=8,
-                    help='origins: slides sampled per dataset')
-    ap.add_argument('--seed', type=int, default=0, help='phase and origins')
+                    help="phase: masks from this job's cache (hest)")
+    ap.add_argument('--seed', type=int, default=0, help='phase')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
@@ -695,21 +626,15 @@ def main() -> int:
     print(f'diag_read_exp  flows {args.flows}  repeats {args.repeats}\n'
           f'  {budget.line()}\n  out {out}', flush=True)
 
-    if 'origins' in args.flows:
-        rows = []
-        check_origins(args.mask_cache_job, 'hest', args.origin_per_dataset,
-                      args.seed, rows)
-        write_csv(rows, out / 'origins.csv')
-
     t = Timings()
     ok = True
     phase_rows = []
-    per_slide = [f for f in args.flows if f != 'origins']
+    per_slide = list(args.flows)
     # phase reads tissue spots off the hest masks of --mask-cache-job, as it
     # always did; the timing flows keep their own hsv masks, so their numbers
     # stay comparable with earlier speed.csv files
     phase_masks = (MaskMaker(MASK_RECIPES['hest'],
-                             cache_root=Cache.cache_root(args.mask_cache_job, 'mask'))
+                             args.mask_cache_job)
                    if 'phase' in per_slide else None)
     with MaskMaker(MASK_RECIPES['hsv']) as masks:
         for name in (args.slides if per_slide else []):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-'''Scores saved `cli/train.py` checkpoints on the TEST half of `wsi_split.csv`,
+'''Scores saved `cli/train.py` checkpoints on the TEST half of the recorded split,
 two ways, into two pairs of CSVs:
 
     original   test_scores_per_combo.csv / _per_rung.csv -- random full 6-way
@@ -94,7 +94,7 @@ def test_manifests(args, caches, out_dir: Path):
     cache.
 
     THE FIRST `args.n_wsi` of the recorded test order, not a fresh draw --
-    `wsi_split.csv` already shuffled once, so a prefix is a sample, and the
+    the recorded split already shuffled once, so a prefix is a sample, and the
     SAME sample every time without a second seed to keep in step with the
     first (`MppRoutingHead/cli/evaluate.py`'s own `test_rows` reasoning).
     The split is READ (`<dataset>#test`; it refuses when the split is missing): one derived
@@ -105,7 +105,7 @@ def test_manifests(args, caches, out_dir: Path):
         names = list_names(dataset=f'{dataset_id}#test',
                            split_job=caches.split_job)[:args.n_wsi]
         part = build_manifest(
-            dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
+            dataset_id, masks=caches.masks, draw_job=caches.draw_job,
             report_dir=(out_dir / 'sampler_reports'
                         / f'{dataset_id.replace("/", "_")}_test'),
             tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,

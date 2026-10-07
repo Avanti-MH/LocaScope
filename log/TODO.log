@@ -3487,3 +3487,31 @@ front of whoever flips it.
       參數裡的 recipe；stage 結果共用（stage1/output_<s1>）需要它跟 FoV 一樣有名字。
       encoder 維持 class 預設（一 encoder 一 class，登錄表即 recipe 表）；訓練 config 由 CLI 決定、
       checkpoint 記錄，不動。
+
+[x] 2026-10-07 | cache 第 2b + 3 步：mask、draw、split、render 搬進 Cache.TREE
+    - mask：slide=<s>/mask/{mask_<seg>.safetensors, record_<seg>}。MaskMaker(cfg, made_by, device)
+      收 job 名稱（不再收 root）；entry(slide)、stored(slide)。沒有「列出 cache 裡有什麼」的功能：
+      讀取方從自己的參數算出要的 slide。
+    - 掃 cache 找 slide 的工具淘汰：inspect_mask_store.py 刪除；diag_read_exp 的 origins 流程刪除；
+      probe_tile_yield 與 extract_pretiles 不再「沒給 slide 就掃 mask cache」，改成和
+      MppRoutingHead / PrototypicalRoutingHead 一樣取 tile：--dataset(s)（id 或 <id>#<split>）、
+      --n-wsi 選 slide，mask 走 MaskMaker（miss 時分割並寫回），extract_pretiles 的 draw 走
+      TileSampler.cached（--draw-cache-job；plan 本來就是 Corpora.ladder，位置不變）。
+      ExtractPreTiles.sh 原本傳不存在的 --grid-step，改為 --step。
+    - draw：slide/seg/region/plan=<PlanSpec.key()>/draw/{index_<sampler>.csv, meta_<sampler>.json,
+      record_<sampler>}。TileSampler.cached(wsi, cfg, plan, made_by, masks=)；draw_address 給下游掛。
+      write/read 拆出 save/load 的兩個檔；index 欄是 draw 裡的列號，讀回時順序不符即拒絕。
+      --sampler-cache-job 改名 --draw-cache-job（MppRoutingHead、PrototypicalRoutingHead、
+      stage 1 bench、test_locascope_stages、jobscripts）。
+    - split：dataset=<key>/split/{split_recorded.csv, record_recorded, orig_recorded.csv}。split 是紀錄、
+      不由 config 推導，所以 id 固定為 recorded；upgrade 的備份是同一 entry 的 orig。
+      WsiSplit 的寫入函式收 job 名稱（make_split_spec / make_split / check_split / upgrade_split）。
+    - render（第 3 步）：draw=<sampler>/render/{render_<gap>.csv, record_<gap>, photos_<gap>/<index>.png}。
+      plan 的 key 已含 sensor，所以 gap id 就是 variant。FovSupply.cached(..., draw_job, render_job,
+      save_photos)、shots(workers, skip) 產生 (index, meta, image, params)：
+      命中且有照片 → 讀回不渲染；命中無照片 → 渲染並逐格比對參數（不符即報錯）；
+      miss → 渲染、整輪跑完才寫（skip 或中途停止都不寫）。照片用有上限的 thread 視窗平行產生，
+      順序同 draw。FovSupply.VERSION = 0。pipeline bench 的 FoV 改走 draw / render cache。
+    - Cache.find / read_meta / atomic_dir 刪除（沒有使用者）；dataset_key 新增。
+    - 舊 cache 全部不搬：<job>_mask/、<job>_sampler/、<job>_split/ 由新地址取代，第一次跑會重新
+      分割、抽樣；MakeSplit 要重跑 make_split.py。

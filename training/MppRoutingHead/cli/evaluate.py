@@ -15,7 +15,7 @@ A checkpoint carries everything needed to rebuild its model (see
 and no head geometry: passing any of those would be a second source of truth
 able to disagree with the weights.
 
-The split comes from `wsi_split.csv`, written once by
+The split comes from the recorded split, written once by
 `utilities/cli/build_cache/make_split.py`.
 Read rather than re-derived: a split recomputed from
 `--seed` is one library version away from silently becoming a different
@@ -73,7 +73,7 @@ def test_rows(args, caches, out_dir, dataset_id: str) -> List:
     rung of each.
 
     THE FIRST `n_wsi` OF THE RECORDED ORDER, not a fresh draw.
-    `split_wsi_names` shuffles before it splits and `wsi_split.csv` keeps that
+    `split_wsi_names` shuffles before it splits and the recorded split keeps that
     order, so the test rows in the file are already randomised -- taking a
     prefix is a sample, and it is the SAME sample every time without a second
     seed to keep in step with the first. Which five were used is then readable
@@ -88,7 +88,7 @@ def test_rows(args, caches, out_dir, dataset_id: str) -> List:
     print(f'[test]  {dataset_id}: {len(names)} WSIs ({", ".join(names)})',
           flush=True)
     return build_manifest(
-        dataset_id, masks=caches.masks, sampler_root=caches.sampler_root,
+        dataset_id, masks=caches.masks, draw_job=caches.draw_job,
         report_dir=(out_dir / 'sampler_reports'
                     / f'{dataset_id.replace("/", "_")}_test'),
         tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,

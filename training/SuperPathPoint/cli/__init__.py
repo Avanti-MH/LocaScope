@@ -38,7 +38,7 @@ def add_pretile_args(ap, *, tile: bool = True) -> None:
                     help='the job that made the pre-tiles: result/cache/'
                          '<this>_pretiles/')
     ap.add_argument('--mask-cache-job', default=MASK_JOB,
-                    help='the job that made the masks: result/cache/<this>_mask/')
+                    help='the job whose cache holds the masks: result/cache/<this>/')
     ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default=PRETILE_SEG,
                     help='mask recipe the pre-tiles were cut through')
     ap.add_argument('--pre-tile-factor', type=int, default=PRE_TILE_FACTOR,
@@ -51,11 +51,6 @@ def add_pretile_args(ap, *, tile: bool = True) -> None:
 def pretile_root(args):
     from Cache import cache_root                                   # noqa: PLC0415
     return cache_root(args.pretile_cache_job, 'pretiles')
-
-
-def mask_root(args):
-    from Cache import cache_root                                   # noqa: PLC0415
-    return cache_root(args.mask_cache_job, 'mask')
 
 
 # ── the two caches made from those corpora ───────────────────────────────────

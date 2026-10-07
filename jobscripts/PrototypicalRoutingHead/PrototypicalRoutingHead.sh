@@ -40,8 +40,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  (--epochs is the total), so the loop walks straight past it. RESUME_DIR=
 #  (set but empty) turns it off.
 #
-#  SAMPLER. Positions come from MppRoutingHead's own mask and sampler caches
-#  (--mask-cache-job / --sampler-cache-job MppRoutingHead): the same function,
+#  SAMPLER. Positions come from MppRoutingHead's own mask and draw caches
+#  (--mask-cache-job / --draw-cache-job MppRoutingHead) : the same function,
 #  the same config and the same files, so both packages train on the same
 #  positions rather than on two draws that should agree.
 #
@@ -174,6 +174,10 @@ MODELS=(
 )
 MATCHING_NET="off:bilstm:attnlstm:cosine_logsumexp"
 
+# The recorded val/test split the slides are taken from. Written once, by its
+# one writer, under MakeSplit; an existing split is kept as it is.
+python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
+
 echo "======== PrototypicalRoutingHead ========"
 echo "  train_dataset=$TRAIN_DATASET  encoder=$ENCODER  pooling=$POOLING  loss=$LOSS"
 echo "  models=${#MODELS[@]}  episode reuse: $EPISODE_REUSES  + matching net x $CROSS_DOMAIN_DATASET"
@@ -223,7 +227,7 @@ run_one () {
         --eval-datasets $EVAL_DATASETS \
         --seg "$SEG" \
         --mask-cache-job "$CACHE_JOB" \
-        --sampler-cache-job "$CACHE_JOB" \
+        --draw-cache-job "$CACHE_JOB" \
         --val-n-per-rung "$VAL_N_PER_RUNG" \
         --epochs "$EPOCHS" \
         --lr "$LR" \
@@ -331,7 +335,7 @@ python training/PrototypicalRoutingHead/cli/evaluate.py \
     --eval-datasets $EVAL_DATASETS \
     --seg "$SEG" \
     --mask-cache-job "$CACHE_JOB" \
-    --sampler-cache-job "$CACHE_JOB" \
+    --draw-cache-job "$CACHE_JOB" \
     --tile "$TILE" \
     --n-wsi "$EVAL_N_WSI" \
     --n-per-rung "$EVAL_N_PER_RUNG" \

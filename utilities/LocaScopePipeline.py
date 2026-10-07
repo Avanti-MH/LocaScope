@@ -42,7 +42,7 @@ slide.
 
 Usage:
 
-    masks = MaskMaker(MASK_RECIPES['hest'], Cache.cache_root(job, 'mask'), device)
+    masks = MaskMaker(MASK_RECIPES['hest'], job, device)   # job's mask cache
     est = knn_estimator('gigapath', masks.cfg, device=device)
     ret = SlidingWinSimRot(
         SlidingWinSimRotConfig(encoder_config('gigapath')), device)

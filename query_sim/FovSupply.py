@@ -11,7 +11,10 @@
         for meta, image, params in FovSupply(microscope, plan, fov.sampler, mask):
             ...   # meta: SampleMeta; image: uint8 RGB; params: the gap drawn
 
-        FovSupply.cached(microscope, plan, cfg, sampler_root, masks=masks)
+        supply = FovSupply.cached(microscope, plan, fov.sampler, masks=masks,
+                                  draw_job=job, render_job=job)
+        for index, meta, image, params in supply.shots(workers=7):
+            ...   # index: the position's row in the draw, what results join on
 
 One supply covers every rung of its plan: each position is photographed
 through the objective at its own ds (`microscope.at(meta.ds)`), at the stack
@@ -20,21 +23,28 @@ not matter. Nothing here decides anything a base module does not: where is
 the sampler's (`SamplerConfig`, `PlanSpec`), how big and what is read is the
 camera's (`ReadSpec`), how it looks is the Render's. The one choice of its own
 is the photo's rng, `photo_rng(seed, x, y, ds, 0)` -- the draw's seed and the
-position -- so a FoV is the same picture in any order, in any subset, in any
-process.
+position -- so a FoV is the same picture in any order, in any subset, on any
+thread, in any process.
 """
 
 from __future__ import annotations
 
+import csv
 import os
 import sys
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Dict, Iterator, Optional, Tuple, Union
+from itertools import islice
+from typing import Callable, Dict, Iterator, Optional, Tuple, Union
 
 import numpy as np
 
+from Cache import Entry                                          # noqa: E402
 from ConfigArgs import add_config_args, config_from_args         # noqa: E402
+from ConfigIdentity import record                                # noqa: E402
 from ReadGeometry import levels_up_to                            # noqa: E402
+from SlideReader import SlideReader                              # noqa: E402
 from TissueMask import TissueMask                                # noqa: E402
 from TileSampler import (SAMPLER_RECIPES, InheritConfig,          # noqa: E402
                          OverlapConfig, PlanSpec,
@@ -243,6 +253,11 @@ class FovSupply:
     seed, richness, overlap, inheritance): a recipe's sampler or a replace of one.
     """
 
+    #: The code between a position and its photo: the read through the
+    #: objective at the position's ds, the domain gap drawn from `photo_rng`
+    #: of the draw's seed and the position (ConfigIdentity rule 3).
+    VERSION = 0
+
     def __init__(self, microscope: Render, plan: PlanSpec,
                  cfg: SamplerConfig,
                  mask: Optional[TissueMask] = None):
@@ -251,17 +266,33 @@ class FovSupply:
         self.cfg = cfg
         self.mask = mask
         self._sampler: Optional[TileSampler] = None
+        self._render: Optional[Entry] = None
+        self.save_photos = False
 
     @classmethod
-    def cached(cls, microscope: Render, plan: PlanSpec, cfg: SamplerConfig,
-               sampler_root, *, masks, report_dir=None) -> 'FovSupply':
-        """The same, with the draw from `TileSampler.cached` -- its arguments,
-        passed through: a hit reads the positions back, a miss draws and
-        writes them (`masks` is the MaskMaker it takes the mask from)."""
+    def cached(cls, microscope: Render, plan: PlanSpec, cfg: SamplerConfig, *,
+               masks, draw_job: str, render_job: Optional[str] = None,
+               save_photos: bool = False, report_dir=None) -> 'FovSupply':
+        """The same, with the draw from `TileSampler.cached` in `draw_job`'s
+        cache (`masks` is the MaskMaker it takes the mask from) and, when
+        `render_job` is given, the photos' record in that job's cache:
+
+            .../plan=<plan>/draw=<sampler_id>/render/
+                render_<gap_id>.csv     index + every drawn parameter
+                record_<gap_id>.json
+                photos_<gap_id>/<index>.png     with `save_photos`
+
+        The plan's key carries the sensor, so the gap's id names the variant.
+        See `shots` for what a hit is and when the entry is written."""
         out = cls(microscope, plan, cfg)
         out._sampler = TileSampler.cached(
-            microscope.reader.path, cfg, plan, sampler_root, masks=masks,
+            microscope.reader.path, cfg, plan, draw_job, masks=masks,
             report_dir=report_dir)
+        if render_job is not None:
+            out._render = TileSampler.draw_address(
+                render_job, out._sampler.slide, masks.cfg, plan).at(
+                    draw=cfg.identity_id()).entry('render')
+        out.save_photos = bool(save_photos)
         return out
 
     @staticmethod
@@ -299,7 +330,7 @@ class FovSupply:
     def photo(self, meta, rotation: Optional[float] = None
               ) -> Tuple[np.ndarray, dict]:
         """`(image, params)` of one position of the draw -- the same picture
-        whether it is taken alone, in a subset or in order.
+        whether it is taken alone, in a subset, in order or on another thread.
 
         `rotation` fixes the angle instead of drawing it
         (`Render.capture_with_gt`). The rng is the position's either way, so
@@ -321,5 +352,159 @@ class FovSupply:
         return image, params
 
     def __iter__(self) -> Iterator[Tuple[object, np.ndarray, dict]]:
-        for s in self.sampler:
-            yield (s.meta, *self.photo(s.meta))
+        for _, meta, image, params in self.shots():
+            yield meta, image, params
+
+    # ── many photos ─────────────────────────────────────────────────────────
+
+    def shots(self, *, workers: int = 1,
+              skip: Optional[Callable[[object], bool]] = None
+              ) -> Iterator[Tuple[int, object, np.ndarray, dict]]:
+        """`(index, meta, image, params)` for every position, in draw order,
+        rendered `workers` at a time. `index` is the position's row in the
+        draw (`TileSampler.write`), what everything made from a photo joins
+        on. `skip(meta)` true passes a position over before it is rendered --
+        a resumed run's done shots.
+
+        With a render entry (`cached(..., render_job=)`):
+
+            hit, photos stored    the photo is read back, nothing is rendered
+            hit, no photos        rendered, and its parameters checked against
+                                  the record cell for cell -- a drift is an
+                                  error, not a new photo under the old name
+            miss or stale         rendered, and the entry written once every
+                                  position has been (never under `skip`, and
+                                  never when the caller stops early: the write
+                                  is staged and dropped). `save_photos` with
+                                  a hit that has no photos is a miss.
+        """
+        todo = [(i, s.meta) for i, s in enumerate(self.sampler)
+                if skip is None or not skip(s.meta)]
+        entry, rid = self._render, self.microscope.cfg.identity_id()
+        if entry is None:
+            yield from self._rendered(todo, workers)
+            return
+        want = self.render_record()
+        state, stale = entry.status(rid, want)
+        photos = entry.path('photos', rid)
+        if state == 'hit' and not (self.save_photos and not photos.is_dir()):
+            stored = _read_render(entry.path('render', rid, '.csv'))
+            if photos.is_dir():
+                for i, m in todo:
+                    yield i, m, _read_png(photos / f'{i}.png'), _params(stored[i])
+                return
+            for i, m, image, params in self._rendered(todo, workers):
+                _check_cells(entry, rid, i, stored[i], params)
+                yield i, m, image, params
+            return
+        if state == 'stale':
+            print(f'  [render] {entry.record_path(rid)} is stale, rendering '
+                  f'again: ' + '; '.join(stale), flush=True)
+        if skip is not None:
+            yield from self._rendered(todo, workers)
+            return
+        rows = []
+        with entry.writing(rid, dict(want, photos=self.save_photos)) as put:
+            folder = put('photos') if self.save_photos else None
+            if folder is not None:
+                folder.mkdir()
+            for i, m, image, params in self._rendered(todo, workers):
+                rows.append(_cells(i, params))
+                if folder is not None:
+                    _write_png(folder / f'{i}.png', image)
+                yield i, m, image, params
+            _write_render(put('render', '.csv'), rows)
+
+    def render_record(self) -> dict:
+        """The identity record of this draw's photos: the gap and every
+        VERSION between a position and its pixels, the draw upstream."""
+        return record(self.microscope.cfg, also=(SlideReader, FovSupply),
+                      draw=self.cfg.identity_id())
+
+    def _rendered(self, todo, workers: int):
+        """`(index, meta, image, params)` of `todo`'s `(index, meta)` in order,
+        `workers` rendering at once; at most twice that many photos are held
+        ahead of the reader."""
+        if workers <= 1:
+            for i, m in todo:
+                yield (i, m, *self.photo(m))
+            return
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            ahead, pending = iter(todo), deque()
+            for i, m in islice(ahead, 2 * workers):
+                pending.append((i, m, pool.submit(self.photo, m)))
+            while pending:
+                i, m, future = pending.popleft()
+                image, params = future.result()
+                nxt = next(ahead, None)
+                if nxt is not None:
+                    pending.append((*nxt, pool.submit(self.photo, nxt[1])))
+                yield i, m, image, params
+
+
+# ── the render entry's files ─────────────────────────────────────────────────
+
+def _cell(value) -> str:
+    """One parameter as the CSV holds it: exact for a float (`repr` round-
+    trips), empty for None."""
+    return '' if value is None else repr(value) if isinstance(value, float) else str(value)
+
+
+def _value(cell: str):
+    """`_cell` undone: None, a bool, an int or a float, else the string."""
+    if cell == '':
+        return None
+    if cell in ('True', 'False'):
+        return cell == 'True'
+    for kind in (int, float):
+        try:
+            return kind(cell)
+        except ValueError:
+            pass
+    return cell
+
+
+def _params(row: Dict[str, str]) -> dict:
+    """A render row's parameters as the photo's own `params` had them."""
+    return {k: _value(v) for k, v in row.items() if k != 'index'}
+
+
+def _cells(index: int, params: dict) -> Dict[str, str]:
+    return {'index': str(int(index)), **{k: _cell(v) for k, v in params.items()}}
+
+
+def _write_render(path, rows) -> None:
+    keys = list(dict.fromkeys(k for r in rows for k in r))
+    with open(path, 'w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=keys, restval='')
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _read_render(path) -> Dict[int, Dict[str, str]]:
+    """`{index: row}`; a row's cells stay strings, compared as `_cell` wrote
+    them, and read back as the values they spell."""
+    with open(path, newline='') as handle:
+        return {int(r['index']): r for r in csv.DictReader(handle)}
+
+
+def _check_cells(entry, rid, index, stored, params) -> None:
+    now = _cells(index, params)
+    bad = sorted(k for k in set(now) | set(stored) if now.get(k, '') != stored.get(k, ''))
+    if bad:
+        raise RuntimeError(
+            f'{entry.path("render", rid, ".csv")}: index {index} was rendered '
+            f'with other parameters than recorded ({", ".join(bad)}). The same '
+            f'position under the same gap must be the same photo; something '
+            f'between them changed without a VERSION')
+
+
+def _write_png(path, image: np.ndarray) -> None:
+    from PIL import Image                                         # noqa: PLC0415
+    Image.fromarray(np.ascontiguousarray(image)).save(path, compress_level=1)
+
+
+def _read_png(path) -> np.ndarray:
+    from PIL import Image                                         # noqa: PLC0415
+    with Image.open(path) as im:
+        return np.asarray(im.convert('RGB'))

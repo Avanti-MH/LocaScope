@@ -40,6 +40,7 @@ import argparse
 import dataclasses
 import os
 import sys
+import contextlib
 import tempfile
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -660,11 +661,24 @@ def t_cfg_weights_content_moves_seg_id():
     return f'{first} -> {second}'
 
 
+@contextlib.contextmanager
+def _cache_job():
+    """A job name whose cache lives in a temp dir for the length of a test."""
+    import Cache
+    saved = Cache.RESULT_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        Cache.RESULT_DIR = tmp
+        try:
+            yield 'TestJob'
+        finally:
+            Cache.RESULT_DIR = saved
+
+
 def t_cache_miss_then_hit_builds_nothing():
     """A hit reads the mask back without building a segmenter -- the whole
     point of caching a model's output."""
     _fresh()
-    with tempfile.TemporaryDirectory() as root:
+    with _cache_job() as root:
         cfg, wsi = _cfg(), _slide()
         with MaskMaker(cfg, root) as masks:
             a, hit_a = masks.mask(wsi)
@@ -675,13 +689,13 @@ def t_cache_miss_then_hit_builds_nothing():
             (FakeSegmenter.calls, FakeSegConfig.builds)
         assert len(a) == 1, f'{len(a)} regions -- the fixture must have one'
         assert boxes_of(a) == boxes_of(b), 'the hit placed different regions'
-        assert (masks.slide_dir('SLIDE_A') / 'mask_meta.json').exists()
+        assert masks.entry('SLIDE_A').record_path(masks.cfg.seg_id()).exists()
     return f'{len(a)} regions, one build'
 
 
 def t_cache_region_change_reuses_the_mask():
     _fresh()
-    with tempfile.TemporaryDirectory() as root:
+    with _cache_job() as root:
         MaskMaker(_cfg(), root).mask(_slide())
         _, hit = MaskMaker(_cfg(min_region_ratio=0.3), root).mask(_slide())
         assert hit and FakeSegmenter.calls == 1, (hit, FakeSegmenter.calls)
@@ -693,7 +707,7 @@ def t_cache_version_bump_resegments():
     matches, so the mask is made again in place. The decoy is the same maker
     after the version is restored, which must hit what was just rewritten."""
     _fresh()
-    with tempfile.TemporaryDirectory() as root:
+    with _cache_job() as root:
         MaskMaker(_cfg(), root).mask(_slide())
         saved = FakeSegConfig.VERSION
         try:
@@ -711,7 +725,7 @@ def t_cache_version_bump_resegments():
 
 def t_cache_segmenter_lives_with_the_maker():
     _fresh()
-    with tempfile.TemporaryDirectory() as root:
+    with _cache_job() as root:
         masks = MaskMaker(_cfg(), root)
         for name in ('A', 'B', 'C'):
             masks.mask(_slide(f'/data/g/SLIDE_{name}.svs'))
@@ -724,7 +738,7 @@ def t_cache_segmenter_lives_with_the_maker():
 
 def t_cache_same_stem_elsewhere_is_refused():
     _fresh()
-    with tempfile.TemporaryDirectory() as root:
+    with _cache_job() as root:
         masks = MaskMaker(_cfg(), root)
         masks.mask(_slide('/data/Group_A/SLIDE_A.svs'))
         masks.mask(_slide('/other/mount/Group_A/SLIDE_A.svs'))     # a remount: fine
@@ -740,10 +754,10 @@ def t_cache_missing_sidecar_is_a_miss():
     """The sidecar is written last; a job killed between the two files leaves
     a miss, not a half-written hit."""
     _fresh()
-    with tempfile.TemporaryDirectory() as root:
+    with _cache_job() as root:
         masks = MaskMaker(_cfg(), root)
         masks.mask(_slide())
-        (masks.slide_dir('SLIDE_A') / 'mask_meta.json').unlink()
+        masks.entry('SLIDE_A').record_path(masks.cfg.seg_id()).unlink()
         _, hit = masks.mask(_slide())
         assert not hit and FakeSegmenter.calls == 2
     return 'no sidecar -> resegmented'

@@ -86,8 +86,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #                                              TissueMaskConfig: derived ds, the
 #                                              span decoy, the 0.5 gate, views,
 #                                              the tiled read, the mask cache
-#   store        test_cache.py                 the stores: layout, identity,
-#                test_store.py                 round trips, and the refusals
+#   store        test_store.py                 the stores: layout, identity,
+#                                              round trips, and the refusals
 #                test_keypoint_label_store.py  that keep a reader from getting
 #                                              the WRONG artefact rather than
 #                                              none
@@ -274,8 +274,6 @@ for stage in $STAGES; do
       # data, no model. The typed-geometry regression (a mask_ds that came
       # back as the string '14.0' after six correct mask files had been
       # written) lives with SlideMask now, in the `mask` stage above.
-      run "store  (Cache: layout, atomic writes, sidecar, slide key)" \
-        python utilities/test_modules/test_cache.py
       run "store  (features, map cache, pre-tile corpora: address, codec)" \
         python utilities/test_modules/test_store.py
       run "store  (label store: threshold/NMS/border/cap, padding, two rounds)" \

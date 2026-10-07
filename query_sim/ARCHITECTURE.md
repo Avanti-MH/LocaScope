@@ -224,36 +224,6 @@ class FOVRecord:
 
 ---
 
-## CLI 對照
-
-| 舊 | 新 |
-|---|---|
-| `python simulate_microscope_photo.py <wsi> --x 0 --y 0` | `python -m query_sim.cli.demo <wsi> --x 0 --y 0` |
-| `python synth_fov_generator.py --wsi ... --n 300` | `python -m query_sim.cli.batch <wsi> --n 300 --out ./synth_fovs` |
-
-- `demo.py` — import `pipeline.simulate_microscope_photo`，印 effects panel（單張比對用）
-- `batch.py` — 呼叫 `generator.generate(...)`，產生 dataset + gt.csv
-
----
-
-## 遷移建議順序
-
-```
-Step 1  augment/ 集中             ← 把 capture / field / lens 搬過來
-                                    + 新增 geometry.py（rotation + scale）
-                                    + 補上 color_temp / brightness_contrast
-Step 2  config.py                 ← 合併兩邊參數為一個 DomainGapConfig
-Step 3  source/wsi_query.py       ← rename QueryFromWSI，保留 MPP 邏輯
-Step 4  source/tissue_filter.py   ← is_tissue、classify_region 搬進來
-Step 5  pipeline.py               ← 抽 simulate_microscope_photo(img, cfg)
-Step 6  generator.py              ← 抽批量 loop + tissue retry + stratify + CSV
-Step 7  cli/demo.py, cli/batch.py ← 兩支 CLI 入口
-Step 8  __init__.py re-export     ← 舊 import 路徑不壞掉（backward compat）
-Step 9  刪除 synth_fov_generator.py（若存在於 repo 內）
-```
-
----
-
 ## 命名說明
 
 `query_sim` 的 **query = 整個 LocaScope 專案的 FoV Picture**（顯微鏡下拍到的一張視野）。

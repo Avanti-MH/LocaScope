@@ -2,9 +2,8 @@
 eval", "Caching" and "Handle count" sections for the reasoning; this file is
 the implementation of all three.
 
-    rows = build_manifest('ki67_pure', mask_cfg=MASK_RECIPES['hest'],
-                          cache_root=cache_root(job, 'sampler'),
-                          n_per_rung=100)                    # positions only
+    rows = build_manifest('ki67_pure', masks=MaskMaker(MASK_RECIPES['hest'], job),
+                          draw_job=job, n_per_rung=100)   # positions only
 
     # TRAIN -- fresh augmentation every access, WSI-batched so open handles
     # stay bounded (see group_by_wsi/iterate_epoch)
@@ -53,7 +52,7 @@ import torch.utils.data                                             # noqa: E402
 
 from AccessDatasets import locate, list_names, pick_wsi_names        # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from Cache import cache_root, job_name                               # noqa: E402
+from Cache import job_name                                           # noqa: E402
 from TileSampler import PlanSpec, TileSampler                       # noqa: E402
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from ReadGeometry import finer_levels                               # noqa: E402
@@ -209,15 +208,14 @@ def add_cache_args(ap) -> None:
                     help='tissue-mask recipe the positions are drawn inside '
                          '(TissueMaskConfig.MASK_RECIPES)')
     ap.add_argument('--mask-cache-job', default=None,
-                    help='whose mask cache to read and fill: result/cache/'
-                         '<this>_mask/. Default: this job')
-    ap.add_argument('--sampler-cache-job', default=None,
-                    help='whose sampler cache to read and fill: result/cache/'
-                         '<this>_sampler/. Default: this job')
+                    help='whose cache the masks are read from and written to: '
+                         'result/cache/<this>/. Default: this job')
+    ap.add_argument('--draw-cache-job', default=None,
+                    help='whose cache the draws are read from and written to: '
+                         'result/cache/<this>/. Default: this job')
     ap.add_argument('--split-cache-job', default=None,
-                    help=f'whose val/test split to read: result/cache/<this>_'
-                         f'split/. Default: {SPLIT_JOB}. Written only by '
-                         f'make_split.py')
+                    help=f'whose val/test split to read: result/cache/<this>/. '
+                         f'Default: {SPLIT_JOB}. Written only by make_split.py')
 
 
 @dataclass
@@ -225,7 +223,7 @@ class Caches:
     """What `add_cache_args` resolved to. `masks` owns the segmenter: call
     `masks.close()` once the manifests are drawn, or it stays on the card."""
     masks: MaskMaker
-    sampler_root: Path
+    draw_job: str
     split_job: str
 
 
@@ -235,10 +233,9 @@ def open_caches(args, job: str, device) -> Caches:
     its one writer's."""
     made_by = job_name(job)
     return Caches(
-        masks=MaskMaker(MASK_RECIPES[args.seg],
-                        cache_root(args.mask_cache_job or made_by, 'mask'),
+        masks=MaskMaker(MASK_RECIPES[args.seg], args.mask_cache_job or made_by,
                         device),
-        sampler_root=cache_root(args.sampler_cache_job or made_by, 'sampler'),
+        draw_job=args.draw_cache_job or made_by,
         split_job=args.split_cache_job or SPLIT_JOB)
 
 
@@ -246,13 +243,12 @@ def cache_jobs(args, job: str, caches: Caches) -> dict:
     """The three `--*-cache-job` flags as `open_caches` RESOLVED them. An unset
     flag is None in `vars(args)`, which names no cache and is nothing to filter a
     wandb config on; this is the job it actually read."""
-    made_by = job_name(job)
-    return dict(mask_cache_job=args.mask_cache_job or made_by,
-                sampler_cache_job=args.sampler_cache_job or made_by,
+    return dict(mask_cache_job=caches.masks.made_by,
+                draw_cache_job=caches.draw_job,
                 split_cache_job=caches.split_job)
 
 
-def build_manifest(dataset_id: str, *, masks, sampler_root,
+def build_manifest(dataset_id: str, *, masks, draw_job: str,
                    report_dir=None, tile_size: int = 256,
                    rungs: Sequence[float] = RUNGS, n_per_rung: int = 100,
                    seed: int = 42, max_wsi: Optional[int] = None,
@@ -264,7 +260,7 @@ def build_manifest(dataset_id: str, *, masks, sampler_root,
     dataset_id)` currently finds.
 
     Every slide goes through `TileSampler.cached`: a slide already drawn under
-    this recipe, config and plan is read back from `sampler_root` without
+    this recipe, config and plan is read back from `draw_job`'s cache without
     being opened; one that is not is opened, its mask taken from `masks` (a
     `TissueMaskConfig.MaskMaker`: the recipe, the device and the mask cache),
     and its draw written back. There is no manifest-level cache: the
@@ -293,7 +289,7 @@ def build_manifest(dataset_id: str, *, masks, sampler_root,
     plan = PlanSpec('ladder', tuple(rungs), camera=routing_camera(tile_size))
     for name in names:
         sampler = TileSampler.cached(
-            locate(name, dataset=dataset_id).path, cfg, plan, sampler_root,
+            locate(name, dataset=dataset_id).path, cfg, plan, draw_job,
             masks=masks, report_dir=report_dir)
         for s in sampler:
             rows.append(ManifestRow(dataset=dataset_id, wsi_name=name,

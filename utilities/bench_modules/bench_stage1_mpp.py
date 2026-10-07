@@ -32,7 +32,7 @@ bench_mpp_feature_decomposition.py's parts (axes, subspace_knn,
 sampler_routing) investigate the feature space and read cached stores; this
 one measures the production estimators and reads no store, which is why it
 has its own job and result directory. Its cache job defaults to
-Stage1MppBench; `--mask-cache-job` / `--sampler-cache-job` name an existing
+Stage1MppBench; `--mask-cache-job` / `--draw-cache-job` name an existing
 one instead.
 """
 
@@ -63,7 +63,8 @@ from stage1_estimation.PrototypeEstMpp import PrototypeEstMpp, PrototypeEstMppCo
 from stage1_estimation.estimate_mpp_classic import ClassicEstMpp, ClassicEstMppConfig  # noqa: E402
 from stage1_estimation.FoVVote import QUALITY_SIGNALS, diagnose                      # noqa: E402
 from stage1_estimation.StageInterface import EstMppResult                             # noqa: E402
-from _paths import job_result_dir                                   # noqa: E402
+from _paths import job_name, job_result_dir                         # noqa: E402
+from CpuBudget import CpuBudget                                     # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
 from training.MppRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, open_caches, read_label_of)
@@ -420,7 +421,9 @@ def run_stage1_compare(args, out_dir: Path) -> int:
             supply = FovSupply.cached(
                 Render(SlideReader(wsi), fov.sensor, fov.gap, ds=1.0), plan,
                 fov.sampler,
-                caches.sampler_root, masks=caches.masks,
+                masks=caches.masks, draw_job=caches.draw_job,
+                render_job=args.render_cache_job or job_name(JOB_NAME),
+                save_photos=args.save_photos,
                 report_dir=out_dir / 'sampler_reports' / dataset_id.replace('/', '_'))
             sampler = supply.sampler
             mask, _ = caches.masks.mask(wsi)
@@ -460,9 +463,16 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     # tissue and the lens ops have their margin.
     t0 = time.perf_counter()
     photos_by_slide = {}
+    workers = CpuBudget.for_job(processes=1).workers
     for (dataset_id, wsi_name), (_, positions, supply) in slide_cache.items():
+        # the positions to score, by their place in the draw; any other is
+        # skipped before it is rendered
+        wanted = {id(p['meta']): p for p in positions}
+        skip = None if len(wanted) == len(supply.sampler) else (
+            lambda m, w=wanted: id(m) not in w)
         photos_by_slide[(dataset_id, wsi_name)] = [
-            (pos, supply.photo(pos['meta'])[0]) for pos in positions]
+            (wanted[id(meta)], image)
+            for _, meta, image, _ in supply.shots(workers=workers, skip=skip)]
         supply.microscope.wsi.close()
     print(f'  [photos] {sum(len(v) for v in photos_by_slide.values())} made once '
           f'in {time.perf_counter() - t0:.0f}s  [{_mem_snapshot(device)}]',
@@ -625,8 +635,15 @@ def main() -> int:
                              'smaller --sampler-n-per-rung')
     # --fov, --max-ds, --sampler-*, --camera-*: the FoV recipe and its overrides.
     add_fov_args(parser)
-    # --seg / --mask-cache-job / --sampler-cache-job / --split-cache-job.
+    # --seg / --mask-cache-job / --draw-cache-job / --split-cache-job.
     add_cache_args(parser)
+    parser.add_argument('--render-cache-job', default=None,
+                        help='whose cache the photo record (and, with '
+                             '--save-photos, the photos) is read from and '
+                             'written to. Default: this job')
+    parser.add_argument('--save-photos', action='store_true',
+                        help='keep every photo beside its record, so a later '
+                             'run reads it instead of rendering it')
     parser.add_argument('--knn-encoder', nargs='+', default=[],
                         help='one KnnEstMpp per encoder name '
                              '(TileEncoderFunc registry)')

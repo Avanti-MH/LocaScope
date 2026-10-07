@@ -64,7 +64,7 @@ from TileEncoderFunc import encoder_config, encoder_names             # noqa: E4
 from TileSampler import SAMPLER_RECIPES, PlanSpec, TileSampler    # noqa: E402
 from FovSupply import FOV_RECIPES                                   # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
-from Cache import cache_root, job_name                               # noqa: E402
+from Cache import job_name                                           # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from ReadGeometry import ReadSpec, coarser_level                    # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
@@ -113,15 +113,13 @@ def pick_fov(args, masks) -> None:
     names = list_names(dataset=args.dataset, split_job=args.split_cache_job)
     name = args.slide or random.Random(args.pick_seed).choice(names)
     entry = locate(name, dataset=args.dataset, split_job=args.split_cache_job)
-    sampler_root = cache_root(
-        args.sampler_cache_job or job_name('TestLocaScopeStages'), 'sampler')
     fov = FOV_RECIPES['bench']
     sampler = TileSampler.cached(
         entry.path, fov.sampler,
         PlanSpec('ladder',
                  fov.rungs_for(SafeSlide(entry.path).level_downsamples),
                  camera=render_spec(fov.gap, fov.sensor)),
-        sampler_root, masks=masks)
+        args.draw_cache_job or job_name('TestLocaScopeStages'), masks=masks)
     at_rung = [s.meta for s in sampler
                if abs(math.log(float(s.meta.ds) / args.rung)) < 0.01]
     if not at_rung:
@@ -315,8 +313,8 @@ def main() -> int:
                     help='which slide (when --slide is not given) and which FoV')
     ap.add_argument('--mask-cache-job', default='MppRoutingHead',
                     help='whose mask cache is read')
-    ap.add_argument('--sampler-cache-job', default='Stage1MppBench',
-                    help="whose sampler cache the FoV draw is read from; "
+    ap.add_argument('--draw-cache-job', default='Stage1MppBench',
+                    help="whose cache the FoV draw is read from; "
                          'Stage1MppBench\'s, which this test shares')
     ap.add_argument('--split-cache-job', default=None,
                     help='whose recorded split --dataset is read from; default MakeSplit')
@@ -347,7 +345,7 @@ def main() -> int:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     timings: dict = {}
     masks = MaskMaker(mask_cfg_from_args(args),
-                      cache_root(args.mask_cache_job, 'mask'), device)
+                      args.mask_cache_job, device)
     pick_fov(args, masks)
     print(f'WSI    : {args.wsi}')
     print(f'GT     : x={args.x}  y={args.y}  mpp={args.mpp:.4f}  (rung {args.rung:g})')
@@ -375,7 +373,7 @@ def main() -> int:
     mask, hit = masks.mask(wsi)
     masks.close()
     print(f'  {"cache hit" if hit else "segmented (cache miss)"}: '
-          f'{cache_root(args.mask_cache_job, "mask")}')
+          f'{args.mask_cache_job}')
     before = len(mask.raw())
     if not args.filter:
         mask = mask.raw()

@@ -212,7 +212,6 @@ import collections
 import csv
 import dataclasses
 import json
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
@@ -225,8 +224,7 @@ import numpy as np
 
 from ConfigIdentity import (IdentifiedConfig, record,          # noqa: E402
                             record_diff, register)
-from Cache import (atomic_dir, check_source, source_key,         # noqa: E402
-                   wsi_stem_of)
+from Cache import Address, check_source, source_key, wsi_stem_of  # noqa: E402
 from DsLadder import DsLadder, RungPlan                          # noqa: E402
 
 
@@ -1993,8 +1991,16 @@ class TileSampler:
         """
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
+        self.write(folder / 'index.csv', folder / 'meta.json', extra_meta)
+        return folder
 
-        with open(folder / 'index.csv', 'w', newline='') as handle:
+    def write(self, index_path: Union[str, Path], meta_path: Union[str, Path],
+              extra_meta: Optional[Dict[str, object]] = None) -> None:
+        """`save`'s two files at paths of the caller's choosing -- the cache's
+        `index_<sampler_id>.csv` and `meta_<sampler_id>.json`. `index` is each
+        sample's position in the draw, the key everything downstream of a draw
+        (renders, stage results) joins on."""
+        with open(index_path, 'w', newline='') as handle:
             writer = csv.writer(handle)
             writer.writerow(self.COLUMNS)
             for i, s in enumerate(self.samples):
@@ -2012,9 +2018,8 @@ class TileSampler:
                       for d, r in self.reports.items()},
             **(extra_meta or {}),
         }
-        with open(folder / 'meta.json', 'w') as handle:
+        with open(meta_path, 'w') as handle:
             json.dump(meta, handle, indent=2)
-        return folder
 
     @classmethod
     def load(cls, folder: Union[str, Path], wsi=None, mask=None,
@@ -2027,11 +2032,23 @@ class TileSampler:
         reads a sample is built on the reader its caller owns.
         """
         folder = Path(folder)
-        with open(folder / 'meta.json') as handle:
+        return cls.read(folder / 'index.csv', folder / 'meta.json', wsi, mask, cfg)
+
+    @classmethod
+    def read(cls, index_path: Union[str, Path], meta_path: Union[str, Path],
+             wsi=None, mask=None, cfg: Optional[SamplerConfig] = None
+             ) -> 'TileSampler':
+        """`load` from `write`'s two files."""
+        with open(meta_path) as handle:
             meta = json.load(handle)
         rows = []
-        with open(folder / 'index.csv', newline='') as handle:
+        with open(index_path, newline='') as handle:
             for row in csv.DictReader(handle):
+                # `index` is what downstream rows join on, so a file whose
+                # rows were reordered or dropped is refused, not renumbered
+                if int(row['index']) != len(rows):
+                    raise ValueError(f'{index_path}: row {len(rows)} holds index '
+                                     f'{row["index"]}')
                 rows.append(SampleMeta(
                     slide=row['slide'], ds=float(row['ds']),
                     level=int(row['level']), x=int(row['x']), y=int(row['y']),
@@ -2050,7 +2067,7 @@ class TileSampler:
 
         out = cls.__new__(cls)
         out.wsi, out.mask = wsi, mask
-        # None when the caller did not name the config: the folder's own
+        # None when the caller did not name the config: the draw's own
         # record says what drew it, and a default here would claim otherwise
         out.cfg = cfg
         out.slide = meta.get('slide', '')
@@ -2067,7 +2084,7 @@ class TileSampler:
         stored = meta.get('sampler_id', '')
         if cfg is not None and stored and stored != cfg.identity_id():
             raise ValueError(
-                f'{folder} was cut with sampler_id {stored} and the config '
+                f'{meta_path} was cut with sampler_id {stored} and the config '
                 f'passed in hashes to {cfg.identity_id()}. Loading it under the '
                 f'wrong config would report the wrong axes for every row -- '
                 f'pass the right config, or none, and read the stored one')
@@ -2075,28 +2092,39 @@ class TileSampler:
 
     # ── the cache ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def draw_address(made_by: str, slide: str, mask_cfg, plan: PlanSpec) -> Address:
+        """Where a slide's draws over `plan` live in `made_by`'s cache:
+        `slide=/seg=/region=/plan=` -- every upstream id the draw depends on,
+        upstream above downstream. The draws themselves are the `draw` entry
+        here, one variant per sampler id; whatever is made from one draw sits
+        below `.at(draw=<sampler_id>)`."""
+        return Address(made_by, slide=slide, seg=mask_cfg.seg_id(),
+                       region=mask_cfg.region_id(), plan=plan.key())
+
     @classmethod
     def cached(cls, wsi_path: Union[str, Path], cfg: SamplerConfig,
-               plan: PlanSpec, sampler_root: Union[str, Path], *, masks,
+               plan: PlanSpec, made_by: str, *, masks,
                report_dir: Optional[Union[str, Path]] = None) -> 'TileSampler':
-        """The draw for one slide, from the cache when it is there and made
-        -- segmentation included -- when it is not.
+        """The draw for one slide, from `made_by`'s cache when it is there and
+        made -- segmentation included -- when it is not.
 
-            <sampler_root>/<seg_id>/<slide>/<region_id>_<sampler_id>_<plan>/
-                                            index.csv + meta.json
+            slide=<s>/seg=<seg_id>/region=<region_id>/plan=<plan>/draw/
+                index_<sampler_id>.csv  meta_<sampler_id>.json  record_<sampler_id>.json
 
         `masks` is the caller's `TissueMaskConfig.MaskMaker`: the recipe, the
-        device and the MASK cache, which is its own object under its own root
-        (`<made_by>_mask`). The draw's path repeats the mask's keys, upstream
-        above downstream, so dropping a recipe is one `rm -rf` of `<seg_id>/`
-        in each root.
+        device and the MASK cache, which is its own entry and may be another
+        job's. The draw's address repeats the mask's ids, upstream above
+        downstream.
 
         A hit opens NOTHING: no slide, no segmenter. A miss opens the slide,
         asks `masks` for the mask (itself a hit or a segmentation), samples,
-        and writes the draw atomically. Either way the sampler comes back in
-        one state -- `wsi=None, mask=None` -- so a caller cannot tell which
-        happened by what it holds, only by `cache_info`; a caller that wants
-        pixels reads them through a camera on its own reader.
+        and writes the draw, its record last. A record that differs from the
+        one this call would write is a recompute in place, printed with the
+        fields that differ. Either way the sampler comes back in one state --
+        `wsi=None, mask=None` -- so a caller cannot tell which happened by what
+        it holds, only by `cache_info`; a caller that wants pixels reads them
+        through a camera on its own reader.
 
         `masks` is taken as an object and never imported: the mask recipes
         import every segmenter, and this module stays without them.
@@ -2107,27 +2135,24 @@ class TileSampler:
         """
         mask_cfg = masks.cfg
         slide = wsi_stem_of(wsi_path)
-        folder = (Path(sampler_root) / mask_cfg.seg_id() / slide
-                  / f'{mask_cfg.region_id()}_{cfg.identity_id()}_{plan.key()}')
-        info = dict(folder=str(folder), seg_id=mask_cfg.seg_id(),
-                    region_id=mask_cfg.region_id(), sampler_id=cfg.identity_id(),
-                    plan=plan.key(),
-                    mask_parts=list(mask_cfg.identity_parts()))
+        sid = cfg.identity_id()
+        entry = cls.draw_address(made_by, slide, mask_cfg, plan).entry('draw')
+        info = dict(entry=str(entry.dir), seg_id=mask_cfg.seg_id(),
+                    region_id=mask_cfg.region_id(), sampler_id=sid,
+                    plan=plan.key(), mask_parts=list(mask_cfg.identity_parts()))
         # The draw depends on the mask's code as well as on its id, so the
         # mask recipe's versions ride in this record too.
         want = record(cfg, also=(mask_cfg,), seg_id=info['seg_id'],
                       region_id=info['region_id'], plan=info['plan'])
-        if (folder / 'meta.json').exists():
-            with open(folder / 'meta.json') as handle:
-                stored = json.load(handle)
-            check_source(stored, wsi_path, folder)
-            stale = record_diff(stored.get('identity'), want)
-            if stale:
-                print(f'  [sampler] {folder} is stale, drawing again: '
-                      + '; '.join(stale), flush=True)
-                shutil.rmtree(folder)
-        if (folder / 'meta.json').exists():
-            out = cls.load(folder, cfg=cfg)
+        state, stale = entry.status(sid, want)
+        if state != 'miss':
+            check_source(entry.stored(sid), wsi_path, entry.record_path(sid))
+        if state == 'stale':
+            print(f'  [draw] {entry.record_path(sid)} is stale, drawing again: '
+                  + '; '.join(stale), flush=True)
+        if state == 'hit':
+            out = cls.read(entry.path('index', sid, '.csv'),
+                           entry.path('meta', sid, '.json'), cfg=cfg)
             info.update(mask_hit=True, samples_hit=True)
         else:
             from SafeSlide import SafeSlide                     # noqa: PLC0415
@@ -2135,12 +2160,13 @@ class TileSampler:
                 mask, mask_hit = masks.mask(wsi)
                 out = cls(wsi, mask, cfg, slide=slide)
                 out.sample(plan.plans_for(wsi))
-                with atomic_dir(folder) as tmp:
-                    out.save(tmp, extra_meta=dict(
-                        source=source_key(wsi_path), wsi_path=str(wsi_path),
-                        seg_id=info['seg_id'], region_id=info['region_id'],
-                        plan=info['plan'], mask_parts=info['mask_parts'],
-                        identity=want))
+                with entry.writing(sid, dict(
+                        want, source=source_key(wsi_path),
+                        wsi_path=str(wsi_path))) as put:
+                    out.write(put('index', '.csv'), put('meta', '.json'),
+                              extra_meta=dict(plan=info['plan'],
+                                              seg_id=info['seg_id'],
+                                              region_id=info['region_id']))
             out.wsi, out.mask = None, None
             info.update(mask_hit=bool(mask_hit), samples_hit=False)
         out.slide = slide
@@ -2178,7 +2204,7 @@ class TileSampler:
         if info:
             state = lambda hit: 'reused' if hit else 'computed'   # noqa: E731
             lines += ['## Cache', '',
-                      f'- entry: `{info.get("folder", "")}`',
+                      f'- entry: `{info.get("entry", "")}`',
                       f'- mask: {state(info.get("mask_hit"))}, '
                       f'draw: {state(info.get("samples_hit"))}',
                       f'- seg_id `{info.get("seg_id")}`, region_id '
