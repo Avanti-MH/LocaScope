@@ -8,7 +8,8 @@ temp, distortion, noise floor ...) and its objective (`ds`). Different `seed`
 = different random exposures. The instance is called `camera` everywhere.
 
     reader = SlideReader(wsi)
-    camera = Render(reader, REAL_PHOTO_SENSOR, DomainGapConfig(), ds=4.0, seed=42)
+    gap    = FOV_RECIPES['plain'].gap              # FovSupply's recipes
+    camera = Render(reader, REAL_PHOTO_SENSOR, gap, ds=4.0, seed=42)
 
     img         = camera.capture(x, y)            # np.ndarray | None
     img, params = camera.capture_with_gt(x, y)    # (np.ndarray, dict) | (None, None)
@@ -101,12 +102,12 @@ def photo_rng(*key) -> random.Random:
 
 class Render:
     def __init__(self, reader: SlideReader, sensor: Tuple[int, int],
-                 cfg: Optional[DomainGapConfig] = None, *, ds: float,
+                 cfg: DomainGapConfig, *, ds: float,
                  seed: Optional[int] = None, read_level: Optional[int] = None):
         """
         `reader` is the slide's `SlideReader`; its filter is the camera's
         ('lanczos' for a microscope). `sensor` is `(w, h)` output px.
-        `cfg` is the domain gap, None its defaults. `seed` seeds the sequential
+        `cfg` is the domain gap, a recipe's or a replace of one. `seed` seeds the sequential
         draw of `capture` when no per-call `rng` is given.
 
         `ds` is the magnification (downsample from level 0). The nominal mpp a
@@ -127,7 +128,10 @@ class Render:
         if ds is None or float(ds) <= 0:
             raise ValueError(f'ds must be a positive downsample, got {ds}')
         self.reader = reader
-        self.cfg = cfg or DomainGapConfig()
+        if not isinstance(cfg, DomainGapConfig):
+            raise TypeError(f'Render takes a DomainGapConfig (the gap of a FoV '
+                            f'recipe or a replace of one), got {type(cfg).__name__}')
+        self.cfg = cfg
         self.output_w, self.output_h = w, h
         self.ds = float(ds)
         self.read_level = read_level

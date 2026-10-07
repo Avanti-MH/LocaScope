@@ -55,6 +55,7 @@ import os
 import random
 import sys
 import time
+from dataclasses import replace
 
 import numpy as np
 import torch
@@ -73,12 +74,11 @@ from ReadGeometry import ReadSpec                                     # noqa: E4
 from SafeSlide import SafeSlide                                       # noqa: E402
 from SlideReader import SlideReader                                   # noqa: E402
 from PatchingLib import region_grids                                  # noqa: E402
-from TileSampler import PlanSpec, SamplerConfig, TileSampler          # noqa: E402
+from TileSampler import SAMPLER_RECIPES, PlanSpec, TileSampler        # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                  # noqa: E402
 from camera import Render, render_spec                                # noqa: E402
 from pipeline import simulate_with_gt                                 # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR                            # noqa: E402
-from config import DomainGapConfig                                    # noqa: E402
 from FovSupply import FOV_RECIPES, FovSupply                          # noqa: E402
 import training.MppRoutingHead.Datasets as Datasets                    # noqa: E402
 
@@ -89,6 +89,11 @@ RUNGS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 TIMING_FLOWS = ('grid', 'capture', 'tiles', 'fov')
 FLOWS = TIMING_FLOWS + ('pca', 's1photo', 'phase', 'origins')
 DATASET_OF = {'BRACS': 'bracs/test', 'S1': 'ki67_with_photo'}
+
+#: The plain gap and draw (FOV_RECIPES['plain'], SAMPLER_RECIPES['lattice']):
+#: every arm below switches one part of them.
+_GAP = FOV_RECIPES['plain'].gap
+_LATTICE = SAMPLER_RECIPES['lattice']
 
 
 def _dataset_of(name: str) -> str:
@@ -123,7 +128,7 @@ class Timings:
 def _sample(wsi, mask, spec: ReadSpec, kind: str, n: int, seed: int):
     plan = (PlanSpec('native', camera=spec) if kind == 'native'
             else PlanSpec('ladder', RUNGS, camera=spec))
-    return list(TileSampler(wsi, mask, SamplerConfig(n_per_rung=n, seed=seed))
+    return list(TileSampler(wsi, mask, replace(_LATTICE, n_per_rung=n, seed=seed))
                 .sample(plan.plans_for(wsi)))
 
 
@@ -175,13 +180,13 @@ def flow_tiles(t, args, name, wsi, mask):
 
 
 def flow_fov(t, args, name, wsi, mask):
-    still = DomainGapConfig(rotation_choices=(0,), angle_jitter_deg=0.0,
-                            scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
-                            stage_shift_max=0)
+    still = replace(_GAP, rotation_choices=(0,), angle_jitter_deg=0.0,
+                    scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
+                    stage_shift_max=0)
     reader = SlideReader(wsi)
     for level in range(min(2, wsi.level_count)):
         ds = float(wsi.level_downsamples[level])
-        cfg = SamplerConfig(n_per_rung=args.n, seed=21 + level)
+        cfg = replace(_LATTICE, n_per_rung=args.n, seed=21 + level)
 
         def bank():
             cam = Render(reader, REAL_PHOTO_SENSOR, still, ds=ds, seed=21 + level)
@@ -245,9 +250,9 @@ def flow_pca(t, args, name, wsi, budget):
     from PatchingLib import PatchGrid
     from TissueMask import TissueRegion
     from TissueSegFunc import scanned_rect
-    from Uni2PcaSegFunc import LEVEL, Uni2PcaSegConfig, Uni2PcaSegmenter
+    from Uni2PcaSegFunc import LEVEL, Uni2PcaSegmenter
 
-    cfg = Uni2PcaSegConfig(workers=budget.workers)
+    cfg = replace(MASK_RECIPES['uni2_pca'].seg, workers=budget.workers)
     seg = SimpleNamespace(cfg=cfg)           # the two readers use only .cfg
     level = LEVEL
     ds = float(wsi.level_downsamples[level])
@@ -386,11 +391,11 @@ def flow_s1photo(t, args, name, wsi, mask):
                side bands (outside the turned 1024 px) by reflection, Render
                reads them. Mean |new - old| in the bands against the centre,
                where both hold the same tissue -- the centre is the decoy.
-      speed    the full gap (`DomainGapConfig`'s own, as the bench uses),
+      speed    the full gap (`FOV_RECIPES['plain']`'s),
                photos/s for both."""
-    gap = DomainGapConfig()
+    gap = _GAP
     plan = PlanSpec('ladder', RUNGS, camera=render_spec(gap, S1_SENSOR))
-    samples = list(TileSampler(wsi, mask, SamplerConfig(n_per_rung=args.n, seed=41))
+    samples = list(TileSampler(wsi, mask, replace(_LATTICE, n_per_rung=args.n, seed=41))
                    .sample(plan.plans_for(wsi)))
     positions = [dict(x=int(s.meta.fov_rect[0]), y=int(s.meta.fov_rect[1]),
                       rung=float(s.meta.ds)) for s in samples]
@@ -400,9 +405,9 @@ def flow_s1photo(t, args, name, wsi, mask):
         return random.Random(1000 + k)
 
     # same: no gap
-    bare = DomainGapConfig(rotation_choices=(0,),
-                           angle_jitter_deg=0.0, stage_shift_max=0,
-                           geometric=False, photometric=False)
+    bare = replace(_GAP, rotation_choices=(0,),
+                   angle_jitter_deg=0.0, stage_shift_max=0,
+                   geometric=False, photometric=False)
     still = Render(reader, S1_SENSOR, bare, ds=1.0)
     rows, ok, worst = [], True, None
     for k, pos in enumerate(positions):
@@ -447,8 +452,8 @@ def flow_s1photo(t, args, name, wsi, mask):
     print(f'  s1photo  same   {"PASS" if ok else "FAIL"}', flush=True)
 
     # bands: geometry only, an explicit 92 degree turn
-    geo = DomainGapConfig(scale_range=(1.0, 1.0),
-                          stage_shift_max=0, photometric=False)
+    geo = replace(_GAP, scale_range=(1.0, 1.0),
+                  stage_shift_max=0, photometric=False)
     turned = Render(reader, S1_SENSOR, geo, ds=1.0)
     w, h = S1_SENSOR
     lo, hi = (w - h) // 2, (w + h) // 2         # the turned rectangle's columns
@@ -475,9 +480,9 @@ def flow_s1photo(t, args, name, wsi, mask):
     # reference renders the same scene from a read with real pixels far beyond
     # it (a plain read grown by S1_CORNER_REF output px, centred alike); the
     # centre, the same tissue in both, is the decoy.
-    zoom = DomainGapConfig(scale_range=(0.9, 0.9),
-                           angle_jitter_deg=0.0, stage_shift_max=0,
-                           photometric=False)
+    zoom = replace(_GAP, scale_range=(0.9, 0.9),
+                   angle_jitter_deg=0.0, stage_shift_max=0,
+                   photometric=False)
     zoomed = Render(reader, S1_SENSOR, zoom, ds=1.0)
     w, h = S1_SENSOR
     c = S1_CORNER

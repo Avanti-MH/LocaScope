@@ -1,6 +1,6 @@
 """HEST tissue segmentation (MahmoodLab/hest-tissue-seg) as a plane segmenter.
 
-    seg  = HestSegConfig().build(device)
+    seg  = MASK_RECIPES['hest'].seg.build(device)   # TissueMaskConfig's recipes
     mask = seg.segment_slide(wsi)        # SlideMask, via PlaneSegmenter's read
     binary = seg(rgb)                    # one image: [H, W] uint8, 1 = tissue
 

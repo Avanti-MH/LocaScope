@@ -26,12 +26,14 @@ caller that reads passes the same value.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional, Sequence
 
 from DsLadder import DEFAULT_RUNGS
 from ReadGeometry import ReadSpec
 from Store import PreTileCorpus
-from TileSampler import (PRE_TILE_FACTOR, InheritConfig, OverlapConfig,
+from TileSampler import (PRE_TILE_FACTOR, SAMPLER_RECIPES, InheritConfig,
+                         OverlapConfig,
                          PlanSpec, RichnessConfig, SamplerConfig, centre_margin)
 
 #: A flat rejection budget per cell; `sampler_config` divides it by n.
@@ -64,16 +66,18 @@ def sampler_config(*, n: int, seed: int = 0,
     DsLadder, which tags itself 'F' (TileSampler's native_plans); 'R' cannot
     occur here.
     """
-    return SamplerConfig(
-        n_per_rung=int(n), seed=int(seed),
+    lattice = SAMPLER_RECIPES['lattice']
+    return replace(
+        lattice, n_per_rung=int(n), seed=int(seed),
         candidates=candidates,
         max_tries_per_tile=max(1, int(max_tries) // max(int(n), 1)),
-        overlap=OverlapConfig(step=float(step),
-                              max_overlap_ratio=float(max_overlap),
-                              overlapping_share=float(overlapping_share)),
-        richness=RichnessConfig(bucket_frame=bucket_frame),
-        inherit=InheritConfig(stack_kind='F', share=float(inherit_share),
-                              source_rung=inherit_source_rung))
+        overlap=replace(lattice.overlap, step=float(step),
+                        max_overlap_ratio=float(max_overlap),
+                        overlapping_share=float(overlapping_share)),
+        richness=replace(lattice.richness, bucket_frame=bucket_frame),
+        inherit=replace(lattice.inherit, stack_kind='F',
+                        share=float(inherit_share),
+                        source_rung=inherit_source_rung))
 
 
 #: The named corpora, every field written out (test_config_identity's recipe

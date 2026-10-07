@@ -127,8 +127,7 @@ from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 from PatchingLib import region_grids                             # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
 from ReadGeometry import levels_up_to                        # noqa: E402
-from TileSampler import (PRE_TILE_FACTOR, OverlapConfig,      # noqa: E402
-                         SamplerConfig, TileSampler)
+from TileSampler import PRE_TILE_FACTOR, SAMPLER_RECIPES, TileSampler  # noqa: E402
 from TissueMask import SlideMask                # noqa: E402
 from DsLadder import DEFAULT_RUNGS, DsLadder              # noqa: E402
 from WsiSelection import resolve_wsi_paths                       # noqa: E402
@@ -459,13 +458,15 @@ class TileYieldProbe:
         #
         # `self.candidates` is the arm: 'random' and 'lattice' are DIFFERENT
         # measurements.
-        cfg = SamplerConfig(
-            n_per_rung=self.n, seed=self.seed,
+        lattice = SAMPLER_RECIPES['lattice']
+        cfg = dataclasses.replace(
+            lattice, n_per_rung=self.n, seed=self.seed,
             candidates=self.candidates,
             max_tries_per_tile=max(1, self.max_tries // max(self.n, 1)),
-            overlap=OverlapConfig(step=self.step,
-                                  max_overlap_ratio=self.max_overlap,
-                                  overlapping_share=self.overlapping_share))
+            overlap=dataclasses.replace(
+                lattice.overlap, step=self.step,
+                max_overlap_ratio=self.max_overlap,
+                overlapping_share=self.overlapping_share))
         sampler = TileSampler(wsi, trm, cfg)
         pre = sampler.preflight([plan])[0]
         sampler.sample([plan])

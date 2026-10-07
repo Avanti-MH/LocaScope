@@ -640,6 +640,97 @@ def t_no_config_constant_outside_a_recipe_table():
     return f'{len(names) - 1} config classes checked'
 
 
+def _recipe_bearing():
+    """`{class: defining file}` of every config a recipe table names."""
+    import inspect
+    from FovSupply import FovRecipe
+    from HestSegFunc import HestSegConfig
+    from TileSampler import (InheritConfig, OverlapConfig, RichnessConfig,
+                             SamplerConfig)
+    from TissueMaskConfig import TissueMaskConfig
+    from TissueSegFunc import PlaneSegConfig, TissueSegConfig
+    from Uni2PcaSegFunc import Uni2PcaSegConfig
+    from config import DomainGapConfig
+    classes = (SamplerConfig, RichnessConfig, OverlapConfig, InheritConfig,
+               DomainGapConfig, TissueMaskConfig, TissueSegConfig,
+               PlaneSegConfig, HestSegConfig, Uni2PcaSegConfig, FovRecipe)
+    return {c: Path(inspect.getsourcefile(c)).resolve().relative_to(_ROOT).as_posix()
+            for c in classes}
+
+
+def t_recipe_configs_are_built_only_in_a_recipe():
+    """A config a recipe table names is built in three places only: the module
+    that defines it, a recipe table, a test. Anywhere else it starts from a
+    recipe and `replace`s what that caller's arguments set -- a call from
+    scratch is a recipe nobody can find, and its unwritten fields are the
+    class's default, whatever that becomes."""
+    import ast
+    owned = {c.__name__: rel for c, rel in _recipe_bearing().items()}
+
+    def called(node) -> str:
+        f = node.func
+        return f.id if isinstance(f, ast.Name) else (
+            f.attr if isinstance(f, ast.Attribute) else '')
+
+    found = []
+    for top in _LINT_ROOTS:
+        for dirpath, _, files in os.walk(_ROOT / top):
+            for name in files:
+                path = Path(dirpath) / name
+                rel = path.relative_to(_ROOT).as_posix()
+                if (not name.endswith('.py') or 'test_modules' in rel
+                        or 'FewShotEoMT' in rel):
+                    continue
+                tree = ast.parse(path.read_text(errors='replace'))
+                in_table = set()
+                for _, value in _recipe_tables(tree):
+                    in_table |= {id(n) for n in ast.walk(value)}
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Call) and called(node) in owned
+                            and owned[called(node)] != rel
+                            and id(node) not in in_table):
+                        found.append(f'{rel}:{node.lineno} {called(node)}(...)')
+    assert not found, ('recipe configs built from scratch:\n  '
+                       + '\n  '.join(found))
+    return f'{len(owned)} classes'
+
+
+def t_config_flag_parsers_refuse_abbreviations():
+    """A tool that adds config flags (ConfigArgs: add_config_args and the
+    add_fov_args / add_encoder_args built on it) builds its parser with
+    `allow_abbrev=False`, or `--fov` would be taken as a prefix of another
+    flag. ConfigArgs refuses that parser when it runs; this finds it first."""
+    import ast
+    users = {'add_config_args', 'add_fov_args', 'add_encoder_args'}
+    found = []
+    for top in _LINT_ROOTS:
+        for dirpath, _, files in os.walk(_ROOT / top):
+            for name in files:
+                path = Path(dirpath) / name
+                rel = path.relative_to(_ROOT).as_posix()
+                if (not name.endswith('.py') or 'test_modules' in rel
+                        or 'FewShotEoMT' in rel):
+                    continue
+                tree = ast.parse(path.read_text(errors='replace'))
+                calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+
+                def name_of(n):
+                    f = n.func
+                    return f.id if isinstance(f, ast.Name) else (
+                        f.attr if isinstance(f, ast.Attribute) else '')
+                if not any(name_of(c) in users for c in calls):
+                    continue
+                for c in calls:
+                    if name_of(c) != 'ArgumentParser':
+                        continue
+                    kw = {k.arg: k.value for k in c.keywords}
+                    v = kw.get('allow_abbrev')
+                    if not (isinstance(v, ast.Constant) and v.value is False):
+                        found.append(f'{rel}:{c.lineno}')
+    assert not found, ('parsers that add config flags without '
+                       'allow_abbrev=False: ' + ', '.join(found))
+
+
 def t_recipes_equal_the_configs_they_replace():
     """Frozen copies of the expressions each moved recipe replaced: written out
     in full, a recipe must still be the same config -- the same ids, so every
@@ -668,6 +759,11 @@ def t_recipes_equal_the_configs_they_replace():
         same(f'mask {k}', MASK_RECIPES[k], old)
         assert (MASK_RECIPES[k].seg_id(), MASK_RECIPES[k].region_id()) == (
             old.seg_id(), old.region_id()), k
+
+    # the class defaults the diagnostics built from scratch
+    same('lattice', SAMPLER_RECIPES['lattice'], SamplerConfig())
+    same('plain gap', FOV_RECIPES['plain'].gap, DomainGapConfig())
+    assert FOV_RECIPES['plain'].sampler == SamplerConfig()
 
     bank_richness = RichnessConfig(floors=(0.0,) * 7,
                                    caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0))
@@ -929,6 +1025,8 @@ def main() -> int:
     print('recipes')
     check('every recipe writes every field',  t_every_recipe_writes_every_field)
     check('no config constant outside one',   t_no_config_constant_outside_a_recipe_table)
+    check('recipe configs built only in one', t_recipe_configs_are_built_only_in_a_recipe)
+    check('config-flag parsers refuse abbrev', t_config_flag_parsers_refuse_abbreviations)
     check('moved recipes are the same configs', t_recipes_equal_the_configs_they_replace)
 
     print('weights_id')

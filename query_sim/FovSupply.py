@@ -4,9 +4,11 @@
     read       the objective's SlideReader, at the level the plan placed it for
     render     Render.capture_with_gt, the domain gap drawn from `photo_rng`
 
-        microscope = Render(SlideReader(wsi), REAL_PHOTO_SENSOR, DomainGapConfig(...), ds=1.0)
-        plan = PlanSpec('ladder', (1.0, 4.00003, 16.0017), camera=microscope.spec)
-        for meta, image, params in FovSupply(microscope, plan, SamplerConfig(...), mask):
+        fov = FOV_RECIPES['bench']
+        microscope = Render(SlideReader(wsi), fov.sensor, fov.gap, ds=1.0)
+        plan = PlanSpec('ladder', fov.rungs_for(wsi.level_downsamples),
+                        camera=microscope.spec)
+        for meta, image, params in FovSupply(microscope, plan, fov.sampler, mask):
             ...   # meta: SampleMeta; image: uint8 RGB; params: the gap drawn
 
         FovSupply.cached(microscope, plan, cfg, sampler_root, masks=masks)
@@ -34,7 +36,8 @@ import numpy as np
 from ConfigArgs import add_config_args, config_from_args         # noqa: E402
 from ReadGeometry import levels_up_to                            # noqa: E402
 from TissueMask import TissueMask                                # noqa: E402
-from TileSampler import (InheritConfig, OverlapConfig, PlanSpec,  # noqa: E402
+from TileSampler import (SAMPLER_RECIPES, InheritConfig,          # noqa: E402
+                         OverlapConfig, PlanSpec,
                          RichnessConfig, SamplerConfig, TileSampler)
 
 from camera import Render, photo_rng                               # noqa: E402
@@ -85,6 +88,10 @@ class FovRecipe:
 #:                         native level up to ds 16, a third of a level's
 #:                         budget allowed to overlap so a coarse level whose
 #:                         disjoint lattice runs out still fills.
+#: plain                   the class defaults written out: the real photos'
+#:                         sensor, the full gap with no mpp jitter, the plain
+#:                         lattice draw, every native level. What a diagnostic
+#:                         switches one part of.
 #: routing-query           MppRoutingHead's query tiles: a tile-sized sensor
 #:                         (`--tile` replaces it), the full gap with the two
 #:                         frame-referenced optics present half the time and no
@@ -126,6 +133,20 @@ FOV_RECIPES: Dict[str, FovRecipe] = {
                                   on_incomplete='drop'),
             candidates='lattice', max_tries_per_tile=5),
         rungs='native', max_ds=16.0),
+    'plain': FovRecipe(
+        sensor=(1440, 1024),
+        gap=DomainGapConfig(
+            rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+            scale_range=(0.90, 1.15), query_mpp_jitter=0.0,
+            brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
+            saturation=1.0, color_temp_range=(-0.12, 0.12),
+            vignette_range=(0.15, 0.45), stage_shift_max=3,
+            distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
+            vignette_p=1.0, distortion_p=1.0, defocus_radius=2,
+            chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
+            photometric=True, geometric=True),
+        sampler=SAMPLER_RECIPES['lattice'],
+        rungs='native', max_ds=None),
     'routing-query': FovRecipe(
         sensor=(256, 256),
         gap=DomainGapConfig(
@@ -219,15 +240,15 @@ class FovSupply:
     `microscope` is the camera: its config (sensor, gap) and its reader. The
     plan must place for exactly this camera (`plan.camera == microscope.spec`),
     or the positions would be legal for another read. `cfg` is WHERE (count,
-    seed, richness, overlap, inheritance); None is `SamplerConfig()`.
+    seed, richness, overlap, inheritance): a recipe's sampler or a replace of one.
     """
 
     def __init__(self, microscope: Render, plan: PlanSpec,
-                 cfg: Optional[SamplerConfig] = None,
+                 cfg: SamplerConfig,
                  mask: Optional[TissueMask] = None):
         self._check(microscope, plan, cfg)
         self.microscope, self.plan = microscope, plan
-        self.cfg = cfg if cfg is not None else SamplerConfig()
+        self.cfg = cfg
         self.mask = mask
         self._sampler: Optional[TileSampler] = None
 
@@ -251,7 +272,7 @@ class FovSupply:
             raise ValueError(f'the plan places for {plan.camera} and this '
                              f'microscope reads {microscope.spec}: positions '
                              f'legal for one read are not for the other')
-        if cfg is not None and not isinstance(cfg, SamplerConfig):
+        if not isinstance(cfg, SamplerConfig):
             raise TypeError(f'FovSupply takes a SamplerConfig, got '
                             f'{type(cfg).__name__}')
 

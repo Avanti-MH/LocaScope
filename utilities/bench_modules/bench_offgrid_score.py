@@ -95,6 +95,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from dataclasses import replace
 import traceback
 from pathlib import Path
 
@@ -119,7 +120,7 @@ from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
 from camera import Render                                           # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
-from config import DomainGapConfig                                  # noqa: E402
+from FovSupply import FOV_RECIPES                                   # noqa: E402
 from _paths import encoder_tag, job_result_dir                      # noqa: E402
 
 TILE = 256
@@ -510,8 +511,8 @@ def analyse_slide(wsi_path, args, encoders, masks, rng) -> list:
             ds = float(slide.level_downsamples[level])
             level_mpp = base_mpp * ds
 
-            config = DomainGapConfig(
-                angle_jitter_deg=0.0, scale_range=(1.0, 1.0),
+            config = replace(
+                FOV_RECIPES['plain'].gap, angle_jitter_deg=0.0, scale_range=(1.0, 1.0),
                 query_mpp_jitter=0.0, stage_shift_max=0,
                 photometric=args.domain_gap)
             camera = Render(SlideReader(slide), tuple(args.fov_sensor), config,

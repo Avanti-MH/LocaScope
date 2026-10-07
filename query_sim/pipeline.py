@@ -277,7 +277,7 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
 
 def simulate_with_gt(
     img,
-    cfg:      Optional[DomainGapConfig] = None,
+    cfg:      DomainGapConfig,
     rng:      Optional[random.Random]   = None,
     rotation:  Optional[float]           = None,
     output_wh: Optional[Tuple[int, int]]  = None,
@@ -295,7 +295,9 @@ def simulate_with_gt(
       - float -> rot_deg = int(round(rotation)), angle_jitter = rotation - rot_deg
                 (so FOVRecord's rot_deg + angle_jitter still sum to the exact angle)
     """
-    cfg = cfg or DomainGapConfig()
+    if not isinstance(cfg, DomainGapConfig):
+        raise TypeError(f'simulate_with_gt takes a DomainGapConfig, got '
+                        f'{type(cfg).__name__}')
     rng = rng or random
     arr = _as_rgb_uint8(img)
     params = _sample_params(cfg, rng, mpp)

@@ -1,9 +1,9 @@
 """What every tissue segmenter in this project has to be, and the ones that
 need no model at all.
 
-    seg  = HestSegConfig().build(device)          # a network
-    seg  = PlaneSegConfig('hsv').build()          # colour thresholds, no model
-    seg  = PlaneSegConfig('').build()             # nothing runs; see below
+    seg  = MASK_RECIPES['hest'].seg.build(device)  # a network (TissueMaskConfig)
+    seg  = MASK_RECIPES['hsv'].seg.build()         # colour thresholds, no model
+    seg  = MASK_RECIPES['none'].seg.build()        # nothing runs; see below
     mask = seg.segment_slide(wsi)                 # -> SlideMask, the whole contract
 
 A segmenter turns a SLIDE into a `SlideMask`, and that is the whole contract.
@@ -276,8 +276,8 @@ class PlaneSegConfig(TissueSegConfig):
         # looks like a slightly worse mask.
         if self.method == 'otsu' and (self.seg_chunk_px or self.read_chunk_px):
             raise ValueError(
-                "otsu is not tiling-safe; use PlaneSegConfig('otsu', "
-                'seg_chunk_px=None, read_chunk_px=None), which reads the level '
+                "otsu is not tiling-safe; use method='otsu' with "
+                'seg_chunk_px=None, read_chunk_px=None, which reads the level '
                 'whole')
 
     def build(self, device: Optional['torch.device'] = None) -> 'PlaneSegmenter':

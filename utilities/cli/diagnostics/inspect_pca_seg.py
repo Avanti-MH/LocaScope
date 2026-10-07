@@ -38,7 +38,7 @@ like a choice between two answers even when neither is one.
 
 HSV IS A REFERENCE, NOT GROUND TRUTH
 -------------------------------------
-`agree_hsv` below is agreement with `PlaneSegConfig('hsv')`, which this project
+`agree_hsv` below is agreement with `MASK_RECIPES['hsv']`'s segmenter, which this project
 has shipped and whose numbers appear in its logs -- 20.8 percent tissue on
 BRACS_1228. It is a threshold on saturation and it is wrong at fat, at fold
 shadows and at pale sections. So a high agreement means "this polarity is the
@@ -69,6 +69,7 @@ import argparse
 import csv
 import os
 import sys
+from dataclasses import replace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 for _p in (os.path.join(_HERE, '..', '..'),
@@ -89,9 +90,8 @@ import cv2                                                      # noqa: E402
 import torch                                                    # noqa: E402
 
 from SafeSlide import SafeSlide                                  # noqa: E402
-from TissueSegFunc import PlaneSegConfig                         # noqa: E402
+from TissueMaskConfig import MASK_RECIPES                        # noqa: E402
 
-from Uni2PcaSegFunc import Uni2PcaSegConfig                     # noqa: E402
 
 
 #: Every string a reader will see, and what it actually computes. Written to
@@ -118,7 +118,7 @@ DEFINITIONS = [
     ('fg=True', 'the mask with larger_pca_as_fg=True, i.e. tissue is PC1 > '
                 'background_threshold'),
     ('hsv reference',
-     "PlaneSegConfig('hsv') on the per-cell mean colour, so it lands on the "
+     "the hsv mask recipe's segmenter on the per-cell mean colour, so it lands on the "
      'same grid. A saturation and value '
      'threshold, not ground truth -- it is wrong at fat, at fold shadows and '
      'at pale sections'),
@@ -163,10 +163,10 @@ def analyse(wsi_path, args, out_dir):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     stem = os.path.splitext(os.path.basename(wsi_path))[0]
 
-    cfg = Uni2PcaSegConfig(fit_tiles=args.fit_tiles,
-                           components=args.components,
-                           background_threshold=args.background_threshold,
-                           workers=args.workers)
+    cfg = replace(MASK_RECIPES['uni2_pca'].seg, fit_tiles=args.fit_tiles,
+                  components=args.components,
+                  background_threshold=args.background_threshold,
+                  workers=args.workers)
     seg = cfg.build(device)
     wsi = SafeSlide(wsi_path)
     try:
@@ -196,7 +196,7 @@ def analyse(wsi_path, args, out_dir):
     # grid. `mask_hsv` is per-pixel, so running it on a downsampled image is
     # sound in a way `mask_otsu` would not be -- the reason PlaneSegConfig
     # refuses to tile otsu.
-    hsv_mask = PlaneSegConfig('hsv').build()(thumb_cells).astype(bool)
+    hsv_mask = MASK_RECIPES['hsv'].seg.build()(thumb_cells).astype(bool)
 
     masks = {'fg=False': pc1 < cfg.background_threshold,
              'fg=True': pc1 > cfg.background_threshold}

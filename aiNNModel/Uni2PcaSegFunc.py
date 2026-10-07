@@ -1,6 +1,6 @@
 """Tissue segmentation from UNI2 patch features and one PCA per slide.
 
-    seg  = Uni2PcaSegConfig().build(device)
+    seg  = MASK_RECIPES['uni2_pca'].seg.build(device)   # TissueMaskConfig's recipes
     mask = seg.segment_slide(wsi)                  # fit + project, level 0, no args
     trm  = TissueMask(wsi, mask)
 
@@ -461,7 +461,7 @@ class _GpuProjection:
 class Uni2PcaSegmenter(TissueSegmenter):
     """UNI2 features, one PCA per slide, PC1 thresholded.
 
-        seg = Uni2PcaSegConfig().build(device)
+        seg = MASK_RECIPES['uni2_pca'].seg.build(device)
         mask = seg.segment_slide(wsi)      # the path: fit + project, SlideMask
 
         seg.fit(wsi)                       # the escape hatch: fit once, then
@@ -826,7 +826,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
     def segment_slide(self, wsi) -> 'SlideMask':
         """A whole slide in, a tissue mask out. The entry point; no parameters.
 
-            seg  = Uni2PcaSegConfig().build(device)
+            seg  = MASK_RECIPES['uni2_pca'].seg.build(device)
             mask = seg.segment_slide(wsi)
             trm  = TissueMask(wsi, mask)
 

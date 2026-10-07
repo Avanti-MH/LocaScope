@@ -54,6 +54,7 @@ import argparse
 import csv
 import sys
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -81,8 +82,8 @@ from training.MppRoutingHead.Datasets import add_cache_args         # noqa: E402
 from PatchingLib import QueryPatchContainer                          # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
-from TileSampler import (OverlapConfig, RichnessConfig,                 # noqa: E402
-                         SamplerConfig, TileSampler)
+from TileSampler import SAMPLER_RECIPES, TileSampler                 # noqa: E402
+from FovSupply import FOV_RECIPES                                    # noqa: E402
 from DsLadder import DEFAULT_RUNGS, DsLadder                        # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR                           # noqa: E402
 from ReadGeometry import ReadSpec                                    # noqa: E402
@@ -1307,7 +1308,7 @@ def sample_reference_and_query_positions(wsi, mask, tile_size, rungs,
                                          seed):
     """The SHAPE of SuperPoint's stageA recipe
     (`training/SuperPathPoint/common/Corpora.RECIPES['stageA']`): `DsLadder`
-    rungs, disjoint lattice, PLAIN DEFAULT `RichnessConfig()` (bg85_95/bg95_100
+    rungs, `SAMPLER_RECIPES['lattice']` (bg85_95/bg95_100
     capped at 0 -- a background-heavy tile carries no scale information and
     only adds a wrong neighbour), no chains. Not its n, and not its corpus:
     `sampler_routing` draws its own and writes no pre-tiles.
@@ -1325,9 +1326,8 @@ def sample_reference_and_query_positions(wsi, mask, tile_size, rungs,
     plans = ladder.plan_for(wsi, tile_size)
     n_per_rung = n_ref_per_rung + n_query_per_rung
     max_tries = max(1, 2500 // max(n_per_rung, 1))     # 5x n, extract_pretiles.py's own ratio
-    cfg = SamplerConfig(n_per_rung=n_per_rung, seed=seed,
-                        max_tries_per_tile=max_tries,
-                        richness=RichnessConfig(), overlap=OverlapConfig())
+    cfg = replace(SAMPLER_RECIPES['lattice'], n_per_rung=n_per_rung, seed=seed,
+                  max_tries_per_tile=max_tries)
     sampler = TileSampler(wsi, mask, cfg)
     sampler.sample(plans)
     return sampler
@@ -1464,7 +1464,7 @@ def run_sampler_routing(args, out_dir: Path) -> int:
         # an ndarray or a PIL image,
         # but wrapped as PIL so this stays the same type the reference side
         # reads (SlideReader.read_samples).
-        photo = Image.fromarray(simulate_with_gt(image)[0])
+        photo = Image.fromarray(simulate_with_gt(image, FOV_RECIPES['plain'].gap)[0])
         qc = QueryPatchContainer(photo)
         qc.extract_all(args.tile, overlap=True)
         qfm = qc.to_features(encoder)

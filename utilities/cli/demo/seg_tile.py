@@ -69,6 +69,7 @@ import argparse
 import os
 import re
 import sys
+from dataclasses import replace
 from typing import Dict, Optional
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,9 +91,7 @@ setup_import_paths()
 
 from AccessDatasets import locate                                 # noqa: E402
 from SafeSlide import SafeSlide                                   # noqa: E402
-from TissueSegFunc import PlaneSegConfig                          # noqa: E402
-from HestSegFunc import HestSegConfig                             # noqa: E402
-from Uni2PcaSegFunc import Uni2PcaSegConfig                       # noqa: E402
+from TissueMaskConfig import MASK_RECIPES                          # noqa: E402
 
 
 #: `{slide}__ds{ds}__t{tile}__{hash}` -- the tile cache folder-naming
@@ -119,22 +118,22 @@ def _build_no_fit_segmenters(methods, device) -> dict:
     """hest/hsv/otsu -- built ONCE, independent of any slide or tile."""
     segs = {}
     if 'hest' in methods:
-        segs['hest'] = HestSegConfig().build(device)
+        segs['hest'] = MASK_RECIPES['hest'].seg.build(device)
     for m in ('hsv', 'otsu'):
         if m in methods:
             # One tile at a time, so the slide-read chunking never applies --
             # and otsu refuses a config that says it might.
-            segs[m] = PlaneSegConfig(method=m, seg_chunk_px=None,
-                                     read_chunk_px=None).build()
+            segs[m] = replace(MASK_RECIPES['hsv'].seg, method=m,
+                              seg_chunk_px=None, read_chunk_px=None).build()
     return segs
 
 
 def _fit_uni2(slide_name: str, args, device):
-    cfg = Uni2PcaSegConfig(fit_tiles=args.fit_tiles,
-                           components=args.components,
-                           background_threshold=args.background_threshold,
-                           larger_pca_as_fg=args.larger_pca_as_fg,
-                           workers=args.workers)
+    cfg = replace(MASK_RECIPES['uni2_pca'].seg, fit_tiles=args.fit_tiles,
+                  components=args.components,
+                  background_threshold=args.background_threshold,
+                  larger_pca_as_fg=args.larger_pca_as_fg,
+                  workers=args.workers)
     seg = cfg.build(device)
     entry = locate(slide_name)
     with SafeSlide(entry.path, warn=False) as wsi:

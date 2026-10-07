@@ -79,8 +79,7 @@ import torch                                                      # noqa: E402
 
 from Cache import find, read_meta, wsi_stem_of                    # noqa: E402
 from SafeSlide import SafeSlide                                    # noqa: E402
-from TileSampler import (RichnessConfig,                            # noqa: E402
-                         SamplerConfig, TileSampler, pre_tile_px)
+from TileSampler import SamplerConfig, TileSampler, pre_tile_px     # noqa: E402
 from SlideReader import SlideReader                                # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker              # noqa: E402
 
@@ -178,12 +177,6 @@ def main():
     pre_px = pre_tile_px(args.tile, args.pre_tile_factor)
     print(f'tile {args.tile}   pre-tile {pre_px}   factor '
           f'{args.pre_tile_factor}', flush=True)
-    _rich = RichnessConfig()
-    print('  richness  ' + '  '.join(
-        f'{nm}:{f:.0%}/{c:.0%}' for nm, f, c
-        in zip(_rich.names, _rich.floors, _rich.caps)) + '   (floor/cap)',
-        flush=True)
-
     # THE CONFIG AND THE CORPUS ARE KNOWN BEFORE ANY SLIDE IS OPENED. Every
     # knob is slide-independent, so the directory this run writes is fixed
     # here and printed -- the key a reader passes to find it again.
@@ -195,6 +188,11 @@ def main():
         bucket_frame=args.bucket_frame,
         inherit_share=args.inherit_share,
         inherit_source_rung=args.inherit_source_rung)
+    rich = cfg.richness
+    print('  richness  ' + '  '.join(
+        f'{nm}:{f:.0%}/{c:.0%}' for nm, f, c
+        in zip(rich.names, rich.floors, rich.caps)) + '   (floor/cap)',
+        flush=True)
     mask_cfg = MASK_RECIPES[args.seg]
     corpus = PreTileCorpus.of(pretile_root(args), mask_cfg, cfg,
                               ladder(args.rungs, args.tile, args.pre_tile_factor),

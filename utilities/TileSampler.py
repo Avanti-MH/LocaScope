@@ -1,12 +1,9 @@
 """Choose which tiles a slide contributes, on three controlled axes, and carry
 them as objects that know what they are.
 
-    cfg = SamplerConfig(
-        n_per_rung=500,
-        richness=RichnessConfig(scorer='background'),
-        overlap=OverlapConfig(step=1.0, max_overlap_ratio=0.0),
-        inherit=InheritConfig(stack_kind='F', share=0.4, source_rung=1.0),
-    )
+    lattice = SAMPLER_RECIPES['lattice']
+    cfg = replace(lattice, n_per_rung=500,
+                  inherit=replace(lattice.inherit, share=0.4, source_rung=1.0))
     camera  = ReadSpec(256, 256)                   # ReadGeometry: how big, what is read
     sampler = TileSampler(wsi, mask, cfg).sample(PlanSpec("ladder", rungs, camera).plans_for(wsi))
 
@@ -901,12 +898,29 @@ class SamplerConfig(IdentifiedConfig):
 #: A caller takes one and `dataclasses.replace`s what its own arguments set
 #: (`n_per_rung`, `seed`), which is a different config and so a different id.
 #:
+#: lattice         the disjoint lattice under the general richness mix, no
+#:                 chains: the plain draw a diagnostic varies one knob of.
 #: reference-bank  the tiles a slide is described by when it is its own
 #:                 reference (KnnEstMpp, PrototypeEstMpp, the classic
 #:                 estimator, the tile bench's reference store): any tile
 #:                 under 50 per cent background, no preference among the
 #:                 buckets that admits, on the disjoint lattice.
 SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
+    'lattice': SamplerConfig(
+        n_per_rung=500, seed=0,
+        richness=RichnessConfig(
+            scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+            floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+            caps=(0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+            bucket_frame='per_rung', floor_frame='ask'),
+        overlap=OverlapConfig(
+            step=1.0, max_overlap_ratio=0.0, overlapping_share=0.0,
+            jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                            (1.0, 0.75), (1.25, 1.25)),
+            jitter_cap=0.0),
+        inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                              on_incomplete='drop'),
+        candidates='lattice', max_tries_per_tile=5),
     'reference-bank': SamplerConfig(
         n_per_rung=500, seed=0,
         richness=RichnessConfig(
@@ -1105,7 +1119,7 @@ class RungReport:
 class TileSampler:
     """Sampler and container. See the module docstring for the spec."""
 
-    def __init__(self, wsi, mask, cfg: Optional[SamplerConfig] = None,
+    def __init__(self, wsi, mask, cfg: SamplerConfig,
                  slide: str = ''):
         # SafeSlide only. Tiles read here are handed downstream -- to the
         # encoders, to query_sim, to the pre-tile store -- and a plain handle
@@ -1120,7 +1134,10 @@ class TileSampler:
                 f'hole black, and these tiles are read and used, not only drawn')
         self.wsi = wsi
         self.mask = mask
-        self.cfg = cfg or SamplerConfig()
+        if not isinstance(cfg, SamplerConfig):
+            raise TypeError(f'TileSampler takes a SamplerConfig (a SAMPLER_RECIPES '
+                            f'entry or a replace of one), got {type(cfg).__name__}')
+        self.cfg = cfg
         self.slide = slide or getattr(wsi, 'stem', '') or ''
         self.samples: List[Sample] = []
         self.reports: Dict[float, RungReport] = {}
@@ -2033,7 +2050,9 @@ class TileSampler:
 
         out = cls.__new__(cls)
         out.wsi, out.mask = wsi, mask
-        out.cfg = cfg or SamplerConfig()
+        # None when the caller did not name the config: the folder's own
+        # record says what drew it, and a default here would claim otherwise
+        out.cfg = cfg
         out.slide = meta.get('slide', '')
         out.samples = [Sample(m) for m in rows]
         # The per-rung reports ride in meta.json (`save` writes them), and a
@@ -2042,7 +2061,7 @@ class TileSampler:
         out.reports = {float(d): RungReport(**r)
                        for d, r in meta.get('rungs', {}).items()}
         out.cache_info = {}
-        out._rng = np.random.default_rng(out.cfg.seed)
+        out._rng = None if cfg is None else np.random.default_rng(cfg.seed)
         out._inherit_bucket = {}
 
         stored = meta.get('sampler_id', '')

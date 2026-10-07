@@ -3455,3 +3455,35 @@ front of whoever flips it.
       8 purge 工具、lint（Cache.py 以外不得組 <kind>= 路徑）、CLAUDE.md、刪舊 cache。
     - 第 5 步的對照基準：a80c958 的 CostLocaScope metrics.csv，TOPK 20 / SIFT_TOPK 5 重跑後
       除時間欄外逐欄相等。
+
+[x] 2026-10-07 | config 只有一個來源：RECIPES 表
+    - 四張表，每個欄位寫齊（lint）：MASK_RECIPES（none / hsv / hest / uni2_pca）、
+      SAMPLER_RECIPES（lattice、reference-bank）、FOV_RECIPES（bench、plain、routing-query、
+      routing-support-native）、Corpora.RECIPES（stageA / stageB-fOwn / stageB-cOwn）。
+      FovRecipe = sensor、gap、sampler、rungs（'native' 或 ds tuple）、max_ds。
+    - 搬家前後同 config、同 id（frozen 對照），routing data record 仍是 e1b6e602ac441e1b：
+      舊 mask cache、corpus、routing-head checkpoint 都有效。lattice / plain 等於 class 預設。
+    - reference bank 原本三份抄寫（KnnEstMpp、PrototypeEstMpp、estimate_mpp_classic）合成一份。
+      MppRoutingHead 的 CAMERA_FULL / CAMERA_GEOMETRY_ONLY / RICHNESS / OVERLAP / OPTICS_P 刪除。
+    - 四個 bench 都用 FOV_RECIPES['bench']（add_fov_args / fov_from_args / rungs_for）：
+      jitter 0.05、50 張、native levels 到 ds16、overlap step 0.5 / max 0.5 / share 1/3、seed 0。
+      stage 1 bench 改 native levels（--native-only、--overlap、--sensor、--n-per-rung 刪除），
+      KNN bank 不再跟 --overlap，和 pipeline 的 KNN 同 config。window bench 的 RICHNESS_PRESETS、
+      --richness、--white-max 刪除。tile bench：bench 的 gap、sensor 256、candidates random，
+      答案用照片實際的 rot_deg / scale（一個 tile 就是中心，等於 FoV 中心；stage shift 不還原）。
+      這三個 bench 的數字不能和舊的比。
+    - lint：recipe 寫齊；RECIPES 表以外沒有模組層級 config；recipe 的 config class 只在定義模組、
+      RECIPES 表、測試裡建構，其餘一律 recipe + replace；加 config flag 的 parser 必須
+      allow_abbrev=False（stage 1 bench 原本沒有，--help 才發現）。
+    - Render / FovSupply / simulate_with_gt / TileSampler 不再在沒給 config 時補 class 預設；
+      TileSampler.load 沒給 cfg 時 cfg 為 None，不假裝。
+    - 第 5 步對照 a80c958 CostLocaScope 時要把舊的 draw 用 flag 傳回去：
+      --sampler-overlap-step 1.0 --sampler-overlap-max-overlap-ratio 0
+      --sampler-overlap-overlapping-share 0 --max-ds 1000。
+
+[ ] 2026-10-07 | 待決定（與「query_sim/ARCHITECTURE.md 的 CLI 對照 / 遷移建議順序兩節」一起）
+    - stage config 要不要也做成 recipe（STAGE1/2/3_RECIPES）：pipeline bench 與 stage 1 bench 的
+      KNN 現在一致，靠的是 knn_estimator 的函式預設值（samples 40、seed 42、k 5），是一份藏在
+      參數裡的 recipe；stage 結果共用（stage1/output_<s1>）需要它跟 FoV 一樣有名字。
+      encoder 維持 class 預設（一 encoder 一 class，登錄表即 recipe 表）；訓練 config 由 CLI 決定、
+      checkpoint 記錄，不動。
