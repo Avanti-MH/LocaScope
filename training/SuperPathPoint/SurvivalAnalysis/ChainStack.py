@@ -38,12 +38,6 @@ from typing import Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
-           os.path.join(_HERE, '..')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 from Store import PreTileStore                               # noqa: E402
 from TileSampler import centre_crop                          # noqa: E402
 from PatchingLib import PatchGrid, PatchInfo                  # noqa: E402

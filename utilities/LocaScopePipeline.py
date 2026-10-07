@@ -62,14 +62,7 @@ import numpy as np
 import openslide
 import torch
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent
-for _d in ('utilities', ''):     # '' = the root, which resolves the stage packages
-    p = str(_ROOT / _d)
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
-from PatchingLib             import QueryPatchContainer                                # noqa: E402
+from PatchingLib            import QueryPatchContainer                                # noqa: E402
 from SafeSlide               import SafeSlide                                          # noqa: E402
 from TissueMask      import TissueMask                                 # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import SlidingWinSimRot     # noqa: E402

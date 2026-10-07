@@ -32,10 +32,6 @@ import cv2
 import numpy as np
 import openslide
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'utilities'))
-from _paths import setup_import_paths                                   # noqa: E402
-setup_import_paths()
 
 from ConfigIdentity import IdentifiedBuild, IdentifiedConfig             # noqa: E402
 from ReadGeometry import ReadSpec                                        # noqa: E402

@@ -72,9 +72,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent.parent
-sys.path.insert(0, str(_ROOT / 'utilities'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 from _paths import job_result_dir                                   # noqa: E402
 
 from ReadGeometry import ReadSpec, coarser_level                    # noqa: E402

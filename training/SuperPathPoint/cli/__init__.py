@@ -6,33 +6,12 @@ this import points DOWN rather than sideways at a sibling. What this package
 owns is its default job names -- SuperPathPointDemo and the rest -- which are
 arguments to `job_result_dir`, not a second copy of it.
 
-Entry points must put `training/SuperPathPoint/` on sys.path themselves before
-`from cli import job_result_dir`, since this package lives one level under it.
-`setup_import_paths()` does that for the module tree; the two lines below do it
-for `_paths` itself, which is the one import that cannot be bootstrapped by the
-thing it bootstraps.
-
-`setup_import_paths` here is `_paths.setup_import_paths` followed by
-`_paths.add_training_package('SuperPathPoint')`: every file that reaches it
-through this module is a SuperPathPoint entry point. A file that imports
-`_paths.setup_import_paths` directly has to call `add_training_package` itself.
+An entry point sets the path before importing this package -- utilities/ by
+hand, then `_paths.setup_import_paths('SuperPathPoint')`, which puts
+`training/SuperPathPoint/` (this package's parent) there too.
 """
 
-import os
-import sys
-
-_UTILITIES = os.path.abspath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'utilities'))
-if _UTILITIES not in sys.path:
-    sys.path.insert(0, _UTILITIES)
-
-import _paths                                                       # noqa: E402
-from _paths import LOG_DIR, OUTPUT_ROOT, RESULT_DIR, job_result_dir  # noqa: E402,F401
-
-
-def setup_import_paths() -> None:
-    _paths.setup_import_paths()
-    _paths.add_training_package('SuperPathPoint')
+from _paths import LOG_DIR, OUTPUT_ROOT, RESULT_DIR, job_result_dir  # noqa: F401
 
 
 # ── the pre-tile corpora every entry point here reads ──────────────────────

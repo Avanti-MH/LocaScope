@@ -43,10 +43,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-_HERE = Path(__file__).resolve().parent
-for _d in (_HERE, _HERE.parent / 'utilities'):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
 
 import numpy as np                                          # noqa: E402
 import torch                                                # noqa: E402

@@ -43,16 +43,14 @@ import json
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
-           os.path.join(_HERE, '..')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', '..', 'utilities'))
+import _paths                                                     # noqa: E402
+_paths.setup_import_paths('SuperPathPoint')
 
 from cli import (add_corpus_arg, add_labels_args, add_pretile_args,  # noqa: E402
-                 corpus_arg, job_result_dir, labels_root, setup_import_paths)
+                 corpus_arg, job_result_dir, labels_root)
 
-setup_import_paths()
 
 import torch                                                      # noqa: E402
 

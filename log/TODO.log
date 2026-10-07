@@ -3397,3 +3397,34 @@ front of whoever flips it.
       的範例改指向那裡（它是唯一有已知破洞的 slide）；TestPatchingLib 的 QUERY、test_patching_lib
       的 --query、slide_win_sift 的範例改用 S1104360。test_safe_slide 原本沒有任何 jobscript
       跑它，現在在 TestReadPath（有 slide 時）跑一次。
+
+[x] 2026-10-07 | 可讀性清理（階段 7，U2 以外）
+    - sys.path：只有入口腳本設定，一律 utilities/ 手插一次 + _paths.setup_import_paths(...)；
+      setup_import_paths 收 training package 名稱（'SuperPathPoint'），add_training_package
+      由它呼叫。30 個函式庫模組的 bootstrap 刪除（aiNNModel 8、query_sim 3、stage 6、
+      MppRoutingHead 2、SuperPathPoint SurvivalAnalysis 3 與 cli/__init__、utilities 4、
+      Checkpoints）；17 個手寫路徑的入口改為同一寫法；平面 test_modules 裡多插的 root/_HERE
+      刪除（setup_import_paths 已加 root，腳本目錄由 python 自己放在 sys.path[0]）；子目錄測試
+      照 CLAUDE.md 插兩層。cli/__init__ 不再碰 sys.path，也不再包一層 setup_import_paths；
+      SuperPathPoint 測試的兩個呼叫合成一個。diag_read_exp 與 test_reeval_density 改用完整
+      package 名稱 import（training.MppRoutingHead.Datasets、cli.reeval_density）。
+      例外兩個：_paths 本身；Teacher.py 在 build 時加入外部 SuperPoint checkout。
+      test_config_identity 新增 lint：函式庫模組不得 sys.path.insert。
+    - help / 錯誤訊息裡的歷史刪除（TileSampler caps、bench_locascope --precision、
+      bench_tile_retrieval --queries、MppRoutingHead --merge）；probe_tile_yield 的
+      --tissue-ratio 拒絕用 shim 整個刪除（argparse 自己會拒絕未知 flag）。
+    - window bench docstring 指向 CONFIG 常數，不再重抄數值（--n-fov 寫 25，實際 50）。
+    - augment：_legacy 本體、USE_FAST、VIGNETTE_FLOAT32 從 query_sim/augment 刪除，每個 op
+      只剩一個本體；舊本體凍結成 test_camera 裡的 _frozen_*，逐值比對照跑。整段 capture 計時
+      （需要函式庫開關）和 float32 vignette 量測（預設關、從未啟用）一併刪除。
+    - simulate_microscope_photo 刪除；兩個呼叫端改 simulate_with_gt(...)[0]。
+    - 待決定：query_sim/ARCHITECTURE.md 的「CLI 對照」「遷移建議順序」兩節描述的是一個沒有做成的
+      搬遷（query_sim/cli/ 不存在）。
+    - U2：bench_tile_retrieval 的 query 改由 FovSupply 產生。256x256 sensor、每層一個 rung，
+      位置是 random 抽樣（candidates='random'；lattice 等於 main grid，query 會正好落在答案上），
+      richness 用 reference bank 的同一份（取代 min_std 的空白玻片判斷，--min-std 刪除）；
+      每個位置以 FovSupply.photo(meta, rotation=r) 拍 0/90 度（新的 rotation 參數，同一位置的兩
+      張共用 photo_rng，只差角度）。答案仍由 output_tile_origins 算，未覆蓋邊緣的剔除保留。
+      store 地址的 plan_label 加上 q<id>（query 抽樣、QUERY_GAP、rotations），之前 query 怎麼來
+      不在地址裡。query 的定義變了：從 1440x1024 照片切出的 tile 變成直接拍一張 256 tile，
+      數字不能和舊的比。

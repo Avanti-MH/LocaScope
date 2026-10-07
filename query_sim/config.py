@@ -8,17 +8,10 @@ NOT the sensor and NOT the magnification. Both are the camera's
 downsample, so the same gap can be put on any sensor at any objective.
 """
 
-import os
-import sys
 from dataclasses import dataclass
 from typing import Tuple
 
-_UTILITIES = os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
-                                          'utilities'))
-if _UTILITIES not in sys.path:
-    sys.path.insert(0, _UTILITIES)
-
-from ConfigIdentity import IdentifiedConfig, register            # noqa: E402
+from ConfigIdentity import IdentifiedConfig, register
 
 
 @register('domain-gap')

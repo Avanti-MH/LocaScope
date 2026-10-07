@@ -1150,9 +1150,8 @@ def main() -> int:
                          "encoder, head)'s rows already on disk and only "
                          "replace this run's own -- e.g. retraining just "
                          "convnext_v2/attn_linear (--baseline 3 --heads "
-                         "attn_linear) no longer wipes out the other 10 "
-                         "heads' history. Off by default: a plain overwrite "
-                         'is still what a full run wants.')
+                         "attn_linear) keeps the other heads' rows. Off by "
+                         'default: a plain overwrite is what a full run wants.')
     args = ap.parse_args()
     try:
         read_cfg = train_render_cfg(args)       # refused here, not mid-run

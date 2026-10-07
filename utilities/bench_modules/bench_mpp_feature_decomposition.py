@@ -87,7 +87,7 @@ from DsLadder import DEFAULT_RUNGS, DsLadder                        # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR                           # noqa: E402
 from ReadGeometry import ReadSpec                                    # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
-from pipeline import simulate_microscope_photo                        # noqa: E402
+from pipeline import simulate_with_gt                                 # noqa: E402
 
 
 def write_csv(rows, path) -> None:
@@ -1317,7 +1317,7 @@ def sample_reference_and_query_positions(wsi, mask, tile_size, rungs,
     never share a position -- a query whose twin is in the reference bank is
     found by identity, not by scale. Reference tiles are read straight off this
     sampler (real grid pixels); query POSITIONS only are read off it, then
-    rendered through `SlideReader.read` + `simulate_microscope_photo` instead --
+    rendered through `SlideReader.read` + `simulate_with_gt` instead --
     see `run_sampler_routing` -- so reference and query differ by more than
     which grid cell they happened to land on.
     """
@@ -1431,7 +1431,7 @@ def run_sampler_routing(args, out_dir: Path) -> int:
     level_mpp_values = np.array(sorted({float(m) for m in ref_mpp}))
 
     # ── query: SAME positions, rendered as a photo would be, not read as a
-    #    plain grid tile -- SlideReader.read + simulate_microscope_photo is the
+    #    plain grid tile -- SlideReader.read + simulate_with_gt is the
     #    exact pair test_gigapath_knn_esti_mpp.py's own load_query() uses.
     #    --sensor (default `REAL_PHOTO_SENSOR`): the query is sized like the
     #    real photos.
@@ -1460,11 +1460,11 @@ def run_sampler_routing(args, out_dir: Path) -> int:
         image = photo_reader.read(int(meta.x), int(meta.y), photo_spec, ds)
         if image is None:
             continue
-        # simulate_microscope_photo returns an ndarray (its own docstring:
-        # "backward-compat entry point"); QueryPatchContainer takes either,
+        # simulate_with_gt returns (ndarray, params); QueryPatchContainer takes
+        # an ndarray or a PIL image,
         # but wrapped as PIL so this stays the same type the reference side
         # reads (SlideReader.read_samples).
-        photo = Image.fromarray(simulate_microscope_photo(image))
+        photo = Image.fromarray(simulate_with_gt(image)[0])
         qc = QueryPatchContainer(photo)
         qc.extract_all(args.tile, overlap=True)
         qfm = qc.to_features(encoder)
@@ -1578,7 +1578,7 @@ def main() -> int:
                         help='sampler_routing: held-out query positions per '
                              'rung, DISJOINT from the reference draw -- '
                              'rendered as a photo (SlideReader.read + '
-                             'simulate_microscope_photo), not read as a '
+                             'simulate_with_gt), not read as a '
                              'plain grid tile')
     parser.add_argument('--sensor', type=int, nargs=2,
                         default=list(REAL_PHOTO_SENSOR), metavar=('W', 'H'),

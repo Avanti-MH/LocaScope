@@ -34,11 +34,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-_HERE = Path(__file__).resolve().parent
-for _d in (_HERE, _HERE.parent / 'aiNNModel'):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
-
 from Cache import (check_source, read_meta, source_key,          # noqa: E402
                    wsi_stem_of, write_meta)
 from ConfigIdentity import (IdentifiedConfig, enc, parts_of,     # noqa: E402

@@ -29,12 +29,6 @@ from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-if os.path.join(_HERE, '..') not in sys.path:
-    sys.path.insert(0, os.path.join(_HERE, '..'))
-
 from SurvivalAnalysis import SurvivalProcess                      # noqa: E402
 from SurvivalAnalysis.Attribution import NONE                      # noqa: E402
 from SurvivalAnalysis.Patterns import PATTERNS, alive_from, classify  # noqa: E402

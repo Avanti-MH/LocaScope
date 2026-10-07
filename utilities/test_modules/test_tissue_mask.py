@@ -46,7 +46,6 @@ from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
 from _paths import job_result_dir, setup_import_paths            # noqa: E402
 

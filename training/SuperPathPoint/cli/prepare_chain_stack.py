@@ -53,19 +53,15 @@ import os
 import sys
 import time
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.join(_HERE, '..', '..', '..')
-for _p in (os.path.join(_REPO_ROOT, 'utilities'), os.path.join(_HERE, '..')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-if _HERE not in sys.path:            # extract_pretiles.py lives right here
-    sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', '..', 'utilities'))
+import _paths                                                     # noqa: E402
+_paths.setup_import_paths('SuperPathPoint')
 
 from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
                  chainstack_root, corpus_from_args, job_result_dir,
-                 mask_root, setup_import_paths)
+                 mask_root)
 
-setup_import_paths()
 
 import torch                                                      # noqa: E402
 

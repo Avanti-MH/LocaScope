@@ -81,9 +81,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-for _d in (_HERE, _HERE.parent / 'utilities'):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
 
 # MUST stay above `import timm`, for the reason GigaPathFunc spells out in
 # full: huggingface_hub freezes HF_HOME into module-level constants at import

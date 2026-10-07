@@ -26,8 +26,10 @@ For each (slide, level):
                     pure geometry, so nothing large is read: an unsegmented region at
                     L0 is 18.7 Gpx and reading it whole once cost 3h43m.
 
-    query set       whole FoVs photographed by query_sim's Render, then cut into
-                    5x4 tiles.
+    query set       one 256 x 256 photo per position, each position shot at 0 and
+                    90 degrees: FovSupply places the positions (a random draw
+                    under the reference bank's richness contract) and the
+                    Render photographs them.
 
     the answer      computed, not searched: Render.output_tile_origins inverts the
                     capture to a level-0 coordinate, and the nearest tile in each
@@ -36,7 +38,7 @@ For each (slide, level):
                     half-tile overlap grid earning its keep".
 
 delta -- how far a query tile sits from the grid position it is matched to -- is
-recorded, not swept. A FoV lands wherever it lands, and its 20 tiles come with a
+recorded, not swept. A query position is drawn uniformly, so delta comes with a
 natural spread. The union of the two grids is a checkerboard, so delta reaches
 128px (half a tile) rather than 64: the deep holes are at points like (128, 0),
 equidistant from (0,0) and (128,128).
@@ -51,17 +53,13 @@ import sys
 import time
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
-for _d in ('utilities', 'aiNNModel', 'query_sim', ''):     # '' = the root: stage packages
-    p = str(_ROOT / _d)
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
-import _paths                                                       # noqa: E402
 from _paths import encoder_tag                                      # noqa: E402
 import Cache                                                        # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
@@ -70,13 +68,13 @@ from dump_function import RetrievalReport as RR                     # noqa: E402
 from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
 from PatchingLib import PatchGrid                                   # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from TileSampler import (OverlapConfig, SamplerConfig, TileSampler,  # noqa: E402
+from TileSampler import (OverlapConfig, PlanSpec, SamplerConfig, TileSampler,  # noqa: E402
                          assign_buckets, native_plans)
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import (encoder_config, encoder_names,          # noqa: E402
                              pool_slots, pooling_kinds)
 from camera import Render                                           # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
+from FovSupply import FovSupply                                      # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from config import DomainGapConfig                                  # noqa: E402
 
@@ -160,19 +158,42 @@ def reference_config(k: int, seed: int) -> SamplerConfig:
                          richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig())
 
 
-def plan_label(k_floor: int) -> str:
+#: The query photo's domain gap: no angle jitter, no scale, no stage shift --
+#: the rotation is set per shot (`dump_one`'s `rots`), so what is left is the
+#: photometric half and the lens.
+QUERY_GAP = DomainGapConfig(angle_jitter_deg=0.0, scale_range=(1.0, 1.0),
+                            query_mpp_jitter=0.0, stage_shift_max=0)
+
+
+def query_config(n_positions: int, seed: int) -> SamplerConfig:
+    """Where the query photos are taken: uniform draws (`candidates='random'`)
+    under the reference bank's richness contract. Not the lattice, which IS
+    the main grid and would put every query exactly on its answer."""
+    return SamplerConfig(n_per_rung=n_positions, seed=seed,
+                         richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig(),
+                         candidates='random')
+
+
+def plan_label(k_floor: int, n_query: int, seed: int, rots=(0, 90)) -> str:
     """The rung plan -- one native rung per pyramid level -- the per-level
     sizing floor, which changes which tiles a coarse level holds, and the
-    camera: the tile size is not in `sampler_id`, so it is named here."""
+    camera: the tile size is not in `sampler_id`, so it is named here. Then
+    the query set: where its positions are drawn, the gap they are shot
+    through and at which rotations (`q<id>`), which the reference draw's
+    `sampler_id` does not see."""
+    from ConfigIdentity import enc, short_id                      # noqa: PLC0415
     from ReadGeometry import ReadSpec                             # noqa: PLC0415
-    return f'native-floor{k_floor}-{ReadSpec(TILE, TILE).key()}'
+    queries = short_id([
+        f'sampler={enc(query_config(math.ceil(n_query / len(rots)), seed).identity_id())}',
+        f'gap={enc(QUERY_GAP.identity_id())}', f'rots={enc(tuple(rots))}'])
+    return f'native-floor{k_floor}-{ReadSpec(TILE, TILE).key()}-q{queries}'
 
 
 def dump_one(wsi_path: str, level: int, out_root: Path, *,
              mask, masks, encoder, device, spec,
              k: int, k_floor: int, n_query: int, seed: int,
              encoder_id: str, batch_size: int,
-             min_std: float = 8.0, rots=(0, 90)) -> dict:
+             rots=(0, 90)) -> dict:
     slide = SafeSlide(wsi_path)
     stem = Path(wsi_path).stem
     base_mpp = slide.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
@@ -188,48 +209,38 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
     n_grid_positions = len(grid_xy)
     gcen = grid_xy + (TILE * ds) / 2.0                 # grid tile centres, level-0
 
-    # queries: FoVs -> tiles -> level-0 centres -> the two grid answers
-    cfg = DomainGapConfig(
-        angle_jitter_deg=0.0, scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
-        stage_shift_max=0,
-    )
-    cam = Render(SlideReader(slide), REAL_PHOTO_SENSOR, cfg, ds=ds, seed=seed)
-    per_fov = (cam.output_h // TILE) * (cam.output_w // TILE)
-    n_fov = max(1, math.ceil(n_query / (per_fov * len(rots))))
-
-    rng = np.random.default_rng(seed)
+    # queries: one TILE x TILE photo per position, every position shot at each
+    # of `rots`. FovSupply places them -- a TileSampler draw on this level's
+    # rung under the reference bank's richness contract, so a query is on
+    # tissue for the same reason a reference tile is -- and photographs them
+    # through the Render. `candidates='random'`: a disjoint lattice IS the main
+    # grid, and every query would sit exactly on its answer.
+    cam = Render(SlideReader(slide), (TILE, TILE), QUERY_GAP, ds=ds, seed=seed)
+    plan = PlanSpec('ladder', (ds,), camera=cam.spec)
+    supply = FovSupply(cam, plan, query_config(math.ceil(n_query / len(rots)), seed),
+                       mask)
     query_imgs, query_centres, query_rots, query_fov_ids, query_rowcol = [], [], [], [], []
-    n_fov_made = 0
-    tries = 0
-    while n_fov_made < n_fov and tries < n_fov * 20:
-        tries += 1
-        ri = int(rng.integers(0, len(mask.tissue_regions)))
-        reg = mask.tissue_regions[ri]
-        if reg.w < cam.rect_w_l0 * 2 or reg.h < cam.rect_h_l0 * 2:
-            continue
-        x = int(rng.integers(reg.x, reg.x + reg.w - cam.rect_w_l0))
-        y = int(rng.integers(reg.y, reg.y + reg.h - cam.rect_h_l0))
-        shot = [cam.capture_with_gt(x, y, rotation=r) for r in rots]
-        if any(im is None for im, _ in shot):
-            continue
-        # A region's bbox contains plenty of blank glass, and a FoV that lands on
-        # it yields 20 featureless tiles -- questions with no answer that every
-        # pooling gets wrong equally, diluting the comparison. Judge the shot,
-        # not the mask, for the same reason the coordinate test does.
-        if float(np.asarray(shot[0][0], dtype=np.float32).std()) < min_std:
-            continue
-        for (img, _), r in zip(shot, rots):
+    try:
+        positions = [s.meta for s in supply.sampler]
+    except RuntimeError as exc:
+        if 'No FoV position' not in str(exc):
+            raise
+        positions = []
+    for fov_id, meta in enumerate(positions):
+        x, y = meta.fov_rect[0], meta.fov_rect[1]
+        for r in rots:
+            img, _ = supply.photo(meta, rotation=r)
             for rr, cc, u, v, cx, cy in cam.output_tile_origins(
                     x, y, TILE, rot_deg=r, scale=1.0):
                 query_imgs.append(np.ascontiguousarray(img[v:v + TILE, u:u + TILE]))
                 query_centres.append((cx, cy))
                 query_rots.append(r)
-                query_fov_ids.append(n_fov_made)
+                query_fov_ids.append(fov_id)
                 query_rowcol.append((rr, cc))
-        n_fov_made += 1
+    n_fov_made = len(positions)
 
     if not query_imgs:
-        print(f'  L{level}: no FoV could be placed -- skipped', flush=True)
+        print(f'  L{level}: no query position could be placed -- skipped', flush=True)
         slide.close()
         return {}
 
@@ -248,8 +259,7 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
     # is inset another 128. A FoV near the region edge puts tiles in that margin,
     # where the nearest grid position sits 300+ px away -- past a 256 px tile, so
     # the "answer" shares no pixels with the query. Every pooling gets those
-    # wrong, equally, which is dilution rather than evidence -- the same reason
-    # min_std rejects blank glass above.
+    # wrong, equally, which is dilution rather than evidence.
     #
     # 128 is the covering radius of the two grids together: main at (256i, 256j)
     # and overlap at (256i+128, 256j+128) form a checkerboard whose deep holes
@@ -261,13 +271,10 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
     keep = near <= DELTA_UNION * ds
     if not keep.all():
         n_drop = int((~keep).sum())
-        # Split by rotation, because two different things put a tile in the
-        # margin and they call for different fixes. The FoV rect is sampled
-        # inside the region bbox, but only unrotated: at rot 90 the footprint is
-        # the rect turned about its centre, 208 level-0 px taller here, and that
-        # overhang is not in the sampling constraint. If the drops sit at one
-        # rotation, tighten the sampling; if they are even, it is purely the
-        # margin PatchGrid leaves and no sampling change would help.
+        # Split by rotation: a square tile turned about its centre has the
+        # same centre, so the drops should be even across rotations -- the
+        # margin PatchGrid leaves. Uneven drops would mean the answer
+        # arithmetic depends on the angle.
         rot_a = np.asarray(query_rots)[~keep]
         by_rot = '  '.join(f'rot{r}={int((rot_a == r).sum())}' for r in rots)
         query_imgs = [im for im, k in zip(query_imgs, keep) if k]
@@ -369,7 +376,8 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
                   num_prefix=spec['num_prefix'], encoder_id=encoder_id,
                   seg_id=masks.cfg.seg_id(), region_id=masks.cfg.region_id(),
                   coverage='sample', sample_seed=seed,
-                  sampler_id=base_cfg.identity_id(), plan=plan_label(k_floor))
+                  sampler_id=base_cfg.identity_id(),
+                  plan=plan_label(k_floor, n_query, seed, rots))
 
     written = {}
     for tag, tok in (('ref', ref_tokens), ('query', query_tokens)):
@@ -537,9 +545,10 @@ def slidewin_rows(query_meta, ref_tensors, pooled_q, pooled_r, poolings,
     a_main = query_tensors['ans_main'].numpy().astype(np.int64)
     a_ovlp = query_tensors['ans_ovlp'].numpy().astype(np.int64)
     fov = query_tensors['fov_id'].numpy().astype(np.int64)
-    # fov_id repeats across the tiles of one shot, and RetrievalReport pairs
-    # arms on it. Two tiles of the same FoV would collide, so the pairing key is
-    # the row itself -- each query tile is its own retrieval question here.
+    # fov_id is the query POSITION and repeats across its rotations, and
+    # RetrievalReport pairs arms on its key. Two shots of one position would
+    # collide, so the pairing key is the row itself -- each query tile is its
+    # own retrieval question here, and the position is kept as `shot_id`.
     qid = np.arange(n, dtype=np.int64)
 
     out = []
@@ -1041,9 +1050,7 @@ def main() -> int:
     ap.add_argument('--k-floor', type=int, default=500)
     ap.add_argument('--queries', type=int, default=400,
                     help='query tiles per (slide, level) -- the same unit as -k '
-                         'and as every table eval prints. It used to be per '
-                         'slide and divided by the level count, which silently '
-                         'gave a third of what was asked for on a 3-level slide.')
+                         'and as every table eval prints.')
     add_mask_args(ap)
     ap.add_argument(
         '--encoder', default='gigapath', choices=encoder_names(),
@@ -1064,9 +1071,6 @@ def main() -> int:
              "what makes the three comparable rather than merely all runnable. "
              "The head reaches identity_id and so reaches the store filenames.")
     ap.add_argument('--batch-size', type=int, default=256)
-    ap.add_argument('--min-std', type=float, default=8.0,
-                    help='reject a FoV whose pixels vary less than this; blank '
-                         'glass makes questions no pooling can answer')
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args()
 
@@ -1124,7 +1128,7 @@ def main() -> int:
     masks = MaskMaker(mask_cfg_from_args(args), device=device,
                       cache_root=Cache.cache_root(args.mask_cache_job, 'mask'))
     print(f'reference draw {reference_config(args.k, args.seed).identity_id()}_'
-          f'{plan_label(args.k_floor)}   mask {masks.cfg.seg_id()}/'
+          f'{plan_label(args.k_floor, args.queries, args.seed)}   mask {masks.cfg.seg_id()}/'
           f'{masks.cfg.region_id()}', flush=True)
 
     for wsi_path, levels in sorted(combos.items()):
@@ -1149,7 +1153,7 @@ def main() -> int:
                          encoder=encoder, device=device, spec=spec,
                          k=args.k, k_floor=args.k_floor, n_query=n_per_level,
                          seed=args.seed, encoder_id=encoder_id,
-                         batch_size=args.batch_size, min_std=args.min_std)
+                         batch_size=args.batch_size)
             except Exception as e:                          # noqa: BLE001
                 import traceback
                 print(f'  L{lv} FAILED: {type(e).__name__}: {e}', flush=True)

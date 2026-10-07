@@ -52,10 +52,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Tuple, Union
 
-_HERE = Path(__file__).resolve().parent
-for _d in (_HERE, _HERE.parent / 'utilities'):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
 
 import cv2                                                  # noqa: E402
 import numpy as np                                          # noqa: E402

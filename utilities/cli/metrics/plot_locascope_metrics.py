@@ -34,7 +34,9 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))   # utilities/
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 
 from dump_function._locascope_plots import (load_metrics_csv,   # noqa: E402
                                             render_all)

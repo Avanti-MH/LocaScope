@@ -35,9 +35,6 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
-for _d in (_HERE, _HERE.parent / 'utilities'):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
 
 # MUST stay above `import timm`. huggingface_hub freezes its cache location into
 # module-level constants the moment it is imported

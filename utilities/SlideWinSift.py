@@ -74,10 +74,7 @@ from SlideReader import SlideReader
 # torch and the encoder config into this file. Taken deliberately: this module
 # has exactly one importer, cli/driver/slide_win_sift.py:80, and it is the brute-force
 # baseline rather than anything the pipeline runs, so the import cost buys
-# convenience at no risk to production. The project root is not on sys.path when
-# that CLI loads us -- it inserts utilities/ only -- and stage3_localization is
-# a package off the root, so put the root there here.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))     # the root: stage packages
+# convenience at no risk to production.
 from stage3_localization.SIFT_RANSAC import is_invertible          # noqa: E402
 
 

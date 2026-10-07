@@ -70,17 +70,15 @@ import os
 import sys
 from collections import defaultdict
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
-           os.path.join(_HERE, '..')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', '..', 'utilities'))
+import _paths                                                     # noqa: E402
+_paths.setup_import_paths('SuperPathPoint')
 
 from cli import (RESULT_DIR, add_corpus_arg, add_labels_args,       # noqa: E402
                  add_pretile_args, corpus_arg, job_result_dir, labels_root,
-                 pretile_root, setup_import_paths)
+                 pretile_root)
 
-setup_import_paths()
 
 import numpy as np                                                # noqa: E402
 import torch                                                      # noqa: E402

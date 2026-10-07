@@ -31,12 +31,6 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 from scipy.spatial import cKDTree
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
-           os.path.join(_HERE, '..')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 from common.KeypointLabelStore import points_from_prob        # noqa: E402
 from SurvivalAnalysis.Attribution import NONE                    # noqa: E402
 

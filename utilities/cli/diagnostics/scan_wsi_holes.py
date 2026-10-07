@@ -61,7 +61,8 @@ import time
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from _paths import job_result_dir                                   # noqa: E402
+from _paths import job_result_dir, setup_import_paths               # noqa: E402
+setup_import_paths()
 
 import numpy as np
 import openslide

@@ -43,13 +43,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-# utilities/ so ReadGeometry and SlideReader import when this is used alone
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_UTILITIES = os.path.abspath(os.path.join(_HERE, '..', 'utilities'))
-if _UTILITIES not in sys.path:
-    sys.path.insert(0, _UTILITIES)
-
-from config      import DomainGapConfig                   # noqa: E402
+from config     import DomainGapConfig                   # noqa: E402
 from pipeline    import read_reach, simulate_with_gt      # noqa: E402
 from ReadGeometry import FovGeometry, ReadSpec           # noqa: E402
 from SafeSlide   import SafeSlide                        # noqa: E402

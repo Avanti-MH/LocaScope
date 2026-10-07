@@ -43,14 +43,6 @@ import openslide
 import torch
 from PIL import Image
 
-# _paths holds the one definition of every package's sys.path entry
-# (setup_import_paths) -- utilities/ goes on the path here, by hand, because
-# that function is INSIDE it and this is the one step nothing else can do
-# for this file. Same idiom every test_modules/cli entry point uses.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'utilities'))
-from _paths import setup_import_paths                                   # noqa: E402
-setup_import_paths()
 
 from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
 from PatchingLib import QueryPatchContainer, FeaturesMap                 # noqa: E402

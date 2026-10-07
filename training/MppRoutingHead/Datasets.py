@@ -47,13 +47,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
-for _dir in ('utilities', 'aiNNModel', '', 'query_sim'):     # '' = the root: stage packages
-    _path = str(_ROOT / _dir)
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
-
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 import torch.utils.data                                             # noqa: E402

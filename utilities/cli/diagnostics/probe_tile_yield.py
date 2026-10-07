@@ -709,10 +709,6 @@ def main():
                     help='explicit WSI path(s). Default (with no --dataset '
                          'either): every mask already in the cache')
     ap.add_argument('--val-only', action='store_true')
-    # NO --tissue-ratio: the gate it swept is gone, and the axis with it.
-    # What replaced the question is `supply_<bucket>` against `floor_<bucket>`.
-    ap.add_argument('--tissue-ratio', type=float, nargs='+', default=None,
-                    help=argparse.SUPPRESS)
     ap.add_argument('--tile-size', dest='tile_sizes', type=int, nargs='+',
                     default=[256, 512, 1024],
                     help='the three models of spec.md 6.5')
@@ -755,13 +751,6 @@ def main():
                          'is tissue. (The production sampler admits up to 0.85; '
                          'pass 0.85 to count what it could draw.)')
     args = ap.parse_args()
-
-    if args.tissue_ratio is not None:
-        ap.error(
-            '--tissue-ratio is gone with the gate it swept. The question it '
-            'used to answer -- how much does a stricter cut cost -- is now '
-            'supply_<bucket> against floor_<bucket>, because the cut IS the '
-            'richness caps. See RichnessConfig.')
 
     out_dir = args.out or job_result_dir('ProbeTileYield')
 

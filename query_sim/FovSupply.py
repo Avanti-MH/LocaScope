@@ -30,12 +30,6 @@ from typing import Iterator, Optional, Tuple
 
 import numpy as np
 
-# ── utilities/ on sys.path so the base modules import ───────────────────────
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_UTILITIES = os.path.abspath(os.path.join(_HERE, '..', 'utilities'))
-if _UTILITIES not in sys.path:
-    sys.path.insert(0, _UTILITIES)
-
 from TissueMask import TissueMask                                # noqa: E402
 from TileSampler import PlanSpec, SamplerConfig, TileSampler      # noqa: E402
 
@@ -104,9 +98,14 @@ class FovSupply:
         caches its objectives, so the same ds is the same Render."""
         return self.microscope.at(float(ds))
 
-    def photo(self, meta) -> Tuple[np.ndarray, dict]:
+    def photo(self, meta, rotation: Optional[float] = None
+              ) -> Tuple[np.ndarray, dict]:
         """`(image, params)` of one position of the draw -- the same picture
-        whether it is taken alone, in a subset or in order."""
+        whether it is taken alone, in a subset or in order.
+
+        `rotation` fixes the angle instead of drawing it
+        (`Render.capture_with_gt`). The rng is the position's either way, so
+        two rotations of one position share every other draw of the gap."""
         cam = self.camera_for(meta.ds)
         if meta.stack_kind == 'F' and cam.level != meta.level:
             raise RuntimeError(f'{meta.slide} ds {meta.ds:g}: placed for level '
@@ -114,7 +113,7 @@ class FovSupply:
                                f'{cam.level}')
         x0, y0 = meta.fov_rect[0], meta.fov_rect[1]
         image, params = cam.capture_with_gt(
-            x0, y0, stack=meta.stack_kind,
+            x0, y0, rotation=rotation, stack=meta.stack_kind,
             rng=photo_rng(self.sampler.cfg.seed, meta.x, meta.y, f'{meta.ds:g}', 0))
         if image is None:
             # the sampler only offers positions whose reserve is on the slide;

@@ -463,6 +463,35 @@ def t_nothing_else_hashes_for_identity():
                        f'ConfigIdentity.short_id of parts (rule 5)')
 
 
+#: Library modules that may touch sys.path: the one that defines the paths,
+#: and the teacher, which adds an EXTERNAL checkout when it is built.
+_SYS_PATH_ALLOWED = {'utilities/_paths.py',
+                     'training/SuperPathPoint/SuperPoint/Teacher.py'}
+
+
+def t_only_entry_points_set_sys_path():
+    """`_paths.setup_import_paths` is the one place sys.path is set, called by
+    the entry point; a library module that inserts a path of its own makes
+    what it can import depend on who imported it first."""
+    import re
+    main = re.compile(r'__name__\s*==\s*[\'"]__main__[\'"]')
+    found = []
+    for top in _LINT_ROOTS:
+        for dirpath, _, files in os.walk(_ROOT / top):
+            for name in files:
+                if not name.endswith('.py'):
+                    continue
+                path = Path(dirpath) / name
+                rel = path.relative_to(_ROOT).as_posix()
+                if rel in _SYS_PATH_ALLOWED or 'FewShotEoMT' in rel:
+                    continue
+                text = path.read_text(errors='replace')
+                if 'sys.path.insert' in text and not main.search(text):
+                    found.append(rel)
+    assert not found, (f'library modules setting sys.path: {found}. Only an '
+                       f'entry point sets it, through _paths.setup_import_paths')
+
+
 # ── weights_id ────────────────────────────────────────────────────────────────
 
 def t_weights_id_is_content():
@@ -657,6 +686,7 @@ def main() -> int:
 
     print('lint')
     check('hashlib only in ConfigIdentity',   t_nothing_else_hashes_for_identity)
+    check('only entry points set sys.path',   t_only_entry_points_set_sys_path)
 
     print('weights_id')
     check('hashes content, not names',        t_weights_id_is_content)

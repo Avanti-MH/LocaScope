@@ -73,14 +73,14 @@ REPORT="$OUT/$TAG"/reference_report.txt
 
 K=2000                # reference tiles per (slide, level)
 K_FLOOR=2000          # floor for coarse levels; they take min(available, this)
-QUERIES=1000          # query tiles per (slide, level) -- 20 per FoV, 2 rotations
+QUERIES=1000          # query tiles per (slide, level): 500 positions x 2 rotations
 MASK_DS=4             # segmentation resolution
 SEED=0
 
 # Empty runs every slide in the gt csv. Set to a substring for one slide.
-ONLY_WSI=""
+ONLY_WSI="${ONLY_WSI:-}"
 # Empty runs every level present. Set e.g. "0 1" to restrict.
-ONLY_LEVELS=""
+ONLY_LEVELS="${ONLY_LEVELS:-}"
 
 # ---------------- background quota on the distractor pool --------------------
 #

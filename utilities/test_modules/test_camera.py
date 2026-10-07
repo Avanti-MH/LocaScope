@@ -17,8 +17,8 @@ check does not hide the seed check.
                 and 180 degrees, so all four of 0/90/180/270 are checked.
     seed        two Renders from one seed, and one Render with the same
                 `capture(rng=)` twice, must give bit-identical pixels.
-    augment     the optimised `query_sim/augment/` bodies against the legacy
-                ones, value for value, plus what the whole capture costs.
+    augment     `query_sim/augment/` ops against frozen copies of the bodies
+                they replaced, value for value, and what each costs.
 
 Two slides, two formats, on purpose. BRACS is SVS and steps 4x per pyramid
 level; Ki67 is MIRAX and steps 2x (CLAUDE.md, "Pyramid spacing decides how hard
@@ -38,9 +38,7 @@ import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_HERE.parent))
-sys.path.insert(0, str(_ROOT))
 
 from _paths import job_result_dir, setup_import_paths            # noqa: E402
 
@@ -408,130 +406,85 @@ def compare(legacy_fn, fast_fn, image, *args) -> dict:
             'legacy_ms': median_ms(legacy_fn), 'fast_ms': median_ms(fast_fn)}
 
 
-def vignette_float32(image, strength):
-    """The inexact variant, run with the flag on and then restored."""
-    previous = field.VIGNETTE_FLOAT32
-    field.VIGNETTE_FLOAT32 = True
-    try:
-        return field._apply_vignette_fast(image, strength)
-    finally:
-        field.VIGNETTE_FLOAT32 = previous
+# ── the bodies the augment ops replaced, FROZEN ──────────────────────────────
+#
+# What query_sim/augment/ computed before its no-op, caching and clip
+# rewrites, kept here so the comparison has something to compare with while
+# the library keeps one body per op.
+
+def _frozen_rotation(img, angle=0.0):
+    angle_mod = float(angle) % 360.0
+    if angle_mod == 0.0:
+        return img.copy()
+    if angle_mod == 90.0:
+        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    if angle_mod == 180.0:
+        return cv2.rotate(img, cv2.ROTATE_180)
+    if angle_mod == 270.0:
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    h, w = img.shape[:2]
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+    return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REFLECT)
+
+
+def _frozen_scale(img, scale=1.0):
+    if scale == 1.0:
+        return img.copy()
+    h, w = img.shape[:2]
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    if scale > 1.0:
+        y0, x0 = (new_h - h) // 2, (new_w - w) // 2
+        return resized[y0:y0 + h, x0:x0 + w]
+    pad_y, pad_x = (h - new_h) // 2, (w - new_w) // 2
+    return cv2.copyMakeBorder(resized, pad_y, h - new_h - pad_y, pad_x,
+                              w - new_w - pad_x, borderType=cv2.BORDER_REFLECT)
+
+
+def _frozen_vignette(img, strength=0.4):
+    if strength == 0.0:
+        return img
+    h, w = img.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    Y, X = np.ogrid[:h, :w]
+    dist = np.hypot(X - cx, Y - cy)
+    sigma = min(cx, cy) * 0.8
+    gain = (1 - strength) + strength * np.exp(-dist**2 / (2 * sigma**2))
+    return np.clip(img * gain[:, :, np.newaxis], 0, 255).astype(np.uint8)
+
+
+def _frozen_distortion(img, k1=0.2, k2=0.0, sensor=None):
+    if k1 == 0.0 and k2 == 0.0:
+        return img
+    h, w = img.shape[:2]
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    sw, sh = sensor if sensor else (w, h)
+    nx, ny = (sw - 1) / 2.0, (sh - 1) / 2.0
+    Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
+    xn = (X - cx) / (nx + 1e-6)
+    yn = (Y - cy) / (ny + 1e-6)
+    r2 = xn**2 + yn**2
+    factor = 1.0 + k1 * r2 + k2 * r2**2
+    factor = np.where(np.abs(factor) < 1e-6, 1e-6, factor)
+    src_x = np.clip(xn / factor * nx + cx, 0, w - 1)
+    src_y = np.clip(yn / factor * ny + cy, 0, h - 1)
+    return cv2.remap(img, src_x, src_y, cv2.INTER_LINEAR)
 
 
 def cases(params: dict) -> list:
-    """(name, legacy, fast, args, gated) for one sampled parameter set.
-
-    `gated` marks the rewrites whose claim is exact equality. The float32
-    vignette is not gated: it is here to be measured, not to pass.
-    """
+    """(name, frozen, current, args, gated) for one sampled parameter set.
+    Every rewrite claims exact equality, so every case is gated."""
     return [
-        ('rotation @ 0', geometry._apply_rotation_legacy,
-         geometry._apply_rotation_fast, (0.0,), True),
-        ('scale @ 1', geometry._apply_scale_legacy,
-         geometry._apply_scale_fast, (1.0,), True),
-        ('vignette f64', field._apply_vignette_legacy,
-         field._apply_vignette_fast, (params['vignette_strength'],), True),
-        ('distortion', lens._apply_distortion_legacy,
-         lens._apply_distortion_fast,
+        ('rotation @ 0', _frozen_rotation, geometry.apply_rotation, (0.0,), True),
+        ('scale @ 1', _frozen_scale, geometry.apply_scale, (1.0,), True),
+        ('vignette', _frozen_vignette, field.apply_vignette,
+         (params['vignette_strength'],), True),
+        ('distortion', _frozen_distortion, lens.apply_distortion,
          (params['distortion_k1'], params['distortion_k2']), True),
-        ('vignette f32 *', field._apply_vignette_legacy,
-         vignette_float32, (params['vignette_strength'],), False),
     ]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  The whole capture
-# ══════════════════════════════════════════════════════════════════════════════
-
-def set_fast(enabled: bool) -> None:
-    """Flip all three augment modules at once.
-
-    The public functions dispatch on these flags at call time and every caller
-    binds the dispatcher rather than a body, so this changes what a Render
-    capture actually runs without importing anything from `pipeline`.
-    """
-    field.USE_FAST = lens.USE_FAST = geometry.USE_FAST = enabled
-
-
-def time_captures(wsi, cfg, positions, seed: int, level_ds: float) -> dict:
-    """`Render.capture_with_gt` timed both ways, on identical parameter draws.
-
-    A capture is read + augment + centre crop, and only the middle term
-    changes. Including the other two is the point: the per-op table says what
-    the rewrite saves, this says what fraction of a real shot that is, which is
-    the number that decides whether a bench gets shorter.
-
-    Both passes build a fresh Render from the SAME seed, so `_py_rng` hands
-    them the same sequence of domain-gap parameters. Without that one pass
-    could draw a larger `k1` or `vignette_strength` more often than the other
-    and the difference would be luck rather than code -- the parameters are
-    redrawn on every capture by design.
-
-    Each position is timed legacy-then-fast at even indices and fast-then-
-    legacy at odd ones, so the page cache warming on the first of a pair does
-    not systematically favour the second. A warm-up pass runs first anyway, so
-    neither side is charged for the cold read of a WSI block.
-    """
-    def capture_all(fast: bool, record: list | None):
-        set_fast(fast)
-        camera = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=seed)
-        for x, y in positions:
-            start = time.perf_counter()
-            camera.capture_with_gt(x, y, rotation=0)
-            if record is not None:
-                record.append((time.perf_counter() - start) * 1e3)
-
-    capture_all(True, None)                       # warm the page cache
-    capture_all(False, None)
-
-    legacy, fast = [], []
-    for index, (x, y) in enumerate(positions):
-        order = (False, True) if index % 2 == 0 else (True, False)
-        for use_fast in order:
-            set_fast(use_fast)
-            camera = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds,
-                            seed=seed + index)
-            start = time.perf_counter()
-            camera.capture_with_gt(x, y, rotation=0)
-            elapsed = (time.perf_counter() - start) * 1e3
-            (fast if use_fast else legacy).append(elapsed)
-
-    # The read alone, so the report can say how much of a capture is the part
-    # no rewrite in this file touches.
-    set_fast(True)
-    cam = Render(SlideReader(wsi), SENSOR, cfg, ds=level_ds, seed=seed)
-    pad = cam.spec
-    reads = []
-    for x, y in positions:
-        start = time.perf_counter()
-        cam.reader.read(x, y, pad, cam.ds)
-        reads.append((time.perf_counter() - start) * 1e3)
-
-    set_fast(True)
-    return {'legacy_ms': float(np.median(legacy)),
-            'fast_ms': float(np.median(fast)),
-            'read_ms': float(np.median(reads)),
-            'n': len(positions)}
-
-
-def print_capture(timing: dict) -> None:
-    legacy, fast, read = timing['legacy_ms'], timing['fast_ms'], timing['read_ms']
-    saved = legacy - fast
-    print(f'\nwhole Camera.capture_with_gt, median of {timing["n"]} shots')
-    print('-' * 87)
-    print(f'  legacy      {legacy:8.1f} ms')
-    print(f'  fast        {fast:8.1f} ms      '
-          f'{saved:.1f} ms saved, {saved / legacy * 100:.1f}% of a shot, '
-          f'{legacy / fast:.2f}x')
-    print(f'  of which read {read:6.1f} ms      '
-          f'{read / legacy * 100:.0f}% of the capture is the WSI read, which no '
-          f'rewrite here touches')
-    print(f'{"":16}augment chain alone: {legacy - read:.1f} -> {fast - read:.1f} '
-          f'ms ({(legacy - read) / max(1e-9, fast - read):.2f}x)')
-    print(f'\n  NOTE  "legacy" here is the CURRENT pipeline running the old op '
-          f'bodies. The crop-first\n        order, the narrow read and the '
-          f'removal of field_mask are in BOTH numbers, so\n        this '
-          f'{saved:.0f} ms is the body rewrites alone.')
 
 
 def summarise(rows: list) -> list:
@@ -579,7 +532,6 @@ def print_table(summary: list) -> None:
     total_saved = sum(r['saved_ms'] for r in summary if r['gated'])
     print(f'  max|Δ| is the worst pixel of every shot, not an average.')
     print(f'  gated rewrites save {total_saved:.1f} ms per shot together.')
-    print(f'  * vignette f32 is knowingly inexact: reported, not gated.')
 
 
 def run_augment(args, wsi, level_ds) -> int:
@@ -614,24 +566,13 @@ def run_augment(args, wsi, level_ds) -> int:
     summary = summarise(rows)
     print_table(summary)
 
-    timing = time_captures(wsi, cfg, [xy for xy, _, _ in shots], args.seed,
-                           level_ds)
-    print_capture(timing)
-    summary.append({
-        'op': 'capture (whole)', 'gated': False, 'shots': timing['n'],
-        'max_abs': 0, 'n_differ': 0, 'frac_differ': 0.0,
-        'legacy_ms': round(timing['legacy_ms'], 2),
-        'fast_ms': round(timing['fast_ms'], 2),
-        'speedup': round(timing['legacy_ms'] / timing['fast_ms'], 2),
-        'saved_ms': round(timing['legacy_ms'] - timing['fast_ms'], 2)})
-
     # The point of the geometry rewrite is that a no-op returns the input
     # itself. Values alone cannot show that -- a copy has the same values --
     # so it is stated here as the fact it is.
     probe = shots[0][1]
     print(f'\nno-op returns the input object itself: '
-          f'rotation {geometry._apply_rotation_fast(probe, 0.0) is probe}   '
-          f'scale {geometry._apply_scale_fast(probe, 1.0) is probe}')
+          f'rotation {geometry.apply_rotation(probe, 0.0) is probe}   '
+          f'scale {geometry.apply_scale(probe, 1.0) is probe}')
 
     out_dir = Path(args.out or job_result_dir('TestReadPath'))
     out_dir.mkdir(parents=True, exist_ok=True)

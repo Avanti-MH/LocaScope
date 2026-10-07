@@ -69,8 +69,10 @@ import argparse
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(_HERE))          # training/SuperPathPoint/
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', '..', 'utilities'))
+import _paths                                                     # noqa: E402
+_paths.setup_import_paths('SuperPathPoint')
 
 import numpy as np                                              # noqa: E402
 import matplotlib                                               # noqa: E402
@@ -78,9 +80,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
 from cli import (add_corpus_arg, add_pretile_args, corpus_arg,  # noqa: E402
-                 job_result_dir, setup_import_paths)
+                 job_result_dir)
 
-setup_import_paths()
 
 import torch                                                    # noqa: E402
 

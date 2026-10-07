@@ -59,11 +59,10 @@ import csv
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
-           os.path.join(_HERE, '..')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', '..', 'utilities'))
+import _paths                                                     # noqa: E402
+_paths.setup_import_paths('SuperPathPoint')
 
 import matplotlib                                                 # noqa: E402
 matplotlib.use('Agg')
@@ -71,9 +70,8 @@ import matplotlib.pyplot as plt                                   # noqa: E402
 import numpy as np                                                # noqa: E402
 
 from cli import (add_labels_args, job_result_dir, labels_root,      # noqa: E402
-                 pretile_root, setup_import_paths)
+                 pretile_root)
 
-setup_import_paths()
 
 from common import KeypointLabelStore                # noqa: E402
 from Store import PreTileCorpus, PreTileStore                    # noqa: E402

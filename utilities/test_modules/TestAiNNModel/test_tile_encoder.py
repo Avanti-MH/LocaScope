@@ -41,22 +41,19 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..'))
+sys.path.insert(0, os.path.join(_HERE, '..', '..'))
+import _paths                                                   # noqa: E402
+_paths.setup_import_paths()
+
 #: BEFORE `import torch`. huggingface_hub freezes HF_HOME into module constants
 #: at its own import, and something here reaches it during `import torch`, so
 #: the setdefault inside each encoder module runs too late to decide anything.
 #: This file downloads vit_tiny for its last section; without this line it goes
-#: to ~/.cache/huggingface, where it does not join the 16 GB already in /work.
+#: to ~/.cache/huggingface instead of the shared weights root.
 #: setdefault, so jobscripts/_env.sh and an exported HF_HOME both still win.
-os.environ.setdefault(
-    'HF_HOME', os.environ.get('LOCASCOPE_MODEL_WEIGHTS',
-                              '/work/u26130998/model_weights'))
-
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent.parent      # this file sits one directory deeper
-for _d in ('aiNNModel', 'utilities'):
-    p = str(_ROOT / _d)
-    if p not in sys.path:
-        sys.path.insert(0, p)
+os.environ.setdefault('HF_HOME', _paths.MODEL_WEIGHTS_DIR)
 
 import numpy as np                                          # noqa: E402
 import torch                                                # noqa: E402

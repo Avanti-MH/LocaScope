@@ -63,10 +63,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
 sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths, add_training_package  # noqa: E402
+from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths()
-add_training_package('SuperPathPoint')
+setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
@@ -321,7 +320,7 @@ def t_the_teacher_is_part_of_the_labels_identity():
     second = HaConfig(num=NUM).build(other).identity_id()
     assert first != second, 'a different teacher gave the same HA identity'
 
-    assert 'teacher=faketeacher01' in HaConfig(num=NUM).build(
+    assert 'teacher="faketeacher01"' in HaConfig(num=NUM).build(
         teacher).identity_parts(), 'the teacher is not in the parts at all'
     return f'{first} vs {second}'
 

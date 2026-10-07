@@ -32,12 +32,6 @@ import numpy as np
 import torch
 from PIL import Image
 
-# utilities/ by hand, then _paths for the rest -- the idiom stage1_estimation
-# uses. The project root it adds is what resolves `stage2_retrieval.X`.
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / 'utilities'))
-from _paths import setup_import_paths                                   # noqa: E402
-setup_import_paths()
 
 import openslide                                                            # noqa: E402
 from PatchingLib          import (QueryPatchContainer, PatchGrid, region_grids,  # noqa: E402

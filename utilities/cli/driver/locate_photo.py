@@ -68,12 +68,10 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from PIL import Image
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent.parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_ROOT / 'utilities'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 from _paths import encoder_tag, job_result_dir                      # noqa: E402
-sys.path.insert(0, str(_ROOT / 'aiNNModel'))
 
 from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
                                       warp_query_into,

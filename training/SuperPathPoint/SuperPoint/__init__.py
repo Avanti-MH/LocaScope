@@ -5,9 +5,8 @@ Named after upstream's stages 2 and 3, which is what this package reproduces
 of the released weights, and `Teacher.py` is the only thing that loads them.
 
 Flat re-exports, matching `common/__init__.py`: with
-`training/SuperPathPoint/` on sys.path (`_paths.add_training_package(
-'SuperPathPoint')`, called after `setup_import_paths()` -- see
-that function's own docstring), callers spell `from SuperPoint.Teacher
+`training/SuperPathPoint/` on sys.path (`_paths.setup_import_paths(
+'SuperPathPoint')`), callers spell `from SuperPoint.Teacher
 import TeacherConfig` or take the short names from here.
 
 The import order below is the dependency order, and it is not alphabetical:

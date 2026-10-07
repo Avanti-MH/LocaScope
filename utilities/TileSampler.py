@@ -701,9 +701,7 @@ class RichnessConfig(IdentifiedConfig):
             raise ValueError(
                 f'caps sum to {sum(self.caps):.3f} < 1, so every rung is short '
                 f'BY CONSTRUCTION and the shortfall will be read as a property '
-                f'of the slides. This is the 475/500 bug of 2026-08-26: the '
-                f'reachable caps were 0.85 + 0.15 and the rest of the quota '
-                f'sat in buckets the tissue gate had already emptied')
+                f'of the slides')
 
 
 

@@ -60,12 +60,9 @@ import os
 import sys
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
-for _directory in ('utilities', 'aiNNModel'):
-    _path = str(_ROOT / _directory)
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402

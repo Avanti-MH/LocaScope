@@ -35,8 +35,8 @@ three levels, 100 FoVs each and top-left answers; this section is what runs:
              MakeSplit). `--n-wsi` random slides of each (`pick_wsi_names`, fixed
              by --seed; a cap at or above the pool takes all of it). `--shard I/N`
              takes every N-th of the slides, for N processes on N cards.
-  levels     each slide's own pyramid levels up to `--max-ds` (16).
-  FoVs       `--n-fov` (25) per (slide, level), placed for the camera
+  levels     each slide's own pyramid levels up to `--max-ds` (CONFIG `MAX_DS`).
+  FoVs       `--n-fov` (CONFIG `SAMPLER.n_per_rung`) per (slide, level), placed for the camera
              (`FovSupply`, a richness mix and an overlap bound) with the
              domain gap on. A level too coarse for the tissue holds no FoV and is
              skipped with the sampler's per-bucket report.
@@ -360,7 +360,7 @@ RICHNESS_PRESETS = {
                            caps=(1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0)),
 }
 OVERLAP = OverlapConfig(
-    step              = 0.5,        # half a FoV footprint (was grid_step 720 of 1440); 1.0 disjoint
+    step              = 0.5,        # half a FoV footprint; 1.0 disjoint
     max_overlap_ratio = 0.5,
     overlapping_share = 0.5,
     jitter_offsets    = ((0.25, 1.0), (1.0, 0.25), (0.75, 1.0), (1.0, 0.75), (1.25, 1.25)),

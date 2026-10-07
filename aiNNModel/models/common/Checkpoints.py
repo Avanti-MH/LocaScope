@@ -10,13 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-_HERE = Path(__file__).resolve().parent
-for _dir in (_HERE, _HERE.parent):
-    _path = str(_dir)
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
-
-import torch                                                        # noqa: E402
+import torch                                                       # noqa: E402
 
 from Head import Head                                               # noqa: E402
 from Heads import HeadConfig, classifier_class, classifier_name     # noqa: E402

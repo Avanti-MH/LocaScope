@@ -45,12 +45,9 @@ import time
 import traceback
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent.parent
-for _d in ('utilities', 'aiNNModel', ''):     # '' = the root: stage packages
-    p = str(_ROOT / _d)
-    if p not in sys.path:
-        sys.path.insert(0, p)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402

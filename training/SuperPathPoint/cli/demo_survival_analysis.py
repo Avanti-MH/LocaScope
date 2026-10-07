@@ -184,18 +184,14 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..', '..', 'utilities'),
-          os.path.join(_HERE, '..')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-if _HERE not in sys.path:            # prepare_chain_stack.py lives right here
-    sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', '..', '..', 'utilities'))
+import _paths                                                     # noqa: E402
+_paths.setup_import_paths('SuperPathPoint')
 
 from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
-                 chainstack_root, job_result_dir, setup_import_paths)
+                 chainstack_root, job_result_dir)
 
-setup_import_paths()
 
 import matplotlib                                              # noqa: E402
 matplotlib.use('Agg')

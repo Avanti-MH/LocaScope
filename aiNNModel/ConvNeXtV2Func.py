@@ -58,9 +58,6 @@ from pathlib import Path
 from typing import Tuple
 
 _HERE = Path(__file__).resolve().parent
-for _d in (_HERE, _HERE.parent / 'utilities'):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
 
 # Same reasoning and same ordering constraint as GigaPathFunc.py /
 # Uni2Func.py: this MUST stay above `import timm`, because huggingface_hub

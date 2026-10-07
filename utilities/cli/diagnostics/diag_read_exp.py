@@ -21,7 +21,7 @@ of them can be measured before and after against the same numbers:
               same positions: tiles/s for both, and
               PASS only if every tile is identical -- level 0, the same pixels.
     s1photo   bench_stage1_mpp's photo (Render, placed by render_spec) against
-              a frozen bare sensor read + simulate_microscope_photo, at the same ladder positions: identical
+              a frozen bare sensor read + simulate_with_gt, at the same ladder positions: identical
               with no gap (PASS), the side bands a 92 degree turn filled by
               reflection, the corners a 0.9 zoom-out at 3 degrees pads, and
               photos/s for both under the bench's gap.
@@ -65,9 +65,6 @@ sys.path.insert(0, os.path.join(
 from _paths import job_result_dir, setup_import_paths                 # noqa: E402
 
 setup_import_paths()
-_ROOT = Path(__file__).resolve().parents[3]
-if str(_ROOT / 'training/MppRoutingHead') not in sys.path:
-    sys.path.insert(0, str(_ROOT / 'training/MppRoutingHead'))
 
 import Cache                                                          # noqa: E402
 from AccessDatasets import locate                                     # noqa: E402
@@ -79,12 +76,11 @@ from PatchingLib import region_grids                                  # noqa: E4
 from TileSampler import PlanSpec, SamplerConfig, TileSampler          # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                  # noqa: E402
 from camera import Render, render_spec                                # noqa: E402
-from pipeline import simulate_microscope_photo                        # noqa: E402
 from pipeline import simulate_with_gt                                 # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR                            # noqa: E402
 from config import DomainGapConfig                                    # noqa: E402
 from FovSupply import FovSupply                                       # noqa: E402
-import Datasets                                                       # noqa: E402
+import training.MppRoutingHead.Datasets as Datasets                    # noqa: E402
 
 TILE = 256
 RUNGS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
@@ -322,7 +318,7 @@ def _old_s1photo(reader, pos, cfg, rng, rotation=None):
     image = reader.read(pos['x'], pos['y'], ReadSpec(*S1_SENSOR), pos['rung'])
     if image is None:
         return None
-    return simulate_microscope_photo(image, cfg=cfg, rng=rng, rotation=rotation)
+    return simulate_with_gt(image, cfg=cfg, rng=rng, rotation=rotation)[0]
 
 
 S1_BORDER = 8          # output px: the band a resize's truncated kernel reaches

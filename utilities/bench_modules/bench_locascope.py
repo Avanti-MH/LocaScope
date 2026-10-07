@@ -49,14 +49,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_ROOT / 'utilities'))
-sys.path.insert(0, str(_ROOT / 'aiNNModel'))
-
-sys.path.insert(0, str(_ROOT))     # the root, which resolves the stage packages
-sys.path.insert(0, str(_ROOT / 'query_sim'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 
 from _paths            import encoder_tag, job_result_dir               # noqa: E402
 import Cache                                                           # noqa: E402
@@ -797,7 +792,7 @@ def main():
                     help='autocast precision for the tile encoder. fp16 is the '
                          'validated production setting, but the validation is '
                          "GigaPath's: ~5.5x faster at cos=0.99995 and top-5=0.99 "
-                         'against fp32 (TODO 2026-07-23 AccuracyV1). Nobody has '
+                         'against fp32 (log/TODO.log, AccuracyV1). Nobody has '
                          'measured the other two, so read fp16 there as an '
                          'assumption rather than a result. Ignored on CPU.')
     args = ap.parse_args()

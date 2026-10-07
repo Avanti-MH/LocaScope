@@ -1,9 +1,6 @@
-"""Layer 1: img + cfg -> augmented img (+ params dict).
+"""Layer 1: img + cfg -> augmented img + params dict.
 
-`simulate_microscope_photo(img)` — old signature kept (no cfg == defaults)
-so existing callers (test_gigapath_knn_esti_mpp, notebooks) don't break.
-
-`simulate_with_gt(img, cfg)` — returns (img, dict) with every sampled value,
+`simulate_with_gt(img, cfg)` returns (img, dict) with every sampled value,
 which `FOVRecord.from_capture` folds into a row.
 """
 
@@ -223,7 +220,7 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
 
     `output_wh` is the sensor size. None means the input already is the sensor,
     which leaves both crops as no-ops -- that is the path
-    `simulate_microscope_photo` takes when it augments a whole image.
+    a caller takes when it augments a whole image.
     """
     source = img
     height, width = img.shape[:2]
@@ -308,16 +305,3 @@ def simulate_with_gt(
         params['angle_jitter'] = float(rotation) - rot_int
     out = _apply_params(arr, cfg, params, output_wh=output_wh)
     return out, params
-
-
-def simulate_microscope_photo(
-    img,
-    cfg:      Optional[DomainGapConfig] = None,
-    rng:      Optional[random.Random]   = None,
-    rotation:  Optional[float]           = None,
-    output_wh: Optional[Tuple[int, int]]  = None,
-) -> np.ndarray:
-    """Return augmented img only (backward-compat entry point for existing callers)."""
-    out, _ = simulate_with_gt(img, cfg=cfg, rng=rng, rotation=rotation,
-                              output_wh=output_wh)
-    return out

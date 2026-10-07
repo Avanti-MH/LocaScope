@@ -44,8 +44,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _paths import RESULT_DIR, job_name                          # noqa: E402,F401
+from _paths import RESULT_DIR, job_name                          # noqa: F401
 
 
 class CacheMismatch(RuntimeError):

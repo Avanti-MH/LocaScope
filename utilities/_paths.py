@@ -72,25 +72,31 @@ MPPROUTINGHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'MppRoutingHead')
 PROTOTYPICALROUTINGHEAD_DIR = os.path.join(
     PROJECT_ROOT, 'training', 'PrototypicalRoutingHead')
 
-def setup_import_paths():
+def setup_import_paths(*training_packages: str) -> None:
     """Make utilities/, query_sim/, aiNNModel/ (+ its models/ and
     models/common/) and the project root importable -- the root is what makes
     the stage packages (`stage1_estimation`, `stage2_retrieval`,
-    `stage3_localization`) and `training` importable by their full names.
+    `stage3_localization`) and `training` importable by their full names --
+    then the named training packages' own directories (`add_training_package`).
 
-    Does NOT add any training package's own directory: the packages each
+    THE ONE PLACE sys.path IS SET. An entry point puts utilities/ on the path
+    by hand (this function lives in it) and calls this; no library module
+    touches sys.path, so what a module can import is decided by the entry
+    that runs it and by nothing else.
+
+    No training package directory is added unless named: the packages each
     have their own `Runtime.py` / `Datasets.py` / ..., and with all of them
     on `sys.path` a bare `from Runtime import ...` resolves to whichever comes
     first, not the caller's sibling. `MppRoutingHead` and
     `PrototypicalRoutingHead` are real packages imported by full name
-    (`training/__init__.py`); `SuperPathPoint` adds itself with
-    `add_training_package`.
+    (`training/__init__.py`); a SuperPathPoint entry names `'SuperPathPoint'`.
     """
     for path in (UTILITIES_DIR, QUERY_SIM_DIR,
                 AINM_DIR, AINM_MODELS_DIR, AINM_MODELS_COMMON_DIR,
                 PROJECT_ROOT):
         if path not in sys.path:
             sys.path.insert(0, path)
+    add_training_package(*training_packages)
 
 
 #: `add_training_package`'s own name -> directory map. Keys are the SAME
@@ -110,7 +116,7 @@ def add_training_package(*names: str) -> None:
     ORDER MATTERS when a caller names more than one: each `insert(0, ...)`
     pushes the previous ones DOWN, so the LAST name given ends up FIRST in
     `sys.path` and wins any bare-import collision. Put the caller's OWN
-    package last. Only `SuperPathPoint` calls this, naming itself alone.
+    package last. Called by `setup_import_paths` with the names it was given.
     """
     for name in names:
         path = TRAINING_PACKAGE_DIRS[name]

@@ -56,7 +56,7 @@ query_sim/
 │   ├── geometry.py            ← rotation (0/90/180/270 + jitter)、scale     ← 新
 │   └── noise.py               ← gaussian noise
 │
-├── pipeline.py                ← simulate_microscope_photo(img, cfg) 串接所有 augment
+├── pipeline.py                ← 串接所有 augment
 │                                simulate_with_gt(cfg, output_wh) → (img, FOVRecord)
 │                                兩段式：場景階段決定什麼落到感測器上，裁切，
 │                                然後感測器階段。見下方「op 的順序」
@@ -86,7 +86,6 @@ query_sim/
 │    generate_one(cfg) → (img, FOVRecord)                     │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 1 — pipeline.py                                      │
-│    simulate_microscope_photo(img, cfg) → img                │
 │    simulate_with_gt(img, cfg) → (img, params_dict)          │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 0 — augment/*                                        │

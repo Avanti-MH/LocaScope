@@ -60,8 +60,9 @@ import json
 import sys
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent.parent))          # utilities/
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
+import _paths                                                       # noqa: E402
+_paths.setup_import_paths()
 
 import numpy as np                                          # noqa: E402
 from Store import FeatureStore as FS                        # noqa: E402

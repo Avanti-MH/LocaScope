@@ -28,9 +28,7 @@ import tempfile
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
 sys.path.insert(0, str(_HERE.parent))
-sys.path.insert(0, str(_ROOT))
 
 from _paths import setup_import_paths                            # noqa: E402
 

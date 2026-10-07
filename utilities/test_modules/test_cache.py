@@ -15,7 +15,8 @@ from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
+import _paths                                                    # noqa: E402
+_paths.setup_import_paths()
 
 import Cache                                                     # noqa: E402
 from Cache import (CacheMismatch, atomic_dir, atomic_file,        # noqa: E402
