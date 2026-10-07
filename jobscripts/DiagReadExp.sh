@@ -25,7 +25,7 @@ source jobscripts/_env.sh
 #
 #  How fast the read path is, flow by flow, on the same slides every time:
 #    grid      SlideReader.read_grid per level (tiles/s, CpuBudget workers)
-#    capture   training render_row, CAMERA_FULL (rows/s)
+#    capture   training render_row, routing-query (rows/s)
 #    tiles     SlideReader.read_samples, native reference tiles (tiles/s)
 #    fov       FovSupply, the window bench's still FoV (shots/s)
 #    pca       the UNI2-PCA segmenter's reads against the retired WsiTileLoader

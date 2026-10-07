@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Union
 
 import cv2
@@ -38,7 +38,7 @@ from ReadGeometry import ReadSpec                                        # noqa:
 from SafeSlide import SafeSlide                                         # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
 from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
-from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
+from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
                          TileSampler, native_plans)
 from TissueMaskConfig import MASK_RECIPES                                # noqa: E402
 
@@ -84,11 +84,6 @@ def fingerprint(rgb: np.ndarray) -> np.ndarray:
 
 # ── config / result ──────────────────────────────────────────────────────────
 
-#: The richness shape the other reference banks use (PrototypeEstMpp,
-#: KnnEstMpp): the bottom four buckets -- mostly background -- excluded.
-_REFERENCE_BANK_RICHNESS = RichnessConfig(
-    floors=(0.0,) * 7, caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0))
-
 
 @dataclass(frozen=True)
 class ClassicEstMppConfig(IdentifiedConfig):
@@ -106,9 +101,8 @@ class ClassicEstMppConfig(IdentifiedConfig):
     def sampler(self) -> SamplerConfig:
         if self.sampler_cfg is not None:
             return self.sampler_cfg
-        return SamplerConfig(n_per_rung=self.samples, seed=self.seed,
-                             richness=_REFERENCE_BANK_RICHNESS,
-                             overlap=OverlapConfig())
+        return replace(SAMPLER_RECIPES['reference-bank'],
+                       n_per_rung=self.samples, seed=self.seed)
 
 
 @dataclass(frozen=True)

@@ -1060,8 +1060,8 @@ def main() -> int:
     ap.add_argument('--ordinal-weight', type=float, default=1.0,
                     help="ord_a's lambda: (E_c[log2 rung] - log2 rung_true)^2, "
                          "weight on top of the weighted-CE term. Unvalidated "
-                         "starting value, same status as DomainGapConfig's "
-                         "OPTICS_P=0.5 -- sweep it")
+                         "starting value, same status as the routing recipes' "
+                         "optics probability 0.5 -- sweep it")
     ap.add_argument('--ordinal-sigma', type=float, default=1.0,
                     help="ord_b's kernel bandwidth in log2-rung units. 1.0 = "
                          "one rung-step gets meaningful soft-target mass, two "

@@ -817,8 +817,8 @@ def main() -> int:
     ap.add_argument('--n-query', type=int, default=10,
                     help='query positions per rung per batch')
     ap.add_argument('--support-native', action='store_true',
-                    help='render support with CAMERA_GEOMETRY_ONLY (rotation '
-                         'only); query always renders CAMERA_FULL')
+                    help='render support with routing-support-native (rotation '
+                         'only); query always renders routing-query')
     ap.add_argument('--n-choices', type=int, nargs='+', default=[3, 4, 5],
                     help='way counts whose rung combinations train (minus '
                          'Episodes.HELD_OUT_COMBOS)')

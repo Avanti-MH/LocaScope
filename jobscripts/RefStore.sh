@@ -23,7 +23,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # ---------------- Build the stage-1 reference ---------------------------------
 #
 # 1000 tiles per level per slide, drawn by TileSampler under the reference-bank
-# richness contract (KnnEstMpp.REFERENCE_BANK_RICHNESS), one native rung per
+# recipe (TileSampler.SAMPLER_RECIPES reference-bank), one native rung per
 # pyramid level, half of each level carried by chains -- the same level-0 centre
 # at every level -- and stored with the reason each tile is there.
 #

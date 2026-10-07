@@ -46,6 +46,7 @@ import os
 import resource
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -56,8 +57,7 @@ sys.path.insert(0, str(_HERE.parent.parent / 'utilities'))
 import _paths                                                       # noqa: E402
 _paths.setup_import_paths()
 
-from stage1_estimation.KnnEstMpp import (KnnEstMpp, KnnEstMppConfig,                  # noqa: E402
-                       REFERENCE_BANK_RICHNESS)
+from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig                   # noqa: E402
 from stage1_estimation.ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
 from stage1_estimation.PrototypeEstMpp import PrototypeEstMpp, PrototypeEstMppConfig  # noqa: E402
 from stage1_estimation.estimate_mpp_classic import ClassicEstMpp, ClassicEstMppConfig  # noqa: E402
@@ -70,24 +70,13 @@ from training.MppRoutingHead.Datasets import (                      # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MASK_RECIPES                           # noqa: E402
 from ConfigIdentity import enc, short_id                            # noqa: E402
-from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
-                         SamplerConfig)
+from TileSampler import SAMPLER_RECIPES, PlanSpec                   # noqa: E402
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from camera import Render, render_spec                               # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
-from FovSupply import FovSupply                                      # noqa: E402
-from config import DomainGapConfig                                  # noqa: E402
+from FovSupply import FovSupply, add_fov_args, fov_from_args         # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 
 JOB_NAME = 'Stage1MppBench'
-
-
-#: The domain gap every FoV of this bench is photographed with:
-#: `DomainGapConfig`'s own. With the sensor (--sensor) it places the positions
-#: (`render_spec`) and renders them (`Render`), so a FoV is read with the
-#: headroom its rotation needs. `test_locascope_stages.pick_fov` builds the same
-#: one to read this draw.
-PHOTO_GAP = DomainGapConfig()
 
 
 def write_csv(rows, path) -> None:
@@ -120,51 +109,26 @@ def write_csv(rows, path) -> None:
 FOV_VERSION = 0
 
 
-def _fov_sampler_cfg(args) -> SamplerConfig:
-    """Where the FoVs are drawn. `--overlap` draws other FoVs (jitter top-up
-    at the coarse rungs), so it is part of the draw's identity."""
-    return SamplerConfig(n_per_rung=args.n_per_rung, seed=args.seed,
-                         richness=RichnessConfig(),
-                         overlap=_overlap_cfg(args.overlap))
-
-
 def _sampling_recipe_id(args) -> str:
     """`<fov id>_<seg_id>_<region_id>_<split>` -- the filename
     analyze_stage1_metrics.py's own docstring names. The fov id is composed
-    from the ids of what decides which photos there are: the draw
-    (`SamplerConfig`), the domain gap (`PHOTO_GAP`), the sensor, the plan and
-    the slides asked for. The mask is its own two ids, so a caller who only
-    changed the mask recipe cannot collide with a run that drew other FoVs.
-    The split is last and outside the hash: a val and a test run of one recipe
-    differ only in it, which is how analyze_stage1_metrics pairs them."""
+    from the ids of what decides which photos there are: the recipe's draw,
+    domain gap, sensor and levels (`fov_from_args`), and the slides asked for.
+    The mask is its own two ids, so a caller who only changed the mask recipe
+    cannot collide with a run that drew other FoVs. The split is last and
+    outside the hash: a val and a test run of one recipe differ only in it,
+    which is how analyze_stage1_metrics pairs them."""
+    fov = fov_from_args(args)
     fov_id = short_id([
-        f'sampler={enc(_fov_sampler_cfg(args).identity_id())}',
-        f'gap={enc(PHOTO_GAP.identity_id())}',
-        f'sensor={enc(tuple(args.sensor))}',
-        f'plan={enc("native" if args.native_only else "ladder")}',
+        f'sampler={enc(fov.sampler.identity_id())}',
+        f'gap={enc(fov.gap.identity_id())}',
+        f'sensor={enc(tuple(fov.sensor))}',
+        f'rungs={enc(fov.rungs)}', f'max_ds={enc(fov.max_ds)}',
         f'tile={enc(args.tile)}', f'datasets={enc(sorted(args.datasets))}',
         f'n_wsi={enc(args.n_wsi)}', f'fov_per_rung={enc(args.fov_per_rung)}',
         f'version={enc(FOV_VERSION)}'])
     mask_cfg = MASK_RECIPES[args.seg]
     return f'{fov_id}_{mask_cfg.seg_id()}_{mask_cfg.region_id()}_{args.split}'
-
-
-def _overlap_cfg(enabled: bool) -> OverlapConfig:
-    """Disjoint lattice (default) or, with `--overlap`, the same lattice plus
-    JITTER TOP-UP allowed. A coarse rung's footprint is huge, so a disjoint
-    lattice can run out of room inside a tissue region long before
-    `n_per_rung` is reached -- and `OverlapConfig`'s own default
-    (`jitter_cap=0`) is deliberately dead under a disjoint lattice, by its
-    own docstring: "under a disjoint lattice the top-up is provably dead...
-    it means something as soon as overlap is allowed." Raising
-    `max_overlap_ratio`/`overlapping_share`/`jitter_cap` is what makes that
-    existing top-up mechanism reachable, without changing `step` (the
-    main lattice stays disjoint; only the shortfall gets topped up).
-    """
-    if not enabled:
-        return OverlapConfig()
-    return OverlapConfig(max_overlap_ratio=0.5, overlapping_share=1.0,
-                         jitter_cap=1.0)
 
 
 def _method_specs(args) -> list:
@@ -254,10 +218,8 @@ def _instantiate(spec: dict, args, device):
     if spec['kind'] == 'knn':
         cfg = KnnEstMppConfig(
             encoder=spec['encoder'],
-            sampler_cfg=SamplerConfig(n_per_rung=args.knn_samples,
-                                      seed=args.seed,
-                                      richness=REFERENCE_BANK_RICHNESS,
-                                      overlap=_overlap_cfg(args.overlap)),
+            sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'],
+                                n_per_rung=args.knn_samples, seed=args.seed),
             k=args.knn_k, tile_size=args.tile)
         return KnnEstMpp(cfg, device)
     if spec['kind'] == 'prototype':
@@ -440,25 +402,24 @@ def run_stage1_compare(args, out_dir: Path) -> int:
     # released before any method is built.
     print(f'\n======== segmenting ({args.seg}) + sampling every slide once ========')
     caches = open_caches(args, JOB_NAME, device)
-    sampler_cfg = _fov_sampler_cfg(args)
-    # The positions are placed for the camera that photographs them
-    # (`PHOTO_GAP` on --sensor): its sensor, and -- since it rotates -- the
+    fov = fov_from_args(args)
+    # The positions are placed for the camera that photographs them (the
+    # recipe's gap on its sensor): its sensor, and -- since it rotates -- the
     # bounding square and sensor margin it reads, so the rotated read stays on the
-    # tissue the sampler scored.
-    sensor = tuple(args.sensor)
-    camera = render_spec(PHOTO_GAP, sensor)
-    plan = (PlanSpec('native', camera=camera) if args.native_only
-            else PlanSpec('ladder', tuple(DEFAULT_RUNGS), camera=camera))
+    # tissue the sampler scored. The rungs are each slide's own (`rungs_for`).
+    camera = render_spec(fov.gap, fov.sensor)
     slide_cache = {}
     for dataset_id, names in slides_by_dataset.items():
         for wsi_name in names:
             entry = locate(wsi_name, dataset=dataset_id)
             # one microscope per slide, every rung through its own objective;
-            # the ladder draw through the sampler cache (FovSupply.cached)
+            # the draw through the sampler cache (FovSupply.cached)
             wsi = SafeSlide(entry.path)
+            plan = PlanSpec('ladder', fov.rungs_for(wsi.level_downsamples),
+                            camera=camera)
             supply = FovSupply.cached(
-                Render(SlideReader(wsi), sensor, PHOTO_GAP, ds=1.0), plan,
-                sampler_cfg,
+                Render(SlideReader(wsi), fov.sensor, fov.gap, ds=1.0), plan,
+                fov.sampler,
                 caches.sampler_root, masks=caches.masks,
                 report_dir=out_dir / 'sampler_reports' / dataset_id.replace('/', '_'))
             sampler = supply.sampler
@@ -543,10 +504,10 @@ def run_stage1_compare(args, out_dir: Path) -> int:
                     gt_ds = pos['rung']
                     gt_mpp = wsi.base_mpp * gt_ds
                     # `rung` is the CANONICAL bin (nearest DEFAULT_RUNGS
-                    # value in log space), not `gt_ds` itself -- under
-                    # --native-only, `gt_ds` is this WSI's own native
-                    # downsample (e.g. 4.00003), and grouping by that exact
-                    # float would give every slide its own private "rung 4"
+                    # value in log space), not `gt_ds` itself -- `gt_ds` is
+                    # this WSI's own native downsample (e.g. 4.00003), and
+                    # grouping by that exact float would give every slide its
+                    # own private "rung 4"
                     # instead of letting analyze_stage1_metrics.py aggregate
                     # them as the same one. `gt_ds`/`gt_mpp` keep the exact
                     # value for mpp_error_relative.
@@ -637,15 +598,15 @@ def run_stage1_compare(args, out_dir: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False)
     parser.add_argument('--tile', type=int, default=256)
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=42,
+                        help='the estimators\' own: the reference banks and the '
+                             'classic estimator. Where the FoVs go is the '
+                             'recipe\'s (--sampler-seed)')
     parser.add_argument('--device',
                         default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--sensor', type=int, nargs=2, default=list(REAL_PHOTO_SENSOR),
-                        metavar=('W', 'H'),
-                        help='query sensor, px. Default: the real photos, '
-                             f'{REAL_PHOTO_SENSOR[0]}x{REAL_PHOTO_SENSOR[1]}')
     parser.add_argument('--datasets', nargs='+',
                         default=['bracs/test', 'ki67_with_photo'],
                         help='which datasets to draw slides '
@@ -656,31 +617,16 @@ def main() -> int:
                              '(utilities/cli/build_cache/make_split.py) '
                              'so this never scores on a slide a checkpoint '
                              'was selected on')
-    parser.add_argument('--native-only', action='store_true',
-                        help='sample only the ds values '
-                             "this WSI's own pyramid actually has "
-                             '(native_plans) instead of every DsLadder rung '
-                             '-- see analyze_stage1_metrics.py\'s docstring '
-                             'for what this changes about the output tables')
-    parser.add_argument('--n-per-rung', type=int, default=20,
-                        help='query positions per rung per '
-                             'slide')
     parser.add_argument('--fov-per-rung', type=int, default=0,
                         help='score only the first k positions of every rung '
                              'of the draw (0: all). A smoke run reads the SAME '
                              'cached draw as the full run and scores a subset '
                              'of it, instead of drawing other FoVs with a '
-                             'smaller --n-per-rung')
+                             'smaller --sampler-n-per-rung')
+    # --fov, --max-ds, --sampler-*, --camera-*: the FoV recipe and its overrides.
+    add_fov_args(parser)
     # --seg / --mask-cache-job / --sampler-cache-job / --split-cache-job.
     add_cache_args(parser)
-    parser.add_argument('--overlap', action='store_true',
-                        help='allow jitter top-up (both the '
-                             'query positions and each KnnEstMpp\'s own '
-                             'reference bank) instead of a strictly disjoint '
-                             'lattice -- see _overlap_cfg for why the '
-                             'disjoint default can come up short at coarse '
-                             'rungs, where one tile\'s footprint is most of '
-                             'a tissue region')
     parser.add_argument('--knn-encoder', nargs='+', default=[],
                         help='one KnnEstMpp per encoder name '
                              '(TileEncoderFunc registry)')

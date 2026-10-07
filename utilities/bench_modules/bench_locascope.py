@@ -68,37 +68,27 @@ from TissueMaskConfig import add_mask_args, mask_cfg_from_args           # noqa:
 from stage3_localization.SIFT_RANSAC       import SiftRansacLocalizer                       # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names             # noqa: E402
 from CpuBudget         import CpuBudget                                 # noqa: E402
-from TileSampler       import PlanSpec, SamplerConfig              # noqa: E402
-from ReadGeometry      import REAL_PHOTO_SENSOR, levels_up_to          # noqa: E402
+from TileSampler       import PlanSpec                              # noqa: E402
 from TissueMaskConfig  import MASK_RECIPES, MaskMaker                   # noqa: E402
-from config            import DomainGapConfig                           # noqa: E402
-from ConfigArgs        import add_config_args, config_from_args        # noqa: E402
 from AccessDatasets    import list_names, locate                        # noqa: E402
 from SlideReader       import SlideReader                               # noqa: E402
 from camera            import Render                                    # noqa: E402
 from record            import FOVRecord                                 # noqa: E402
-from FovSupply         import FovSupply                                 # noqa: E402
+from FovSupply         import (FovRecipe, FovSupply, add_fov_args,  # noqa: E402
+                               fov_from_args)
 
 
-# ── the shots: FovSupply per (slide, level), the window bench's way ─────────
-#: The camera: the real photos' sensor, the full domain gap, and 5 per cent mpp
-#: jitter. The magnification is each level's own.
-SENSOR = REAL_PHOTO_SENSOR
-CAMERA = DomainGapConfig(query_mpp_jitter=0.05)
-#: Where the FoVs go: 50 per native level under the default richness mix, every
-#: level of a slide in one draw (`split_shots`).
-SAMPLER = SamplerConfig(n_per_rung=50, seed=0)
+# ── the shots: one FovSupply per slide, every level in one draw ─────────────
 
-
-def split_shots(datasets, split: str, n_wsi: int, sampler_cfg: SamplerConfig,
-                camera_cfg: DomainGapConfig, *, masks, max_ds=None, skip=None):
+def split_shots(datasets, split: str, n_wsi: int, fov: FovRecipe, *, masks,
+                skip=None):
     """`(row, image)` per synthetic FoV, rendered on demand: `row` is the
     FOVRecord of its ground truth, `image` uint8 RGB.
 
     SLIDES: the first `n_wsi` of each dataset's recorded `split`
     (`<dataset>#<split>`), the slides Stage1MppBench and OffGridScore score,
-    every one with a cached mask in `masks` (a MaskMaker). LEVELS: every
-    native level up to `max_ds`, all in ONE draw per slide: a microscope
+    every one with a cached mask in `masks` (a MaskMaker). LEVELS: the
+    recipe's (`fov.rungs_for`), all in ONE draw per slide: a microscope
     (`Render` at ds 1) and a `FovSupply` over `PlanSpec('ladder', <the levels'
     own ds>)`, each position photographed through the objective at its level.
     A level with no room for a FoV comes back short in the sampler's report; a
@@ -119,13 +109,12 @@ def split_shots(datasets, split: str, n_wsi: int, sampler_cfg: SamplerConfig,
             path = str(locate(name, dataset=dataset_split).path)
             reader = SlideReader(path)
             mask, _ = masks.mask(reader.slide)
-            rungs = tuple(float(reader.level_downsamples[lv])
-                          for lv in levels_up_to(reader.level_downsamples, max_ds))
-            microscope = Render(reader, SENSOR, camera_cfg, ds=1.0,
-                                seed=sampler_cfg.seed)
+            rungs = fov.rungs_for(reader.level_downsamples)
+            microscope = Render(reader, fov.sensor, fov.gap, ds=1.0,
+                                seed=fov.sampler.seed)
             supply = FovSupply(microscope, PlanSpec('ladder', rungs,
                                                     camera=microscope.spec),
-                               sampler_cfg, mask)
+                               fov.sampler, mask)
             try:
                 sampler = supply.sampler
             except RuntimeError as exc:
@@ -153,16 +142,16 @@ def split_shots(datasets, split: str, n_wsi: int, sampler_cfg: SamplerConfig,
 SHOTS_RECIPE = 'fov-supply-per-slide'
 
 
-def run_identity(args, sampler_cfg, camera_cfg, encoder, mask_cfg) -> dict:
+def run_identity(args, fov: FovRecipe, encoder, mask_cfg) -> dict:
     """Everything that decides which shots a row is about and how it is
     scored. A resume skips shots by filename, and a filename is only an id:
     under another value of any of these, the same name is another FoV or
     another score, and rows of one bench would be mixed into another."""
     return {'shots': SHOTS_RECIPE,
             'datasets': list(args.datasets), 'split': args.split,
-            'n_wsi': args.n_wsi, 'max_ds': args.max_ds,
-            'sampler': dataclasses.asdict(sampler_cfg),
-            'sensor': list(SENSOR), 'camera': dataclasses.asdict(camera_cfg),
+            'n_wsi': args.n_wsi, 'max_ds': fov.max_ds, 'rungs': fov.rungs,
+            'sampler': dataclasses.asdict(fov.sampler),
+            'sensor': list(fov.sensor), 'camera': dataclasses.asdict(fov.gap),
             'fov_mask': MASK_RECIPES['hest'].seg_id(),
             'encoder': encoder.identity_id(),
             'mask': [mask_cfg.seg_id(), mask_cfg.region_id()],
@@ -680,15 +669,11 @@ def main():
     ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
     ap.add_argument('--split', default='test', choices=['val', 'test'])
     ap.add_argument('--n-wsi', type=int, default=5, help='slides per dataset')
-    ap.add_argument('--max-ds', type=float, default=None,
-                    help='leave out levels coarser than this; default every level')
+    # --fov, --max-ds, --sampler-* (--sampler-n-per-rung, --sampler-seed, ...)
+    # and --camera-*, each given flag replacing that field of the recipe.
+    add_fov_args(ap)
     ap.add_argument('--fov-mask-cache-job', default='MppRoutingHead',
                     help='hest masks the FoVs are placed on')
-    # One --sampler-* flag per SAMPLER field (--sampler-n-per-rung,
-    # --sampler-seed, ...) and one --camera-* flag per CAMERA field, as the
-    # window bench has them.
-    add_config_args(ap, SAMPLER, 'sampler')
-    add_config_args(ap, CAMERA, 'camera')
     ap.add_argument('--out',        default=None,
                     help='Output dir, used verbatim. Default: '
                          'result/<SLURM_JOB_NAME or BenchLocaScope>/<encoder>/ '
@@ -809,8 +794,8 @@ def main():
     enc_tag = encoder_tag(args.encoder, args.head)
     out_dir = args.out or job_result_dir('BenchLocaScope', encoder=enc_tag)
     os.makedirs(out_dir, exist_ok=True)
-    sampler_cfg = config_from_args(args, SAMPLER, 'sampler')
-    camera_cfg = config_from_args(args, CAMERA, 'camera')
+    fov = fov_from_args(args)
+    sampler_cfg = fov.sampler
     print(f'shots      : {" ".join(args.datasets)}  #{args.split}  n_wsi={args.n_wsi}  '
           f'per level {sampler_cfg.n_per_rung}  seed {sampler_cfg.seed}  '
           f'sampler {sampler_cfg.identity_id()}')
@@ -856,7 +841,7 @@ def main():
     all_metrics: List[dict] = []
     metrics_path = os.path.join(out_dir, 'metrics.csv')
     run_path = os.path.join(out_dir, 'run.json')
-    run = run_identity(args, sampler_cfg, camera_cfg, encoder, mask_cfg)
+    run = run_identity(args, fov, encoder, mask_cfg)
     metrics_fields: Optional[List[str]] = None
     done: set = set()
     if args.resume and os.path.exists(metrics_path):
@@ -883,9 +868,8 @@ def main():
 
     fov_masks = MaskMaker(MASK_RECIPES['hest'],
                           Cache.cache_root(args.fov_mask_cache_job, 'mask'), device)
-    shots = split_shots(args.datasets, args.split, args.n_wsi, sampler_cfg,
-                        camera_cfg, masks=fov_masks, max_ds=args.max_ds,
-                        skip=lambda name: name in done)
+    shots = split_shots(args.datasets, args.split, args.n_wsi, fov,
+                        masks=fov_masks, skip=lambda name: name in done)
     if done:
         print(f'Shots      : {len(done)} already done are passed over', flush=True)
 

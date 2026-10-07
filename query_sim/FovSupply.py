@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterator, Optional, Tuple, Union
 
 import numpy as np
 
+from ConfigArgs import add_config_args, config_from_args         # noqa: E402
+from ReadGeometry import levels_up_to                            # noqa: E402
 from TissueMask import TissueMask                                # noqa: E402
 from TileSampler import (InheritConfig, OverlapConfig, PlanSpec,  # noqa: E402
                          RichnessConfig, SamplerConfig, TileSampler)
@@ -65,6 +67,14 @@ class FovRecipe:
                              f'with explicit rungs {self.rungs} it would bound '
                              f'nothing')
 
+    def rungs_for(self, level_downsamples) -> Tuple[float, ...]:
+        """The ds of every rung on a slide with these `level_downsamples`:
+        its own levels up to `max_ds` when the recipe is 'native'."""
+        if self.rungs != 'native':
+            return tuple(float(r) for r in self.rungs)
+        return tuple(float(level_downsamples[lv])
+                     for lv in levels_up_to(level_downsamples, self.max_ds))
+
 
 #: `--fov <name>` resolves here. Every field of every config is written out
 #: (test_config_identity's recipe lint); a caller `dataclasses.replace`s what
@@ -78,7 +88,12 @@ class FovRecipe:
 #: routing-query           MppRoutingHead's query tiles: a tile-sized sensor
 #:                         (`--tile` replaces it), the full gap with the two
 #:                         frame-referenced optics present half the time and no
-#:                         stage shift, over DsLadder's six rungs.
+#:                         stage shift, over DsLadder's six rungs. The half is a
+#:                         starting value, not a measured one: a tile is as
+#:                         likely to come from a frame's lit centre as from its
+#:                         darkened edge. No tile above 50 per cent background:
+#:                         the label is scale, and a mostly blank field carries
+#:                         no scale cue at all.
 #: routing-support-native  its support tiles read as stage 1 reads them at
 #:                         inference: rotation only, no photometric gap.
 FOV_RECIPES: Dict[str, FovRecipe] = {
@@ -170,6 +185,32 @@ FOV_RECIPES: Dict[str, FovRecipe] = {
             candidates='lattice', max_tries_per_tile=5),
         rungs=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0), max_ds=None),
 }
+
+
+def add_fov_args(ap, default: str = 'bench') -> None:
+    """`--fov <recipe>`, one `--sampler-*` flag per field of its draw, one
+    `--camera-*` per field of its gap and `--max-ds`: the same flags in every
+    tool that photographs FoVs, so any recipe one tool uses another can name.
+    A flag given replaces that field of whichever recipe `--fov` names."""
+    ap.add_argument('--fov', choices=sorted(FOV_RECIPES), default=default,
+                    help='FoV recipe (FovSupply.FOV_RECIPES): sensor, domain '
+                         'gap, draw and levels')
+    ap.add_argument('--max-ds', type=float, default=None,
+                    help="leave out levels coarser than this; default the "
+                         "recipe's own")
+    add_config_args(ap, FOV_RECIPES[default].sampler, 'sampler')
+    add_config_args(ap, FOV_RECIPES[default].gap, 'camera')
+
+
+def fov_from_args(args) -> FovRecipe:
+    """The recipe `--fov` names with every flag given applied. A flag makes a
+    different config and so a different id: an override is never served a
+    draw or a photo made without it."""
+    recipe = FOV_RECIPES[args.fov]
+    return replace(
+        recipe, sampler=config_from_args(args, recipe.sampler, 'sampler'),
+        gap=config_from_args(args, recipe.gap, 'camera'),
+        max_ds=args.max_ds if args.max_ds is not None else recipe.max_ds)
 
 
 class FovSupply:

@@ -41,7 +41,7 @@ has to beat, not a step towards them.
 | 最大縮小倍數 | `max_resample_factor` | 候選層需要的縮小倍數（rung ÷ 該層 ds）超過它就不列入；控制讀取成本（讀取邊長 = tile × 倍數）。預設不設 |
 | 重新取樣比例 | `resampled_share` | 只用於 `mixed`：走 resampled 的比例，預設 0.5 |
 | 讀取模式標籤 | read tag | 讀取模式寫成一個字串，用在權重與 resume 檔名、wandb run 名稱、CSV 的 `read_level` 欄、評估標籤：`resampled-finer`、`resampled-finer-x8`、`mixed-l0-p0.3`。預設模式為空字串，CSV 寫 `pyramid`。四個預設值固定不改，舊的檔名與 resume 檔才繼續代表 pyramid |
-| 原生 / 重新取樣（tile） | native / resampled (tile) | 一張 tile 是否直接讀自目標 mpp 的金字塔層（`QueryFromWSI.reads_natively`），CSV 的 `n_native`、`level_accuracy_resampled`、`native` 欄。與 Camera 風格參數 `native`（`CAMERA_GEOMETRY_ONLY`）無關，也與讀取模式不同：讀取模式描述模型怎麼訓練，這個描述一張 tile 怎麼讀出來 |
+| 原生 / 重新取樣（tile） | native / resampled (tile) | 一張 tile 是否直接讀自目標 mpp 的金字塔層（`QueryFromWSI.reads_natively`），CSV 的 `n_native`、`level_accuracy_resampled`、`native` 欄。與 Camera 風格參數 `native`（'routing-support-native' recipe）無關，也與讀取模式不同：讀取模式描述模型怎麼訓練，這個描述一張 tile 怎麼讀出來 |
 | head 名稱 | head name | `[mix_]` + `[attn_ / clsattn_ / 無]` + 分類器名；沒有前綴即 `fixed`、只用最後一層。名稱只是 `HEAD_CHOICES` 的 key，`Runtime.head_parts` 從登記內容讀回各部分 |
 
 ## Task
@@ -283,12 +283,12 @@ They are not switched off; they are made **present only sometimes**.
 `DomainGapConfig` gained `vignette_p` / `distortion_p` (default `1.0` =
 always, so every existing config and every already-generated corpus keeps its
 exact behaviour — `pipeline._coin` does not even draw at 1.0, so the rng
-sequence is byte-identical), and `Datasets.OPTICS_P = 0.5` sets both here.
+sequence is byte-identical), and the 'routing-query' recipe sets both to 0.5.
 
 Why a probability rather than a wider strength range: a real photograph's
 tiles are slices of ONE vignette, and a tile from the lit centre of the frame
 has none at all. Drawing strength from `(0, 0.45)` models only the darkened-
-edge kind, ever more weakly; a coin models both kinds. `OPTICS_P = 0.5` says a
+edge kind, ever more weakly; a coin models both kinds. 0.5 says a
 tile is as likely to have come from the centre as from the edge — a starting
 value, not a measured one.
 

@@ -54,15 +54,14 @@ import torch.utils.data                                             # noqa: E402
 from AccessDatasets import locate, list_names, pick_wsi_names        # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from Cache import cache_root, job_name                               # noqa: E402
-from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
-                         SamplerConfig, TileSampler)
+from TileSampler import PlanSpec, TileSampler                       # noqa: E402
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from ReadGeometry import finer_levels                               # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
 from WsiSplit import SPLIT_JOB                                       # noqa: E402
 from camera import Render, photo_rng, render_spec                    # noqa: E402
 from SlideReader import SlideReader                                  # noqa: E402
-from config import DomainGapConfig                                   # noqa: E402
+from FovSupply import FOV_RECIPES                                    # noqa: E402
 
 
 #: The label space every baseline classifies into -- rung VALUE, not a
@@ -100,108 +99,33 @@ NUM_CLASSES = len(RUNGS)
 # `CameraBank.camera_for`. `CameraBank` builds every Render with the sensor
 # `(tile_size, tile_size)`.
 
-#: How often the two FRAME-REFERENCED optics (vignette, lens distortion) are
-#: present on a shot -- see `CameraBank.camera_for` for why they cannot simply
-#: be always-on at this sensor size, and `DomainGapConfig.vignette_p` for the
-#: mechanism. 0.5 is a starting value, not a measured one: it says a tile is as
-#: likely to have come from a frame's lit centre as from its darkened edge.
-OPTICS_P = 0.5
+#: The two camera templates and the draw are `FovSupply.FOV_RECIPES`
+#: 'routing-query' -- every query tile: the full gap, the two frame-referenced
+#: optics present half the time, no stage shift -- and 'routing-support-native'
+#: -- `--support-native`: rotation only, every photometric channel at its no-op,
+#: which is what a stage-1 reference tile read straight off the WSI looks like.
+#: Both share one sampler and DsLadder's six rungs. `CameraBank.camera_for`
+#: replaces only `stage_shift_max` (from `RenderConfig`); the sensor is the
+#: tile, `(tile_size, tile_size)`.
+#:
+#: The sampler's caps sum to exactly 1.0, so with `floor_frame='ask'` a rung
+#: that cannot supply 60 per cent `bg30_50` comes back SHORT rather than being
+#: topped up with background: `n_per_rung` is a ceiling and not a promise, and
+#: the training loop prints a per-rung `trained on` line so the shortfall is a
+#: number on screen.
+QUERY_RECIPE = 'routing-query'
+SUPPORT_NATIVE_RECIPE = 'routing-support-native'
 
-#: Two COMPLETE, explicit `DomainGapConfig` templates -- `CameraBank.camera_
-#: for`'s `native` switch picks one and `replace()`s only `stage_shift_max`
-#: (from `RenderConfig`, see below); the sensor and the rung are the Render's
-#: own (see `camera_for`). Every OTHER field is spelled out here BY
-#: VALUE on both, not left for `DomainGapConfig`'s own dataclass defaults to
-#: silently supply, so a reader does not have to open `DomainGapConfig`'s
-#: source to know what a tile got.
-#:
-#: `photometric`/`geometric` (`query_sim/config.py`'s own comment: "if
-#: False, skip color/vignette/lens/noise/jpeg" / "if False, skip rotation +
-#: scale", enforced in `query_sim/pipeline.py:195,209`) are REAL master
-#: switches, not decorative -- `CAMERA_GEOMETRY_ONLY` sets `photometric=
-#: False` so `pipeline.py` skips that whole branch regardless of what any
-#: individual colour/vignette/distortion/noise/jpeg field below says. Every
-#: one of those fields is STILL spelled out explicitly underneath the
-#: switch (not left at the class default) -- belt and suspenders: the
-#: switch is the actual guarantee, the explicit no-op values are what a
-#: reader sees without having to know the switch exists.
-#:
-#: CAMERA_FULL: simulates a real photograph taken through a microscope --
-#: `photometric=True`, `geometric=True`, every value the class's own real
-#: production default.
-#:
-#: CAMERA_GEOMETRY_ONLY: `geometric=True` (rotation stays on -- a real
-#: photo's own framing genuinely varies by it) but `scale_range=(1.0,1.0)`
-#: (no scale JITTER specifically -- `geometric` alone cannot separate
-#: rotation from scale, both live under one switch in `pipeline.py`).
-#: `photometric=False` (colour/vignette/lens/noise/jpeg all off). Built for
-#: `Episodes.render_episode`'s `support_native` switch: at real Stage 1
-#: inference, a reference/support tile is read straight off the target WSI
-#: (`KnnEstMpp`'s own reference bank does exactly this, no photo simulation
-#: at all), so training support this way is what lets training match what
-#: deployment will actually feed the model on that side, while `query` --
-#: always `CAMERA_FULL` -- keeps simulating the real photograph a query
-#: genuinely is.
-_CAMERA_TEMPLATE_KWARGS = dict(stage_shift_max=0)
-
-CAMERA_FULL = DomainGapConfig(
-    rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
-    scale_range=(0.90, 1.15), query_mpp_jitter=0.0,
-    brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
-    saturation=1.0, color_temp_range=(-0.12, 0.12),
-    vignette_range=(0.15, 0.45), vignette_p=OPTICS_P, distortion_p=OPTICS_P,
-    distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
-    defocus_radius=2, chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
-    photometric=True, geometric=True,
-    **_CAMERA_TEMPLATE_KWARGS)
-
-CAMERA_GEOMETRY_ONLY = DomainGapConfig(
-    rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
-    scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
-    brightness_range=(0.0, 0.0), contrast_range=(0.0, 0.0),
-    saturation=1.0, color_temp_range=(0.0, 0.0),
-    vignette_range=(0.0, 0.0), vignette_p=0.0, distortion_p=0.0,
-    distortion_k1_range=(0.0, 0.0), distortion_k2=0.0,
-    defocus_radius=0, chromatic_shift=0, noise_sigma=0.0, jpeg_quality=100,
-    photometric=False, geometric=True,
-    **_CAMERA_TEMPLATE_KWARGS)
-
-#: This package's richness contract: `bg50_70` and `bg70_85` capped at 0 on top
-#: of `RichnessConfig`'s own zeros for `bg85_95`/`bg95_100`, so NO tile above 50
-#: per cent background is ever sampled. The label here is SCALE, and a mostly
-#: blank field carries no scale cue at all -- it is not a hard example, it is an
-#: unanswerable one, and at coarse rungs it is exactly what the supply degrades
-#: into.
-#:
-#: READ THE COST BEFORE CHANGING n_per_rung. Those two buckets are where a
-#: SHORTFALL goes: `RichnessConfig`'s own docstring records the 475/500 episode,
-#: where caps that summed to exactly 1.0 left a short rung with nowhere to take
-#: its remainder from and the shortage was read as a property of the slides.
-#: These caps sum to exactly 1.0 again -- deliberately this time. With
-#: `floor_frame='ask'` the consequence is that a rung which cannot supply 60 per
-#: cent `bg30_50` comes back SHORT rather than being topped up with background,
-#: so `n_per_rung` is a ceiling and not a promise.
-#:
-#: That is why the training loop prints a per-rung `trained on` line: the
-#: shortfall is now a number on screen every epoch instead of an assumption.
-RICHNESS = RichnessConfig(caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0))
-# OVERLAP = OverlapConfig()
-OVERLAP = OverlapConfig(
-    step=0.5,                       # half a footprint: was grid_step=128 on 256
-    max_overlap_ratio=0.5,
-    overlapping_share=1.0,
-    jitter_cap= 0.25,
-)
 
 def routing_camera(tile_size: int):
     """The `ReadSpec` every manifest row is rendered with: a tile-sized
-    sensor under the routing heads' camera. `CAMERA_FULL` and
-    `CAMERA_GEOMETRY_ONLY` (the `native` support style) both rotate, so they
-    read the same square and one spec covers both -- checked, so a template
-    that stopped rotating could not leave the manifest reserving the wrong
-    read."""
-    full = render_spec(CAMERA_FULL, (tile_size, tile_size))
-    native = render_spec(CAMERA_GEOMETRY_ONLY, (tile_size, tile_size))
+    sensor under the routing heads' camera. The query and the native support
+    templates both rotate, so they read the same square and one spec covers
+    both -- checked, so a template that stopped rotating could not leave the
+    manifest reserving the wrong read."""
+    full = render_spec(FOV_RECIPES[QUERY_RECIPE].gap, (tile_size, tile_size))
+    native = render_spec(FOV_RECIPES[SUPPORT_NATIVE_RECIPE].gap,
+                         (tile_size, tile_size))
     if full != native:
         raise RuntimeError(f'the two camera templates read differently ({full} '
                            f'vs {native}); a manifest serves both, so they must not')
@@ -222,17 +146,19 @@ def data_record(tile_size: int, seg: str) -> Dict:
     `cli/evaluate.py` refuses to score it on data whose record differs, so a
     changed render cannot be read as a changed model."""
     from ConfigIdentity import enc, environment, parts_of, short_id, versions_of
-    sampler = SamplerConfig(richness=RICHNESS, overlap=OVERLAP)
+    camera_full = FOV_RECIPES[QUERY_RECIPE].gap
+    camera_native = FOV_RECIPES[SUPPORT_NATIVE_RECIPE].gap
+    sampler = FOV_RECIPES[QUERY_RECIPE].sampler
     mask = MASK_RECIPES[seg]
     plan = PlanSpec('ladder', tuple(RUNGS), camera=routing_camera(tile_size))
     parts = ([f'sampler.{p}' for p in parts_of(sampler, exclude=('n_per_rung', 'seed'))]
              + [f'plan={enc(plan.key())}', f'rungs={enc(RUNGS)}',
-                f'camera_full={enc(CAMERA_FULL.identity_id())}',
-                f'camera_native={enc(CAMERA_GEOMETRY_ONLY.identity_id())}',
+                f'camera_full={enc(camera_full.identity_id())}',
+                f'camera_native={enc(camera_native.identity_id())}',
                 f'seg_id={enc(mask.seg_id())}', f'region_id={enc(mask.region_id())}',
                 f'version={enc(DATA_VERSION)}'])
     versions = {}
-    for owner in (sampler, mask, CAMERA_FULL, SlideReader):
+    for owner in (sampler, mask, camera_full, SlideReader):
         versions.update(versions_of(owner))
     return {'id': short_id(parts), 'parts': parts,
             'versions': dict(sorted(versions.items())), 'upstream': {},
@@ -359,8 +285,8 @@ def build_manifest(dataset_id: str, *, masks, sampler_root,
     rows: List[ManifestRow] = []
     names = list(wsi_names) if wsi_names is not None else list_names(dataset=dataset_id)
     names = pick_wsi_names(names, max_wsi, seed)
-    cfg = SamplerConfig(n_per_rung=n_per_rung, seed=seed,
-                        richness=RICHNESS, overlap=OVERLAP)
+    cfg = replace(FOV_RECIPES[QUERY_RECIPE].sampler,
+                  n_per_rung=n_per_rung, seed=seed)
     # The camera that renders every row: its footprint is the tile, and the
     # sampler reserves exactly what it reads, so no position is offered that
     # the Camera cannot read.
@@ -393,7 +319,7 @@ def class_weights(rows: List[ManifestRow], device) -> torch.Tensor:
     unchanged, only its distribution across classes. This is the direct fix
     for the failure mode `HeadConfig`'s own docstring already names from the
     OTHER direction (fp16-under-Adam): even with a correct, finite loss,
-    `RICHNESS`'s own shortfall at coarse rungs (spec.md: "n_per_rung is a
+    the routing sampler's own shortfall at coarse rungs (spec.md: "n_per_rung is a
     ceiling, not a promise") means rung 32 supplies roughly 1 percent of what
     rung 1 does, so an unweighted mean lets the common rungs' gradient drown
     the rare ones out (near-perfect accuracy wherever the true class was the majority
@@ -562,22 +488,21 @@ class CameraBank:
     def camera_for(self, dataset_id: str, wsi_name: str, rung: float, *,
                    native: bool = False,
                    read_level: Optional[int] = None) -> Render:
-        '''`native=False` (default): `CAMERA_FULL` -- simulates a real
-        photograph, every rotation/scale/colour/vignette/distortion channel
-        active. `native=True`: `CAMERA_GEOMETRY_ONLY` -- only rotation, every
-        other channel pinned to its own no-op value -- for a caller that
-        wants a tile closer to what reading straight off the WSI gives (see
-        that constant's own module-level docstring for why: a real Stage 1
-        reference/support tile, unlike a query, is never actually
-        photographed).
+        '''`native=False` (default): the 'routing-query' gap -- simulates a
+        real photograph, every rotation/scale/colour/vignette/distortion
+        channel active. `native=True`: 'routing-support-native' -- only
+        rotation, every other channel pinned to its own no-op value -- for a
+        caller that wants a tile closer to what reading straight off the WSI
+        gives: a real Stage 1 reference/support tile, unlike a query, is never
+        actually photographed.
 
         `native` is part of the cache KEY, not just the config: the same
         (WSI, rung) needs up to two DIFFERENT `Camera` instances now, one
         per style, since a caller (`Episodes.render_episode`'s own
         `support_native` switch) may ask for both across one run.
 
-        THE TWO FRAME-REFERENCED OPS, PRESENT ONLY SOMETIMES (on `CAMERA_
-        FULL`; always off on `CAMERA_GEOMETRY_ONLY`). Every other op in
+        THE TWO FRAME-REFERENCED OPS, PRESENT ONLY SOMETIMES (on the query
+        gap; always off on the native support one). Every other op in
         `query_sim/augment/` is per-pixel or local (colour, colour
         temperature, brightness/contrast, defocus, chromatic shift, noise,
         JPEG) or a scene transform (rotation, scale), and so means the same
@@ -601,7 +526,8 @@ class CameraBank:
         cam = self._camera.get(key)
         if cam is None:
             reader = self.reader_for(dataset_id, wsi_name)
-            template = CAMERA_GEOMETRY_ONLY if native else CAMERA_FULL
+            template = FOV_RECIPES[SUPPORT_NATIVE_RECIPE if native
+                                   else QUERY_RECIPE].gap
             gap_cfg = replace(template, stage_shift_max=self.cfg.stage_shift_max)
             # seed=None (the default): determinism, where wanted, is handled
             # per-call via capture(..., rng=...) in render_row -- a fixed

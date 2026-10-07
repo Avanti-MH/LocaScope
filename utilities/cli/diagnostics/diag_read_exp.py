@@ -12,7 +12,7 @@ of them can be measured before and after against the same numbers:
     grid      SlideReader.read_grid at each of --grid-levels: tiles/s, with
               the CpuBudget's workers (blocks at an integer ds, one read per
               region otherwise -- the BRACS level-1 case)
-    capture   render_row over sampler-placed training rows (CAMERA_FULL):
+    capture   render_row over sampler-placed training rows (routing-query):
               rows/s, one process
     tiles     SlideReader.read_samples of native reference tiles: tiles/s
     fov       FovSupply over the window bench's still FoV: shots/s
@@ -79,7 +79,7 @@ from camera import Render, render_spec                                # noqa: E4
 from pipeline import simulate_with_gt                                 # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR                            # noqa: E402
 from config import DomainGapConfig                                    # noqa: E402
-from FovSupply import FovSupply                                       # noqa: E402
+from FovSupply import FOV_RECIPES, FovSupply                          # noqa: E402
 import training.MppRoutingHead.Datasets as Datasets                    # noqa: E402
 
 TILE = 256
@@ -151,7 +151,7 @@ def flow_grid(t, args, name, wsi, mask, budget):
 
 
 def flow_capture(t, args, dataset, name, wsi, mask):
-    spec = render_spec(Datasets.CAMERA_FULL, (TILE, TILE))
+    spec = render_spec(FOV_RECIPES['routing-query'].gap, (TILE, TILE))
     rows = [Datasets.ManifestRow(dataset=dataset, wsi_name=name, x=int(s.meta.x),
                                  y=int(s.meta.y), rung=float(s.meta.ds),
                                  bucket=s.meta.bucket,
@@ -163,7 +163,7 @@ def flow_capture(t, args, dataset, name, wsi, mask):
         bank = Datasets.CameraBank(rc)
         for row in rows:
             Datasets.render_row(bank, row, rc, deterministic=True)
-    t.add(name, 'capture', 'render_row CAMERA_FULL', len(rows), _best(go, args.repeats))
+    t.add(name, 'capture', 'render_row routing-query', len(rows), _best(go, args.repeats))
 
 
 def flow_tiles(t, args, name, wsi, mask):

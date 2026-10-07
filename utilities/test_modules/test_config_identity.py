@@ -222,6 +222,9 @@ def t_routing_data_record_moves_with_what_makes_the_tiles():
     package's DATA_VERSION moves."""
     import training.MppRoutingHead.Datasets as D
     a = D.data_record(256, 'hest')
+    # what every routing-head checkpoint trained at 256 on hest carries; a
+    # move of its configs into FOV_RECIPES must not change it
+    assert a['id'] == 'e1b6e602ac441e1b', a['id']
     assert CI.record_diff(a, D.data_record(256, 'hest')) == []
     assert any(d.startswith('id:') for d in CI.record_diff(a, D.data_record(224, 'hest')))
     saved = D.DATA_VERSION
@@ -592,6 +595,51 @@ def t_every_recipe_writes_every_field():
     return f'{n} recipes in {len(_RECIPE_MODULES)} modules'
 
 
+def t_no_config_constant_outside_a_recipe_table():
+    """A config written down at module level is a recipe under another name:
+    one more place a value lives, read by nobody who looks for the recipes.
+    So every module-level statement that builds a config -- a call to a config
+    class, or a `replace` of one -- is a recipe table's entry or nothing."""
+    import ast
+    from FovSupply import FovRecipe
+    names = {c.__name__ for c in _project_configs()}
+    names |= {'FovRecipe', 'ModelConfig', 'replace'}
+    assert FovRecipe.__name__ in names
+
+    def called(node) -> str:
+        f = node.func
+        return f.id if isinstance(f, ast.Name) else (
+            f.attr if isinstance(f, ast.Attribute) else '')
+
+    found = []
+    for top in _LINT_ROOTS:
+        for dirpath, _, files in os.walk(_ROOT / top):
+            for name in files:
+                path = Path(dirpath) / name
+                rel = path.relative_to(_ROOT).as_posix()
+                if (not name.endswith('.py') or 'test_modules' in rel
+                        or 'FewShotEoMT' in rel):
+                    continue
+                tree = ast.parse(path.read_text(errors='replace'))
+                for node in tree.body:
+                    if isinstance(node, ast.Assign):
+                        targets, value = node.targets, node.value
+                    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                        targets, value = [node.target], node.value
+                    else:
+                        continue
+                    target = ', '.join(t.id for t in targets if isinstance(t, ast.Name))
+                    if target.endswith('RECIPES'):
+                        continue
+                    calls = sorted({called(c) for c in ast.walk(value)
+                                    if isinstance(c, ast.Call) and called(c) in names})
+                    if calls:
+                        found.append(f'{rel}:{node.lineno} {target} = {"/".join(calls)}(...)')
+    assert not found, ('module-level configs outside a recipe table:\n  '
+                       + '\n  '.join(found))
+    return f'{len(names) - 1} config classes checked'
+
+
 def t_recipes_equal_the_configs_they_replace():
     """Frozen copies of the expressions each moved recipe replaced: written out
     in full, a recipe must still be the same config -- the same ids, so every
@@ -880,6 +928,7 @@ def main() -> int:
 
     print('recipes')
     check('every recipe writes every field',  t_every_recipe_writes_every_field)
+    check('no config constant outside one',   t_no_config_constant_outside_a_recipe_table)
     check('moved recipes are the same configs', t_recipes_equal_the_configs_they_replace)
 
     print('weights_id')

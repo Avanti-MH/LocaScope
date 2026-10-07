@@ -7,8 +7,8 @@ The reference behind stage 1 is 40 tiles per level, drawn inside the tissue
 mask and rebuilt in memory on every LocaScopePipeline.build(). That is enough
 for a KNN to saturate (result/MppEstimate: 40 -> 640 buys 2.7 points) but it
 leaves no record of how the tiles were chosen. This tool draws them with
-TileSampler under the reference-bank richness contract (`KnnEstMpp.
-REFERENCE_BANK_RICHNESS`), one native rung per pyramid level, drops the ones
+TileSampler under the reference-bank recipe (`SAMPLER_RECIPES[
+'reference-bank']`), one native rung per pyramid level, drops the ones
 the scanner never photographed, encodes what is left, and stores the
 coordinates together with WHY each one is there -- its background score, its
 bucket, whether it is a grid, jitter or inherited tile, and its chain.
@@ -42,6 +42,7 @@ import csv
 import os
 import sys
 import time
+from dataclasses import replace
 import traceback
 from pathlib import Path
 
@@ -53,14 +54,12 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
 import Cache                                                        # noqa: E402
-from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from ReadGeometry import ReadSpec                                   # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from Store import FeatureStore as FS                                # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names           # noqa: E402
-from TileSampler import (InheritConfig, OverlapConfig,              # noqa: E402
-                         SamplerConfig, TileSampler, native_plans)
+from TileSampler import SAMPLER_RECIPES, TileSampler, native_plans  # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from _paths import encoder_tag, job_result_dir                      # noqa: E402
 
@@ -207,9 +206,9 @@ def main() -> int:
     ap.add_argument('--device', default='cuda')
     args = ap.parse_args()
 
-    cfg = SamplerConfig(n_per_rung=args.n_target, seed=args.seed,
-                        richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig(),
-                        inherit=InheritConfig(stack_kind='F', share=args.inherit_share))
+    bank = SAMPLER_RECIPES['reference-bank']
+    cfg = replace(bank, n_per_rung=args.n_target, seed=args.seed,
+                  inherit=replace(bank.inherit, share=args.inherit_share))
     plan = plan_label(args.levels, args.tile)
     enc_tag = encoder_tag(args.encoder, args.head)
     out_root = Path(args.out) if args.out else (

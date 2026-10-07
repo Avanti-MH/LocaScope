@@ -183,10 +183,10 @@ def main() -> int:
                     default='checkpoint',
                     help="how the SUPPORT side is rendered. 'checkpoint' "
                          "(default): as each checkpoint trained (its own "
-                         "--support-native). 'on': CAMERA_GEOMETRY_ONLY for "
+                         "--support-native). 'on': routing-support-native for "
                          "every checkpoint -- rotation only, closer to the raw "
                          "WSI crops PrototypeEstMpp feeds at deployment (which "
-                         "do not rotate). 'off': CAMERA_FULL for every one. Off "
+                         "do not rotate). 'off': routing-query for every one. Off "
                          "the default, the CSVs are named test_scores[_kxk]_"
                          "support-<on|off>_* so they do not replace the default "
                          "run's")
@@ -235,7 +235,7 @@ def main() -> int:
         'as each checkpoint trained (--support-native recorded in it)'
         if args.support_native == 'checkpoint' else
         f'{args.support_native} for every checkpoint ('
-        f'{"CAMERA_GEOMETRY_ONLY: rotation only" if args.support_native == "on" else "CAMERA_FULL"})'),
+        f'{"routing-support-native: rotation only" if args.support_native == "on" else "routing-query"})'),
         flush=True)
     print(f'retries       --feasibility-tries {args.feasibility_tries}: a draw '
           f'that cannot be drawn or rendered is drawn again, this many times',
@@ -283,8 +283,8 @@ def main() -> int:
                 f'score it with the code and environment it was trained under')
         # support_native: by default read back off THIS
         # checkpoint's own recorded args, same as tile above -- render_episode
-        # reproduces whatever this specific arm trained under (CAMERA_FULL or
-        # CAMERA_GEOMETRY_ONLY on the support side); --weights all scores
+        # reproduces whatever this specific arm trained under (routing-query or
+        # routing-support-native on the support side); --weights all scores
         # several arms in one call, and each may have trained differently.
         # --support-native on/off overrides that for every
         # checkpoint, to score them all against one kind of support -- the

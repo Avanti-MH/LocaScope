@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..'))
@@ -51,9 +52,9 @@ _paths.setup_import_paths()
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
-from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
+from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig      # noqa: E402
 from stage1_estimation.ClassifierEstMpp import ClassifierEstMpp, ClassifierEstMppConfig  # noqa: E402
-from TileSampler import OverlapConfig, SamplerConfig                  # noqa: E402
+from TileSampler import SAMPLER_RECIPES                               # noqa: E402
 
 
 def _bytes(n) -> str:
@@ -74,9 +75,8 @@ def measure(spec: dict, args, device) -> dict:
     if spec['kind'] == 'knn':
         cfg = KnnEstMppConfig(
             encoder=spec['encoder'],
-            sampler_cfg=SamplerConfig(n_per_rung=args.knn_samples,
-                                      richness=REFERENCE_BANK_RICHNESS,
-                                      overlap=OverlapConfig()),
+            sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'],
+                                n_per_rung=args.knn_samples),
             k=args.knn_k, tile_size=args.tile)
         est = KnnEstMpp(cfg, device)
         modules = (est.encoder.model,)

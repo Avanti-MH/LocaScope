@@ -63,7 +63,7 @@ not only one winner. Its tables also go to `<csv stem>_vote_*.csv` and
 `<csv stem>_fov_distribution.csv` next to the input.
 
 Filename: `<sampler_id>_<seg_id>.csv` -- the sampling recipe's own hash
-(rungs, n per rung, seed, native_only, tile size, sensor) plus the
+(the FoV recipe: draw, gap, sensor, levels; tile size) plus the
 tissue-mask recipe's hash, so one file can hold EVERY method's rows over the
 exact same drawn FoVs (a paired comparison, same premise as
 `bench_subspace_knn.py`'s arm A/B) and a changed sampling recipe cannot land
@@ -78,7 +78,7 @@ convention `bench_mpp_feature_decomposition.py`'s own `score()` uses.
 THREE VIEWS, not one table:
     per (wsi_name, rung, method)   -- does a method fail on one slide, or
                                     everywhere at that scale?
-    per (rung, method), cross-slide -- with n: `--native-only` means not
+    per (rung, method), cross-slide -- with n: native levels mean not
                                     every slide contributes every rung (BRACS
                                     has no native ds=2), so a rung's number
                                     can rest on one slide's worth of shots
@@ -87,7 +87,7 @@ THREE VIEWS, not one table:
     one overall number per method  -- the MEAN of the per-rung accuracies
                                     above, not the pooled accuracy over every
                                     shot: rungs are not sampled equally
-                                    (native_only leaves some rungs thin), and
+                                    (native levels leave some rungs thin), and
                                     pooling would let whichever rung has the
                                     most shots decide the winner instead of
                                     every scale counting equally.
@@ -104,7 +104,7 @@ Usage:
         result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv
 
     python utilities/cli/metrics/analyze_stage1_metrics.py \\
-        result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv --native-only
+        result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv
 """
 from __future__ import annotations
 
@@ -349,7 +349,7 @@ def cross_slide_rung(rows: list) -> list:
     """View 2: one row per (dataset, rung, method), pooled across every slide
     that contributed one. `n` says how many shots that actually is -- read it
     before trusting the accuracy next to it, especially under
-    `--native-only` where a rung some slides lack natively rests on fewer
+    native levels, where a rung some slides lack natively rests on fewer
     slides' worth of shots than one that every slide has.
 
     `classifier`/`reduction`/`loss` are carried through

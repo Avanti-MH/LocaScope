@@ -226,7 +226,7 @@ reader = SlideReader(wsi, resize='area')
 tiles = reader.read_samples(sampler, ReadSpec(256, 256))          # 每個 sample 用自己的 ds、stack
 pre   = reader.read(m.x, m.y, ReadSpec(256, 256, margin_out=centre_margin(256, 3)), m.ds)
 win   = reader.read(x0, y0, ReadSpec(w_out, h_out), ds)          # 原 read_rect
-camera = Render(SlideReader(wsi), CAMERA_FULL, ds=rung); camera.capture(x, y, rng=rng)
+camera = Render(SlideReader(wsi), sensor, FOV_RECIPES['routing-query'].gap, ds=rung); camera.capture(x, y, rng=rng)
 ```
 
 ### 各流程怎麼取像素

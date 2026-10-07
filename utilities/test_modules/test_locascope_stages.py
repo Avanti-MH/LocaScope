@@ -42,6 +42,7 @@ import random
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Tuple
 
@@ -58,18 +59,16 @@ from Store import FeatureMapCache                                   # noqa: E402
 from CpuBudget import CpuBudget                                     # noqa: E402
 from camera import render_spec                                      # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
-from config import DomainGapConfig                                  # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names             # noqa: E402
-from TileSampler import (OverlapConfig, PlanSpec, RichnessConfig,     # noqa: E402
-                         SamplerConfig, TileSampler)
-from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
+from TileSampler import SAMPLER_RECIPES, PlanSpec, TileSampler    # noqa: E402
+from FovSupply import FOV_RECIPES                                   # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
 from Cache import cache_root, job_name                               # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from ReadGeometry import ReadSpec, coarser_level                    # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
-from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig, REFERENCE_BANK_RICHNESS  # noqa: E402
+from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig      # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import (                     # noqa: E402
     SlidingWinSimRot, SlidingWinSimRotConfig, _sim_tensors)
 from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer                            # noqa: E402
@@ -102,31 +101,29 @@ def parse_stages(text: str) -> Tuple[int, ...]:
 
 def pick_fov(args, masks) -> None:
     """Set args.wsi / x / y / mpp: a slide of `--dataset` and one FoV at
-    `--rung` out of Stage1MppBench's own draw. The SamplerConfig and the plan
-    below are written out with the values `bench_stage1_mpp --overlap` uses at
-    its defaults (--n-per-rung 20, --seed, the DsLadder rungs, and the
-    bench's camera `PHOTO_GAP` on the query sensor, placed for its rotated read), so their key is the bench's and the
-    cached draw is read, not redrawn. If the two ever differ, the result is
-    still right -- the test just draws a separate set. `x, y` is the FoV's own
-    top-left. Only the positions follow the bench: the query itself stays a
-    plain read (`crop_query`), since stage 3's error is exact only without
-    rotation and lens."""
+    `--rung` out of Stage1MppBench's own draw: `FOV_RECIPES['bench']` with
+    its draw, its camera and each slide's own levels, exactly as the bench
+    places them, so the key is the bench's and the cached draw is read, not
+    redrawn. If the two ever differ, the result is still right -- the test
+    just draws a separate set. `x, y` is the FoV's own top-left. Only the
+    positions follow the bench: the query itself stays a plain read
+    (`crop_query`), since stage 3's error is exact only without rotation and
+    lens. `--rung` names a level by its nominal ds, matched in log space, so
+    4 finds BRACS's 4.00003."""
     names = list_names(dataset=args.dataset, split_job=args.split_cache_job)
     name = args.slide or random.Random(args.pick_seed).choice(names)
     entry = locate(name, dataset=args.dataset, split_job=args.split_cache_job)
     sampler_root = cache_root(
         args.sampler_cache_job or job_name('TestLocaScopeStages'), 'sampler')
+    fov = FOV_RECIPES['bench']
     sampler = TileSampler.cached(
-        entry.path,
-        SamplerConfig(n_per_rung=20, seed=args.seed,
-                      richness=RichnessConfig(),
-                      overlap=OverlapConfig(max_overlap_ratio=0.5,
-                                            overlapping_share=1.0,
-                                            jitter_cap=1.0)),
-        PlanSpec('ladder', tuple(DEFAULT_RUNGS),
-                 camera=render_spec(DomainGapConfig(), tuple(args.sensor))),
+        entry.path, fov.sampler,
+        PlanSpec('ladder',
+                 fov.rungs_for(SafeSlide(entry.path).level_downsamples),
+                 camera=render_spec(fov.gap, fov.sensor)),
         sampler_root, masks=masks)
-    at_rung = [s.meta for s in sampler if float(s.meta.ds) == args.rung]
+    at_rung = [s.meta for s in sampler
+               if abs(math.log(float(s.meta.ds) / args.rung)) < 0.01]
     if not at_rung:
         sys.exit(f'[FAIL] the draw holds no FoV of {name} at rung {args.rung:g}')
     meta = random.Random(args.pick_seed).choice(at_rung)
@@ -162,9 +159,8 @@ def run_stage1(wsi, mask, query_qc, args, device):
     """Returns the EstMppResult."""
     cfg = KnnEstMppConfig(
         encoder=args.encoder, mask_cfg=mask_cfg_from_args(args),
-        sampler_cfg=SamplerConfig(n_per_rung=args.samples,
-                                  seed=args.seed, richness=REFERENCE_BANK_RICHNESS,
-                                  overlap=OverlapConfig()),
+        sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'],
+                            n_per_rung=args.samples, seed=args.seed),
         k=args.k, tile_size=args.tile)
     est = KnnEstMpp(cfg, device=device).build(wsi, mask=mask)
     result = est.estimate(query_qc)

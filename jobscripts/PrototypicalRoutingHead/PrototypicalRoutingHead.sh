@@ -115,7 +115,7 @@ EVAL_FEASIBILITY_TRIES="${EVAL_FEASIBILITY_TRIES:-100}"
 # EVAL_ONLY=1 skips training and scores the checkpoints already in $OUT/weights.
 EVAL_ONLY="${EVAL_ONLY:-0}"
 # How evaluate.py renders the SUPPORT side (--support-native): checkpoint (each
-# as it trained), on (CAMERA_GEOMETRY_ONLY for all), off (CAMERA_FULL for all).
+# as it trained), on (routing-support-native for all), off (routing-query for all).
 # Off the default its CSVs are test_scores[_kxk]_support-<on|off>_*.
 EVAL_SUPPORT_NATIVE="${EVAL_SUPPORT_NATIVE:-checkpoint}"
 

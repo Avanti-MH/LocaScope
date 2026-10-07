@@ -30,7 +30,7 @@ MODE accuracy
              vs baseline via Spearman correlation, top-K neighbour overlap,
              and rank shift of baseline's own top-1.
   Sampling: `TileSampler`, level-stratified, HEST tissue mask, richness caps
-            from `KnnEstMpp.REFERENCE_BANK_RICHNESS` -- see "NOT
+            from `SAMPLER_RECIPES['reference-bank']` -- see "NOT
             --tissue-ratio" below.
   Outputs: result/<SLURM_JOB_NAME or AccuracyV1>/{summary.txt,cos_hist.png}
 
@@ -42,7 +42,7 @@ MODE speed
              over --batch-sizes x --dtypes x --levels x --overlaps, with a
              cpu/gpu time split per point and a bottleneck verdict.
 
-The reference bank's richness is `KnnEstMpp.REFERENCE_BANK_RICHNESS` (floors
+The reference bank's richness is `SAMPLER_RECIPES['reference-bank']`'s (floors
 all zero, caps admit background < 50%, no preference between the three buckets
 that clears), reused rather than a second copy: a fair per-config comparison
 should not also be biased toward busy tiles.
@@ -54,6 +54,7 @@ import os
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import replace
 from itertools import groupby
 from pathlib import Path
 
@@ -71,12 +72,11 @@ setup_import_paths()
 from SafeSlide import SafeSlide                                     # noqa: E402
 from PatchingLib import region_grids                                 # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
-from TileSampler import OverlapConfig, SamplerConfig, TileSampler, native_plans  # noqa: E402
+from TileSampler import SAMPLER_RECIPES, TileSampler, native_plans  # noqa: E402
 from ReadGeometry import ReadSpec                                                # noqa: E402
 from SlideReader import SlideReader                                             # noqa: E402
 from GigaPathFunc import GigaPathEncoderConfig                        # noqa: E402
-from TileEncoderFunc import TransformConfig                          # noqa: E402
-from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                        # noqa: E402
+from TileEncoderFunc import encoder_config                           # noqa: E402
 
 
 # ── shared config table ─────────────────────────────────────────────────────
@@ -162,8 +162,8 @@ def sample_wsi(wsi_path, per_wsi, masks, tile_size, seed):
 
     # One rung per PYRAMID level: this bench compares the SAME tiles across
     # encoder configs, so the magnifications are the slide's own.
-    cfg = SamplerConfig(n_per_rung=per_level, seed=seed,
-                        richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig())
+    cfg = replace(SAMPLER_RECIPES['reference-bank'],
+                  n_per_rung=per_level, seed=seed)
     sampler = TileSampler(wsi, mask, cfg)
     sampler.sample(native_plans(wsi, tile_size))
     sampler.summary()
@@ -361,14 +361,9 @@ def run_accuracy(args, out_dir: Path) -> int:
 #  MODE speed
 # ═════════════════════════════════════════════════════════════════════════
 
-#: GigaPath's own validated preprocessing (`GigaPathFunc._GIGAPATH_BASELINE`),
-#: spelled out here rather than relying on `TransformConfig()`'s bare
-#: defaults happening to match it -- they do today, but a bare default is
-#: not a promise the way naming the actual baseline values is.
-_CPU_TRANSFORM = TransformConfig(
-    scale_size=256, crop_size=224, interpolation='bicubic',
-    mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225),
-    preprocess='none').build()
+#: GigaPath's own preprocessing, read off its encoder config rather than
+#: written a second time here.
+_CPU_TRANSFORM = encoder_config('gigapath').transform.build()
 
 
 def _run_batch_loop(encoder, ctx, device, batch_size, images):

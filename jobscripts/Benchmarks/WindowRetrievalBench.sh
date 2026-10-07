@@ -99,14 +99,16 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # ---------------- what a run uses ---------------------------------------------
 #
 # The values are in bench_window_retrieval.py's CONFIG block, right after its
-# imports: which datasets and how many slides, the FoV sampler (the richness
-# buckets and their caps, overlap, how many FoVs per (slide, level)), the camera,
-# the tissue mask, the encoder, the arms. Edit them there.
+# imports (which datasets and how many slides, the encoder, the arms), and in
+# the two recipes it names: the FoV recipe (FOV, default 'bench' --
+# query_sim/FovSupply.FOV_RECIPES: the sampler, the camera, the levels) and the
+# mask recipe (SEG, default hest -- utilities/TissueMaskConfig.MASK_RECIPES).
 #
-# Nothing below sets one of them unless you name it, so the CONFIG block is what
-# runs. An environment variable, when set, becomes the matching flag and wins:
+# Nothing below sets one of them unless you name it, so the CONFIG block and
+# the recipes are what runs. An environment variable, when set, becomes the
+# matching flag and wins:
 #
-#   DATASETS  N_WSI  MAX_DS  SEED  N_FOV  RICHNESS  ROTATION  SCALE_MIN  SCALE_MAX
+#   DATASETS  N_WSI  FOV  SEED  N_FOV  ROTATION  SCALE_MIN  SCALE_MAX
 #   ARMS  SEG  MASK_CACHE_JOB  SPLIT_CACHE_JOB  BATCH_SIZE
 #
 # and EXTRA_ARGS takes ANY flag of the bench, which is how a single field is
@@ -120,9 +122,10 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # pool) or a recorded split of one, `<id>#<split>`. Quote a value that holds a `#`:
 # DATASETS="bracs/test#val ki67_with_photo#val".
 #
-# ROTATION / SCALE_MIN / SCALE_MAX: anything but 0 and 1 is scored against an
-# UPRIGHT reference window, so recall falls for a reason unrelated to pooling; the
-# entry exists to look at that fall.
+# ROTATION / SCALE_MIN / SCALE_MAX replace the recipe's gap, which rotates by
+# every quarter turn and scales 0.90-1.15. Anything but 0 and 1 is scored against
+# an UPRIGHT reference window, so recall falls for a reason unrelated to pooling;
+# ROTATION=0 SCALE_MIN=1 SCALE_MAX=1 isolates the pooling.
 
 # ---------------- which arms, and where the masks come from -----------------
 #
@@ -142,11 +145,11 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # script and the bench have to agree on it.
 COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
 [ -n "${DATASETS:-}" ]  && COMMON="$COMMON --datasets $DATASETS"
+[ -n "${FOV:-}" ]       && COMMON="$COMMON --fov $FOV"
 [ -n "${SEED:-}" ]      && COMMON="$COMMON --seed $SEED"
 [ -n "${ROTATION:-}" ]  && COMMON="$COMMON --rotation $ROTATION"
 [ -n "${SCALE_MIN:-}" ] && COMMON="$COMMON --scale-min $SCALE_MIN"
 [ -n "${SCALE_MAX:-}" ] && COMMON="$COMMON --scale-max $SCALE_MAX"
-[ -n "${RICHNESS:-}" ]  && COMMON="$COMMON --richness $RICHNESS"
 [ -n "${N_FOV:-}" ]     && COMMON="$COMMON --n-fov $N_FOV"
 [ -n "${BATCH_SIZE:-}" ] && COMMON="$COMMON --batch-size $BATCH_SIZE"
 # READ_WORKERS: reference-grid readers per shard (default: the shard's cpu share

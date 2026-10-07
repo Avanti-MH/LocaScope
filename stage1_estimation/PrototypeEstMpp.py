@@ -18,13 +18,11 @@ instead of another training episode -- and runs it once through the
 checkpoint's own Stage 2 (support_context/collapse) so every subsequent
 `estimate(query)` call is cheap.
 
-INDEPENDENT of `KnnEstMpp.py` ON PURPOSE: `StageInterface.py`'s
-own "tree, not list of alternatives" docstring -- each branch owns its own
-build-time setup. `native_plans`/`TileSampler`/`TissueMaskConfig` are shared
-UTILITIES both methods happen to call the same way, but this file's own
-richness/overlap tuning (`_REFERENCE_BANK_RICHNESS`/`_default_sampler_cfg`
-below) is its OWN copy, not imported from `KnnEstMpp.py` -- re-tuning one
-method's reference-bank recipe must not silently move the other's.
+INDEPENDENT of `KnnEstMpp.py`: `StageInterface.py`'s own "tree, not list of
+alternatives" docstring -- each branch owns its own build-time setup. Both
+take their reference bank from `SAMPLER_RECIPES['reference-bank']`, by name;
+re-tuning one method's bank is a new recipe for that method, never an edit
+that moves the other's.
 
 REFERENCE BANK = NATIVE PYRAMID LEVELS, NOT `Datasets.RUNGS`. The trained
 model has no fixed rung ladder baked into it anywhere: `Episodes.sample_
@@ -46,10 +44,10 @@ SUPPORT TILES ARE READ RAW, NEVER AUGMENTED -- `SlideReader.read_samples` is
 a direct WSI read (no `Render`, no augment chain), the same
 choice `KnnEstMpp` makes for its own reference bank and for the same reason: a
 reference/support tile is not a photograph, at real deployment it never was
-one. `training/MppRoutingHead/Datasets.CAMERA_GEOMETRY_ONLY` (`--support-
+one. The 'routing-support-native' FoV recipe (`FovSupply.FOV_RECIPES`, `--support-
 native`, `cli/train.py`) exists specifically so a checkpoint can be trained
-against support pixels shaped like THIS, rather than like `CAMERA_FULL`'s
-own simulated photograph -- whether a specific checkpoint actually was is a
+against support pixels shaped like THIS, rather than like the 'routing-query'
+recipe's simulated photograph -- whether a specific checkpoint actually was is a
 fact about how it was trained, not something this file needs to branch on:
 it just reads whatever pixels are here.
 
@@ -97,7 +95,7 @@ import torch
 
 
 from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
-from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
+from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
                          TileSampler, native_plans)
 from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
 from PatchingLib import QueryPatchContainer                              # noqa: E402
@@ -111,18 +109,11 @@ from ReadGeometry import ReadSpec                                        # noqa:
 from SlideReader import SlideReader                                     # noqa: E402
 
 
-# ── reference-bank sampling recipe -- THIS FILE'S OWN, not KnnEstMpp's ─────
-
-#: Own copy of the same SHAPE `KnnEstMpp.REFERENCE_BANK_RICHNESS` uses
-#: (floors all 0, first three richness buckets effectively uncapped, the
-#: bottom four excluded entirely) -- not imported from `KnnEstMpp.py`, see
-#: this module's own docstring for why the two methods stay independent.
-_REFERENCE_BANK_RICHNESS = RichnessConfig(
-    floors=(0.0,) * 7, caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0))
-
+# ── reference-bank sampling ──────────────────────────────────────────────────
 
 def _default_sampler_cfg() -> SamplerConfig:
-    '''`n_per_rung=5`, NOT `KnnEstMpp`'s own 500: those tiles are fed
+    '''`SAMPLER_RECIPES['reference-bank']` at `n_per_rung=5`, NOT the
+    recipe's 500: those tiles are fed
     directly into `support_context`/`collapse` here, the same modules
     `cli/train.py` trained against support sets of size `--n-support`
     (default 5) -- `SetTransformerPrototype`'s self-attention and
@@ -135,8 +126,7 @@ def _default_sampler_cfg() -> SamplerConfig:
     own docstring for why `from_checkpoint` does not try to read
     `--n-support` back off the checkpoint to set this automatically).
     '''
-    return SamplerConfig(n_per_rung=5, richness=_REFERENCE_BANK_RICHNESS,
-                         overlap=OverlapConfig())
+    return replace(SAMPLER_RECIPES['reference-bank'], n_per_rung=5)
 
 
 # ── config ───────────────────────────────────────────────────────────────────

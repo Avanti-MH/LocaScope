@@ -504,12 +504,12 @@ def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
 
     `support_native` (default `False`):
     passed straight through to `render_row`'s own `native` switch for the
-    SUPPORT side only -- `query` always renders `native=False` (`CAMERA_
-    FULL`, `Datasets.py`'s own module docstring), because a query genuinely
+    SUPPORT side only -- `query` always renders `native=False` (the
+    'routing-query' recipe, `FovSupply.FOV_RECIPES`), because a query genuinely
     IS a photograph, simulated or real, at both train and deploy time.
     Support is different: at real Stage 1 inference a reference/support
     tile is read straight off the target WSI, never photographed (see
-    `CAMERA_GEOMETRY_ONLY`'s own docstring) -- this switch is what lets
+    the 'routing-support-native' recipe) -- this switch is what lets
     training match that on the support side, when a caller asks for it.
 
     `None` if ANY position fails to render (`render_row` returns `None`

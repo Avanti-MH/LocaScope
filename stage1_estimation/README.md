@@ -83,7 +83,7 @@ patch 編碼後去投票。
   - `sampler_cfg`：`TileSampler.SamplerConfig`，決定參考庫怎麼抽（tile
     大小、每層抽幾張、seed、richness caps/floors、overlap）；query patch
     切多大也讀這裡的 `sampler_cfg.tile`，跟參考 tile 用同一個尺寸
-  - 預設 richness 是 `REFERENCE_BANK_RICHNESS`（只收背景比例 <50% 的
+  - 預設 sampler 是 `TileSampler.SAMPLER_RECIPES['reference-bank']`（只收背景比例 <50% 的
     tile，三個桶等權，不偏好任何一桶）
 - **建置**：`KnnEstMpp(cfg, device)` 建構時就把 encoder 建好；`.build(wsi, mask=None)`
   才是真正貴的一步——對「這個 WSI」現場抽參考 tile、編碼（`mask=None`

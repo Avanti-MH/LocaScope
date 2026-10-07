@@ -69,17 +69,19 @@ else:
 # CACHES: masks are read from MppRoutingHead's cache; the FoV draw is
 # Stage1MppBench's whatever the job name, so a smoke, a timing run and the
 # stages test (TestLocaScopeStages) read the FoVs the full run scores -- one
-# draw, one key, as long as STAGE1_N_PER_RUNG, SEED and OVERLAP are left alone.
+# draw, one key, as long as FOV and STAGE1_N_PER_RUNG are left alone.
 # A smoke scores a subset of it with FOV_PER_RUNG rather than drawing others.
 MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # its masks cover every val slide and the first test slides; "" = this job's own
 SAMPLER_CACHE_JOB="${SAMPLER_CACHE_JOB-Stage1MppBench}"   # "" = this job's own
 TILE="${TILE:-256}"
-SENSOR="${SENSOR:-1440 1024}"
 BATCH_SIZE="${BATCH_SIZE:-4096}"
 
 DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
 N_WSI="${N_WSI:-5}"   # per dataset; val and test must match, n_wsi is in the file name the test run finds the val thresholds by
-STAGE1_N_PER_RUNG="${STAGE1_N_PER_RUNG:-20}"
+# FOV: the FoV recipe (query_sim/FovSupply.FOV_RECIPES) -- sensor, domain gap,
+# draw and levels. STAGE1_N_PER_RUNG, when set, replaces its n_per_rung.
+FOV="${FOV:-bench}"
+STAGE1_N_PER_RUNG="${STAGE1_N_PER_RUNG:-}"
 # SEG: hsv (free, no model) / hest (DeepLabV3+ResNet-50) / uni2 (fits a PCA
 # across the whole scanned rectangle first, 3.5-6 GPU-min/slide -- see
 # Uni2PcaSegConfig's own docstring). Built once, shared across every slide
@@ -145,10 +147,8 @@ SPLIT="${SPLIT:-test}"
 STAGE1_ARGS=(--seg "$SEG")
 [ -n "$MASK_CACHE_JOB" ] && STAGE1_ARGS+=(--mask-cache-job "$MASK_CACHE_JOB")
 [ -n "$SAMPLER_CACHE_JOB" ] && STAGE1_ARGS+=(--sampler-cache-job "$SAMPLER_CACHE_JOB")
-[ "${NATIVE_ONLY:-0}" = "1" ] && STAGE1_ARGS+=(--native-only)
-# avoids coarse rungs (huge footprint, little disjoint room) coming up short;
-# on by default since the val and test runs both use it (OVERLAP=0 turns it off)
-[ "${OVERLAP:-1}" = "1" ] && STAGE1_ARGS+=(--overlap)
+STAGE1_ARGS+=(--fov "$FOV")
+[ -n "$STAGE1_N_PER_RUNG" ] && STAGE1_ARGS+=(--sampler-n-per-rung "$STAGE1_N_PER_RUNG")
 [ -n "${FOV_PER_RUNG:-}" ] && STAGE1_ARGS+=(--fov-per-rung "$FOV_PER_RUNG")
 [ -n "$KNN_ENCODER" ] && STAGE1_ARGS+=(--knn-encoder $KNN_ENCODER)
 [ -n "$CLASSIFIER_WEIGHTS" ] && STAGE1_ARGS+=(--classifier-weights $CLASSIFIER_WEIGHTS)
@@ -172,7 +172,7 @@ python utilities/cli/diagnostics/estimate_method_memory.py \
   $([ -n "$CLASSIFIER_WEIGHTS" ] && echo --classifier-weights $CLASSIFIER_WEIGHTS)
 
 echo "======== Stage1MppBench ========"
-echo "  datasets  $DATASETS   n_wsi=$N_WSI   seg=$SEG   native_only=${NATIVE_ONLY:-0}"
+echo "  datasets  $DATASETS   n_wsi=$N_WSI   seg=$SEG   fov=$FOV"
 
 # Piped through `tee` only so the CSV path the python prints can be recovered
 # below without re-deriving _sampling_recipe_id()'s hash in bash -- everything
@@ -181,11 +181,9 @@ echo "  datasets  $DATASETS   n_wsi=$N_WSI   seg=$SEG   native_only=${NATIVE_ONL
 STAGE1_LOG_TEE="$(mktemp)"
 python -u utilities/bench_modules/bench_stage1_mpp.py \
   --tile "$TILE" \
-  --sensor $SENSOR \
   --seed "${SEED:-42}" \
   --datasets $DATASETS \
   --n-wsi "$N_WSI" \
-  --n-per-rung "$STAGE1_N_PER_RUNG" \
   --knn-samples "$KNN_SAMPLES" \
   --knn-k "$KNN_K" \
   "${STAGE1_ARGS[@]}" \

@@ -65,18 +65,16 @@ import Cache                                                        # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
 from Store import FeatureStore as FS                                # noqa: E402
 from dump_function import RetrievalReport as RR                     # noqa: E402
-from stage1_estimation.KnnEstMpp import REFERENCE_BANK_RICHNESS                       # noqa: E402
 from PatchingLib import PatchGrid                                   # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
-from TileSampler import (OverlapConfig, PlanSpec, SamplerConfig, TileSampler,  # noqa: E402
-                         assign_buckets, native_plans)
+from TileSampler import (SAMPLER_RECIPES, PlanSpec, SamplerConfig,  # noqa: E402
+                         TileSampler, assign_buckets, native_plans)
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import (encoder_config, encoder_names,          # noqa: E402
                              pool_slots, pooling_kinds)
 from camera import Render                                           # noqa: E402
-from FovSupply import FovSupply                                      # noqa: E402
+from FovSupply import FOV_RECIPES, FovRecipe, FovSupply              # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
-from config import DomainGapConfig                                  # noqa: E402
 
 TILE = 256
 POOLINGS = ('cls', 'cls_avg', 'cls_std', 'rings3', 'grid2x2')
@@ -151,27 +149,24 @@ ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
 
 def reference_config(k: int, seed: int) -> SamplerConfig:
     """The draw every level's reference pool is cut by -- before the per-level
-    size. `n_per_rung` is `k`, the L0 size; each level takes
-    `min(grid, max(k / ds**2, k_floor))`, and that rule is part of the store's
-    address through `plan_label`."""
-    return SamplerConfig(n_per_rung=k, seed=seed,
-                         richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig())
+    size: `SAMPLER_RECIPES['reference-bank']`. `n_per_rung` is `k`, the L0
+    size; each level takes `min(grid, max(k / ds**2, k_floor))`, and that rule
+    is part of the store's address through `plan_label`."""
+    return dataclasses.replace(SAMPLER_RECIPES['reference-bank'],
+                               n_per_rung=k, seed=seed)
 
 
-#: The query photo's domain gap: no angle jitter, no scale, no stage shift --
-#: the rotation is set per shot (`dump_one`'s `rots`), so what is left is the
-#: photometric half and the lens.
-QUERY_GAP = DomainGapConfig(angle_jitter_deg=0.0, scale_range=(1.0, 1.0),
-                            query_mpp_jitter=0.0, stage_shift_max=0)
-
-
-def query_config(n_positions: int, seed: int) -> SamplerConfig:
-    """Where the query photos are taken: uniform draws (`candidates='random'`)
-    under the reference bank's richness contract. Not the lattice, which IS
-    the main grid and would put every query exactly on its answer."""
-    return SamplerConfig(n_per_rung=n_positions, seed=seed,
-                         richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig(),
-                         candidates='random')
+def query_fov(n_positions: int, seed: int) -> FovRecipe:
+    """The query photos: `FOV_RECIPES['bench']` -- its gap, its draw -- on a
+    one-tile sensor, `n_positions` positions drawn uniformly
+    (`candidates='random'`). Not the lattice, which IS the main grid and would
+    put every query exactly on its answer. The rotation is set per shot
+    (`dump_one`'s `rots`); everything else the gap does is on."""
+    fov = FOV_RECIPES['bench']
+    return dataclasses.replace(
+        fov, sensor=(TILE, TILE),
+        sampler=dataclasses.replace(fov.sampler, n_per_rung=n_positions,
+                                    seed=seed, candidates='random'))
 
 
 def plan_label(k_floor: int, n_query: int, seed: int, rots=(0, 90)) -> str:
@@ -183,9 +178,10 @@ def plan_label(k_floor: int, n_query: int, seed: int, rots=(0, 90)) -> str:
     `sampler_id` does not see."""
     from ConfigIdentity import enc, short_id                      # noqa: PLC0415
     from ReadGeometry import ReadSpec                             # noqa: PLC0415
+    q = query_fov(math.ceil(n_query / len(rots)), seed)
     queries = short_id([
-        f'sampler={enc(query_config(math.ceil(n_query / len(rots)), seed).identity_id())}',
-        f'gap={enc(QUERY_GAP.identity_id())}', f'rots={enc(tuple(rots))}'])
+        f'sampler={enc(q.sampler.identity_id())}',
+        f'gap={enc(q.gap.identity_id())}', f'rots={enc(tuple(rots))}'])
     return f'native-floor{k_floor}-{ReadSpec(TILE, TILE).key()}-q{queries}'
 
 
@@ -211,14 +207,14 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
 
     # queries: one TILE x TILE photo per position, every position shot at each
     # of `rots`. FovSupply places them -- a TileSampler draw on this level's
-    # rung under the reference bank's richness contract, so a query is on
-    # tissue for the same reason a reference tile is -- and photographs them
-    # through the Render. `candidates='random'`: a disjoint lattice IS the main
-    # grid, and every query would sit exactly on its answer.
-    cam = Render(SlideReader(slide), (TILE, TILE), QUERY_GAP, ds=ds, seed=seed)
+    # rung under the bench recipe's richness, so a query is on tissue for the
+    # reason every benchmark FoV is -- and photographs them through the Render.
+    # `candidates='random'`: a disjoint lattice IS the main grid, and every
+    # query would sit exactly on its answer.
+    q = query_fov(math.ceil(n_query / len(rots)), seed)
+    cam = Render(SlideReader(slide), q.sensor, q.gap, ds=ds, seed=seed)
     plan = PlanSpec('ladder', (ds,), camera=cam.spec)
-    supply = FovSupply(cam, plan, query_config(math.ceil(n_query / len(rots)), seed),
-                       mask)
+    supply = FovSupply(cam, plan, q.sampler, mask)
     query_imgs, query_centres, query_rots, query_fov_ids, query_rowcol = [], [], [], [], []
     try:
         positions = [s.meta for s in supply.sampler]
@@ -229,9 +225,14 @@ def dump_one(wsi_path: str, level: int, out_root: Path, *,
     for fov_id, meta in enumerate(positions):
         x, y = meta.fov_rect[0], meta.fov_rect[1]
         for r in rots:
-            img, _ = supply.photo(meta, rotation=r)
+            # the answer through the angle and scale this shot was taken at:
+            # the one tile is the sensor's centre, so its level-0 centre is
+            # the FoV's whatever they are, and the stage shift is left as the
+            # irreducible error it models (`Render.output_to_level0`)
+            img, params = supply.photo(meta, rotation=r)
             for rr, cc, u, v, cx, cy in cam.output_tile_origins(
-                    x, y, TILE, rot_deg=r, scale=1.0):
+                    x, y, TILE, rot_deg=float(params['rot_deg']),
+                    scale=float(params['scale'])):
                 query_imgs.append(np.ascontiguousarray(img[v:v + TILE, u:u + TILE]))
                 query_centres.append((cx, cy))
                 query_rots.append(r)

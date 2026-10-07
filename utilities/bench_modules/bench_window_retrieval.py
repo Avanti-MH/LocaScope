@@ -35,17 +35,19 @@ three levels, 100 FoVs each and top-left answers; this section is what runs:
              MakeSplit). `--n-wsi` random slides of each (`pick_wsi_names`, fixed
              by --seed; a cap at or above the pool takes all of it). `--shard I/N`
              takes every N-th of the slides, for N processes on N cards.
-  levels     each slide's own pyramid levels up to `--max-ds` (CONFIG `MAX_DS`).
-  FoVs       `--n-fov` (CONFIG `SAMPLER.n_per_rung`) per (slide, level), placed for the camera
-             (`FovSupply`, a richness mix and an overlap bound) with the
-             domain gap on. A level too coarse for the tissue holds no FoV and is
-             skipped with the sampler's per-bucket report.
+  levels     each slide's own pyramid levels up to `--max-ds` (the FoV recipe's
+             `max_ds` by default; `--fov`, FovSupply.FOV_RECIPES).
+  FoVs       `--n-fov` (the recipe's `n_per_rung`) per (slide, level), placed for
+             the camera (`FovSupply`, a richness mix and an overlap bound) with
+             the recipe's domain gap on. A level too coarse for the tissue holds
+             no FoV and is skipped with the sampler's per-bucket report.
   answer     the window the query's TILE GRID covers, located by
              `Render.output_to_level0` at the rotation and scale the shot was
              taken at -- not the FoV's top-left. At rotation 0 and scale 1 the two
              are the same point, which the bench checks on every FoV.
-  rotation   `--rotation` / `--scale-min` / `--scale-max` are inputs, default 0 and
-             1. A rotated shot is still scored against an UPRIGHT reference
+  rotation   `--rotation` / `--scale-min` / `--scale-max` replace the recipe's
+             (every quarter turn, scale 0.90-1.15 under 'bench'). A rotated shot
+             is still scored against an UPRIGHT reference
              window (`SlidingWindowSimilarity` uses the MAIN kernel only), so
              recall falls for a reason that has nothing to do with pooling.
   arms       `--arms cls cls_avg-M rings3`: each pooling says which reference
@@ -297,25 +299,22 @@ from PatchingLib import (FeaturesMap, PatchGrid, region_grids,  # noqa: E402
 from CpuBudget import CpuBudget                                  # noqa: E402
 from SlideReader import SlideReader                              # noqa: E402
 from SafeSlide import SafeSlide                                  # noqa: E402
-from TissueMaskConfig import (MASK_RECIPES, MaskMaker, TissueMaskConfig,  # noqa: E402
+from TissueMaskConfig import (MASK_RECIPES, MaskMaker,           # noqa: E402
                               add_mask_args, mask_cfg_from_args)
 from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E402
                              encoder_cfg_from_args, encoder_config,
                              encoder_names, pooling_kinds)
-from FovSupply import FovSupply                                  # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR, ReadRect, levels_up_to  # noqa: E402
-from ConfigArgs import add_config_args, config_from_args, describe  # noqa: E402
-from ConfigIdentity import ModelConfig, enc, short_id             # noqa: E402
-from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
-from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
-                         PlanSpec, RichnessConfig, SamplerConfig)
+from FovSupply import FOV_RECIPES, FovSupply, add_fov_args       # noqa: E402
+from ReadGeometry import ReadRect, levels_up_to                  # noqa: E402
+from ConfigArgs import config_from_args, describe                # noqa: E402
+from ConfigIdentity import enc, short_id                         # noqa: E402
+from TileSampler import PlanSpec                                 # noqa: E402
 from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
                                            attach_baseline, frac_label, grid_table,
                                            group_by, group_levels, k_at, pct,
                                            print_level_heading, report, truth_rank)
 from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
 from camera import Render                                        # noqa: E402
-from config import DomainGapConfig                               # noqa: E402
 from _paths import encoder_tag, job_result_dir                   # noqa: E402
 
 
@@ -326,7 +325,7 @@ from _paths import encoder_tag, job_result_dir                   # noqa: E402
 #  otherwise: every field of the sampler, camera and encoder configs is a flag
 #  (`--sampler-richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...; see
 #  ConfigArgs), and the shorthand flags (`--n-fov`, `--seed`, `--rotation`, `--scale-min`,
-#  `--scale-max`, `--richness`, `--batch-size`, `--fp16`) name one field each. What
+#  `--scale-max`, `--batch-size`, `--fp16`) name one field each. What
 #  a run really used is printed at its start, and everything that changes a
 #  number is in the parts id, so a changed value here can never be resumed into
 #  parts made with another.
@@ -338,72 +337,11 @@ N_WSI            = 10           # slides taken from each dataset
 WSI_SEED         = 0            # which N_WSI of a pool (pick_wsi_names)
 SPLIT_CACHE_JOB  = None         # None: MakeSplit
 MASK_CACHE_JOB   = None         # None: this job's own; 'MppRoutingHead' to reuse
-MAX_DS           = 16.0         # coarsest pyramid level, by downsample
 
-# ── where the FoVs go: TileSampler configs ───────────────────────────────────
-RICHNESS = RichnessConfig(
-    scorer       = 'background',
-    edges        = (0.15, 0.30, 0.50, 0.70, 0.85, 0.95),   # 7 buckets of background
-    floors       = (0.05, 0.15, 0.50, 0.00, 0.00, 0.00, 0.00),
-    caps         = (0.15, 0.25, 0.60, 0.30, 0.00, 0.00, 0.00),
-    bucket_frame = 'per_rung',
-    floor_frame  = 'ask',
-)
-#: What `--richness` can name instead of RICHNESS.
-#:   default  `RichnessConfig()`: mostly tissue-dense FoVs, a share of edges,
-#:            nothing above 85 per cent background (the production contract).
-#:   open     no floors, any FoV up to 85 per cent background, first come over
-#:            the shuffle -- what "any place with tissue" means.
-RICHNESS_PRESETS = {
-    'default': RichnessConfig(),
-    'open': RichnessConfig(floors=(0.0,) * 7,
-                           caps=(1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0)),
-}
-OVERLAP = OverlapConfig(
-    step              = 0.5,        # half a FoV footprint; 1.0 disjoint
-    max_overlap_ratio = 0.5,
-    overlapping_share = 0.5,
-    jitter_offsets    = ((0.25, 1.0), (1.0, 0.25), (0.75, 1.0), (1.0, 0.75), (1.25, 1.25)),
-    jitter_cap        = 0.25,
-)
-INHERIT = InheritConfig(stack_kind='F', share=0.0, source_rung=None, on_incomplete='drop')
-SAMPLER = SamplerConfig(
-    n_per_rung         = 50,      # FoVs per (slide, level)
-    seed               = 0,       # + the level index, per level
-    richness           = RICHNESS,
-    overlap            = OVERLAP,
-    inherit            = INHERIT,
-    candidates         = 'lattice',
-    max_tries_per_tile = 5,
-)
-
-# ── the camera: the real photos' sensor, a query_sim DomainGapConfig ────────
-#: Each level is photographed at its own ds.
-SENSOR = REAL_PHOTO_SENSOR
-CAMERA = DomainGapConfig(
-    rotation_choices=(0,), angle_jitter_deg=0.0,
-    scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
-    brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
-    saturation=1.0, color_temp_range=(-0.12, 0.12),
-    vignette_range=(0.15, 0.45), vignette_p=1.0,
-    distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0, distortion_p=1.0,
-    defocus_radius=2, chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
-    stage_shift_max=0,
-    photometric=True, geometric=True,
-)
-
-# ── the tissue mask ──────────────────────────────────────────────────────────
-# The hest recipe, written out. A field that differs from MASK_RECIPES['hest']
-# is a different mask (`seg_id`), made again rather than read from a cache made
-# without it; the run says which it is.
-MASK = TissueMaskConfig(
-    seg=HestSegConfig(
-        method='hest', ds=4.0, seg_chunk_px=4_000_000, read_chunk_px=4_000_000,
-        stitch_overlap=128, limit_bounds=True,
-        model=ModelConfig(source='torchvision', arch=HEST_ARCH, dtype='fp32',
-                          weights=None)),
-    min_region_ratio=0.01, merge=True,
-)
+# ── the FoVs and the mask ────────────────────────────────────────────────────
+# Where the FoVs go, the camera that takes them and the coarsest level are a FoV
+# recipe (`--fov`, default `FovSupply.FOV_RECIPES['bench']`); the mask is a mask
+# recipe (`--seg`, default `MASK_RECIPES['hest']`). Every field of both is a flag.
 
 # ── the encoder and what is compared ─────────────────────────────────────────
 # The encoder's own config is built from its registry entry once its NAME is
@@ -1357,7 +1295,7 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     seed and its own resolution."""
     ds = float(slide.level_downsamples[level])
     seed = sampler_cfg.seed + level
-    camera = Render(SlideReader(slide), SENSOR, camera_cfg, ds=ds, seed=seed)
+    camera = Render(SlideReader(slide), args.sensor, camera_cfg, ds=ds, seed=seed)
     # the level's own rung, placed for this camera; one supply per (slide,
     # level) because a level is this bench's unit of work and of resume
     plan = PlanSpec('ladder', (ds,), camera=camera.spec)
@@ -1554,7 +1492,7 @@ def config_id(args, arm_specs, configs: dict) -> str:
               f'wsi_names={enc(list(args.wsi_names or []))}',
               f'max_ds={enc(args.max_ds)}', f'wsi_seed={enc(args.wsi_seed)}',
               f'split_job={enc(args.split_cache_job)}',
-              f'sensor={enc(list(SENSOR))}', f'version={enc(ROW_VERSION)}']
+              f'sensor={enc(list(args.sensor))}', f'version={enc(ROW_VERSION)}']
     return short_id(parts)
 
 
@@ -1721,25 +1659,18 @@ def main() -> int:
                              'result/cache/<this>_split/. Default: MakeSplit')
     parser.add_argument('--wsi-names', nargs='*', default=None,
                         help='slide NAMES to use instead of the random pick')
-    parser.add_argument('--max-ds', type=float, default=MAX_DS,
-                        help='coarsest pyramid level to use, by downsample')
     parser.add_argument('--seed', type=int, default=None,
                         help=f'sets both the slide pick (CONFIG WSI_SEED, '
-                             f'{WSI_SEED}) and the sampler seed (SAMPLER.seed, '
-                             f'{SAMPLER.seed})')
+                             f'{WSI_SEED}) and the sampler seed (the recipe\'s '
+                             f'own by default)')
 
     # ── which FoVs, through which camera: one flag per field ─────────────────
-    # The four below name one field each and kept their spelling; everything else
-    # is `--sampler-*`, `--richness-*`, `--overlap-*`, `--inherit-*`, `--camera-*`.
+    # The four below name one field each; everything else is `--sampler-*`
+    # (richness, overlap and inherit included) or `--camera-*`.
     parser.add_argument('--n-fov', type=int, default=None,
-                        help=f'= --sampler-n-per-rung (CONFIG {SAMPLER.n_per_rung}): '
-                             f'FoVs per (slide, level); a slide that cannot give '
-                             f'them says how many it did')
-    parser.add_argument('--richness', choices=sorted(RICHNESS_PRESETS),
-                        default=None,
-                        help='replace the CONFIG richness by a named mix '
-                             '(RICHNESS_PRESETS above); `--richness-*` '
-                             'flags still apply on top')
+                        help="= --sampler-n-per-rung (the recipe's own by "
+                             "default): FoVs per (slide, level); a slide that "
+                             "cannot give them says how many it did")
     parser.add_argument('--rotation', type=int, choices=(0, 90, 180, 270),
                         default=None, help='= --camera-rotation-choices with one '
                         'value: the shots are rotated by this. Scored against an '
@@ -1749,11 +1680,9 @@ def main() -> int:
                         help='= the low end of --camera-scale-range')
     parser.add_argument('--scale-max', type=float, default=None,
                         help='= the high end of --camera-scale-range')
-    parser.add_argument('--white-max', type=float, default=None,
-                        help=argparse.SUPPRESS)      # refused: use --richness
-    add_config_args(parser, SAMPLER, 'sampler')
-    add_config_args(parser, CAMERA, 'camera')
-    add_mask_args(parser, default=None)              # None: the CONFIG `MASK`
+    # --fov, --max-ds, --sampler-*, --camera-*: the FoV recipe and its fields.
+    add_fov_args(parser)
+    add_mask_args(parser, default=None)              # None: MASK_RECIPES['hest']
     parser.add_argument('--mask-cache-job', default=MASK_CACHE_JOB,
                         help='whose mask cache to read and fill: result/cache/'
                              '<this>_mask/. Default: this job')
@@ -1849,8 +1778,6 @@ def main() -> int:
             **({'head': pre.head} if pre.head else {})).with_model(dtype=DTYPE)
         add_encoder_args(parser, encoder_base)
     args = parser.parse_args()
-    if args.white_max is not None:
-        parser.error('--white-max is retired: FoVs are placed by --richness')
 
     # The tag is a directory, not a filename suffix, added only to the derived
     # path. An explicit --out is used verbatim.
@@ -1859,6 +1786,13 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     args.wsi_seed = args.seed if args.seed is not None else WSI_SEED
+    fov = FOV_RECIPES[args.fov]
+    if fov.rungs != 'native':
+        parser.error(f'--fov {args.fov} names its rungs {fov.rungs}; this bench '
+                     f'scores each slide level by level, so it takes a recipe '
+                     f"of native levels")
+    args.max_ds = args.max_ds if args.max_ds is not None else fov.max_ds
+    args.sensor = tuple(fov.sensor)
     print(f'bench_window_retrieval   datasets {args.datasets}  '
           f'{args.n_wsi} slides each  ds <= {args.max_ds:g}')
     print(f'scores    {"  ".join(SCORES)}   baseline = {BASELINE}\n')
@@ -1881,14 +1815,11 @@ def main() -> int:
         return 0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # The run's configs, each resolved once: what CONFIG holds, then the flag that
-    # names one field, then the field's own flag. A bad value is refused here by
-    # the config's own checks, before anything is built.
+    # The run's configs, each resolved once: what the recipes hold, then the
+    # flag that names one field, then the field's own flag. A bad value is
+    # refused here by the config's own checks, before anything is built.
     try:
-        sampler_base = SAMPLER
-        if args.richness is not None:
-            sampler_base = dataclasses.replace(
-                sampler_base, richness=RICHNESS_PRESETS[args.richness])
+        sampler_base = fov.sampler
         if args.n_fov is not None:
             sampler_base = dataclasses.replace(sampler_base,
                                                n_per_rung=args.n_fov)
@@ -1896,7 +1827,7 @@ def main() -> int:
             sampler_base = dataclasses.replace(sampler_base, seed=args.seed)
         sampler_cfg = config_from_args(args, sampler_base, 'sampler')
 
-        camera_base = CAMERA
+        camera_base = fov.gap
         if args.rotation is not None:
             camera_base = dataclasses.replace(camera_base,
                                               rotation_choices=(args.rotation,))
@@ -1915,7 +1846,7 @@ def main() -> int:
             encoder_cfg = encoder_cfg.with_model(
                 dtype='fp16' if args.fp16 else 'fp32')
         encoder_cfg = encoder_cfg_from_args(args, encoder_cfg)
-        mask_cfg = mask_cfg_from_args(args, base=MASK)
+        mask_cfg = mask_cfg_from_args(args, base=MASK_RECIPES['hest'])
     except ValueError as exc:
         parser.error(str(exc))
     cfg = encoder_cfg

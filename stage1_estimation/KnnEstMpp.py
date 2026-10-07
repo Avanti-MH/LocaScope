@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -50,7 +50,7 @@ from SafeSlide import SafeSlide                                         # noqa: 
 from TileEncoderFunc import encoder_config                              # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
 from TissueMask import TissueMask                        # noqa: E402
-from TileSampler import (OverlapConfig, RichnessConfig, SamplerConfig,  # noqa: E402
+from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
                          TileSampler, native_plans)
 
 from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
@@ -59,22 +59,6 @@ from SlideReader import SlideReader                                     # noqa: 
 
 
 # ── config ───────────────────────────────────────────────────────────────────
-
-#: The reference bank's own richness policy: any tile under 50% background,
-#: no preference between the buckets that admits -- NOT `RichnessConfig()`'s
-#: own general-purpose default (non-zero floors, meant for a training corpus
-#: that wants specific proportions of busy/quiet tiles). Public (no
-#: leading underscore) so a caller building its own `SamplerConfig` for this estimator -- `LocaScopePipeline`, when it
-#: wants its own `--knn-samples`/`--knn-seed`-style overrides without
-#: re-deriving this policy -- reuses this object rather than a second copy of
-#: the tuple that could drift from it.
-REFERENCE_BANK_RICHNESS = RichnessConfig(
-    floors=(0.0,) * 7, caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0))
-
-
-def _default_sampler_cfg() -> SamplerConfig:
-    return SamplerConfig(richness=REFERENCE_BANK_RICHNESS, overlap=OverlapConfig())
-
 
 @register('knn_est_mpp')
 @dataclass(frozen=True)
@@ -108,7 +92,8 @@ class KnnEstMppConfig(IdentifiedConfig):
     '''
     encoder: str
     mask_cfg: TissueMaskConfig = field(default_factory=lambda: MASK_RECIPES['hest'])
-    sampler_cfg: SamplerConfig = field(default_factory=_default_sampler_cfg)
+    sampler_cfg: SamplerConfig = field(
+        default_factory=lambda: SAMPLER_RECIPES['reference-bank'])
     k: int = 5
     tile_size: int = 256
 
@@ -217,7 +202,7 @@ class KnnEstMpp(IdentifiedBuild):
         ladder. Why the default richness is as strict as it is: this bank is
         the reference every query's mpp is voted against, so a tile that is
         mostly background carries no scale information and only adds a wrong
-        neighbour -- see `REFERENCE_BANK_RICHNESS`.
+        neighbour -- see `SAMPLER_RECIPES['reference-bank']`.
         '''
         if self.mask is None:
             self.mask = self.cfg.mask_cfg.build(self.wsi, self.device)
@@ -313,8 +298,7 @@ def knn_estimator(encoder_name: str, mask_cfg: TissueMaskConfig,
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cfg = KnnEstMppConfig(
         encoder=encoder_name, mask_cfg=mask_cfg,
-        sampler_cfg=SamplerConfig(
-            n_per_rung=samples, seed=seed, richness=REFERENCE_BANK_RICHNESS,
-            overlap=OverlapConfig()),
+        sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'],
+                            n_per_rung=samples, seed=seed),
         k=k, tile_size=tile_size)
     return KnnEstMpp(cfg, device=device)
