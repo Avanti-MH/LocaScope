@@ -489,8 +489,10 @@ def main():
     over = {'head': args.head} if args.head else {}
     cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
         .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')
-    from TissueMaskConfig import MASK_RECIPES
+    from TissueMaskConfig import MASK_RECIPES, MaskMaker
     mask_cfg = MASK_RECIPES['hest']
+    # one slide, one run: no mask cache, so the mask is segmented here
+    masks = MaskMaker(mask_cfg, device=device)
 
     # Built ONCE for the whole folder -- see the module docstring.
     print('Building pipeline (mask + mpp reference bank) ...', flush=True)
@@ -505,8 +507,8 @@ def main():
         SlidingWinSimRotConfig(cfg, tile_size=256, overlap=True), device,
         read_workers=budget.workers)
     localizer = SiftRansacLocalizer(min_inliers=10, padding=2)
-    pl = LocaScopePipeline(args.wsi, estimator, retriever, localizer,
-                           mask_cfg=mask_cfg).build()
+    pl = LocaScopePipeline(args.wsi, estimator, retriever, localizer, masks).build()
+    masks.close()                       # the segmenter is not needed again
     print(f'  base_mpp={pl.base_mpp:.4f}  levels={pl.wsi.level_count}  '
           f'mask_regions={len(pl.mask.tissue_regions)}  '
           f'({time.perf_counter() - t0:.1f}s)', flush=True)

@@ -61,6 +61,8 @@ DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
 SPLIT="${SPLIT:-test}"
 N_WSI="${N_WSI:-5}"          # per dataset; BRACS test's first 5 are the masked ones
 PER_LEVEL="${PER_LEVEL:-50}"  # FoVs per native level per slide
+SEG="${SEG:-hest}"            # the mask stage 2 searches (MASK_RECIPES); read from
+                              # MppRoutingHead's mask cache, written back on a miss
 
 TOPK="${TOPK:-20}"               # candidates enumerated per shot (free)
 SIFT_TOPK="${SIFT_TOPK:-5}"           # candidates SIFT actually verifies (K passes per shot)
@@ -138,7 +140,7 @@ fi
   --draw-figures $DRAW_FIGURES \
   --multi-gpu \
   --precision fp16 --batch-size 8192 \
-  --seg none \
+  --seg "$SEG" \
   --features-cache-job "$FEATURES_CACHE_JOB" \
   --feature-store-mode "$FEATURE_STORE_MODE" \
   $LIMIT_FLAG $RESUME_FLAG $FAIL_FLAG

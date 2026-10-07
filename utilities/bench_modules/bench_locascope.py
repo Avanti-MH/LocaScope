@@ -731,18 +731,19 @@ def main():
              "embeddings rather than a prerequisite. Its attentional pooler is "
              "512-d and its trunk 768-d, the shape GigaPath and UNI2 have. The "
              "head is part of identity_id and of the output directory.")
-    # --seg: `none` gives stage 2 ONE region covering the whole scanned
-    # rectangle. A window on blank glass loses on its own mean-cosine, so the
-    # mask is an optimisation there -- and its cost is the size bias: find_best
-    # takes a global maximum, so a region with more placements wins on sample
-    # count alone. At a routed level of 0 that single region is the whole
-    # plane: stage 2 reads it block by block (SlideReader.read_grid), so it no
-    # longer costs one read of tens to hundreds of GB, but every tile of the
-    # plane is still encoded: the first BRACS_1228 shot of the smoke run took
-    # 627 s with that build inside it. A
-    # model recipe costs a mask build per WSI before any shot runs and shares
-    # the GPUs with the tile encoder, so watch VRAM alongside --batch-size.
+    # --seg: the mask stage 2 searches. `none` gives it ONE region covering the
+    # whole scanned rectangle; a window on blank glass loses on its own
+    # mean-cosine, but find_best takes a global maximum, so a region with more
+    # placements wins on sample count alone, and at a routed level of 0 every
+    # tile of the plane is encoded. A model recipe is read from
+    # --mask-cache-job's cache when it is there (MppRoutingHead's holds hest for
+    # every #val slide and the first test slides) and segmented, then written
+    # back, when it is not -- that costs a mask build before the slide's first
+    # shot and shares the GPUs with the tile encoder.
     add_mask_args(ap)
+    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+                    help="whose mask cache the pipeline's --seg mask is read "
+                         'from and written to')
     ap.add_argument('--resume',     action='store_true',
                     help='carry on from an existing metrics.csv instead of '
                          'replacing it: every shot already recorded there is '
@@ -868,6 +869,11 @@ def main():
 
     fov_masks = MaskMaker(MASK_RECIPES['hest'],
                           Cache.cache_root(args.fov_mask_cache_job, 'mask'), device)
+    # The pipeline's own mask, through the same cache mechanism: under the
+    # default --seg hest and one cache job it is the FoVs' mask, read once more
+    # from the same file and never segmented twice.
+    pipeline_masks = MaskMaker(mask_cfg, Cache.cache_root(args.mask_cache_job,
+                                                          'mask'), device)
     shots = split_shots(args.datasets, args.split, args.n_wsi, fov,
                         masks=fov_masks, skip=lambda name: name in done)
     if done:
@@ -919,7 +925,7 @@ def main():
             t_b = time.time()
             try:
                 pl = LocaScopePipeline(
-                    cur_wsi, estimator, retriever, localizer, mask_cfg=mask_cfg,
+                    cur_wsi, estimator, retriever, localizer, pipeline_masks,
                     feature_store_root=(
                         None if not args.features_cache_job else
                         Cache.cache_root(args.features_cache_job, 'features') / enc_tag),

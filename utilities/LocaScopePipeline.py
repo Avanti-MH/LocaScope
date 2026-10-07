@@ -9,11 +9,13 @@ Wraps the three stage primitives into one WSI-scoped object:
 Design:
 
 * build() does the WSI-wide one-time work (mask + the estimator's build).
-* The mask comes from `mask_cfg` (a `MASK_RECIPES` entry, hest by default),
-  whose segmenter reads the level tile by tile -- a heavy method such as HEST
-  DeepLabV3 OOMs on a whole MRXS level otherwise: at mask_ds=16 one slide's
-  level image is ~313 MP, and a single ResNet layer1 activation on that is
-  18.6 GiB. The chunk budgets are fields of the recipe's segmenter config.
+* The mask comes from `masks`, a `TissueMaskConfig.MaskMaker`: its recipe (a
+  `MASK_RECIPES` entry) and, when it has one, its cache -- so a slide whose
+  mask is cached is never segmented again. The recipe's segmenter reads the
+  level tile by tile -- a heavy method such as HEST DeepLabV3 OOMs on a whole
+  MRXS level otherwise: at mask_ds=16 one slide's level image is ~313 MP, and a
+  single ResNet layer1 activation on that is 18.6 GiB. The chunk budgets are
+  fields of the recipe's segmenter config.
 * A retriever is built lazily on first use for each pyramid level; the
   routed level is the estimator's own `chosen_level` --
   `StageInterface.routed_level` over `ReadGeometry.coarser_level`, the
@@ -40,11 +42,12 @@ slide.
 
 Usage:
 
-    est = knn_estimator('gigapath', mask_cfg, device=device)
+    masks = MaskMaker(MASK_RECIPES['hest'], Cache.cache_root(job, 'mask'), device)
+    est = knn_estimator('gigapath', masks.cfg, device=device)
     ret = SlidingWinSimRot(
         SlidingWinSimRotConfig(encoder_config('gigapath')), device)
     loc = SiftRansacLocalizer()
-    pl  = LocaScopePipeline(wsi, est, ret, loc, mask_cfg=mask_cfg).build()
+    pl  = LocaScopePipeline(wsi, est, ret, loc, masks).build()
     result = pl.run(shot_img)
     # result.est_mpp, result.routed_level, result.retrieval, result.refine
 """
@@ -109,7 +112,7 @@ class LocaScopePipeline:
         estimator,                    # stage 1, built, not yet bound
         retriever:           SlidingWinSimRot,
         localizer:           SiftRansacLocalizer,
-        mask_cfg:            'TissueMaskConfig' = None,
+        masks:               'MaskMaker',
         feature_store_root:  Optional[str] = None,
         feature_store_mode:  str = 'rw',
     ):
@@ -122,10 +125,10 @@ class LocaScopePipeline:
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi                 = wsi
-        # The mask recipe: how the mask was built, which is what a cache has
-        # to ask before trusting a stored feature map.
-        from TissueMaskConfig import MASK_RECIPES
-        self.mask_cfg            = mask_cfg or MASK_RECIPES['hest']
+        # Where the mask comes from; its recipe is how the mask was built,
+        # which is what a cache has to ask before trusting a stored feature map.
+        self.masks               = masks
+        self.mask_cfg            = masks.cfg
         self.feature_store_root  = feature_store_root
         self.feature_store_mode  = feature_store_mode
 
@@ -149,11 +152,11 @@ class LocaScopePipeline:
     def build(self) -> 'LocaScopePipeline':
         """Build the mask, then bind the estimator and stages 2-3 to this slide
         (per-WSI one-time)."""
-        # Segment, filter and merge in one place and in one order. merge is
-        # incomplete without filter having run first -- it skips nested boxes on
-        # the assumption they are already gone.
-        self.mask = self.mask_cfg.build(
-            self.wsi, getattr(self.retriever.encoder, 'device', None))
+        # Segment (or read the cached raw mask), filter and merge in one place
+        # and in one order: `MaskMaker.mask`. merge is incomplete without filter
+        # having run first -- it skips nested boxes on the assumption they are
+        # already gone.
+        self.mask, _ = self.masks.mask(self.wsi)
 
         # The same mask to stage 1, so its reference bank and stage 2's
         # retriever agree on which regions are tissue (a method that samples
