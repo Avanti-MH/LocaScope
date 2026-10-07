@@ -492,6 +492,196 @@ def t_only_entry_points_set_sys_path():
                        f'entry point sets it, through _paths.setup_import_paths')
 
 
+# ── recipes ───────────────────────────────────────────────────────────────────
+
+#: Every module that defines a recipe table (a module-level name ending in
+#: RECIPES), by import name and file. The lint also scans the repo, so a table
+#: added anywhere else fails until it is listed here.
+_RECIPE_MODULES = {
+    'TissueMaskConfig': 'utilities/TissueMaskConfig.py',
+    'TileSampler': 'utilities/TileSampler.py',
+    'FovSupply': 'query_sim/FovSupply.py',
+    'common.Corpora': 'training/SuperPathPoint/common/Corpora.py',
+}
+
+
+def _recipe_tables(tree):
+    """`(name, value node)` of every module-level `<...>RECIPES = {...}`."""
+    import ast
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for t in targets:
+            if isinstance(t, ast.Name) and t.id.endswith('RECIPES'):
+                yield t.id, value
+
+
+def _resolve(module, node):
+    """The object a call's `func` names in `module`'s namespace."""
+    import ast
+    if isinstance(node, ast.Name):
+        return getattr(module, node.id)
+    if isinstance(node, ast.Attribute):
+        return getattr(_resolve(module, node.value), node.attr)
+    raise TypeError(f'cannot resolve {ast.dump(node)}')
+
+
+def _incomplete_calls(module, value) -> list:
+    """Every config call under `value` that does not name each of its class's
+    init fields by keyword, as `'<line>: <Class> <what is wrong>'`."""
+    import ast
+    out = []
+    for call in ast.walk(value):
+        if not isinstance(call, ast.Call):
+            continue
+        cls = _resolve(module, call.func)
+        if not (isinstance(cls, type) and dataclasses.is_dataclass(cls)):
+            continue
+        fields = {f.name for f in dataclasses.fields(cls) if f.init}
+        given = {k.arg for k in call.keywords if k.arg is not None}
+        where = f'{call.lineno}: {cls.__name__}'
+        if call.args:
+            out.append(f'{where} takes {len(call.args)} positional argument(s)')
+        if any(k.arg is None for k in call.keywords):
+            out.append(f'{where} spreads **kwargs, which no reader can see')
+        if fields - given:
+            out.append(f'{where} leaves {sorted(fields - given)} to the class')
+    return out
+
+
+def t_every_recipe_writes_every_field():
+    """A recipe is read as the config it builds, so each config call in a
+    recipe table names every init field -- nested configs too -- and each
+    entry of the table is a config call, not a dict a function fills in."""
+    import ast
+    import importlib
+    import re
+    _paths.add_training_package('SuperPathPoint')
+    table = re.compile(r'^\w*RECIPES\s*(:[^=]*)?=', re.M)
+    defined = set()
+    for top in _LINT_ROOTS:
+        for dirpath, _, files in os.walk(_ROOT / top):
+            for name in files:
+                path = Path(dirpath) / name
+                rel = path.relative_to(_ROOT).as_posix()
+                if (name.endswith('.py') and 'test_modules' not in rel
+                        and 'FewShotEoMT' not in rel
+                        and table.search(path.read_text(errors='replace'))):
+                    defined.add(rel)
+    unlisted = sorted(defined - set(_RECIPE_MODULES.values()))
+    assert not unlisted, (f'recipe tables in {unlisted} are not in '
+                          f'_RECIPE_MODULES, so nothing checks them')
+    problems, n = [], 0
+    for mod_name, rel in _RECIPE_MODULES.items():
+        module = importlib.import_module(mod_name)
+        tree = ast.parse((_ROOT / rel).read_text())
+        for table_name, value in _recipe_tables(tree):
+            assert isinstance(value, ast.Dict), f'{rel} {table_name} is not a dict literal'
+            for key, entry in zip(value.keys, value.values):
+                n += 1
+                label = f'{rel} {table_name}[{ast.literal_eval(key)!r}]'
+                if not isinstance(entry, ast.Call):
+                    problems.append(f'{label} is not a config call')
+                    continue
+                problems += [f'{label} line {p}' for p in _incomplete_calls(module, entry)]
+    assert not problems, 'incomplete recipes:\n  ' + '\n  '.join(problems)
+    return f'{n} recipes in {len(_RECIPE_MODULES)} modules'
+
+
+def t_recipes_equal_the_configs_they_replace():
+    """Frozen copies of the expressions each moved recipe replaced: written out
+    in full, a recipe must still be the same config -- the same ids, so every
+    cache and checkpoint made under the old spelling stays valid."""
+    from HestSegFunc import HestSegConfig
+    from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig
+    from TissueSegFunc import PlaneSegConfig
+    from Uni2PcaSegFunc import Uni2PcaSegConfig
+    from TileSampler import (SAMPLER_RECIPES, InheritConfig, OverlapConfig,
+                             RichnessConfig, SamplerConfig)
+    from FovSupply import FOV_RECIPES
+    from config import DomainGapConfig
+    _paths.add_training_package('SuperPathPoint')
+    from common.Corpora import RECIPES as CORPORA
+
+    def same(name, new, old):
+        assert new == old, f'{name}: {new} != {old}'
+        assert new.identity_id() == old.identity_id(), name
+
+    old_masks = {'none': TissueMaskConfig(seg=PlaneSegConfig('')),
+                 'hsv': TissueMaskConfig(seg=PlaneSegConfig('hsv')),
+                 'hest': TissueMaskConfig(seg=HestSegConfig()),
+                 'uni2_pca': TissueMaskConfig(seg=Uni2PcaSegConfig())}
+    assert set(MASK_RECIPES) == set(old_masks)
+    for k, old in old_masks.items():
+        same(f'mask {k}', MASK_RECIPES[k], old)
+        assert (MASK_RECIPES[k].seg_id(), MASK_RECIPES[k].region_id()) == (
+            old.seg_id(), old.region_id()), k
+
+    bank_richness = RichnessConfig(floors=(0.0,) * 7,
+                                   caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0))
+    same('reference-bank', SAMPLER_RECIPES['reference-bank'],
+         SamplerConfig(richness=bank_richness, overlap=OverlapConfig()))
+
+    def frozen_sampler_config(*, n, step, max_overlap, overlapping_share,
+                              bucket_frame, inherit_share, inherit_source_rung):
+        return SamplerConfig(
+            n_per_rung=n, seed=0, candidates='lattice',
+            max_tries_per_tile=max(1, 2500 // max(n, 1)),
+            overlap=OverlapConfig(step=step, max_overlap_ratio=max_overlap,
+                                  overlapping_share=overlapping_share),
+            richness=RichnessConfig(bucket_frame=bucket_frame),
+            inherit=InheritConfig(stack_kind='F', share=inherit_share,
+                                  source_rung=inherit_source_rung))
+    old_corpora = {
+        'stageA': dict(n=100, inherit_share=0.0, inherit_source_rung=None,
+                       bucket_frame='per_rung',
+                       step=1.0, max_overlap=0.0, overlapping_share=0.0),
+        'stageB-fOwn': dict(n=200, inherit_share=1.0, inherit_source_rung=16.0,
+                            bucket_frame='at_inherit',
+                            step=0.5, max_overlap=0.5, overlapping_share=1.0),
+        'stageB-cOwn': dict(n=10, inherit_share=0.0, inherit_source_rung=None,
+                            bucket_frame='per_rung',
+                            step=1.0, max_overlap=0.0, overlapping_share=0.0)}
+    assert set(CORPORA) == set(old_corpora)
+    for k, kw in old_corpora.items():
+        same(f'corpus {k}', CORPORA[k], frozen_sampler_config(**kw))
+
+    camera_full = DomainGapConfig(
+        rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+        scale_range=(0.90, 1.15), query_mpp_jitter=0.0,
+        brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
+        saturation=1.0, color_temp_range=(-0.12, 0.12),
+        vignette_range=(0.15, 0.45), vignette_p=0.5, distortion_p=0.5,
+        distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
+        defocus_radius=2, chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
+        photometric=True, geometric=True, stage_shift_max=0)
+    camera_native = DomainGapConfig(
+        rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+        scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
+        brightness_range=(0.0, 0.0), contrast_range=(0.0, 0.0),
+        saturation=1.0, color_temp_range=(0.0, 0.0),
+        vignette_range=(0.0, 0.0), vignette_p=0.0, distortion_p=0.0,
+        distortion_k1_range=(0.0, 0.0), distortion_k2=0.0,
+        defocus_radius=0, chromatic_shift=0, noise_sigma=0.0, jpeg_quality=100,
+        photometric=False, geometric=True, stage_shift_max=0)
+    routing_sampler = SamplerConfig(
+        richness=RichnessConfig(caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0)),
+        overlap=OverlapConfig(step=0.5, max_overlap_ratio=0.5,
+                              overlapping_share=1.0, jitter_cap=0.25))
+    for k, gap in (('routing-query', camera_full),
+                   ('routing-support-native', camera_native)):
+        r = FOV_RECIPES[k]
+        same(f'{k} gap', r.gap, gap)
+        same(f'{k} sampler', r.sampler, routing_sampler)
+        assert r.rungs == (1.0, 2.0, 4.0, 8.0, 16.0, 32.0) and r.sensor == (256, 256), k
+    return (f'{len(old_masks)} masks, reference-bank, {len(old_corpora)} '
+            f'corpora, 2 routing recipes: same configs, same ids')
+
+
 # ── weights_id ────────────────────────────────────────────────────────────────
 
 def t_weights_id_is_content():
@@ -687,6 +877,10 @@ def main() -> int:
     print('lint')
     check('hashlib only in ConfigIdentity',   t_nothing_else_hashes_for_identity)
     check('only entry points set sys.path',   t_only_entry_points_set_sys_path)
+
+    print('recipes')
+    check('every recipe writes every field',  t_every_recipe_writes_every_field)
+    check('moved recipes are the same configs', t_recipes_equal_the_configs_they_replace)
 
     print('weights_id')
     check('hashes content, not names',        t_weights_id_is_content)

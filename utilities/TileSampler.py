@@ -897,6 +897,34 @@ class SamplerConfig(IdentifiedConfig):
                 f"{self.candidates!r}")
 
 
+#: Named draws, every field written out (test_config_identity's recipe lint).
+#: A caller takes one and `dataclasses.replace`s what its own arguments set
+#: (`n_per_rung`, `seed`), which is a different config and so a different id.
+#:
+#: reference-bank  the tiles a slide is described by when it is its own
+#:                 reference (KnnEstMpp, PrototypeEstMpp, the classic
+#:                 estimator, the tile bench's reference store): any tile
+#:                 under 50 per cent background, no preference among the
+#:                 buckets that admits, on the disjoint lattice.
+SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
+    'reference-bank': SamplerConfig(
+        n_per_rung=500, seed=0,
+        richness=RichnessConfig(
+            scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+            floors=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+            bucket_frame='per_rung', floor_frame='ask'),
+        overlap=OverlapConfig(
+            step=1.0, max_overlap_ratio=0.0, overlapping_share=0.0,
+            jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                            (1.0, 0.75), (1.25, 1.25)),
+            jitter_cap=0.0),
+        inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                              on_incomplete='drop'),
+        candidates='lattice', max_tries_per_tile=5),
+}
+
+
 # ── one tile ─────────────────────────────────────────────────────────────────
 
 @dataclass

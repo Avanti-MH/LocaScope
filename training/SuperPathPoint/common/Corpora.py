@@ -76,20 +76,57 @@ def sampler_config(*, n: int, seed: int = 0,
                               source_rung=inherit_source_rung))
 
 
-#: The named corpora. `stageA` is the training corpus (ExtractPreTiles.sh's
-#: defaults); the other two are F's and C's own tiles for
-#: the survival analysis (prepare_chain_stack.py). All three take
-#: RichnessConfig's default floors and caps and differ in the rest.
+#: The named corpora, every field written out (test_config_identity's recipe
+#: lint). `stageA` is the training corpus (ExtractPreTiles.sh's defaults); the
+#: other two are F's and C's own tiles for the survival analysis
+#: (prepare_chain_stack.py). All three share RichnessConfig's floors and caps
+#: and differ in the rest. `max_tries_per_tile` is MAX_TRIES spread over n.
 RECIPES = {
-    'stageA': dict(n=100, inherit_share=0.0, inherit_source_rung=None,
-                   bucket_frame='per_rung',
-                   step=1.0, max_overlap=0.0, overlapping_share=0.0),
-    'stageB-fOwn': dict(n=200, inherit_share=1.0, inherit_source_rung=16.0,
-                        bucket_frame='at_inherit',
-                        step=0.5, max_overlap=0.5, overlapping_share=1.0),
-    'stageB-cOwn': dict(n=10, inherit_share=0.0, inherit_source_rung=None,
-                        bucket_frame='per_rung',
-                        step=1.0, max_overlap=0.0, overlapping_share=0.0),
+    'stageA': SamplerConfig(
+        n_per_rung=100, seed=0,
+        richness=RichnessConfig(
+            scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+            floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+            caps=(0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+            bucket_frame='per_rung', floor_frame='ask'),
+        overlap=OverlapConfig(
+            step=1.0, max_overlap_ratio=0.0, overlapping_share=0.0,
+            jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                            (1.0, 0.75), (1.25, 1.25)),
+            jitter_cap=0.0),
+        inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                              on_incomplete='drop'),
+        candidates='lattice', max_tries_per_tile=25),
+    'stageB-fOwn': SamplerConfig(
+        n_per_rung=200, seed=0,
+        richness=RichnessConfig(
+            scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+            floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+            caps=(0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+            bucket_frame='at_inherit', floor_frame='ask'),
+        overlap=OverlapConfig(
+            step=0.5, max_overlap_ratio=0.5, overlapping_share=1.0,
+            jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                            (1.0, 0.75), (1.25, 1.25)),
+            jitter_cap=0.0),
+        inherit=InheritConfig(stack_kind='F', share=1.0, source_rung=16.0,
+                              on_incomplete='drop'),
+        candidates='lattice', max_tries_per_tile=12),
+    'stageB-cOwn': SamplerConfig(
+        n_per_rung=10, seed=0,
+        richness=RichnessConfig(
+            scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+            floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+            caps=(0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+            bucket_frame='per_rung', floor_frame='ask'),
+        overlap=OverlapConfig(
+            step=1.0, max_overlap_ratio=0.0, overlapping_share=0.0,
+            jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                            (1.0, 0.75), (1.25, 1.25)),
+            jitter_cap=0.0),
+        inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                              on_incomplete='drop'),
+        candidates='lattice', max_tries_per_tile=250),
 }
 
 #: Which recipe is each survival axis's own corpus. R reads stageA and never
@@ -98,10 +135,10 @@ AXIS_RECIPE = {'F': 'stageB-fOwn', 'R': 'stageA', 'C': 'stageB-cOwn'}
 
 
 def recipe_config(name: str) -> SamplerConfig:
-    """`RECIPES[name]` as the SamplerConfig it samples with."""
+    """`RECIPES[name]`, the SamplerConfig it samples with."""
     if name not in RECIPES:
         raise KeyError(f'no corpus recipe {name!r}; known: {sorted(RECIPES)}')
-    return sampler_config(**RECIPES[name])
+    return RECIPES[name]
 
 
 def ladder(rungs: Optional[Sequence[float]], tile: int,

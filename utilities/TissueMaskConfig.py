@@ -36,10 +36,10 @@ from typing import Dict, List, Optional, Tuple
 
 from Cache import (check_source, read_meta, source_key,          # noqa: E402
                    wsi_stem_of, write_meta)
-from ConfigIdentity import (IdentifiedConfig, enc, parts_of,     # noqa: E402
-                            record, record_diff,
+from ConfigIdentity import (IdentifiedConfig, ModelConfig, enc,  # noqa: E402
+                            parts_of, record, record_diff,
                             register, short_id)
-from HestSegFunc import HestSegConfig                            # noqa: E402
+from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
 from TissueMask import SlideMask, TissueMask                     # noqa: E402
 from TissueSegFunc import PlaneSegConfig, TissueSegConfig        # noqa: E402
 from Uni2PcaSegFunc import Uni2PcaSegConfig                      # noqa: E402
@@ -215,11 +215,36 @@ class MaskMaker:
 #: hsv       colour thresholds at ds 4.
 #: hest      DeepLabV3 at ds 4. The baseline.
 #: uni2_pca  a slide segmenter; its resolution is UNI2's patch grid (ds 14).
+#:
+#: Every field of every config is written out (test_config_identity's recipe
+#: lint): a recipe reads as the mask it makes, and a class whose default moves
+#: does not move a recipe with it.
 MASK_RECIPES: Dict[str, TissueMaskConfig] = {
-    'none': TissueMaskConfig(seg=PlaneSegConfig('')),
-    'hsv': TissueMaskConfig(seg=PlaneSegConfig('hsv')),
-    'hest': TissueMaskConfig(seg=HestSegConfig()),
-    'uni2_pca': TissueMaskConfig(seg=Uni2PcaSegConfig()),
+    'none': TissueMaskConfig(
+        seg=PlaneSegConfig(
+            method='', limit_bounds=True, ds=4.0, seg_chunk_px=4_000_000,
+            read_chunk_px=4_000_000, stitch_overlap=128),
+        min_region_ratio=0.01, merge=True),
+    'hsv': TissueMaskConfig(
+        seg=PlaneSegConfig(
+            method='hsv', limit_bounds=True, ds=4.0, seg_chunk_px=4_000_000,
+            read_chunk_px=4_000_000, stitch_overlap=128),
+        min_region_ratio=0.01, merge=True),
+    'hest': TissueMaskConfig(
+        seg=HestSegConfig(
+            method='hest', limit_bounds=True, ds=4.0, seg_chunk_px=4_000_000,
+            read_chunk_px=4_000_000, stitch_overlap=128,
+            model=ModelConfig(source='torchvision', arch=HEST_ARCH,
+                              dtype='fp32', weights=None)),
+        min_region_ratio=0.01, merge=True),
+    'uni2_pca': TissueMaskConfig(
+        seg=Uni2PcaSegConfig(
+            method='uni2-pca-seg', encoder='uni2', tile=224, components=16,
+            background_threshold=0.5, larger_pca_as_fg=True, morph_kernel=7,
+            feature_norm=False, fp16=True, fit_tiles=1000, fit_bins=10,
+            fit_seed=0, fit_ds=32.0, limit_bounds=True, batch_tiles=64,
+            workers=8),
+        min_region_ratio=0.01, merge=True),
 }
 
 

@@ -26,14 +26,150 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Iterator, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Iterator, Optional, Tuple, Union
 
 import numpy as np
 
 from TissueMask import TissueMask                                # noqa: E402
-from TileSampler import PlanSpec, SamplerConfig, TileSampler      # noqa: E402
+from TileSampler import (InheritConfig, OverlapConfig, PlanSpec,  # noqa: E402
+                         RichnessConfig, SamplerConfig, TileSampler)
 
 from camera import Render, photo_rng                               # noqa: E402
+from config import DomainGapConfig                                 # noqa: E402
+
+
+# ── the recipes -- one name, one corpus of FoVs, wherever it is asked for ─────
+
+@dataclass(frozen=True)
+class FovRecipe:
+    """What decides which pictures a corpus of FoVs holds, apart from the
+    slide and its mask: the sensor, the domain gap, the draw and the rungs.
+
+    `rungs` is 'native' -- each slide's own pyramid levels, up to `max_ds` --
+    or the ds values themselves. Each part keeps its own id (`gap`, `sampler`;
+    the rungs and the sensor are in the plan's key), so a recipe adds no id of
+    its own: two recipes with equal parts are the same FoVs."""
+    sensor: Tuple[int, int]
+    gap: DomainGapConfig
+    sampler: SamplerConfig
+    rungs: Union[str, Tuple[float, ...]]
+    max_ds: Optional[float]
+
+    def __post_init__(self):
+        if isinstance(self.rungs, str) and self.rungs != 'native':
+            raise ValueError(f"rungs is 'native' or a tuple of ds, got "
+                             f"{self.rungs!r}")
+        if not isinstance(self.rungs, str) and self.max_ds is not None:
+            raise ValueError(f'max_ds {self.max_ds} bounds the native levels; '
+                             f'with explicit rungs {self.rungs} it would bound '
+                             f'nothing')
+
+
+#: `--fov <name>` resolves here. Every field of every config is written out
+#: (test_config_identity's recipe lint); a caller `dataclasses.replace`s what
+#: its own arguments set, which is a different config and so a different id.
+#:
+#: bench                   every benchmark's FoVs: the real photos' sensor, the
+#:                         full domain gap with 5 per cent mpp jitter, 50 per
+#:                         native level up to ds 16, a third of a level's
+#:                         budget allowed to overlap so a coarse level whose
+#:                         disjoint lattice runs out still fills.
+#: routing-query           MppRoutingHead's query tiles: a tile-sized sensor
+#:                         (`--tile` replaces it), the full gap with the two
+#:                         frame-referenced optics present half the time and no
+#:                         stage shift, over DsLadder's six rungs.
+#: routing-support-native  its support tiles read as stage 1 reads them at
+#:                         inference: rotation only, no photometric gap.
+FOV_RECIPES: Dict[str, FovRecipe] = {
+    'bench': FovRecipe(
+        sensor=(1440, 1024),
+        gap=DomainGapConfig(
+            rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+            scale_range=(0.90, 1.15), query_mpp_jitter=0.05,
+            brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
+            saturation=1.0, color_temp_range=(-0.12, 0.12),
+            vignette_range=(0.15, 0.45), stage_shift_max=3,
+            distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
+            vignette_p=1.0, distortion_p=1.0, defocus_radius=2,
+            chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
+            photometric=True, geometric=True),
+        sampler=SamplerConfig(
+            n_per_rung=50, seed=0,
+            richness=RichnessConfig(
+                scorer='background',
+                edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+                floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+                caps=(0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+                bucket_frame='per_rung', floor_frame='ask'),
+            overlap=OverlapConfig(
+                step=0.5, max_overlap_ratio=0.5, overlapping_share=1 / 3,
+                jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                                (1.0, 0.75), (1.25, 1.25)),
+                jitter_cap=0.0),
+            inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                                  on_incomplete='drop'),
+            candidates='lattice', max_tries_per_tile=5),
+        rungs='native', max_ds=16.0),
+    'routing-query': FovRecipe(
+        sensor=(256, 256),
+        gap=DomainGapConfig(
+            rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+            scale_range=(0.90, 1.15), query_mpp_jitter=0.0,
+            brightness_range=(-0.08, 0.08), contrast_range=(-0.08, 0.08),
+            saturation=1.0, color_temp_range=(-0.12, 0.12),
+            vignette_range=(0.15, 0.45), stage_shift_max=0,
+            distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
+            vignette_p=0.5, distortion_p=0.5, defocus_radius=2,
+            chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
+            photometric=True, geometric=True),
+        sampler=SamplerConfig(
+            n_per_rung=500, seed=0,
+            richness=RichnessConfig(
+                scorer='background',
+                edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+                floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+                caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0),
+                bucket_frame='per_rung', floor_frame='ask'),
+            overlap=OverlapConfig(
+                step=0.5, max_overlap_ratio=0.5, overlapping_share=1.0,
+                jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                                (1.0, 0.75), (1.25, 1.25)),
+                jitter_cap=0.25),
+            inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                                  on_incomplete='drop'),
+            candidates='lattice', max_tries_per_tile=5),
+        rungs=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0), max_ds=None),
+    'routing-support-native': FovRecipe(
+        sensor=(256, 256),
+        gap=DomainGapConfig(
+            rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+            scale_range=(1.0, 1.0), query_mpp_jitter=0.0,
+            brightness_range=(0.0, 0.0), contrast_range=(0.0, 0.0),
+            saturation=1.0, color_temp_range=(0.0, 0.0),
+            vignette_range=(0.0, 0.0), stage_shift_max=0,
+            distortion_k1_range=(0.0, 0.0), distortion_k2=0.0,
+            vignette_p=0.0, distortion_p=0.0, defocus_radius=0,
+            chromatic_shift=0, noise_sigma=0.0, jpeg_quality=100,
+            photometric=False, geometric=True),
+        sampler=SamplerConfig(
+            n_per_rung=500, seed=0,
+            richness=RichnessConfig(
+                scorer='background',
+                edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+                floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+                caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0),
+                bucket_frame='per_rung', floor_frame='ask'),
+            overlap=OverlapConfig(
+                step=0.5, max_overlap_ratio=0.5, overlapping_share=1.0,
+                jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                                (1.0, 0.75), (1.25, 1.25)),
+                jitter_cap=0.25),
+            inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                                  on_incomplete='drop'),
+            candidates='lattice', max_tries_per_tile=5),
+        rungs=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0), max_ds=None),
+}
 
 
 class FovSupply:
