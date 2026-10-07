@@ -3428,3 +3428,30 @@ front of whoever flips it.
       store 地址的 plan_label 加上 q<id>（query 抽樣、QUERY_GAP、rotations），之前 query 怎麼來
       不在地址裡。query 的定義變了：從 1440x1024 照片切出的 tile 變成直接拍一張 256 tile，
       數字不能和舊的比。
+
+[ ] 2026-10-07 | cache 目錄重新設計：一棵樹，由 Cache.py 維護
+    - 動機：pipeline 只負責跑；bench 那一側的支流把每個 stage 的結果存下來，結果本身就是 cache
+      （可重用、可離線畫圖、可做 demo）。舊版每個模組各自組 <made_by>_<object>/ 底下的層，
+      規則只寫在 CLAUDE.md，各模組照著寫一次。
+    - 量測（CostLocaScope，BRACS_1413 L0 30 shot，--seg none，TOPK 20 / SIFT_TOPK 5，393 s）：
+      verify 139、level（一次性編碼 225,665 tile）111、fig 81、s3 30、s2 14、photo 12、
+      s1/build/topk 6。250 shot 那次計時外的約 1876 s 幾乎全是 verify + fig。verify 對 rank 1
+      重跑了 pipeline 的 s3，而且每個候選都重算 query 的 SIFT。
+    - 樹：result/cache/<made_by>/<kind>=<id>/.../<entry kind>/{<role>_<id>.<ext>, record_<id>.json}
+      <kind>=<id>/ 是選定的輸入，<kind>/ 放同一輸入的兄弟變體。id 為 <label>-<16hex> 或 16hex。
+      Cache.TREE（層與父層）與 Cache.ENTRIES（entry 掛在哪一層）是唯一定義；Address 只能沿
+      TREE 長（缺父層、兩個分支、未知 kind 一律拒絕），.on(job) 只換根目錄。Entry.writing 先
+      寫內容、最後寫 record（被殺的寫入讀起來是 miss），record 列出 members，drop 依名稱刪除，
+      不靠樣式比對（role 和 id 都可能有 _）。
+    - 決定：照片預設不存（--save-photos）；每張 slide、每個 stage 一個檔，整張 slide 跑完才寫；
+      record 相符即跳過、不符重算覆寫並印出差異；bench --route stage1|oracle|both（預設 stage1，
+      oracle 寫到 stage1=oracle/）；TOPK 100、SIFT_TOPK 10；stage 1 逐 patch 機率寫成
+      probs_<s1>.csv；讀別人 cache 每種一個 flag（--sampler-cache-job 改名 --draw-cache-job）；
+      舊 cache 不搬遷直接刪；SuperPathPoint 的 pretile / labels / chainstack 一起遷移；
+      pipeline bench 與 stage 1 bench 共用 stage1/output_<s1>.csv，window bench 之後接。
+    - 順序：1 Cache.TREE / Address / Entry；2 mask、draw、split；3 render cache + FovSupply；
+      4 features + stage 1 KNN bank；5 stage 結果、bench 支流、oracle、stage 3 prototype
+      （SiftRansacConfig，query SIFT 一次、top-K 平行）；6 stage 1 bench；7 SuperPathPoint；
+      8 purge 工具、lint（Cache.py 以外不得組 <kind>= 路徑）、CLAUDE.md、刪舊 cache。
+    - 第 5 步的對照基準：a80c958 的 CostLocaScope metrics.csv，TOPK 20 / SIFT_TOPK 5 重跑後
+      除時間欄外逐欄相等。

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for utilities/Cache.py -- layout, atomic writes, the sidecar, the slide
-key. Standard library only, like the module: no torch, no slide, temp dirs.
+"""Tests for utilities/Cache.py -- the tree, addresses and entries, atomic
+writes, the sidecar, the slide key. No torch, no slide, temp dirs.
 
     python utilities/test_modules/test_cache.py
 """
@@ -134,6 +134,152 @@ def t_find_filters_on_meta_and_sorts():
         assert [p.parent.name for p in got] == ['A', 'B'], got
         assert json.loads(got[0].read_text())['method'] == 'hest'
     return 'A, B'
+
+
+# ── the tree ──────────────────────────────────────────────────────────────────
+
+class _UnderTemp:
+    """Cache.RESULT_DIR pointed at a temp dir for the length of a test."""
+
+    def __enter__(self) -> Path:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old, Cache.RESULT_DIR = Cache.RESULT_DIR, self._tmp.name
+        return Path(self._tmp.name)
+
+    def __exit__(self, *exc):
+        Cache.RESULT_DIR = self._old
+        self._tmp.cleanup()
+
+
+def _refused(fn, *args, **kw) -> str:
+    try:
+        fn(*args, **kw)
+    except ValueError as e:
+        return str(e)
+    raise AssertionError(f'{fn.__name__}{args}{kw} was accepted')
+
+
+def _rec(id_, **parts):
+    return {'id': id_, 'parts': [f'{k}={v}' for k, v in sorted(parts.items())],
+            'upstream': {}, 'versions': {}, 'env': {}}
+
+
+def t_every_entry_level_is_a_level_and_every_parent_a_kind():
+    assert all(p is None or p in Cache.TREE for p in Cache.TREE.values())
+    assert all(lv in Cache.TREE for lvs in Cache.ENTRIES.values() for lv in lvs)
+    return f'{len(Cache.TREE)} levels, {len(Cache.ENTRIES)} entry kinds'
+
+
+def t_address_orders_by_tree_not_by_argument():
+    with _UnderTemp() as res:
+        a = Cache.Address('Job', region='r1', slide='S_1', seg='hest-ab12')
+        assert a.dir == res / 'cache' / 'Job' / 'slide=S_1' / 'seg=hest-ab12' / 'region=r1', a.dir
+        assert a == Cache.Address('Job', slide='S_1', seg='hest-ab12', region='r1')
+        assert a.at(plan='p').leaf == 'plan' and a.leaf == 'region'
+    return 'slide/seg/region whatever the kwargs order'
+
+
+def t_address_refuses_what_the_tree_does_not_have():
+    msgs = [
+        _refused(Cache.Address, 'J', slide='s', region='r'),          # no seg
+        _refused(Cache.Address, 'J', slide='s', seg='g', region='r',
+                 grid='t256-o1', plan='p'),                            # two branches
+        _refused(Cache.Address, 'J', slide='s', colour='x'),           # unknown kind
+        _refused(Cache.Address, 'J', slide='a/b'),                     # two components
+        _refused(Cache.Address, 'J', slide='a=b'),
+        _refused(Cache.Address, 'J', slide=''),
+        _refused(Cache.Address('J', slide='s').at, slide='t'),         # twice
+    ]
+    assert 'seg' in msgs[0], msgs[0]
+    return f'{len(msgs)} refused'
+
+
+def t_on_keeps_the_levels_and_moves_the_root():
+    with _UnderTemp() as res:
+        a = Cache.Address('Reader', slide='s', seg='g')
+        b = a.on('Writer')
+        assert b.levels == a.levels and b.dir == res / 'cache' / 'Writer' / 'slide=s' / 'seg=g'
+        assert _refused(lambda: Cache.Address(slide='s').dir)
+    return 'same levels, other root; no job is no root'
+
+
+def t_entry_sits_only_where_entries_says():
+    a = Cache.Address('J', slide='s')
+    assert a.entry('mask').dir.name == 'mask'
+    _refused(a.entry, 'stage1')
+    _refused(a.entry, 'nonsense')
+    _refused(a.entry('mask').path, 'mask', 'id', 'safetensors')       # no dot
+    return 'mask at slide; stage1 at slide refused'
+
+
+def t_write_puts_the_record_last_and_a_failure_leaves_nothing():
+    with _UnderTemp():
+        e = Cache.Address('J', slide='s').entry('mask')
+        want = _rec('hest-1', a=1)
+        with e.writing('hest-1', want) as put:
+            put('mask', '.bin').write_bytes(b'x')
+            assert e.status('hest-1', want) == ('miss', []), 'record before the files'
+        assert e.status('hest-1', want) == ('hit', [])
+        assert sorted(p.name for p in e.dir.iterdir()) == ['mask_hest-1.bin',
+                                                         'record_hest-1.json']
+        try:
+            with e.writing('hest-2', _rec('hest-2')) as put:
+                put('mask', '.bin').write_bytes(b'half')
+                raise RuntimeError('killed')
+        except RuntimeError:
+            pass
+        assert e.ids() == ['hest-1'] and sorted(p.name for p in e.dir.iterdir()) == [
+            'mask_hest-1.bin', 'record_hest-1.json'], list(e.dir.iterdir())
+        try:
+            with e.writing('hest-3', _rec('hest-3')) as put:
+                put('mask', '.bin')                                    # never written
+        except RuntimeError:
+            pass
+        assert e.ids() == ['hest-1']
+    return 'miss while writing, hit after; killed and empty writes leave nothing'
+
+
+def t_stale_names_the_difference_and_a_rewrite_drops_old_roles():
+    with _UnderTemp():
+        e = Cache.Address('J', slide='s', seg='g', region='r', plan='p',
+                          draw='d', render='g1').entry('stage1')
+        with e.writing('knn-1', _rec('knn-1', k=5)) as put:
+            put('output', '.csv').write_text('old')
+            put('probs', '.csv').write_text('old')
+            put('photos').mkdir()
+        state, diff = e.status('knn-1', _rec('knn-1', k=7))
+        assert state == 'stale' and any('k=7' in d for d in diff), diff
+        with e.writing('knn-1', _rec('knn-1', k=7)) as put:
+            put('output', '.csv').write_text('new')
+        names = sorted(p.name for p in e.dir.iterdir())
+        assert names == ['output_knn-1.csv', 'record_knn-1.json'], names
+        assert (e.dir / 'output_knn-1.csv').read_text() == 'new'
+        assert e.status('knn-1', _rec('knn-1', k=7)) == ('hit', [])
+    return 'stale with the part named; probs and photos of the old write gone'
+
+
+def t_drop_touches_no_other_variant_even_one_sharing_a_suffix():
+    with _UnderTemp():
+        e = Cache.Address('J', slide='s', seg='g', region='r', plan='p',
+                          draw='d', render='g1', stage1='s1').entry('stage2')
+        for id_ in ('x', 'sims_x'):
+            with e.writing(id_, _rec(id_)) as put:
+                put('tile_sims', '.csv').write_text(id_)
+        e.drop('x')
+        assert e.ids() == ['sims_x'] and (e.dir / 'tile_sims_sims_x.csv').exists()
+        assert not (e.dir / 'tile_sims_x.csv').exists()
+    return "dropping 'x' kept 'sims_x'"
+
+
+def t_members_is_the_cache_s_own_key():
+    with _UnderTemp():
+        e = Cache.Address('J', slide='s').entry('mask')
+        try:
+            with e.writing('a', {**_rec('a'), Cache.MEMBERS: []}):
+                pass
+        except ValueError:
+            return 'a caller record carrying members refused'
+    raise AssertionError('a record with members was accepted')
 
 
 _TESTS = [t for n, t in sorted(globals().items()) if n.startswith('t_')]
