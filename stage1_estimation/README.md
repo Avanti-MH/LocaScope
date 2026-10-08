@@ -71,9 +71,8 @@ patch 編碼後去投票。
 
 #### `ClassifierEstMpp.py` — challenger
 
-用 `training/MppRoutingHead/` 訓練出來的分類頭做 mpp 估計。要在
-`bench_mpp_feature_decomposition.py` 的 `sampler_routing` scorecard
-（`level_accuracy`、`mpp_error_relative_p50`）上打贏 `KnnEstMpp` 才能取代
+用 `training/MppRoutingHead/` 訓練出來的分類頭做 mpp 估計。要在 stage 1 bench
+（`bench_stage1_mpp.py`、`analyze_stage1_metrics.py`）上打贏 `KnnEstMpp` 才能取代
 它成為 canonical；`LocaScopePipeline` 目前不呼叫它。
 
 模型離線訓練好、跟任何一張 WSI 無關，所以跟 `KnnEstMpp` 正好相反：建構貴

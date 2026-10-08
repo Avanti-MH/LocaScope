@@ -169,7 +169,7 @@ def main():
                          'help"')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
-    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
+    args.labels_root = labels_root(args)   # the labelling job
 
     overlap = set(args.train_slides) & set(args.val_slides)
     if overlap:

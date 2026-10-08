@@ -18,7 +18,7 @@ import _paths                                                    # noqa: E402
 _paths.setup_import_paths()
 
 import Cache                                                     # noqa: E402
-from Cache import (CacheMismatch, atomic_file, cache_root,          # noqa: E402
+from Cache import (CacheMismatch, atomic_file,          # noqa: E402
                    check_source, source_key, wsi_stem_of)
 
 _RESULTS = []
@@ -32,16 +32,6 @@ def check(name, fn):
     except Exception as e:                                       # noqa: BLE001
         _RESULTS.append((name, e))
         print(f'  FAIL  {name}\n          {type(e).__name__}: {e}')
-
-
-def t_root_is_made_by_then_object():
-    root = cache_root('MppRoutingHead', 'sampler')
-    assert root.name == 'MppRoutingHead_sampler' and root.parent.name == 'cache', root
-    try:
-        cache_root('', 'sampler')
-    except ValueError:
-        return str(root)
-    raise AssertionError('an empty made_by was accepted')
 
 
 def t_job_name_prefers_slurm():

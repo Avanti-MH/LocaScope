@@ -51,7 +51,7 @@ ds and mpp. Every estimator returns its `chosen_*` fields through it.
 '''
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Protocol, Sequence, Tuple, runtime_checkable
 
 import numpy as np
@@ -75,6 +75,11 @@ class EstMppResult:
     chosen_mpp: float
     chosen_level: int
 
+    def row(self) -> dict:
+        '''This result as one table row: the five fields, and whatever a
+        method's subclass adds.'''
+        return asdict(self)
+
 
 @runtime_checkable
 class MppEstimator(Protocol):
@@ -90,10 +95,17 @@ class MppEstimator(Protocol):
     is an error, not silently dropped. `query` is a raw image array -- "the
     input interface is just the query image" is the one thing every estimator
     was asked to agree on.
+
+    `masks` and `cache_job` are where a method that samples a reference bank
+    keeps it (`reference_bank`): the MaskMaker `mask` came from and the job
+    whose cache holds the draw and its features. Without them the bank is made
+    in memory; a method with no bank ignores both.
     '''
 
-    def build(self, wsi, mask=None) -> 'MppEstimator':
+    def build(self, wsi, mask=None, *, masks=None,
+              cache_job=None) -> 'MppEstimator':
         ...
+
 
     def estimate(self, query: np.ndarray) -> EstMppResult:
         ...
@@ -107,3 +119,36 @@ def routed_level(level_downsamples: Sequence[float], base_mpp: float,
     level = coarser_level(level_downsamples, estimated_ds)
     chosen_ds = float(level_downsamples[level])
     return level, chosen_ds, float(base_mpp) * chosen_ds
+
+
+def reference_bank(wsi, mask, sampler_cfg, tile_size: int, *, masks=None,
+                   cache_job=None):
+    """`(sampler, plan)`: the TileSampler draw a reference bank is cut from,
+    one rung per pyramid level (`PlanSpec('native')` for a plain
+    `tile_size` tile), on `mask`.
+
+    With `cache_job` the draw is `TileSampler.cached` in that job's tree --
+    `masks` is the MaskMaker whose recipe `mask` was made by, which names the
+    draw's address and makes the mask on a miss -- so `index_<sampler>.csv`
+    there says which tiles the bank holds, and a later build reads them back.
+    Without, it is drawn in memory: the same plan and config, the same tiles."""
+    from ReadGeometry import ReadSpec                             # noqa: PLC0415
+    from TileSampler import PlanSpec, TileSampler                 # noqa: PLC0415
+    plan = PlanSpec('native', camera=ReadSpec(int(tile_size), int(tile_size)))
+    if cache_job:
+        if masks is None:
+            raise ValueError('a cached reference bank needs the MaskMaker its '
+                             'mask came from (masks=)')
+        path = getattr(wsi, '_filename', None) or str(wsi)
+        return TileSampler.cached(path, sampler_cfg, plan, cache_job,
+                                  masks=masks), plan
+    return TileSampler(wsi, mask, sampler_cfg).sample(plan.plans_for(wsi)), plan
+
+
+def weights_path(weights: str) -> str:
+    """A checkpoint named in a recipe: relative to the results root
+    (`MppRoutingHead/weights/<file>`), so a recipe holds no mount; an absolute
+    path is used as it is."""
+    import os                                                     # noqa: PLC0415
+    from _paths import RESULT_DIR                                 # noqa: PLC0415
+    return weights if os.path.isabs(weights) else os.path.join(RESULT_DIR, weights)

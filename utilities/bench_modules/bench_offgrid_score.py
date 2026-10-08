@@ -866,11 +866,7 @@ def main() -> int:
     add_mask_args(parser)
     parser.add_argument(
         '--encoder', default='gigapath', choices=encoder_names(),
-        help='which tile encoder. Only the module for THIS one is imported: '
-             'every implementation sets HF_HOME above its own timm import and '
-             'setdefault is first-one-wins, so importing all three would point '
-             'two of them at the wrong weight cache -- silently. See '
-             'TileEncoderFunc._IMPLEMENTATIONS.')
+        help='which tile encoder (TileEncoderFunc._IMPLEMENTATIONS).')
     parser.add_argument(
         '--head', default='',
         help="which exit of the model, empty for its own default. Only CONCH "

@@ -3515,3 +3515,169 @@ front of whoever flips it.
     - Cache.find / read_meta / atomic_dir 刪除（沒有使用者）；dataset_key 新增。
     - 舊 cache 全部不搬：<job>_mask/、<job>_sampler/、<job>_split/ 由新地址取代，第一次跑會重新
       分割、抽樣；MakeSplit 要重跑 make_split.py。
+
+[x] 2026-10-07 | cache 第 5 步：stage 結果進 Cache.TREE、bench 支流、離線繪圖
+    - stage recipe：每個方法一張表，放在方法自己的模組：KNN_RECIPES（gigapath、uni2）、
+      SLIDEWIN_RECIPES（gigapath，k=100）、SIFT_RECIPES（default，n_verify=10）。knn_estimator 刪除。
+      每個 stage package 的 __init__ 有 METHODS 表與 recipe('<方法>:<recipe>')（ConfigIdentity.method_recipe，
+      用到才 import）。id 標籤 <方法>-<recipe>-<16hex>；stage 2 的 hex 另含所搜尋 mask 的 seg/region id。
+    - SiftRansacConfig（min_inliers, padding, ratio, ransac_px, n_verify, workers；workers 不是 identity）。
+      localize_top：query 的 SIFT 只算一次，前 n_verify 個候選用 thread pool 平行驗證。
+      SiftRansacResult 帶 crop_l0、pairs，row()/pair_rows()。
+    - LocaScopePipeline 拆成 stage1 / stage2 / candidates_at / stage3；三個 stage 都可以是 None（不建）。
+    - FovSupply.VERSION 0 -> 1：render 列加上幾何欄（level, ds, nominal_mpp, sensor, x0, y0, w0, h0,
+      center_x0, center_y0），真值由分析端從 render CSV 算。舊 render entry 會被判 stale 重寫。
+    - bench_locascope 重寫：每張 slide、每個 stage 一個 entry（render=<gap>/stage1/、
+      stage1=<s1|oracle>/stage2/、stage2=<s2>/stage3/），整張 slide 跑完才寫；命中就讀回、不載入模型。
+      --route stage1|oracle|both。metrics.csv、summary、圖、--resume、--draw-* 全部移除。
+      stage 2 的 truth（最近真值視窗的 rank、score、margin）在相似度圖還在時算。
+      KNN 交出 neighbours（ref_index 是本 slide 參考庫 draw 的列號）。
+    - utilities/cli/plot/plot_locascope.py：用 bench 同一組參數算出地址，join render 與三個 stage 的表，
+      --select（pandas query）、--sample、--panels、--plot、--by、--export demo。
+      它 import bench_locascope 的 add_run_args / run_from_args / slide_supplies / stage_entries，
+      讓地址只有一個定義。
+    - 失效：plot_locascope_metrics.py、analyze_locascope_metrics.py、dump_function/_locascope_plots.py
+      讀舊 metrics.csv，已沒有產生者（第 8 步收尾時刪除）。
+
+[x] 2026-10-08 | cache 第 4、6、7、8 步：features、stage 1 bench、SuperPathPoint 進 Cache.TREE，收尾
+    第 4 步 features
+    - Store.FeatureStore 改成 Entry 的 variant：save(entry, id, record, ...)、write(...) 一次寫多個 role
+      （tile bench 的 query 與 answers）；key_dir / grid_key / sample_key / files / levels 刪除，FeatureMeta.record
+      欄位刪除（record 在 entry 裡）。variant id 是 Store.feature_id：[ds<d>-]<pooling>-<encoder tag>-<config id>，
+      用 config 的 id 讓不載模型的讀取方也算得出來，weights 在 record。FeatureStore.VERSION 0 -> 1。
+    - FeatureMapCache(job, wsi, encoder, mask_cfg)：slide/seg/region/grid=t<tile>-o<0|1>/features/。
+      LocaScopePipeline 的 feature_store_root 改為 feature_cache_job。
+    - stage 1 的參考庫：StageInterface.reference_bank（PlanSpec('native', ReadSpec(t, t))），有 cache job 時走
+      TileSampler.cached；KNN 的特徵存在 draw=<sampler>/features/。build(wsi, mask, *, masks, cache_job)，
+      四個 estimator 都收；pipeline 的 bank_cache_job。in-memory 與 cached 用同一個 plan（camera reserve），
+      和舊的 native_plans(factor=1) 抽到的 tile 不同。
+    - bench_tile_retrieval 重寫：每層的參考是一個 draw entry（max(k/ds^2, k_floor)，不再以 grid 數為上限，
+      讓 eval 不讀 mask 就能算地址），query 走 FovSupply.cached，旋轉改用 gap 自己抽的（不再固定 0/90），
+      query 與答案 tile 存在同一個 render features variant，ans_main/ans_ovlp 指向 answers。--phase dump|eval|all；
+      TileRetrievalBench.sh 用 PHASE。
+    - build_reference_store：draw 走 TileSampler.cached，每層一個 features variant；--cache-job 取代 --out /
+      --features-cache-job。inspect_feature_store 只收檔案路徑，--pairs 檢查 features_<id> 與 answers_<id>。
+    - 照計畫先壞掉：bench_feature_axes.py、bench_mpp_feature_decomposition.py（用舊的 store 路徑）。
+    第 6 步 stage 1 bench
+    - CLASSIFIER_RECIPES、PROTOTYPE_RECIPES 各一個範本（要列哪些 checkpoint 由使用者決定），CLASSIC_RECIPES['default']；
+      stage1 METHODS 四個方法。weights 是相對 result/ 的路徑（StageInterface.weights_path）；建構時 __init__ 逐欄
+      比對 checkpoint，不一致就拒絕。stage 的 record 加 checkpoint 的檔案指紋。
+    - bench_stage1_mpp 重寫：--stage1 多個 <方法>:<recipe>，方法外圈；每個 (slide, 方法) 是 render=<gap>/stage1/
+      的 entry，和 bench_locascope 同一個地址、同一組表（output、neighbours、probs、votes），投票規則 RULES 搬到
+      bench_locascope 並寫進 record。照片存在 render entry 旁，第二個方法起讀回。
+    - analyze_stage1_metrics 改讀 cache：同一組 flag 算地址，真值取自 FovSupply.geometry，fov_stats 從 probs 表算；
+      表寫成 result/<job>/stage1_<split>.csv，之後的表格、門檻流程不變（test 找同一 --out 的 stage1_val_thresholds.json）。
+      舊的 <fov id>_<seg>_<region>_<split>.csv 與 _probs.jsonl 不再產生。
+    - estimate_method_memory 改收 --stage1；locate_photo 的 retriever 改用 SLIDEWIN_RECIPES。
+    第 7 步 SuperPathPoint
+    - PreTileCorpus 的 root 是 job 名；rung 在 .../draw=<sampler>/pretile=f<k>/ds=<d>/tiles/，key 字串不變。
+    - KeypointLabelStore：labels 放在 rung 的 ds=<d>/labels/，variant 是 LabelMeta.identity_id()；find/find_one
+      必須給 wsi_stem、ds、pretile_id，只列該 entry 的 variant。inspect_ha_labels 改用 --corpus 算地址。
+    - ChainStack 的 tile cache 在 slide=<s>/chainstack/；cli 的 pretile_root / labels_root / chainstack_root 回傳 job 名。
+    第 8 步
+    - Cache.cache_root 刪除；Address.children(kind) 列出已知地址正下方一層。lint：Cache.py 以外不准有 glob 一層或
+      夾 /<kind>= 的路徑字串、不准呼叫 cache_root（test_config_identity）。
+    - utilities/cli/inspect_cache_store/purge_cache.py：--level 刪子樹、--entry/--id 刪一個 variant，--yes 才刪。
+    - CLAUDE.md 的 cache 段落、ARCHITECTURE.md 的 cache 一節改寫。plan.md 之後重建，放 pre-tile 退役（A）
+      與網頁讀 cache（B）兩個計畫；B 已完成，A 完成後刪除。
+    - 舊 cache 不搬：result/cache/*_mask、*_sampler、*_split、*_features、*_pretiles、*_keypoint_labels、
+      *_chainstack 全部由新地址取代，SuperPathPoint 的 pre-tile 與 labels 要重新抽、重新標。
+
+[ ] 2026-10-08 | bench_locascope.py
+    stage 2 的相似度圖要不要存（simmaps_<s2>.safetensors）：一張 FoV 四個旋轉，L0 時可達數百 MB。目前不存，
+    plot_locascope 沒有 simmap 面板。需要熱圖時再加 --save-simmaps。
+
+[x] 2026-10-08 | bench_window_retrieval.py
+    改成和其他 bench 共用 draw（一個 draw 跨所有層）：見下方「window bench 改走和其他 bench 一樣的 slide 與
+    FoV 流程」。
+
+[x] 2026-10-08 | bench_feature_axes.py、bench_mpp_feature_decomposition.py 刪除
+    連同 FeatureAxes.sh、MppRoutingExp.sh。兩者用舊的 store 路徑，cache 搬進 TREE 之後已無法執行，使用者不再需要。
+    其他程式碼裡指向它們的註解改寫；training/MppRoutingHead/spec.md 的歷史段落未動。
+    smoke 修正：analyze_stage1_metrics 的 --stage-cache-job 預設改為 job_name（SLURM_JOB_NAME 優先），
+    否則同一個 jobscript 裡 bench 寫在 SmokeStage1、分析去讀 Stage1MppBench，全部 miss。
+    tile bench 的旋轉分組標籤 rot90 改為 rot!=0（query 的旋轉由 gap 抽 0/90/180/270）。
+
+[x] 2026-10-08 | inspect_feature_store.py、build_reference_store.py、RefStore.sh 刪除
+    參考庫由 KNN 的 bank cache 和 tile bench 自己的 draw 產生，不再需要獨立的建庫工具。tile bench 的答案 tile 由它自己
+    依座標算出並存在 query 的同一個 variant（answers），pool 缺的答案在 dump 時補進去，所以不再做配對檢查：
+    TileRetrievalBench.sh 拿掉 inspect 那一段。training/MppRoutingHead/spec.md 刪掉指向已刪 bench 的歷史段落。
+
+[x] 2026-10-08 | stage 2 真值的 tile cosine、畫圖改兩層、stage 1 參考庫「抽幾張／用幾張」
+    - stage 2 的 truth 表加真值視窗的 level-0 框（truth_x0..h0）與只看 main lattice 的最近視窗
+      （truth_main_rank / score / dist_l0，網頁的 d_main）；新表 truth_tiles 存真值視窗的 per-tile cosine
+      （SlidingWinSimRot.nearest_window 加 lattices 參數）。每個 stage 的 record 加 tables（存哪幾張表），
+      表變了舊 entry 就是 stale。
+    - plot_locascope：總覽改成從 slide 讀出剛好包住真值與前 K 個候選框的區域（原本是整張縮圖放大 24 倍，
+      和照片 scale 差太多）；新面板 windows：真值與前 --k-windows 個候選視窗各一欄，上排照片轉到該視窗的
+      旋轉並切 tile，下排視窗依 cosine 調深淺並標數值，和 DemoLocaScope 網頁同一種畫法；tiles 面板刪除。
+    - KnnEstMppConfig、PrototypeEstMppConfig 加 n_per_level：每層用 draw 裡的前幾張（None 全用）；
+      抽幾張仍是 sampler_cfg.n_per_rung。BASELINE 為 None，既有 id 不變。neighbours 的 ref_index 仍是 draw 的列號。
+
+[x] 2026-10-08 | demo 網頁讀 cache（plan.md B）
+    plot_locascope --export demo 寫出 DemoLocaScope 網頁吃的 data.js（parts / queries / windows / arms / cos）
+    與 JPEG，網頁本身複製一份進 utilities/cli/plot/demo_page/index.html，只改 drawPanel：每個視窗帶 rot / rows /
+    cols，照片依視窗的旋轉選圖（q.imgs），格子用視窗自己的 rows×cols；part.pool 為 0 時不顯示。
+    一個 route（--demo-route）、一個 arm（cls+mean）。DemoLocaScope 目錄本身（repo 外）沒動。
+
+[x] 2026-10-08 | stage 表：output 就是每個 stage 的輸出介面；record_diff 比對呼叫端加的欄位
+    - stage 2 的 output 改存 CandidateSet 本身（每個視窗一列，含 level、ds），candidates 表併入、rank 1 摘要刪除；
+      tile_sims 改存 output 每個視窗的 per-tile cosine（不再只有前 10）；truth_tiles 改名 truth_sim。
+      stage 3 的 output 改存每個驗證過的 rank 的 SiftRansacResult，ranks 表併入、rank1／verified 摘要刪除
+      （由分析端從 output 取）。plot_locascope 與 demo 匯出跟著改。
+    - 修正：record_diff 原本只比 id / parts / upstream / versions / env，bench 加在 record 上的 tables、rules、
+      limit 都被忽略，所以表的組成改了、或 --limit 跑出的 entry，完整跑時仍判為命中（SmokeLocaScope 因此讀到
+      沒有 truth_x0 的舊表，PlotLocaScope 匯出 demo 時崩潰）。現在呼叫端 record 的每個欄位都比，只在舊 record
+      裡的欄位（members、source）視為出處不比；limit 一律寫進 stage 的 record（0 = 全部）。test_config_identity
+      加了對應的檢查。
+
+[x] 2026-10-08 | prototype 的 support tile 進 stage 1 entry：prototypes_index_<s1>.csv
+    PrototypeEstMpp.build 記下每個 support tile（draw 裡的列號與 SampleMeta），prototype_rows() 交出；
+    bench 在每張 slide build 之後寫成 slide 層級的表（不帶 FoV index），欄位用 TileSampler.index_row
+    （與 draw 的 index_<sampler>.csv 同一份定義，write 也改用它）加 prototype（進了哪一層的 prototype）。
+    其他方法這張表是空的。
+
+[x] 2026-10-08 | window bench 改走和其他 bench 一樣的 slide 與 FoV 流程
+    原本每一層各自建一個 FovSupply（種子 seed + level）、FoV 不進 cache，slide 由 pick_wsi_names 隨機挑或
+    --wsi-names 點名。改成 bench_locascope.run_slides（每個 dataset 的 recorded --split 前 --n-wsi 張；split
+    建立時已經打散，前 N 張就是隨機的 N 張）與 supply_for（一張 slide 一份跨所有層的 draw，FovSupply.cached，
+    FoV 放在 --fov-mask-cache-job 的 hest mask 上）；每層的照片從同一份 draw 依 level 分出，fov_id 是 draw 的
+    index。同樣的 datasets / split / n_wsi / FoV 旗標下，window bench 的照片就是 pipeline bench 與 stage 1 bench
+    的照片。--wsi-names、--split-cache-job、pick_slides 刪除；--seed 只剩 sampler 的 seed。
+    slide_supplies 拆成 run_slides + supply_for，三個 bench 共用。
+
+[x] 2026-10-08 | stage 2 的真值視窗放錯：中心錯、90/270 旋轉方向反了
+    BRACS_1413 stage1 #3（rot 270）的 windows 圖，GT 窗和 query 對不上。兩個原因：
+    (1) 真值取「離照片中心最近的視窗」，但 stage 2 從轉正後照片的左上角切整數個 tile，1440 px 的邊只容
+        5 個 224 tile、多出的 160 px 落在哪一側隨旋轉而變，tile grid 的中心不是照片中心。改用
+        query_grid_centre：grid 中心換回照片像素，經 Render.output_to_level0 到 level 0。
+    (2) 真值視窗取在 rotation = rot_deg。stage 2 用 np.rot90（逆時針）轉 query，相機轉的是另一個方向，
+        90 與 270 互換：smoke 裡 oracle #3（rot 270）在 rotation 90 被找到 rank 1、誤差 21 um，同一張
+        在 270 的真值 rank 86723。改用 matching_rotation = (360 - rot_deg) mod 360，真值、grid 中心與
+        plot 的 s2_rot_ok 都用它。
+    真值是 bench 自己的程式，不屬於任何 stage class 的 VERSION，所以 stage-2 entry 的 record 加
+    truth=TRUTH_VERSION（現為 2）；舊 entry 因此判 stale、重算。
+    續：真值窗一律取在照片自己的層。stage 2 被送到別層時（stage 1 路由錯），那一層沒有真值窗，原本卻在那層
+    找「最近的窗」當 GT、算 rank 與 cosine（BRACS_1413 stage1 #3：L0 的照片送到 L3，GT 窗與 query 毫無關係）。
+    現在只有搜尋層 == 真實層才算 rank/score/truth_sim；否則 truth 表只寫真實層上 query tile grid 的 level-0
+    框（_truth_box）與 truth_level，不算 sim。plot 的 GT 欄在 truth_level 讀圖，標「not searched」。
+    TRUTH_VERSION = 3。
+    續：名次只留一套，就是 stage 2 output 的名次。truth 表原本的 truth_rank 是全體視窗（沒有去重）裡的名次，
+    與 output（min_sep_tiles 去重後）是兩套：BRACS_1413 oracle #0 的真值窗全體第 2（0.483），但它和 output #1
+    在同 rotation 下只差 181 px < 256，被去重刪掉，output 的 #2 是 0.431，於是出現兩個「第二名」。
+    truth 表刪 truth_rank、truth_main_rank、truth_main_score、margin，只留真值窗本身（位置、分數、距離、
+    truth_sim）與 truth_main_dist_l0（網頁的 d_main 軸）。GT 在 output 的名次就是 plot 的 s2_hit_rank：
+    在 upright 旋轉（matching_rotation）的候選中，第一個中心離真值窗中心在 padding tile 內的名次；容許距離
+    改用 FoV 自己的 ds（原本用候選窗的 ds，路由錯到 L3 時容許距離大到 1.6 萬 px，假命中），搜尋層不是真實層
+    時留空。圖與網頁標成「GT = #n / not in output / not searched」。
+
+[x] 2026-10-08 | 讀舊 metrics.csv 的三個檔刪除
+    analyze_locascope_metrics.py、plot_locascope_metrics.py（utilities/cli/metrics/）、dump_function/_locascope_plots.py。
+    第 5 步之後 bench_locascope 不再寫 metrics.csv，三者沒有輸入；取代者是 plot_locascope.py（join 表、面板、
+    --export demo）。第 8 步原定刪除，當時漏掉。
+
+[ ] 2026-10-08 | 決定記錄：不做的事
+    - tile 深淺維持網頁的公式 alpha = min(0.65, (1-cos)*0.9)，低 cosine 時整窗偏暗；暫不改。
+    - prototype 的 support 特徵不 cache，每張 slide build 時重新 encode。
+    - stage 2 的相似度圖不存。
+    - routing head 的 n_per_rung：recipe 寫 500、jobscript 用 100，使用者自己調回 100。

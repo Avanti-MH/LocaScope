@@ -119,6 +119,18 @@ class CandidateSet:
         (x, y), (w, h) = self.origin_l0(c), self.window_l0(c, query)
         return x + w / 2.0, y + h / 2.0
 
+    def rows(self, query) -> list:
+        '''The set as table rows, rank first (1 is the best): each window's
+        identity, its score and its level-0 box. `query` is the UNROTATED
+        QueryPatchContainer, as for `window_l0`.'''
+        out = []
+        for rank, c in enumerate(self.candidates, 1):
+            (x, y), (w, h) = self.origin_l0(c), self.window_l0(c, query)
+            out.append(dict(rank=rank, region=c.region_index, lattice=c.lattice,
+                            row=c.row, col=c.col, rotation=c.rotation,
+                            score=c.score, x0=x, y0=y, w0=w, h0=h))
+        return out
+
 
 @runtime_checkable
 class Retriever(Protocol):

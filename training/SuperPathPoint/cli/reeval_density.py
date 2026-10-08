@@ -422,7 +422,7 @@ def main():
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
-    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
+    args.labels_root = labels_root(args)   # the labelling job
 
     bad = [n for n in args.budgets if n < 1]
     if bad:

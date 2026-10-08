@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Read a stage1_compare per-shot CSV and say which mpp-estimation method
-actually wins.
+"""Score the stage-1 entries bench_stage1_mpp.py wrote and say which
+mpp-estimation method actually wins.
 
-No GPU, no WSI, no torch -- it only reads the csv, so it runs on a login node
-and takes under a second. `bench_stage1_mpp.py` is the writer; THIS FILE decides the schema that writer
-has to produce (below), and everything the writer collects exists because a
-question here needs it -- not the other way round.
+Takes bench_stage1_mpp's own flags and computes the same addresses: for
+every slide its FoV draw, for every --stage1 method its stage-1 entry under
+--stage-cache-job. No model and no GPU; the slide is opened only for its
+pyramid. The entries are joined with the ground truth -- where each FoV was
+placed (`FovSupply.geometry`) -- into one table, written as
+`<out>/stage1_<split>.csv`, and everything below reads that table.
 
-    csv columns (one row per (query, method)):
+    table columns (one row per (query, method[, vote rule])):
         dataset, wsi_name, x, y, h, w        -- FoV identity
         rung, native, gt_mpp, gt_ds          -- ground truth
         encoder, classifier, reduction, loss,
@@ -37,7 +39,7 @@ question here needs it -- not the other way round.
                                               from one forward pass
         fov_*                                 -- that FoV's per-patch
                                               distribution, on voting rows
-                                              (bench_stage1_mpp.fov_stats)
+                                              (fov_stats, from the probs table)
 
         split                                 -- val / test
         estimator_id                          -- the estimator's identity_id,
@@ -62,18 +64,17 @@ answer can be "rule X when the patches agree, rule Y when they scatter",
 not only one winner. Its tables also go to `<csv stem>_vote_*.csv` and
 `<csv stem>_fov_distribution.csv` next to the input.
 
-Filename: `<sampler_id>_<seg_id>.csv` -- the sampling recipe's own hash
-(the FoV recipe: draw, gap, sensor, levels; tile size) plus the
-tissue-mask recipe's hash, so one file can hold EVERY method's rows over the
-exact same drawn FoVs (a paired comparison, same premise as
-`bench_subspace_knn.py`'s arm A/B) and a changed sampling recipe cannot land
-on a stale file.
+Every method is scored on the same drawn FoVs -- one draw per slide, read by
+address -- so the comparison is paired. The analysis outputs (the table, the
+vote and risk tables, the thresholds, the figures) go to --out, default
+`result/<job>/`: they are results, not reusable computation, so not the
+cache. A test run finds the thresholds its val run fitted in the same --out
+(`stage1_val_thresholds.json`).
 
 Scored on `estimated_*`, NOT `chosen_*`. `chosen_ds`/`chosen_level` already
 went through the shared "snap to this WSI's own pyramid" step
 (`StageInterface.routed_level`) that every method shares, so
-scoring on it would measure that shared step as much as the method. Same
-convention `bench_mpp_feature_decomposition.py`'s own `score()` uses.
+scoring on it would measure that shared step as much as the method.
 
 THREE VIEWS, not one table:
     per (wsi_name, rung, method)   -- does a method fail on one slide, or
@@ -100,11 +101,10 @@ with different pyramid steps (BRACS 4x, Ki67 2x) -- always split by dataset
 first.
 
 Usage:
-    python utilities/cli/metrics/analyze_stage1_metrics.py \\
-        result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv
-
-    python utilities/cli/metrics/analyze_stage1_metrics.py \\
-        result/Stage1MppBench/<sampler_id>_<seg_id>_<region_id>.csv
+    python utilities/cli/metrics/analyze_stage1_metrics.py <bench_stage1_mpp flags> \\
+        --split val --fit-thresholds
+    python utilities/cli/metrics/analyze_stage1_metrics.py <bench_stage1_mpp flags> \\
+        --split test --thresholds auto
 """
 from __future__ import annotations
 
@@ -121,6 +121,160 @@ sys.path.insert(0, os.path.join(
 import _paths                                                       # noqa: E402
 _paths.setup_import_paths()
 
+
+
+# ── the table, from the cache ─────────────────────────────────────────────────
+
+#: The five EstMppResult fields every row carries; the rest of an output or
+#: vote row is the method's own, kept in `extra_json`.
+_RESULT = ('estimated_ds', 'estimated_mpp', 'chosen_ds', 'chosen_mpp',
+           'chosen_level')
+
+
+def fov_stats(probs, classes_ds, gt_ds: float) -> dict:
+    """What one FoV's per-patch distribution looked like -- the columns the
+    vote diagnosis stratifies by. Independent of the vote rule, so every vote
+    row of one FoV carries the same values. `probs` is [patches, classes].
+
+        fov_agree_frac        share of patches whose argmax is the plurality
+                              class: 1.0 = every patch agrees
+        fov_n_distinct        how many classes some patch picked
+        fov_patch_entropy     mean per-patch entropy / log C: how sure each
+                              patch is on its own
+        fov_pooled_entropy    entropy of the mean distribution / log C
+        fov_pooled_margin     top-1 minus top-2 of the mean distribution
+        fov_argmax_log2_spread  std of log2(ds) of the patches' argmaxes: how
+                              far apart, in octaves, the patches disagree
+        fov_gt_reachable      a class within 1% of the true ds exists. A
+                              prototype head's classes are the slide's own
+                              levels, so ds 2 on a 4x pyramid has none
+        fov_gt_prob / fov_gt_rank / fov_gt_patch_frac
+                              mean probability on the true class, its rank
+                              (0 = top), share of patches whose argmax it is
+    """
+    import numpy as np                                            # noqa: PLC0415
+    p = np.asarray(probs, dtype=np.float64)
+    m, c = p.shape
+    arg = p.argmax(axis=1)
+    counts = np.bincount(arg, minlength=c)
+    pooled = p.mean(axis=0)
+    log_c = math.log(c) if c > 1 else 1.0
+
+    def entropy(q):
+        return -(np.log(np.clip(q, 1e-12, None)) * q).sum(axis=-1)
+
+    log2_ds = np.log2(np.asarray(classes_ds, dtype=np.float64))[arg]
+    top = np.sort(pooled)[::-1][:2]
+    gt = min(range(c), key=lambda i: abs(math.log(float(classes_ds[i]) / gt_ds)))
+    reachable = abs(math.log(float(classes_ds[gt]) / gt_ds)) < math.log(1.01)
+    out = dict(
+        fov_n_patches=m, fov_n_classes=c,
+        fov_agree_frac=float(counts.max()) / m,
+        fov_n_distinct=int((counts > 0).sum()),
+        fov_patch_entropy=float(entropy(p).mean()) / log_c,
+        fov_pooled_entropy=float(entropy(pooled)) / log_c,
+        fov_pooled_margin=float(top[0] - top[1]) if c > 1 else 1.0,
+        fov_argmax_log2_spread=float(log2_ds.std()) if m > 1 else 0.0,
+        fov_gt_reachable=reachable)
+    if reachable:
+        out.update(fov_gt_prob=float(pooled[gt]),
+                   fov_gt_rank=int((pooled > pooled[gt]).sum()),
+                   fov_gt_patch_frac=float(counts[gt]) / m)
+    return out
+
+
+def _describe(stage) -> dict:
+    """The method columns `method_of` labels a row by: the kind, the encoder,
+    and for a checkpoint method its recipe name in `classifier`."""
+    cfg = stage.cfg
+    head = {'classifier': stage.name, 'prototype': f'proto:{stage.name}'}
+    return dict(kind=stage.method,
+                encoder=getattr(cfg, 'encoder', '') or stage.method,
+                classifier=head.get(stage.method, ''), reduction='', loss='',
+                read_level='', weights=getattr(cfg, 'weights', '') or '')
+
+
+def _probs_matrix(rows):
+    """[patches, classes] and the classes' ds from one FoV's `probs` rows."""
+    import numpy as np                                            # noqa: PLC0415
+    classes = sorted({float(r['class_ds']) for r in rows})
+    n = 1 + max(int(r['patch']) for r in rows)
+    p = np.zeros((n, len(classes)))
+    for r in rows:
+        p[int(r['patch']), classes.index(float(r['class_ds']))] = float(r['p'])
+    return p, classes
+
+
+def rows_from_cache(args) -> list:
+    """One row per (FoV, method[, vote rule]) of every hit stage-1 entry the
+    flags address, joined with where the FoV was placed."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    '..', '..', 'bench_modules'))
+    from bench_locascope import (by_index, read_rows, slide_supplies,  # noqa: PLC0415
+                                 stage1_record)
+    from bench_stage1_mpp import stages_of                        # noqa: PLC0415
+    from DsLadder import DEFAULT_RUNGS                            # noqa: PLC0415
+    from SafeSlide import SafeSlide                               # noqa: PLC0415
+    from TissueMaskConfig import MASK_RECIPES, MaskMaker          # noqa: PLC0415
+
+    job = args.stage_cache_job
+    stages = stages_of(args)
+    fov_masks = MaskMaker(MASK_RECIPES['hest'], args.fov_mask_cache_job, 'cpu')
+    rows, skipped = [], 0
+    for dataset, name, path, supply in slide_supplies(args, fov_masks, job):
+        base = supply.render_address.on(job)
+        wsi = SafeSlide(path)
+        base_mpp, lds = float(wsi.base_mpp), list(wsi.level_downsamples)
+        wsi.close()
+        geo = [supply.geometry(s.meta) for s in supply.sampler]
+        for s in stages:
+            entry = base.entry('stage1')
+            state, diff = entry.status(s.id, stage1_record(s, base, args.limit))
+            if state != 'hit':
+                print(f'  {name} {s.id}: {state}' + ''.join(f'\n    {d}' for d in diff))
+                continue
+            table = {role: by_index(read_rows(entry.path(role, s.id, '.csv')))
+                     for role in ('output', 'votes', 'probs')}
+            desc = _describe(s)
+            for index, (out,) in sorted(table['output'].items()):
+                if out.get('error'):
+                    skipped += 1
+                    continue
+                g = geo[index]
+                gt_ds = float(g['ds'])
+                fov = dict(
+                    dataset=dataset, wsi_name=name, index=index,
+                    x=int(g['x0']), y=int(g['y0']),
+                    h=int(g['sensor_h']), w=int(g['sensor_w']),
+                    rung=min(DEFAULT_RUNGS,
+                             key=lambda r: abs(math.log(gt_ds) - math.log(r))),
+                    native=abs(math.log(gt_ds / float(lds[int(g['level'])])))
+                    < math.log(1.01),
+                    gt_mpp=base_mpp * gt_ds, gt_ds=gt_ds, split=args.split,
+                    estimator_id=s.id, **desc)
+                votes = table['votes'].get(index)
+                if not votes:
+                    rows.append(dict(
+                        fov, vote='', **{k: out[k] for k in _RESULT},
+                        extra_json=json.dumps(
+                            {k: v for k, v in out.items()
+                             if k not in _RESULT + ('index', 'error', 't_s')})))
+                    continue
+                probs, classes = _probs_matrix(table['probs'][index])
+                stats = fov_stats(probs, classes, gt_ds)
+                for v in votes:
+                    risk = {k: v[k] for k in v if k.startswith('risk_')}
+                    extra = {k: x for k, x in v.items()
+                             if k not in _RESULT and k not in risk
+                             and k not in ('index', 'rule')}
+                    rows.append(dict(fov, vote=v['rule'],
+                                     **{k: v[k] for k in _RESULT},
+                                     extra_json=json.dumps(extra), **stats, **risk))
+    if skipped:
+        print(f'  {skipped} FoV x method with an error in stage 1 left out')
+    return rows
+
+
 BAR = '=' * 78
 
 #: Keyed by "head recipe" (`<head_name>+<reduction>`, or 'baseline' for a
@@ -131,7 +285,7 @@ BAR = '=' * 78
 #: of colour.
 #:
 #: Keyed by `training/MppRoutingHead/Runtime.HEAD_CHOICES`'s registered names
-#: (the `head_name` bench_stage1_mpp writes), one colour per head recipe. Its
+#: (a CLASSIFIER_RECIPES name not keyed here draws in the secondary ink). Its
 #: own table: `training/MppRoutingHead/cli/evaluate.py` colours by classifier
 #: and marks the reduction by shape (`CLASSIFIER_COLORS`, `head_style`), so
 #: the two reports do not use the same colour for the same head.
@@ -275,8 +429,7 @@ def is_default_vote(row: dict) -> bool:
 def nearest_rung(ds: float, rungs=RUNGS) -> float:
     """Which rung `ds` is closest to, in LOG space -- pyramid scales are
     geometric, so a linear nearest would call 1-vs-4 nearer than 16-vs-64
-    though both are one rung apart. Same formula as
-    `bench_mpp_feature_decomposition.py`'s own `nearest_level`."""
+    though both are one rung apart."""
     return min(rungs, key=lambda r: abs(math.log(ds) - math.log(r)))
 
 
@@ -510,7 +663,7 @@ def print_overall(rows: list) -> None:
 #
 # The question is not only "which rule wins" but "which rule suits which kind
 # of FoV", so the FoV is described by its per-patch distribution (`fov_*`,
-# written by bench_stage1_mpp.fov_stats) and every rule is scored inside
+# computed by fov_stats from the probs table) and every rule is scored inside
 # strata of it.
 
 #: (column, [(label, lo, hi)]) -- lo inclusive, hi exclusive, except a bin
@@ -1117,8 +1270,19 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('csv_path')
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    '..', '..', 'bench_modules'))
+    from bench_stage1_mpp import JOB_NAME, add_args               # noqa: PLC0415
+    add_args(ap)
+    ap.add_argument('--stage-cache-job', default=_paths.job_name(JOB_NAME),
+                    help='the bench job whose stage-1 entries are scored. '
+                         'Default: this job (SLURM_JOB_NAME first), the one '
+                         'bench_stage1_mpp wrote under in the same jobscript')
+    ap.add_argument('--out', default=None,
+                    help='where the table, the analysis tables and the '
+                         'figures go. Default: result/<job>/')
     ap.add_argument('--method', nargs='+', default=None,
                     help='keep only these method labels (see method_of)')
     ap.add_argument('--dataset', nargs='+', default=None)
@@ -1134,6 +1298,15 @@ def main() -> int:
                          "<..>_val_thresholds.json)")
     args = ap.parse_args()
 
+    out_dir = args.out or _paths.job_result_dir(JOB_NAME)
+    os.makedirs(out_dir, exist_ok=True)
+    rows = rows_from_cache(args)
+    if not rows:
+        sys.exit('no stage-1 entry in the cache for these flags')
+    args.csv_path = os.path.join(out_dir, f'stage1_{args.split}.csv')
+    write_rows(rows, args.csv_path)
+    # read back, so every cell is the string the scoring parses, as from any
+    # table on disk
     with open(args.csv_path, newline='') as f:
         rows = list(csv.DictReader(f))
     print(f'{args.csv_path}\n{len(rows)} rows')

@@ -96,8 +96,9 @@ def main():
                          'second place for the answer to live, and the two drift')
     ap.add_argument('--overwrite', action='store_true',
                     help="delete the slide's cached mask first. Draws already "
-                         'made from the old mask live under each job\'s '
-                         'slide=<slide>/seg=<seg_id>/ and are NOT touched: '
+                         'made from the old mask live under the seg= level of '
+                         'each job\'s tree and are NOT touched '
+                         '(purge_cache.py --level seg=<seg_id>): '
                          'delete those too, or they outlive the mask they came '
                          'from')
     ap.add_argument('--out', default=None,

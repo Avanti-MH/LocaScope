@@ -55,7 +55,7 @@ PROCEDURE
 ---------
 `build(wsi)`:
 1. Segment tissue (`cfg.mask_cfg`), sample one rung per native pyramid level
-  (`native_plans`, filtered to `cfg.levels` if given) via `TileSampler`.
+  (`StageInterface.reference_bank`, kept to `cfg.levels` if given).
 2. Read every sampled tile as a raw crop (`read_samples`), encode
   + pool each ONE AT A TIME PER LEVEL (never across levels -- same invariant
   `PrototypeGenerators.py`'s own docstring states for training).
@@ -96,14 +96,15 @@ import torch
 
 from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
 from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
-                         TileSampler, native_plans)
+                         TileSampler)
 from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
 from PatchingLib import QueryPatchContainer                              # noqa: E402
 from SafeSlide import SafeSlide                                         # noqa: E402
 from Checkpoints import build_prototype_from_checkpoint                  # noqa: E402
 from Features import encode_raw, trunk_raw                              # noqa: E402
 
-from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
+from stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
+                                              routed_level, weights_path)
 from stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
@@ -183,9 +184,13 @@ class PrototypeEstMppConfig(IdentifiedConfig):
     #: `FoVVote.VOTE_CHOICES` key -- an INFERENCE-time choice, never recorded
     #: on the checkpoint, same reasoning `ClassifierEstMppConfig.vote` gives.
     vote: str = 'mean_probability'
+    #: How many of each level's drawn tiles the support uses -- the first ones
+    #: of the draw. None: every one. The draw (`sampler_cfg.n_per_rung`) is what
+    #: is cached; this picks from it.
+    n_per_level: Optional[int] = None
 
     BASELINE = {'mask_cfg': 'TissueMaskConfig', 'sampler_cfg': 'SamplerConfig',
-                'levels': None, 'vote': 'mean_probability'}
+                'levels': None, 'vote': 'mean_probability', 'n_per_level': None}
     NOT_IDENTITY = ('weights',)
 
     @classmethod
@@ -245,7 +250,7 @@ class PrototypeEstMpp(IdentifiedBuild):
         self.device = torch.device(device)
         (self.pooling, self.support_context, self.query_context, self.collapse,
         self.head, self.encoder, self._ckpt) = build_prototype_from_checkpoint(
-            cfg.weights, self.device)
+            weights_path(cfg.weights), self.device)
 
         # A config built BY HAND (not via from_checkpoint) can name an
         # architecture that disagrees with what `weights` actually holds --
@@ -318,29 +323,39 @@ class PrototypeEstMpp(IdentifiedBuild):
         return self.pooling(raw, self._num_prefix)
 
     def build(self, wsi: Union[openslide.OpenSlide, str],
-             mask=None) -> 'PrototypeEstMpp':
+              mask=None, *, masks=None, cache_job=None) -> 'PrototypeEstMpp':
         '''Sample + encode the reference bank, then run it through this
         checkpoint's own Stage 2 ONCE -- see this module's docstring for the
         four-step procedure. Overwrites whatever a previous `build()` call
         (on a different WSI) left cached, same as `ClassifierEstMpp.build`/
         `KnnEstMpp.build` -- one estimator instance is reusable across many
-        WSIs, one at a time.
+        WSIs, one at a time. `masks` and `cache_job` keep the draw in the
+        cache (`StageInterface.reference_bank`).
         '''
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi = wsi
-        self.mask = mask if mask is not None else self.cfg.mask_cfg.build(wsi, self.device)
+        self.mask = mask if mask is not None or cache_job else \
+            self.cfg.mask_cfg.build(wsi, self.device)
 
-        plans = native_plans(wsi, self.cfg.tile_size)
-        if self.cfg.levels is not None:
-            wanted = set(self.cfg.levels)
-            plans = [p for p in plans if p.level in wanted]
-
-        sampler = TileSampler(wsi, self.mask, self.cfg.sampler_cfg)
-        sampler.sample(plans)
+        # every level is drawn; `cfg.levels`, when given, keeps some of them
+        sampler, _ = reference_bank(wsi, self.mask, self.cfg.sampler_cfg,
+                                    self.cfg.tile_size, masks=masks,
+                                    cache_job=cache_job)
+        kept, seen = [], {}
+        #: `(draw row, SampleMeta)` of every support tile, in the order encoded
+        self.support = []
+        for j, s in enumerate(sampler):
+            lv = s.meta.level
+            if self.cfg.levels is not None and lv not in set(self.cfg.levels):
+                continue
+            seen[lv] = seen.get(lv, 0) + 1
+            if self.cfg.n_per_level is None or seen[lv] <= self.cfg.n_per_level:
+                kept.append(s)
+                self.support.append((j, s.meta))
         images = SlideReader(wsi, resize='area').read_samples(
-            sampler, ReadSpec(self.cfg.tile_size, self.cfg.tile_size))
-        levels_of_sample = [s.meta.level for s in sampler]
+            kept, ReadSpec(self.cfg.tile_size, self.cfg.tile_size))
+        levels_of_sample = [s.meta.level for s in kept]
 
         with torch.no_grad():
             pooled = self._encode_pool(images)                       # [N, D]
@@ -368,6 +383,14 @@ class PrototypeEstMpp(IdentifiedBuild):
         self.prototypes = torch.stack(prototypes) if self.collapses else None
         self.raw_support = raw_support if not self.collapses else None
         return self
+
+    def prototype_rows(self) -> List[dict]:
+        """The support tiles of this slide's prototypes, one row each, as the
+        bank draw's index holds them (`TileSampler.index_row`: `index` is the
+        tile's row in the draw), plus `prototype`, the level whose prototype
+        it went into."""
+        return [dict(TileSampler.index_row(j, m), prototype=int(m.level))
+                for j, m in getattr(self, 'support', [])]
 
     def estimate(self, query: np.ndarray) -> PrototypeEstMppResult:
         return self.from_probs(self.patch_probs(query), self.cfg.vote)
@@ -426,3 +449,21 @@ class PrototypeEstMpp(IdentifiedBuild):
             chosen_level=chosen_level,
             predicted_level=self.level_order[predicted_idx],
             vote_extra=vote_extra)
+
+
+#: Named prototype estimators, every field written out (test_config_identity's
+#: recipe lint); `--stage1 prototype:<name>`. A template to copy, one entry per
+#: checkpoint a run should score; `weights` is relative to the results root
+#: and building refuses a field the checkpoint disagrees with
+#: (`PrototypeEstMpp.__init__`).
+PROTOTYPE_RECIPES: Dict[str, PrototypeEstMppConfig] = {
+    'uni2-mean-cosine-tau': PrototypeEstMppConfig(
+        encoder='uni2', pooling='cls', support_context='identity',
+        query_context='identity', collapse='mean', routing_head='cosine_tau',
+        tile_size=256,
+        weights=('PrototypicalRoutingHead/weights/uni2_frozen_cls_identity_'
+                 'identity_mean_cosine_tau_none_none-k5_best.pt'),
+        mask_cfg=MASK_RECIPES['hest'],
+        sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'], n_per_rung=5),
+        levels=None, vote='mean_probability', n_per_level=None),
+}

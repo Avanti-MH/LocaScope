@@ -1,44 +1,27 @@
 """The stores: encoded tile features, and pre-tiles. One module, one rule.
 
-    from Store import FeatureStore as FS, PreTileStore
+    from Store import FeatureStore as FS, FeatureMapCache, feature_id
 
-Both follow `Cache.py`'s layout -- `<root>/<one level per config the content
-depends on>/`, upstream above downstream -- and both are addressed BY KEY: a
-writer computes the path from what made the content, and a reader computes the
-same path from the same values. Neither searches its root by metadata. The
-metadata is still written, and still checked on every read (`require=`), but
-it is the check, not the address.
+FEATURES are `Cache.TREE` entries of kind `features`, hung under what the
+tiles are: a whole-slide grid, a TileSampler draw or a batch of photos.
 
-    features   <root>/<seg_id>/<slide>/<region_id>/<key>/ds<d>_<pooling>.safetensors
-                 root = Cache.cache_root(<job>, 'features') / encoder_tag
-                 key  = grid-t<tile>-o<0|1>        every tile of every region
-                        <sampler_id>_<plan>        a TileSampler draw
-    pretiles   <root>/<seg_id>/<slide>/<region_id>_<sampler_id>_<plan>/f<factor>/ds<d>/
-                 root = Cache.cache_root(<job>, 'pretiles')
-                 meta.json (written first) + PNGs + index.csv (written LAST)
+    slide=/seg=/region=/grid=t<tile>-o<0|1>/features/      every tile of every region
+    slide=/seg=/region=/plan=/draw=<sampler>/features/     the tiles of one draw
+    .../draw=<sampler>/render=<gap>/features/              tiles cut from photos
 
-Every directory level is named by what that level's content depends on, and
-the mask's keys come first because everything below was cut from it: dropping a
-recipe is one `rm -rf <seg_id>/`.
+        features_<id>.safetensors   [+ other roles of the same variant]
+        record_<id>.json
 
-WHY ONE MODULE
---------------
-FeatureStore, WsiFeaturesMapStore and PreTileStore were three modules with three
-copies of the same machinery -- tmp + rename, a hand-rolled identity hash in the
-filename, a `find()` that opened every file under a root to read its header,
-and a `find_one()` that existed because `find()` could return two. The
-addressing is what made them need all that: a hashed name nobody could
-recompute. Addressed by key, the hash, the search and the "which of these two
-did you mean" error all go, and what is left is small enough to share a file.
-
-WsiFeaturesMapStore is not a third store. It is the grid-coverage case of the
-feature store plus the conversion to and from `WsiFeaturesMap` -- which is what
-`FeatureMapCache` below is.
+`<id>` is `feature_id`: `[ds<d>-]<pooling>-<encoder tag>-<encoder config id>`.
+Every (ds, pooling, encoder) is its own variant: a grid's levels are written at
+different times, and `Entry.writing` writes a whole variant at once. The id is
+the encoder's CONFIG, so a reader that never loads the model (an eval) computes
+it; the weights are in the record, which a writer checks on every read
+(`Entry.status`).
 
 WHAT A FILE MAY HOLD
 ---------------------------------------
-One file is one (slide, ds, pooling), and a key directory holds as many
-poolings side by side as were asked for:
+One file is one (ds, pooling) of one set of tiles:
 
     cls, cls_avg, rings3, grid2x2, ...   an encoder's REDUCED outputs, each
                                          slot L2-normalised (pooling_kinds)
@@ -58,8 +41,11 @@ raw store says `slot_layout='raw:<prefix>+<h>x<w>'`, and `feat_hw` and
 
 The storage dtype is the tensor's own: fp16 or fp32. It follows what the
 encoder ran at -- an fp16 encoder's outputs are already fp16-accurate, and an
-fp32 one is not made worse by the file. Nothing about it goes into the
-metadata.
+fp32 one is not made worse by the file.
+
+PRE-TILES are below: `PreTileCorpus` addresses them in a job's tree, one
+`pretile=f<factor>/ds=<d>/tiles/` folder per rung under the draw they were cut
+from.
 """
 from __future__ import annotations
 
@@ -73,7 +59,7 @@ from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
-from Cache import atomic_file
+from Cache import Address, atomic_file, wsi_stem_of
 from TileSampler import PRE_TILE_FACTOR, centre_margin, pre_tile_px
 
 
@@ -116,7 +102,7 @@ def _ds_name(ds: float) -> str:
 #   grid_rc    [N, 2] int32      grid coverage only: (row, col) in its grid
 #
 # plus any `extra` tensors the writer passes -- a query store carries its
-# answer indices into the reference store beside it this way.
+# answer indices this way.
 
 #: Slot names that hold the tile's single summary vector rather than a cell.
 #: Which one appears is the model's property: a ViT's summary is its CLS token,
@@ -124,6 +110,25 @@ def _ds_name(ds: float) -> str:
 SUMMARY_SLOTS = frozenset({'cls', 'gap'})
 
 _CORE = ('features', 'x', 'y', 'region', 'grid_rc')
+
+
+def encoder_names(encoder) -> Tuple[str, str]:
+    """`(tag, config id)` of an encoder build or its config: what names its
+    features. The tag is `_paths.encoder_tag` of the registered name and the
+    head; the id is the CONFIG's, so it needs no weights loaded."""
+    from _paths import encoder_tag                                # noqa: PLC0415
+    cfg = getattr(encoder, 'cfg', encoder)
+    name = getattr(type(cfg), 'REGISTERED_AS', None) or 'enc'
+    return encoder_tag(name, getattr(cfg, 'head', '') or ''), cfg.identity_id()
+
+
+def feature_id(encoder, pooling: str, ds: Optional[float] = None) -> str:
+    """`[ds<d>-]<pooling>-<encoder tag>-<encoder config id>`: one variant of a
+    features entry. `ds` is left out for a set of tiles that spans levels
+    (a multi-level draw), where it is a column, not a variant."""
+    tag, hexid = encoder_names(encoder)
+    return '-'.join(([_ds_name(ds)] if ds is not None else [])
+                    + [pooling, tag, hexid])
 
 
 def _enc_float(v: float) -> str:
@@ -177,15 +182,14 @@ def _codec(annotation: str):
 
 @dataclass(frozen=True)
 class FeatureMeta:
-    """Everything needed to decide whether a feature file is the one wanted.
-
-    The address holds the identity (see the module docstring); these fields
-    repeat it so a read can check it, and add what the address does not say.
-    """
+    """What a feature file holds, in its own header: the tiles' scale, the
+    slots, the encoder's shape and which tiles. The address and the entry's
+    record say which file it is; these say how to read it, and a read can
+    hold them to what it expects (`require=`)."""
     wsi_stem:    str
     wsi_path:    str
-    level:       int
-    ds:          float
+    level:       int        # -1 when the tiles span levels (a level column)
+    ds:          float      # 0.0 likewise
     mpp:         float
     base_mpp:    float
     tile_size:   int
@@ -204,7 +208,7 @@ class FeatureMeta:
     num_prefix:  int                        # CLS + registers; 0 if none
 
     # what produced it
-    encoder_id:  str                        # TileEncoder.identity_id()
+    encoder_id:  str                        # the encoder CONFIG's identity_id()
     seg_id:      str                        # TissueMaskConfig.seg_id()
     region_id:   str                        # TissueMaskConfig.region_id()
 
@@ -221,19 +225,6 @@ class FeatureMeta:
     buckets:     Tuple[str, ...] = ()
 
     created_at:  str = ''
-
-    #: `ConfigIdentity.record` as JSON: the encoder's parts and weights, every
-    #: VERSION the vectors went through, the upstream ids and the environment.
-    #: '' for a store written without one, which a reader that checks treats
-    #: as stale.
-    record:      str = ''
-
-    @property
-    def key(self) -> str:
-        """The coverage directory: `grid-t<tile>-o<0|1>` or `<sampler_id>_<plan>`."""
-        if self.coverage == 'grid':
-            return FeatureStore.grid_key(self.tile_size, self.overlap)
-        return FeatureStore.sample_key(self.sampler_id, self.plan)
 
     def __getitem__(self, key: str):
         """Field access by name, so `pooling_kinds` takes a FeatureMeta as-is --
@@ -260,7 +251,14 @@ class FeatureMeta:
 
 
 class FeatureStore:
-    """Encoded tile features, one safetensors file per (slide, ds, pooling)."""
+    """Encoded tile features: one variant of a `features` entry is one or
+    more safetensors files (roles), written together, record last.
+
+        entry = address.entry('features')
+        fid = feature_id(encoder, 'tokens', ds)
+        FS.save(entry, fid, record, meta=meta, features=f, x=x, y=y)
+        tensors, meta = FS.load(FS.path(entry, fid))
+    """
 
     Meta = FeatureMeta
 
@@ -268,85 +266,64 @@ class FeatureStore:
     #: (`PatchingLib.region_grids`, `SlideReader.read_grid`) -- code no config
     #: names (ConfigIdentity rule 3). A change in WHERE the tiles sit is also
     #: caught by `geometry_mismatch`; a change in their PIXELS only by this.
-    VERSION = 0
+    VERSION = 1
 
-    # ── addressing ──────────────────────────────────────────────────────────
-
-    @staticmethod
-    def grid_key(tile_size: int, overlap: bool) -> str:
-        return f'grid-t{int(tile_size)}-o{int(bool(overlap))}'
+    # ── where ───────────────────────────────────────────────────────────────
 
     @staticmethod
-    def sample_key(sampler_id: str, plan: str) -> str:
-        if not sampler_id or not plan:
-            raise ValueError('a sample key needs both a sampler_id and a plan')
-        return f'{sampler_id}_{plan}'
+    def path(entry, fid: str, role: str = 'features') -> Path:
+        return entry.path(role, fid, '.safetensors')
 
     @staticmethod
-    def key_dir(root, *, seg_id: str, slide: str, region_id: str, key: str) -> Path:
-        """The directory one draw (or one grid) of one slide lives in -- every
-        ds and pooling of it are files inside."""
-        return Path(root) / seg_id / slide / region_id / key
-
-    @classmethod
-    def path(cls, root, meta: FeatureMeta) -> Path:
-        return (cls.key_dir(root, seg_id=meta.seg_id, slide=meta.wsi_stem,
-                            region_id=meta.region_id, key=meta.key)
-                / f'{_ds_name(meta.ds)}_{meta.pooling}.safetensors')
-
-    @classmethod
-    def files(cls, key_dir, pooling: Optional[str] = None) -> List[Path]:
-        """The files one key directory holds, sorted -- the levels of one draw.
-        A listing of a KNOWN directory, not a search of a root."""
-        pattern = f'ds*_{pooling}.safetensors' if pooling else 'ds*.safetensors'
-        return sorted(Path(key_dir).glob(pattern))
-
-    @classmethod
-    def levels(cls, key_dir, pooling: str) -> Dict[int, Path]:
-        """`{level: path}` for one pooling in one key directory -- one draw's
-        stores, one per pyramid level. Refuses two files claiming one level."""
-        out: Dict[int, Path] = {}
-        for path in cls.files(key_dir, pooling):
-            level = cls.load_meta(path).level
-            if level in out:
-                raise StoreMismatch(f'two {pooling} stores for level {level} '
-                                    f'in {key_dir}: {out[level].name}, {path.name}')
-            out[level] = path
-        if not out:
-            raise FileNotFoundError(f'no {pooling} store in {key_dir}')
-        return out
+    def grid_level(tile_size: int, overlap: bool) -> str:
+        """The `grid=` level of a whole-slide grid: `t<tile>-o<0|1>`."""
+        return f't{int(tile_size)}-o{int(bool(overlap))}'
 
     # ── write ───────────────────────────────────────────────────────────────
 
     @classmethod
-    def save(cls, root, *, meta: FeatureMeta, features, x, y, region=None,
-             grid_rc=None, extra: Optional[Dict[str, object]] = None) -> Path:
-        """Validate, then write atomically to `path(root, meta)`. A truncated
-        store that still loads is worse than none: it drops half the
-        distractors and every recall comes out high.
+    def save(cls, entry, fid: str, record: Dict, *, meta: FeatureMeta, features,
+             x, y, region=None, grid_rc=None,
+             extra: Optional[Dict[str, object]] = None) -> Path:
+        """One role (`features`) of variant `fid`, validated and written with
+        its record (`Entry.writing`). A truncated store that still loads is
+        worse than none: it drops half the distractors and every recall comes
+        out high."""
+        return cls.write(entry, fid, record, {'features': dict(
+            meta=meta, features=features, x=x, y=y, region=region,
+            grid_rc=grid_rc, extra=extra)})['features']
 
-        The write is where tensors move to the host: an encoder leaves its
-        output on the device, and a caller hands it here as it is."""
+    @classmethod
+    def write(cls, entry, fid: str, record: Dict,
+              roles: Dict[str, Dict]) -> Dict[str, Path]:
+        """Several roles of variant `fid` at once -- a query batch and the
+        answer tiles it is scored against, say. Each role is the keyword
+        arguments `save` takes. The tensors move to the host here: an encoder
+        leaves its output on the device, and a caller hands it as it is."""
         import torch                                             # noqa: PLC0415
         from safetensors.torch import save_file                  # noqa: PLC0415
 
         host = lambda t: t.detach().cpu() if isinstance(t, torch.Tensor) else t  # noqa: E731
-        features, x, y = host(features), host(x), host(y)
-        region, grid_rc = host(region), host(grid_rc)
-        extra = {k: host(v) for k, v in (extra or {}).items()}
-        _validate(features, x, y, region, grid_rc, meta, extra)
-        meta = dataclasses.replace(meta, created_at=meta.created_at or _stamp())
-        tensors = {'features': features.contiguous(), 'x': x.contiguous(),
-                   'y': y.contiguous()}
-        if region is not None:
-            tensors['region'] = region.contiguous()
-            tensors['grid_rc'] = grid_rc.contiguous()
-        for k, v in (extra or {}).items():
-            tensors[k] = v.contiguous() if isinstance(v, torch.Tensor) else v
-        path = cls.path(root, meta)
-        with atomic_file(path) as tmp:
-            save_file(tensors, str(tmp), metadata=meta.to_strings())
-        return path
+        out = {}
+        with entry.writing(fid, record) as put:
+            for role, a in roles.items():
+                features, x, y = host(a['features']), host(a['x']), host(a['y'])
+                region, grid_rc = host(a.get('region')), host(a.get('grid_rc'))
+                extra = {k: host(v) for k, v in (a.get('extra') or {}).items()}
+                meta = a['meta']
+                _validate(features, x, y, region, grid_rc, meta, extra)
+                meta = dataclasses.replace(meta, created_at=meta.created_at or _stamp())
+                tensors = {'features': features.contiguous(), 'x': x.contiguous(),
+                           'y': y.contiguous()}
+                if region is not None:
+                    tensors['region'] = region.contiguous()
+                    tensors['grid_rc'] = grid_rc.contiguous()
+                for k, v in extra.items():
+                    tensors[k] = v.contiguous() if isinstance(v, torch.Tensor) else v
+                save_file(tensors, str(put(role, '.safetensors')),
+                          metadata=meta.to_strings())
+                out[role] = cls.path(entry, fid, role)
+        return out
 
     # ── read ────────────────────────────────────────────────────────────────
 
@@ -623,18 +600,21 @@ class PooledFeatures(NamedTuple):
     slot_layout: str
 
 
-class FeatureMapCache:
-    """Cached WsiFeaturesMaps for one slide: the grid-coverage feature files.
 
-        cache = FeatureMapCache(root, wsi_path, encoder, mask_cfg)
+
+class FeatureMapCache:
+    """Cached WsiFeaturesMaps for one slide: the whole-slide grid features.
+
+        cache = FeatureMapCache(job, wsi_path, encoder, mask_cfg)
         wfm   = cache.load(regions, ds=ds, level=level, tile_size=256, overlap=True)
         cache.save(wfm)
 
-    `root` is `Cache.cache_root(<job>, 'features') / encoder_tag`. The file is
-    addressed by the mask recipe's seg_id / region_id and the grid's tile,
-    overlap and ds; the encoder's full identity and the geometry are checked on
-    every read. `load` returns None rather than raising, because the caller's
-    policy is to rebuild on a miss -- so every None says why.
+    The entry is `slide=/seg=/region=/grid=t<tile>-o<0|1>/features/` in `job`'s
+    tree, one variant per (ds, pooling, encoder) (`feature_id`). A read checks
+    the record -- the encoder's weights, the grid code, the mask recipe's code
+    -- and then the geometry against the regions in hand. `load` returns None
+    rather than raising, because the caller's policy is to rebuild on a miss --
+    so every None says why.
     """
 
     #: ONE slot: a WsiFeaturesMap holds one vector per tile by construction.
@@ -642,12 +622,11 @@ class FeatureMapCache:
     #: the encoder's `feature_pooling`, which is this store's pooling label.
     SLOT_LAYOUT = 'none'
 
-    def __init__(self, root, wsi_path, encoder, mask_cfg, mode: str = 'rw',
+    def __init__(self, job: str, wsi_path, encoder, mask_cfg, mode: str = 'rw',
                  verbose: bool = True):
         if mode not in ('r', 'w', 'rw'):
             raise ValueError(f"mode must be 'r', 'w' or 'rw', got {mode!r}")
-        from Cache import wsi_stem_of                             # noqa: PLC0415
-        self.root = Path(root)
+        self.job = job
         self.wsi_path = str(wsi_path)
         self.wsi_stem = wsi_stem_of(wsi_path)
         self.encoder = encoder
@@ -659,8 +638,8 @@ class FeatureMapCache:
         self._record = None
 
     def record(self) -> Dict:
-        """What every file here was made by: the encoder (config and weights),
-        the grid code, the mask recipe's code, the upstream ids, the
+        """What every variant here was made by: the encoder (config and
+        weights), the grid code, the mask recipe's code, the upstream ids, the
         environment. Computed once: the encoder's weights_id costs seconds."""
         if self._record is None:
             from ConfigIdentity import record                     # noqa: PLC0415
@@ -669,16 +648,6 @@ class FeatureMapCache:
                 self.encoder, also=(FeatureStore, SlideReader, self.mask_cfg),
                 seg_id=self.seg_id, region_id=self.region_id)
         return self._record
-
-    def _stale(self, path, meta) -> bool:
-        """True, with the reason printed, when `meta`'s record is not this
-        cache's."""
-        from ConfigIdentity import record_diff                    # noqa: PLC0415
-        diff = record_diff(json.loads(meta.record) if meta.record else None,
-                           self.record())
-        if diff:
-            self._say(f'{path.name} is stale:', *[f'    {d}' for d in diff])
-        return bool(diff)
 
     @property
     def pooling(self) -> str:
@@ -689,18 +658,24 @@ class FeatureMapCache:
             for line in lines:
                 print(f'  [features] {line}', flush=True)
 
+    def entry(self, tile_size: int, overlap: bool):
+        return Address(self.job, slide=self.wsi_stem, seg=self.seg_id,
+                       region=self.region_id,
+                       grid=FeatureStore.grid_level(tile_size, overlap)
+                       ).entry('features')
+
+    def fid(self, ds: float, pooling: Optional[str] = None) -> str:
+        return feature_id(self.encoder, pooling or self.pooling, ds)
+
     def path(self, *, ds: float, tile_size: int, overlap: bool,
              pooling: Optional[str] = None) -> Path:
-        return (FeatureStore.key_dir(
-            self.root, seg_id=self.seg_id, slide=self.wsi_stem,
-            region_id=self.region_id,
-            key=FeatureStore.grid_key(tile_size, overlap))
-            / f'{_ds_name(ds)}_{pooling or self.pooling}.safetensors')
+        return FeatureStore.path(self.entry(tile_size, overlap),
+                                 self.fid(ds, pooling))
 
     def _storage_dtype(self):
         """What the encoder ran at, so the file is no coarser than the compute:
         fp32 for an fp32 encoder, fp16 otherwise (and for anything that does not
-        say, which keeps every existing caller exactly as it was)."""
+        say)."""
         import torch                                              # noqa: PLC0415
         model = getattr(getattr(self.encoder, 'cfg', None), 'model', None)
         torch_dtype = getattr(model, 'torch_dtype', None)
@@ -708,143 +683,44 @@ class FeatureMapCache:
             return torch.float32
         return torch.float16
 
+    def _meta(self, *, level, ds, tile_size, overlap, pooling, slots,
+              slot_layout, dim, n) -> FeatureMeta:
+        base_mpp = float(getattr(self.encoder, 'base_mpp', 0.0)) or 0.0
+        return FeatureMeta(
+            wsi_stem=self.wsi_stem, wsi_path=self.wsi_path, level=int(level),
+            ds=float(ds), mpp=base_mpp * float(ds), base_mpp=base_mpp,
+            tile_size=int(tile_size), overlap=bool(overlap), pooling=pooling,
+            slots=tuple(slots), slot_layout=slot_layout, dim=int(dim),
+            feat_hw=self.encoder.model_spec.feat_hw,
+            num_prefix=self.encoder.model_spec.num_prefix,
+            encoder_id=encoder_names(self.encoder)[1], seg_id=self.seg_id,
+            region_id=self.region_id, coverage='grid', n_available=int(n),
+            n_tiles=int(n))
+
     # Every read takes the GEOMETRY the caller is about to use -- the regions
     # and the scale they are tiled at -- and never pixels: a hit must cost no
     # read of the slide.
 
-    def load(self, regions, *, ds: float, level: int, tile_size: int,
-             overlap: bool):
-        if 'r' not in self.mode:
-            return None
-        path = self.path(ds=ds, tile_size=tile_size, overlap=overlap)
-        if not path.exists():
-            self._say(f'no store at {path} -- encoding')
-            return None
-        want = {'wsi_stem': self.wsi_stem, 'level': level,
-                'ds': float(ds), 'encoder_id': self.encoder.identity_id(),
-                'seg_id': self.seg_id, 'region_id': self.region_id,
-                'coverage': 'grid'}
-        meta = FeatureStore.load_meta(path)
-        differs = {k: (v, getattr(meta, k)) for k, v in want.items()
-                   if getattr(meta, k) != v}
-        if differs:
-            self._say(f'{path.name} does not match:',
-                      *[f'    {k}: store {g!r}, now {w!r}'
-                        for k, (w, g) in sorted(differs.items())])
-            return None
-        if self._stale(path, meta):
-            return None
-        tensors, _ = FeatureStore.load(path)
-        from PatchingLib import region_grids                      # noqa: PLC0415
-        grids = region_grids(regions, ds=ds, level=level, tile_size=tile_size,
-                             overlap=overlap)
-        bad = geometry_mismatch(tensors, grids)
-        if bad:
-            self._say(f'{path.name} has the right address and the wrong regions:',
-                      *[f'    {b}' for b in bad])
-            return None
-        wfm = from_store_tensors(tensors, regions, ds=ds, level=level,
-                                 tile_size=tile_size, overlap=overlap)
-        self._say(f'{path}  {wfm.n_patches():,} tiles, {len(wfm)} regions -- '
-                  f'no encoding needed')
-        return wfm
-
-    def save(self, wfm) -> Optional[Path]:
-        if 'w' not in self.mode:
-            return None
-        base_mpp = float(getattr(self.encoder, 'base_mpp', 0.0)) or 0.0
-        meta = FeatureMeta(
-            wsi_stem=self.wsi_stem, wsi_path=self.wsi_path, level=wfm.level,
-            ds=float(wfm.ds), mpp=base_mpp * wfm.ds, base_mpp=base_mpp,
-            tile_size=wfm.tile_size, overlap=wfm.overlap,
-            pooling=self.pooling, slots=(self.pooling,),
-            slot_layout=self.SLOT_LAYOUT, dim=wfm.feat_dim,
-            feat_hw=self.encoder.model_spec.feat_hw,
-            num_prefix=self.encoder.model_spec.num_prefix,
-            encoder_id=self.encoder.identity_id(), seg_id=self.seg_id,
-            region_id=self.region_id, coverage='grid',
-            record=json.dumps(self.record(), sort_keys=True),
-            n_available=wfm.n_patches(), n_tiles=wfm.n_patches())
-        path = FeatureStore.save(
-            self.root, meta=meta,
-            **to_store_tensors(wfm, dtype=self._storage_dtype()))
-        self._say(f'wrote {path}  {wfm.n_patches():,} tiles')
-        return path
-
-    # ── several poolings of one slide, side by side ─────────────────────────
-    #
-    # `load` / `save` above carry ONE vector per tile, whatever the encoder's
-    # `feature_pooling` is. These carry any pooling -- a reduced one with
-    # several slots, or the model's raw output -- each in its own file next to
-    # the others, under the same address rules and the same two checks (the
-    # encoder's identity, and the geometry against the mask in hand).
-
-    def save_pooled(self, regions, pooled: Dict[str, 'PooledFeatures'], *,
-                    ds: float, level: int, tile_size: int,
-                    overlap: bool) -> Dict[str, Path]:
-        """Write each pooling of `pooled` as its own file. `{name: path}`.
-
-        The features are stored as given -- fp16 or fp32 -- so what runs at fp32
-        is not rounded on its way to disk. Refuses a pooling whose row count is
-        not the grid's: a store that covers half the slide reads as the slide."""
-        if 'w' not in self.mode:
-            return {}
-        base_mpp = float(getattr(self.encoder, 'base_mpp', 0.0)) or 0.0
-        from PatchingLib import region_grids                      # noqa: PLC0415
-        columns = _columns(region_grids(regions, ds=ds, level=level,
-                                        tile_size=tile_size, overlap=overlap))
-        n = int(columns['x'].numel())
-        out = {}
-        for name, item in pooled.items():
-            features = item.features
-            if features.shape[0] != n:
-                raise ValueError(
-                    f'{name}: {features.shape[0]} feature rows against {n} grid '
-                    f'positions')
-            meta = FeatureMeta(
-                wsi_stem=self.wsi_stem, wsi_path=self.wsi_path,
-                level=level, ds=float(ds),
-                mpp=base_mpp * ds, base_mpp=base_mpp,
-                tile_size=tile_size, overlap=overlap,
-                pooling=name, slots=tuple(item.slots),
-                slot_layout=item.slot_layout, dim=int(features.shape[2]),
-                feat_hw=self.encoder.model_spec.feat_hw,
-                num_prefix=self.encoder.model_spec.num_prefix,
-                encoder_id=self.encoder.identity_id(), seg_id=self.seg_id,
-                region_id=self.region_id, coverage='grid',
-                record=json.dumps(self.record(), sort_keys=True),
-                n_available=n, n_tiles=n)
-            out[name] = FeatureStore.save(self.root, meta=meta,
-                                          features=features, **columns)
-            self._say(f'wrote {out[name]}  {n:,} tiles, {name}')
-        return out
-
     def check(self, regions, pooling: str, *, ds: float, level: int,
               tile_size: int, overlap: bool) -> Optional[FeatureMeta]:
-        """The stored metadata of one pooling if the file is the one wanted --
-        the right encoder, the right address, the geometry of THIS mask -- else
-        None, with the reason printed. Reads the header and the four small
+        """The stored metadata of one pooling if the variant is the one wanted
+        -- its record this cache's, its geometry THIS mask's -- else None, with
+        the reason printed. Reads the record, the header and the four small
         grid columns, never the features."""
         if 'r' not in self.mode:
             return None
-        path = self.path(ds=ds, tile_size=tile_size, overlap=overlap,
-                         pooling=pooling)
-        if not path.exists():
-            self._say(f'no {pooling} store at {path}')
+        entry, fid = self.entry(tile_size, overlap), self.fid(ds, pooling)
+        state, diff = entry.status(fid, self.record())
+        if state != 'hit':
+            self._say(f'{entry.dir}/features_{fid}: {state}'
+                      + (' -- encoding' if state == 'miss' else ':'),
+                      *[f'    {d}' for d in diff])
             return None
-        want = {'wsi_stem': self.wsi_stem, 'level': level,
-                'ds': float(ds), 'encoder_id': self.encoder.identity_id(),
-                'seg_id': self.seg_id, 'region_id': self.region_id,
-                'coverage': 'grid', 'pooling': pooling}
+        path = FeatureStore.path(entry, fid)
         meta = FeatureStore.load_meta(path)
-        differs = {k: (v, getattr(meta, k)) for k, v in want.items()
-                   if getattr(meta, k) != v}
-        if differs:
-            self._say(f'{path.name} does not match:',
-                      *[f'    {k}: store {g!r}, now {w!r}'
-                        for k, (w, g) in sorted(differs.items())])
-            return None
-        if self._stale(path, meta):
+        if meta.level != level or meta.ds != float(ds):
+            self._say(f'{path.name} is level {meta.level} ds {meta.ds}, asked '
+                      f'level {level} ds {ds}')
             return None
         columns, _ = FeatureStore.load(path, keys=('x', 'y', 'region', 'grid_rc'))
         from PatchingLib import region_grids                      # noqa: PLC0415
@@ -855,6 +731,67 @@ class FeatureMapCache:
                       *[f'    {b}' for b in bad])
             return None
         return meta
+
+    def load(self, regions, *, ds: float, level: int, tile_size: int,
+             overlap: bool):
+        geo = dict(ds=ds, level=level, tile_size=tile_size, overlap=overlap)
+        if self.check(regions, self.pooling, **geo) is None:
+            return None
+        path = self.path(ds=ds, tile_size=tile_size, overlap=overlap)
+        tensors, _ = FeatureStore.load(path)
+        wfm = from_store_tensors(tensors, regions, **geo)
+        self._say(f'{path}  {wfm.n_patches():,} tiles, {len(wfm)} regions -- '
+                  f'no encoding needed')
+        return wfm
+
+    def save(self, wfm) -> Optional[Path]:
+        if 'w' not in self.mode:
+            return None
+        meta = self._meta(level=wfm.level, ds=wfm.ds, tile_size=wfm.tile_size,
+                          overlap=wfm.overlap, pooling=self.pooling,
+                          slots=(self.pooling,), slot_layout=self.SLOT_LAYOUT,
+                          dim=wfm.feat_dim, n=wfm.n_patches())
+        path = FeatureStore.save(
+            self.entry(wfm.tile_size, wfm.overlap), self.fid(wfm.ds),
+            self.record(), meta=meta,
+            **to_store_tensors(wfm, dtype=self._storage_dtype()))
+        self._say(f'wrote {path}  {wfm.n_patches():,} tiles')
+        return path
+
+    # ── several poolings of one slide, side by side ─────────────────────────
+    #
+    # `load` / `save` above carry ONE vector per tile, whatever the encoder's
+    # `feature_pooling` is. These carry any pooling -- a reduced one with
+    # several slots, or the model's raw output -- each its own variant, under
+    # the same record and the same geometry check.
+
+    def save_pooled(self, regions, pooled: Dict[str, 'PooledFeatures'], *,
+                    ds: float, level: int, tile_size: int,
+                    overlap: bool) -> Dict[str, Path]:
+        """Write each pooling of `pooled` as its own variant. `{name: path}`.
+        Refuses a pooling whose row count is not the grid's: a store that
+        covers half the slide reads as the slide."""
+        if 'w' not in self.mode:
+            return {}
+        from PatchingLib import region_grids                      # noqa: PLC0415
+        columns = _columns(region_grids(regions, ds=ds, level=level,
+                                        tile_size=tile_size, overlap=overlap))
+        n = int(columns['x'].numel())
+        out = {}
+        for name, item in pooled.items():
+            features = item.features
+            if features.shape[0] != n:
+                raise ValueError(f'{name}: {features.shape[0]} feature rows '
+                                 f'against {n} grid positions')
+            meta = self._meta(level=level, ds=ds, tile_size=tile_size,
+                              overlap=overlap, pooling=name, slots=item.slots,
+                              slot_layout=item.slot_layout,
+                              dim=features.shape[2], n=n)
+            out[name] = FeatureStore.save(
+                self.entry(tile_size, overlap), self.fid(ds, name), self.record(),
+                meta=meta, features=features, **columns)
+            self._say(f'wrote {out[name]}  {n:,} tiles, {name}')
+        return out
 
     def load_pooled(self, regions, pooling: str, *, ds: float, level: int,
                     tile_size: int, overlap: bool):
@@ -905,19 +842,23 @@ _META_NAME = 'meta.json'
 
 @dataclass(frozen=True)
 class PreTileCorpus:
-    """Which pre-tiles: one extraction's key, slide-independent.
+    """Which pre-tiles: one extraction's key, slide-independent, and where
+    each slide's rungs of it are in a job's cache tree.
 
-        corpus = PreTileCorpus.of(root, mask_cfg, sampler_cfg, plan)
+        corpus = PreTileCorpus.of(job, mask_cfg, sampler_cfg, plan)
         for folder in corpus.rung_dirs(slide): ...
+
+        slide=<s>/seg=<seg_id>/region=<region_id>/plan=<plan>/draw=<sampler_id>/
+            pretile=f<factor>/ds=<d>/tiles/    meta.json, *.png, index.csv (last)
 
     Everything that decides which tiles were cut: the mask they were drawn
     through (`seg_id`, `region_id`), the draw (`sampler_id` covers all three
-    sampling axes, the tile size and the seed) and the rung plan the draw was
+    sampling axes, the tile size and the seed), the rung plan the draw was
     made over (a chain is only a chain over the rungs sampled TOGETHER), and
-    the context factor. Two corpora in one root differ in at least one of
-    these, so they sit in two directories and a reader cannot mix them.
+    the context factor -- each one level of the address. `root` is the job
+    whose tree holds them (`made_by`).
     """
-    root: Path
+    root: str
     seg_id: str
     region_id: str
     sampler_id: str
@@ -928,14 +869,14 @@ class PreTileCorpus:
     def of(cls, root, mask_cfg, sampler_cfg, plan, factor: int = PRE_TILE_FACTOR
            ) -> 'PreTileCorpus':
         """From the objects that made it -- `plan` is a `TileSampler.PlanSpec`."""
-        return cls(Path(root), mask_cfg.seg_id(), mask_cfg.region_id(),
+        return cls(str(root), mask_cfg.seg_id(), mask_cfg.region_id(),
                    sampler_cfg.identity_id(), plan.key(), int(factor))
 
     @property
     def key(self) -> str:
         """`<seg_id>/<region_id>_<sampler_id>_<plan>/f<factor>` -- what a label
         store records as the pre-tiles it was made from (`PreTileMeta.corpus_key`
-        spells the same string)."""
+        spells the same string). An identity, not a path."""
         return f'{self.seg_id}/{self.region_id}_{self.sampler_id}_{self.plan}/f{self.factor}'
 
     @classmethod
@@ -944,29 +885,41 @@ class PreTileCorpus:
         try:
             seg_id, middle, factor = key.split('/')
             region_id, sampler_id, plan = middle.split('_', 2)
-            return cls(Path(root), seg_id, region_id, sampler_id, plan,
+            return cls(str(root), seg_id, region_id, sampler_id, plan,
                        int(factor.lstrip('f')))
         except ValueError:
             raise StoreMismatch(f'{key!r} is not a pre-tile corpus key') from None
 
+    def address(self, slide: str, ds: Optional[float] = None) -> Address:
+        """The `pretile=` level of one slide (or, with `ds`, one rung's level)
+        in the job `root`'s tree."""
+        levels = dict(slide=slide, seg=self.seg_id, region=self.region_id,
+                      plan=self.plan, draw=self.sampler_id,
+                      pretile=f'f{self.factor}')
+        if ds is not None:
+            levels['ds'] = f'{float(ds):g}'
+        return Address(self.root, **levels)
+
     def set_dir(self, slide: str) -> Path:
-        return (self.root / self.seg_id / slide
-                / f'{self.region_id}_{self.sampler_id}_{self.plan}' / f'f{self.factor}')
+        return self.address(slide).dir
 
     def rung_dir(self, slide: str, ds: float) -> Path:
-        return self.set_dir(slide) / _ds_name(ds)
+        """One rung's folder: the `tiles/` directory of its `ds=` level."""
+        return self.address(slide, ds).dir / 'tiles'
 
     def rung_dirs(self, slide: str) -> List[Path]:
-        """The FINISHED rungs of one slide (index.csv present), finest first.
-        An interrupted rung has no index and is not a dataset yet."""
-        base = self.set_dir(slide)
-        found = [d for d in base.glob('ds*') if (d / _INDEX_NAME).exists()]
-        return sorted(found, key=lambda d: float(d.name[2:]))
+        """The FINISHED rungs of one slide (index.csv present), finest first --
+        a listing of the slide's own `pretile=` directory. An interrupted rung
+        has no index and is not a dataset yet."""
+        rungs = sorted(self.address(slide).children('ds'), key=float)
+        found = [self.rung_dir(slide, float(d)) for d in rungs]
+        return [d for d in found if (d / _INDEX_NAME).exists()]
 
     def slides(self) -> List[str]:
-        """Slides this corpus has at least one finished rung of."""
-        return sorted(p.name for p in (self.root / self.seg_id).glob('*')
-                      if self.rung_dirs(p.name))
+        """Slides this corpus has at least one finished rung of, in the job's
+        tree."""
+        return [s for s in Address(self.root).children('slide')
+                if self.rung_dirs(s)]
 
 
 @dataclass(frozen=True)

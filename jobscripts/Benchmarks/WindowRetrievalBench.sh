@@ -47,7 +47,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # is the cost this bench deliberately accepted rather than reading tile by tile
 # the way bench_offgrid_score does.
 #
-# So MODE=smoke runs one slide per dataset (--n-wsi 1: the first of each #val
+# So MODE=smoke runs one slide per dataset (--n-wsi 1: the first of each val split
 # split as MakeSplit recorded it, BRACS_310 and S1128171) and the two finest
 # levels: an H&E slide on a 4x pyramid and a Ki67 one on a 2x pyramid, both
 # with their masks in MppRoutingHead's cache, so the smoke segments nothing.
@@ -108,8 +108,8 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # the recipes are what runs. An environment variable, when set, becomes the
 # matching flag and wins:
 #
-#   DATASETS  N_WSI  FOV  SEED  N_FOV  ROTATION  SCALE_MIN  SCALE_MAX
-#   ARMS  SEG  MASK_CACHE_JOB  SPLIT_CACHE_JOB  BATCH_SIZE
+#   DATASETS  SPLIT  N_WSI  FOV  SEED  N_FOV  ROTATION  SCALE_MIN  SCALE_MAX
+#   ARMS  SEG  MASK_CACHE_JOB  DRAW_CACHE_JOB  RENDER_CACHE_JOB  BATCH_SIZE
 #
 # and EXTRA_ARGS takes ANY flag of the bench, which is how a single field is
 # changed from sbatch -- every field of the sampler, camera and encoder configs
@@ -118,9 +118,11 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 #   EXTRA_ARGS="--sampler-richness-caps 0.15 0.25 0.6 0 0 0 0 --camera-noise-sigma 0" \
 #       sbatch jobscripts/Benchmarks/WindowRetrievalBench.sh
 #
-# DATASETS names pools the way AccessDatasets does: a real dataset (the whole
-# pool) or a recorded split of one, `<id>#<split>`. Quote a value that holds a `#`:
-# DATASETS="bracs/test#val ki67_with_photo#val".
+# The slides and FoVs are every bench's: the first N_WSI of each DATASETS id's
+# recorded SPLIT (default val), one draw per slide across its levels. With the
+# same DATASETS, SPLIT, N_WSI and FoV flags, a FoV here is the photo
+# BenchLocaScope and Stage1MppBench score; DRAW_CACHE_JOB=BenchLocaScope reads
+# their draws instead of drawing again (the same draw either way).
 #
 # ROTATION / SCALE_MIN / SCALE_MAX replace the recipe's gap, which rotates by
 # every quarter turn and scales 0.90-1.15. Anything but 0 and 1 is scored against
@@ -161,7 +163,9 @@ COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
 [ -n "${SEG:-}" ] && COMMON="$COMMON --seg $SEG"
 MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # "" = this job's own
 [ -n "$MASK_CACHE_JOB" ] && COMMON="$COMMON --mask-cache-job $MASK_CACHE_JOB"
-[ -n "${SPLIT_CACHE_JOB:-}" ] && COMMON="$COMMON --split-cache-job $SPLIT_CACHE_JOB"
+[ -n "${SPLIT:-}" ] && COMMON="$COMMON --split $SPLIT"
+[ -n "${DRAW_CACHE_JOB:-}" ] && COMMON="$COMMON --draw-cache-job $DRAW_CACHE_JOB"
+[ -n "${RENDER_CACHE_JOB:-}" ] && COMMON="$COMMON --render-cache-job $RENDER_CACHE_JOB"
 [ -n "${EXTRA_ARGS:-}" ] && COMMON="$COMMON $EXTRA_ARGS"
 
 if [ "$MODE" = "smoke" ]; then

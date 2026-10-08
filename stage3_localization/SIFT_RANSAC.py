@@ -1,12 +1,12 @@
-import sys
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 
+from ConfigIdentity import IdentifiedConfig, register             # noqa: E402
 from PatchingLib import QueryPatchContainer                     # noqa: E402
 from ReadGeometry import ReadSpec                              # noqa: E402
 from SlideReader import SlideReader                            # noqa: E402
@@ -41,6 +41,37 @@ def is_invertible(H) -> bool:
     return bool(ok)
 
 
+# ── config ────────────────────────────────────────────────────────────────────
+
+@register('sift-ransac')
+@dataclass(frozen=True)
+class SiftRansacConfig(IdentifiedConfig):
+    '''What stage 3 is: how many inliers make a fit, how far past the window
+    the crop reaches, the Lowe ratio, RANSAC's reprojection threshold, and how
+    many of stage 2's candidates are verified. `workers` is how many are
+    verified at once -- it changes no result.'''
+    min_inliers: int = 10
+    padding:     int = 2
+    ratio:       float = 0.75
+    ransac_px:   float = 5.0
+    n_verify:    int = 10
+    workers:     int = 8
+
+    BASELINE = {'min_inliers': 10, 'padding': 2, 'ratio': 0.75,
+                'ransac_px': 5.0, 'n_verify': 10}
+    NOT_IDENTITY = ('workers',)
+    #: The crop, the match and the fit (ConfigIdentity rule 3).
+    VERSION = 0
+
+
+#: Named localizers, every field written out (test_config_identity's recipe
+#: lint); `--stage3 sift:<name>`.
+SIFT_RECIPES: Dict[str, SiftRansacConfig] = {
+    'default': SiftRansacConfig(min_inliers=10, padding=2, ratio=0.75,
+                                ransac_px=5.0, n_verify=10, workers=8),
+}
+
+
 # ── Result dataclass ──────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -52,7 +83,12 @@ class SiftRansacResult:
     `x0, y0` is where the query's own (0, 0) landed; `center_x0, center_y0`
     its centre through H. The centre is the rotation-invariant anchor -- the
     query is rotated about it -- so prefer it when the orientation is unknown.
-    On a failed fit both fall back to the candidate window's own position.'''
+    On a failed fit both fall back to the candidate window's own position.
+
+    `crop_l0` is the crop's level-0 box (x, y, w, h). `pairs` holds every
+    ratio-test match as rows (qx, qy, x0, y0, distance, inlier): the query
+    pixel, where its crop match sits at level 0, the descriptor distance, and
+    whether RANSAC kept it.'''
     x0: float
     y0: float
     center_x0: float
@@ -65,15 +101,43 @@ class SiftRansacResult:
     candidate: Candidate
     ds: float
     level: int
+    crop_l0: Optional[Tuple[float, float, float, float]] = None
+    pairs: Optional[np.ndarray] = field(default=None, repr=False)
+
+    def row(self) -> dict:
+        '''This result as one table row: the candidate it verified, where the
+        query landed, the fit and the crop. `pairs` is `pair_rows`'.'''
+        c = self.candidate
+        H = (np.asarray(self.H, dtype=np.float64).reshape(-1) if self.H is not None
+             else [None] * 9)
+        crop = self.crop_l0 or (None,) * 4
+        return dict(
+            rank=self.rank + 1, region=c.region_index, lattice=c.lattice,
+            row=c.row, col=c.col, rotation=c.rotation,
+            success=self.success, n_good=self.match_count,
+            n_inliers=self.inlier_count,
+            x0=self.x0, y0=self.y0,
+            center_x0=self.center_x0, center_y0=self.center_y0,
+            **{f'h{i // 3}{i % 3}': (None if v is None else float(v))
+               for i, v in enumerate(H)},
+            crop_x0=crop[0], crop_y0=crop[1], crop_w0=crop[2], crop_h0=crop[3])
+
+    def pair_rows(self) -> List[dict]:
+        if self.pairs is None:
+            return []
+        return [dict(rank=self.rank + 1, qx=float(p[0]), qy=float(p[1]),
+                     x0=float(p[2]), y0=float(p[3]), dist=float(p[4]),
+                     inlier=bool(p[5])) for p in self.pairs]
 
 
 # ── Localizer class ───────────────────────────────────────────────────────────
 
 class SiftRansacLocalizer:
     '''
-    Stage 3: SIFT + RANSAC inside one candidate window.
+    Stage 3: SIFT + RANSAC inside the candidate windows of stage 2.
 
-        loc = SiftRansacLocalizer(min_inliers=10, padding=2).build(wsi)
+        loc = SiftRansacLocalizer(SIFT_RECIPES['default']).build(wsi)
+        results = loc.localize_top(query, candidate_set)   # one per verified rank
         result = loc.localize(query, candidate_set, rank=0)
 
     Retrieval places the query to a tile; this places it to a pixel:
@@ -82,22 +146,35 @@ class SiftRansacLocalizer:
                           its region, read on demand at the candidate set's
                           level; `crop_origin_l0` is the level-0 integer the
                           read started at
-      detect_and_match    SIFT on query and crop, BFMatcher, Lowe ratio 0.75
+      detect_and_match    SIFT on query and crop, BFMatcher, Lowe ratio
       estimate_homography RANSAC H: query px -> crop px; a crop pixel (u, v)
                           is level-0 crop_origin_l0 + (u, v) * ds, so the
                           query's (0, 0) and centre go through H and land at
                           level-0, fractional
 
-    A fit with fewer than `min_inliers` inliers, or a degenerate H, falls back
-    to the candidate window's own position. Intermediate state stays on self
-    for the figures; each step builds the ones before it if not called yet.
+    `localize_top` verifies the first `n_verify` candidates: the query's SIFT
+    once, each candidate's crop, match and fit on its own thread. A fit with
+    fewer than `min_inliers` inliers, or a degenerate H, falls back to the
+    candidate window's own position. Intermediate state stays on self for the
+    figures; each step builds the ones before it if not called yet.
     '''
 
-    def __init__(self, min_inliers: int = 10, padding: int = 2):
-        self.min_inliers = min_inliers
-        self.padding = padding
+    def __init__(self, cfg: SiftRansacConfig):
+        if not isinstance(cfg, SiftRansacConfig):
+            raise TypeError(f'SiftRansacLocalizer takes a SiftRansacConfig (a '
+                            f'SIFT_RECIPES entry or a replace of one), got '
+                            f'{type(cfg).__name__}')
+        self.cfg = cfg
         self.reader: Optional[SlideReader] = None
         self._reset(None, None, 0)
+
+    @property
+    def min_inliers(self) -> int:
+        return self.cfg.min_inliers
+
+    @property
+    def padding(self) -> int:
+        return self.cfg.padding
 
     def build(self, wsi) -> 'SiftRansacLocalizer':
         '''Bind a slide. The localizer reads its own crops: a SlideReader of
@@ -125,6 +202,29 @@ class SiftRansacLocalizer:
         self.prepare(query, cs, rank)
         return self.estimate_homography()
 
+    def localize_top(self, query, cs: CandidateSet,
+                     n: Optional[int] = None) -> List[SiftRansacResult]:
+        '''Every one of the first `n` (default `n_verify`) candidates,
+        verified, in rank order. The query's keypoints are computed once and
+        shared; each rank runs on a localizer of its own, `workers` at a time.'''
+        n = min(self.cfg.n_verify if n is None else int(n), len(cs))
+        if n <= 0:
+            return []
+        self.prepare(query, cs, 0)
+        kps, descs = self._query_features(self.query)
+        query = self.query
+
+        def one(rank: int) -> SiftRansacResult:
+            loc = SiftRansacLocalizer(self.cfg).build(self.reader)
+            loc._reset(query, cs, rank)
+            loc.query_kps, loc.query_descs = kps, descs
+            return loc.estimate_homography()
+
+        if self.cfg.workers <= 1 or n == 1:
+            return [one(r) for r in range(n)]
+        with ThreadPoolExecutor(max_workers=min(self.cfg.workers, n)) as pool:
+            return list(pool.map(one, range(n)))
+
     def prepare(self, query, cs: CandidateSet, rank: int = 0) -> 'SiftRansacLocalizer':
         '''Set the query and the candidate without running anything -- for a
         caller that steps through the stages (the figures).'''
@@ -136,6 +236,12 @@ class SiftRansacLocalizer:
             query = qc
         self._reset(query, cs, rank)
         return self
+
+    @staticmethod
+    def _query_features(query: QueryPatchContainer):
+        sift = cv2.SIFT_create()
+        gray = cv2.cvtColor(query.img, cv2.COLOR_RGB2GRAY)
+        return sift.detectAndCompute(gray, None)
 
     # ── Stage 1 ──────────────────────────────────────────────────────────────
 
@@ -185,16 +291,16 @@ class SiftRansacLocalizer:
     # ── Stage 2 ──────────────────────────────────────────────────────────────
 
     def detect_and_match(self) -> list:
-        '''SIFT detect on query + wsi_crop, then BFMatcher with Lowe ratio test.'''
+        '''SIFT detect on query + wsi_crop, then BFMatcher with the Lowe ratio
+        test. The query's keypoints are reused when already set (`localize_top`).'''
         if self.wsi_crop is None:
             self.read_wsi_crop()
 
         sift = cv2.SIFT_create()
-        q_gray = cv2.cvtColor(self.query.img, cv2.COLOR_RGB2GRAY)
-        c_gray = cv2.cvtColor(self.wsi_crop,  cv2.COLOR_RGB2GRAY)
-
-        self.query_kps, self.query_descs = sift.detectAndCompute(q_gray, None)
-        self.crop_kps,  self.crop_descs  = sift.detectAndCompute(c_gray, None)
+        if self.query_kps is None:
+            self.query_kps, self.query_descs = self._query_features(self.query)
+        c_gray = cv2.cvtColor(self.wsi_crop, cv2.COLOR_RGB2GRAY)
+        self.crop_kps, self.crop_descs = sift.detectAndCompute(c_gray, None)
 
         # knnMatch(k=2) needs two crop descriptors to give every query its
         # second neighbour for the ratio test; a blank crop has fewer.
@@ -205,7 +311,8 @@ class SiftRansacLocalizer:
 
         bf = cv2.BFMatcher(cv2.NORM_L2)
         matches = bf.knnMatch(self.query_descs, self.crop_descs, k=2)
-        self.good_matches = [m for m, n in matches if m.distance < 0.75 * n.distance]
+        self.good_matches = [m for m, n in matches
+                             if m.distance < self.cfg.ratio * n.distance]
         return self.good_matches
 
     # ── Stage 3 ──────────────────────────────────────────────────────────────
@@ -220,6 +327,7 @@ class SiftRansacLocalizer:
         H = None
         inliers = 0
         success = False
+        keep = np.zeros(n_matches, dtype=bool)
 
         # Fallback: the candidate window's own place. The query footprint is
         # the ROTATED query's, so width/height swap at 90/270.
@@ -228,20 +336,20 @@ class SiftRansacLocalizer:
         x0, y0 = (float(v) for v in cs.origin_l0(c))
         cx0, cy0 = x0 + w_eff / 2.0 * cs.ds, y0 + h_eff / 2.0 * cs.ds
 
+        src = np.float32([self.query_kps[m.queryIdx].pt
+                          for m in self.good_matches]).reshape(-1, 2)
+        dst = np.float32([self.crop_kps[m.trainIdx].pt
+                          for m in self.good_matches]).reshape(-1, 2)
         if n_matches >= 4:
-            src_pts = np.float32(
-                [self.query_kps[m.queryIdx].pt for m in self.good_matches]
-            ).reshape(-1, 1, 2)
-            dst_pts = np.float32(
-                [self.crop_kps[m.trainIdx].pt for m in self.good_matches]
-            ).reshape(-1, 1, 2)
-
-            H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            H, mask = cv2.findHomography(src.reshape(-1, 1, 2),
+                                         dst.reshape(-1, 1, 2),
+                                         cv2.RANSAC, self.cfg.ransac_px)
             if H is not None:
                 # Count first, reject second: the inlier count is what tells the
                 # two failure modes apart in the log, and it stays true of the
                 # match even when the model fitted to it is thrown away.
-                inliers = int(mask.sum())
+                keep = mask.reshape(-1).astype(bool)
+                inliers = int(keep.sum())
                 if is_invertible(H):
                     success = inliers >= self.min_inliers
                 else:
@@ -258,8 +366,20 @@ class SiftRansacLocalizer:
                     x0, y0 = self.crop_to_l0(*mapped[0])
                     cx0, cy0 = self.crop_to_l0(*mapped[1])
 
+        ds = cs.ds
+        ox, oy = self.crop_origin_l0
+        pairs = np.zeros((n_matches, 6), dtype=np.float64)
+        if n_matches:
+            pairs[:, 0:2] = src
+            pairs[:, 2] = ox + dst[:, 0] * ds
+            pairs[:, 3] = oy + dst[:, 1] * ds
+            pairs[:, 4] = [m.distance for m in self.good_matches]
+            pairs[:, 5] = keep
+        crop_h, crop_w = self.wsi_crop.shape[:2]
         self.result = SiftRansacResult(
             x0=float(x0), y0=float(y0), center_x0=float(cx0), center_y0=float(cy0),
             H=H, inlier_count=inliers, match_count=n_matches, success=success,
-            rank=self.rank, candidate=c, ds=cs.ds, level=cs.level)
+            rank=self.rank, candidate=c, ds=ds, level=cs.level,
+            crop_l0=(float(ox), float(oy), crop_w * ds, crop_h * ds),
+            pairs=pairs)
         return self.result

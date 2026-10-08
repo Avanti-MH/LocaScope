@@ -29,18 +29,18 @@ baseline every other arm is measured against.
 The worked numbers in the sections from VOCABULARY on assume seven slides,
 three levels, 100 FoVs each and top-left answers; this section is what runs:
 
-  slides     `--datasets` names pools the way AccessDatasets does: a real dataset
-             (`bracs/train`, the whole pool) or a recorded split of one
-             (`bracs/test#val`, read from `--split-cache-job`'s split file, default
-             MakeSplit). `--n-wsi` random slides of each (`pick_wsi_names`, fixed
-             by --seed; a cap at or above the pool takes all of it). `--shard I/N`
-             takes every N-th of the slides, for N processes on N cards.
+  slides     the first `--n-wsi` of each `--datasets` id's recorded `--split`
+             (MakeSplit; the split is shuffled when made), as every bench takes
+             them (`bench_locascope.run_slides`). `--shard I/N` takes every N-th
+             of the slides, for N processes on N cards.
   levels     each slide's own pyramid levels up to `--max-ds` (the FoV recipe's
              `max_ds` by default; `--fov`, FovSupply.FOV_RECIPES).
-  FoVs       `--n-fov` (the recipe's `n_per_rung`) per (slide, level), placed for
-             the camera (`FovSupply`, a richness mix and an overlap bound) with
-             the recipe's domain gap on. A level too coarse for the tissue holds
-             no FoV and is skipped with the sampler's per-bucket report.
+  FoVs       `--n-fov` (the recipe's `n_per_rung`) per (slide, level), all of a
+             slide's levels in ONE draw on the hest masks of --fov-mask-cache-job,
+             photographed through `FovSupply.cached` (`bench_locascope.supply_for`):
+             the draw and the photos' record are cache entries, and the same
+             flags give the pipeline bench's and the stage-1 bench's photos. A
+             level too coarse for the tissue holds no FoV and is skipped.
   answer     the window the query's TILE GRID covers, located by
              `Render.output_to_level0` at the rotation and scale the shot was
              taken at -- not the FoV's top-left. At rotation 0 and scale 1 the two
@@ -209,7 +209,7 @@ med Q3, one column per K_FRACTIONS entry) is IDENTICAL in all four.
 
   單片跨層   slide             7 tables   n = 3 x --n-fov
              Exists because stain type has already bitten this project once:
-             bench_feature_axes found the three H&E slides carry mpp on PC1
+             a PCA of the features found the three H&E slides carry mpp on PC1
              while two of the four Ki67 slides carry it on PC2. No fixed
              rank@k -- it mixes a 250x pool range inside one slide.
 
@@ -292,8 +292,6 @@ import torch                                                    # noqa: E402
 import torch.nn.functional as F                                 # noqa: E402
 
 import Cache                                                     # noqa: E402
-from AccessDatasets import (SPLIT_SEP, list_names, locate,      # noqa: E402
-                            pick_wsi_names)
 from PatchingLib import (FeaturesMap, PatchGrid, region_grids,  # noqa: E402
                          QueryPatchContainer)
 from CpuBudget import CpuBudget                                  # noqa: E402
@@ -308,7 +306,6 @@ from FovSupply import FOV_RECIPES, FovSupply, add_fov_args       # noqa: E402
 from ReadGeometry import ReadRect, levels_up_to                  # noqa: E402
 from ConfigArgs import config_from_args, describe                # noqa: E402
 from ConfigIdentity import enc, short_id                         # noqa: E402
-from TileSampler import PlanSpec                                 # noqa: E402
 from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
                                            attach_baseline, frac_label, grid_table,
                                            group_by, group_levels, k_at, pct,
@@ -316,6 +313,7 @@ from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F
 from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
 from camera import Render                                        # noqa: E402
 from _paths import encoder_tag, job_result_dir                   # noqa: E402
+from bench_locascope import run_slides, supply_for                 # noqa: E402
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -332,11 +330,11 @@ from _paths import encoder_tag, job_result_dir                   # noqa: E402
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── which slides ─────────────────────────────────────────────────────────────
-DATASETS         = ('bracs/test#val', 'ki67_with_photo#val')   # real ids or <id>#<split>
-N_WSI            = 10           # slides taken from each dataset
-WSI_SEED         = 0            # which N_WSI of a pool (pick_wsi_names)
-SPLIT_CACHE_JOB  = None         # None: MakeSplit
+DATASETS         = ('bracs/test', 'ki67_with_photo')   # AccessDatasets ids
+SPLIT            = 'val'        # the recorded split (MakeSplit) the slides come from
+N_WSI            = 10           # the first N of each dataset's split, as every bench
 MASK_CACHE_JOB   = None         # None: this job's own; 'MppRoutingHead' to reuse
+FOV_MASK_CACHE_JOB = 'MppRoutingHead'   # the hest masks the FoVs are placed on
 
 # ── the FoVs and the mask ────────────────────────────────────────────────────
 # Where the FoVs go, the camera that takes them and the coarsest level are a FoV
@@ -422,13 +420,6 @@ MAX_TRUTH_DISTANCE = float(HALF_TILE)                            # 128.00
 #: `recall_ranks`). Empty on a main-only arm, which has no offset windows.
 RECALL_COLUMNS = ('rank_offset_in_offset', 'pool_offset', 'rank_main_in_all',
                   'rank_offset_in_all', 'pool_all')
-
-#: Which datasets, by `AccessDatasets` id, and how many slides of each. The
-#: slides are `pick_wsi_names` -- random, fixed by --seed, in their original
-#: order -- and not the first N of a sorted list, which for BRACS would be one
-#: group's worth of one tissue type.
-# DATASETS is in the CONFIG block above.
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Descriptors: pooling -> one vector per tile
@@ -1149,23 +1140,6 @@ def run_gates(patches, encoder, poolings, path: str = '', mask=None) -> bool:
 #  One (slide, level)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def pick_slides(dataset_ids, n_wsi: int, seed: int, split_job=None) -> list:
-    """`[(dataset, name, path)]`: `n_wsi` random slides of each dataset.
-
-    A dataset id is whatever `AccessDatasets` takes: a real one (`bracs/train`,
-    the whole pool) or a recorded split of one (`bracs/test#val`, read from
-    `split_job`'s split file, default `MakeSplit`). One way to name a pool, one
-    way to draw from it."""
-    out = []
-    for dataset in dataset_ids:
-        job = split_job if SPLIT_SEP in dataset else None
-        names = list_names(dataset=dataset, split_job=job)
-        for name in pick_wsi_names(names, n_wsi, seed):
-            out.append((dataset, name, locate(name, dataset=dataset,
-                                              split_job=job).path))
-    return out
-
-
 def region_of(regions, x0: int, y0: int, w: int, h: int):
     """Index of the region that holds the rectangle, or None. Regions are found
     by GEOMETRY: the placer's regions and this bench's are two lists made by two
@@ -1289,31 +1263,21 @@ def rank_in_main(maps: tuple, region: int, found: dict) -> tuple:
 
 
 def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
-                    bases, device, sampler_cfg, camera_cfg) -> list:
-    """Every FoV of one (slide, level), scored by every arm. `sampler_cfg` and
-    `camera_cfg` are the run's resolved configs; a level supplies only its own
-    seed and its own resolution."""
+                    bases, device, supply, shots) -> list:
+    """Every FoV of one (slide, level), scored by every arm. `shots` are this
+    level's `(index, meta, image, params)` out of the slide's one draw
+    (`supply`, the draw every bench takes its FoVs from); `index` is the FoV's
+    row in the draw, and is the row's `fov_id`."""
     ds = float(slide.level_downsamples[level])
-    seed = sampler_cfg.seed + level
-    camera = Render(SlideReader(slide), args.sensor, camera_cfg, ds=ds, seed=seed)
-    # the level's own rung, placed for this camera; one supply per (slide,
-    # level) because a level is this bench's unit of work and of resume
-    plan = PlanSpec('ladder', (ds,), camera=camera.spec)
-    supply = FovSupply(camera, plan, dataclasses.replace(sampler_cfg, seed=seed),
-                       mask)
-    try:
-        bank = list(supply)                 # (meta, image, params), one per position
-    except RuntimeError as exc:
-        if 'No FoV position' not in str(exc):
-            raise
+    if not shots:
         # No region holds a FoV this size at this level -- a coarse level on a
-        # small tissue section. Not an error: say so and say what was seen.
-        print(f'  L{level} (ds {ds:g}): no FoV position -- skipped\n    '
-              + str(exc).replace('\n', '\n    '), flush=True)
+        # small tissue section. Not an error: say so.
+        print(f'  L{level} (ds {ds:g}): no FoV position -- skipped', flush=True)
         return []
+    camera = supply.camera_for(shots[0][1].ds)
+    bank = {index: (meta, image, params) for index, meta, image, params in shots}
     rows_q = camera.output_h // TILE
     cols_q = camera.output_w // TILE
-    print(next(iter(supply.sampler.reports.values())).line(), flush=True)
 
     # The regions and their grids come from geometry alone. Which FoVs have an
     # answer window is decided here, before any tile is encoded.
@@ -1321,7 +1285,7 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     regions = mask.patchable(TILE * ds).tissue_regions
     grids = region_grids(regions, ds=ds, level=lv, tile_size=TILE, overlap=True)
     valid, n_no_region, n_no_window = [], 0, 0
-    for fov_id, shot in enumerate(bank):
+    for fov_id, shot in bank.items():
         meta, _, params = shot
         gx, gy = meta.fov_rect[0], meta.fov_rect[1]
         i = region_of(regions, gx, gy, camera.rect_w_l0,
@@ -1489,9 +1453,7 @@ def config_id(args, arm_specs, configs: dict) -> str:
              for name, cfg in sorted(configs.items())]
     parts += [f'arms={enc(sorted(f"{b}/{g}" for b, g in arm_specs))}',
               f'datasets={enc(list(args.datasets))}', f'n_wsi={enc(args.n_wsi)}',
-              f'wsi_names={enc(list(args.wsi_names or []))}',
-              f'max_ds={enc(args.max_ds)}', f'wsi_seed={enc(args.wsi_seed)}',
-              f'split_job={enc(args.split_cache_job)}',
+              f'split={enc(args.split)}', f'max_ds={enc(args.max_ds)}',
               f'sensor={enc(list(args.sensor))}', f'version={enc(ROW_VERSION)}']
     return short_id(parts)
 
@@ -1647,22 +1609,24 @@ def main() -> int:
                              'list or the grouping never costs a GPU hour.')
 
     # ── which slides ──────────────────────────────────────────────────────────
+    # The slides and their FoVs are every bench's (bench_locascope.run_slides,
+    # supply_for): the first --n-wsi of each dataset's recorded --split, one
+    # draw per slide across its levels, so a FoV here is the same photo the
+    # pipeline bench and the stage-1 bench score under the same flags.
     parser.add_argument('--datasets', nargs='+', default=list(DATASETS),
-                        help="AccessDatasets ids, each a real dataset (the whole "
-                             "pool) or a recorded split of one, `<id>#<split>`: "
-                             "`bracs/test#val`, `ki67_with_photo#test`")
+                        help='AccessDatasets ids')
+    parser.add_argument('--split', default=SPLIT, choices=['val', 'test'],
+                        help='the recorded split (MakeSplit) slides come from')
     parser.add_argument('--n-wsi', type=int, default=N_WSI,
-                        help='slides per dataset, `pick_wsi_names` with --seed; '
-                             'a cap at or above the pool size takes all of it')
-    parser.add_argument('--split-cache-job', default=SPLIT_CACHE_JOB,
-                        help='whose recorded split a `<id>#<split>` dataset reads: '
-                             'result/cache/<this>/. Default: MakeSplit')
-    parser.add_argument('--wsi-names', nargs='*', default=None,
-                        help='slide NAMES to use instead of the random pick')
+                        help='the first N slides of each dataset\'s split')
     parser.add_argument('--seed', type=int, default=None,
-                        help=f'sets both the slide pick (CONFIG WSI_SEED, '
-                             f'{WSI_SEED}) and the sampler seed (the recipe\'s '
-                             f'own by default)')
+                        help="= --sampler-seed (the recipe's own by default)")
+    parser.add_argument('--fov-mask-cache-job', default=FOV_MASK_CACHE_JOB,
+                        help='the hest masks the FoVs are placed on')
+    parser.add_argument('--draw-cache-job', default=None,
+                        help='whose cache the FoV draws are in. Default: this job')
+    parser.add_argument('--render-cache-job', default=None,
+                        help='whose cache the photo record is in. Default: this job')
 
     # ── which FoVs, through which camera: one flag per field ─────────────────
     # The four below name one field each; everything else is `--sampler-*`
@@ -1696,11 +1660,7 @@ def main() -> int:
                              "baseline and is added if missing")
     parser.add_argument(
         '--encoder', default=ENCODER, choices=encoder_names(),
-        help='which tile encoder. Only the module for THIS one is imported: '
-             'every implementation sets HF_HOME above its own timm import and '
-             'setdefault is first-one-wins, so importing all three would point '
-             'two of them at the wrong weight cache -- silently. See '
-             'TileEncoderFunc._IMPLEMENTATIONS. Arms this encoder cannot do '
+        help='which tile encoder (TileEncoderFunc._IMPLEMENTATIONS). Arms this encoder cannot do '
              'are dropped by name and printed; see admissible_poolings.')
     parser.add_argument(
         '--head', default=HEAD,
@@ -1785,7 +1745,6 @@ def main() -> int:
     out_dir = Path(args.out or job_result_dir('WindowRetrievalBench', encoder=tag))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    args.wsi_seed = args.seed if args.seed is not None else WSI_SEED
     fov = FOV_RECIPES[args.fov]
     if fov.rungs != 'native':
         parser.error(f'--fov {args.fov} names its rungs {fov.rungs}; this bench '
@@ -1889,10 +1848,13 @@ def main() -> int:
 
     # Only arguments decide where a run's parts are, so --assemble answers here,
     # before a slide is listed or a model is built.
+    # the FoV recipe as this run resolved it -- what supply_for draws with
+    fov_run = dataclasses.replace(fov, sampler=sampler_cfg, gap=camera_cfg,
+                                  max_ds=args.max_ds)
     configs = {'sampler': sampler_cfg, 'camera': camera_cfg, 'mask': mask_cfg,
                'encoder': encoder_cfg}
-    print(f'FoV       {sampler_cfg.n_per_rung} per (slide, level), seed '
-          f'{sampler_cfg.seed} + level')
+    print(f'FoV       {sampler_cfg.n_per_rung} per (slide, level), one draw per '
+          f'slide across its levels, seed {sampler_cfg.seed}')
     print(f'mask      {"the hest recipe" if mask_cfg == MASK_RECIPES["hest"] else "NOT the hest recipe: a new seg_id, made again"}'
           f'  ({mask_cfg.seg_id()})')
     print('configuration this run uses (CONFIG, then flags):')
@@ -1904,11 +1866,7 @@ def main() -> int:
     if args.assemble:
         return 0 if assemble(parts_dir, out_dir, arms, args.per_slide) else 1
 
-    if args.wsi_names:
-        selected = [('named', n, locate(n).path) for n in args.wsi_names]
-    else:
-        selected = pick_slides(args.datasets, args.n_wsi, args.wsi_seed,
-                               args.split_cache_job)
+    selected = run_slides(args)
     shard = None
     if args.shard:
         try:
@@ -1933,6 +1891,7 @@ def main() -> int:
         print(f'  {dataset:<{width}}{name}')
 
     job = Cache.job_name('WindowRetrievalBench')
+    fov_masks = MaskMaker(MASK_RECIPES['hest'], args.fov_mask_cache_job, device)
     mask_job = args.mask_cache_job or job
     print(f'masks     {mask_cfg.seg_id()}  cache {mask_job}')
 
@@ -1981,14 +1940,26 @@ def main() -> int:
                       f'{len(mask.tissue_regions)} regions', flush=True)
                 if not mask.tissue_regions:
                     continue
+                todo = []
                 for level in levels_up_to(slide.level_downsamples, args.max_ds):
-                    part = part_path(parts_dir, stem, level)
-                    if part.exists():
+                    if part_path(parts_dir, stem, level).exists():
                         print(f'  L{level}  already done -- skipped', flush=True)
-                        continue
+                    else:
+                        todo.append(level)
+                if not todo:
+                    continue
+                # the slide's FoVs, every level in one draw, as every bench
+                # takes them; rendered once and split by level
+                supply = supply_for(str(path), fov_run, fov_masks, args, job)
+                by_level = {}
+                if supply is not None:
+                    for shot in supply.shots(workers=args.budget.workers):
+                        by_level.setdefault(int(shot[1].level), []).append(shot)
+                for level in todo:
+                    part = part_path(parts_dir, stem, level)
                     rows = run_slide_level(
                         slide, dataset, stem, level, mask, args, encoder,
-                        arm_specs, bases, device, sampler_cfg, camera_cfg)
+                        arm_specs, bases, device, supply, by_level.get(level, []))
                     write_part(rows, part)
                     print(f'  L{level}  {len(rows)} rows -> {part.name}   '
                           f'{peak_memory_line()}', flush=True)

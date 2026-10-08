@@ -1,7 +1,7 @@
 """
 估計 query 顯微照片的 MPP —— 用「倍率指紋」比對 WSI 各層(跟位置無關)。
 
-    est = ClassicEstMpp(ClassicEstMppConfig()).build(wsi, mask=mask)
+    est = ClassicEstMpp(CLASSIC_RECIPES['default']).build(wsi, mask=mask)
     result = est.estimate(query_img)   # RGB uint8 np.ndarray -> ClassicEstMppResult
 
 原理:組織在某倍率下的「結構大小(像素)」全片一致,所以
@@ -37,9 +37,10 @@ from ConfigIdentity import IdentifiedBuild, IdentifiedConfig             # noqa:
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SafeSlide import SafeSlide                                         # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
-from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
+from stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
+                                              routed_level)
 from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
-                         TileSampler, native_plans)
+                         TileSampler)
 from TissueMaskConfig import MASK_RECIPES                                # noqa: E402
 
 
@@ -129,17 +130,19 @@ class ClassicEstMpp(IdentifiedBuild):
         self.ref_feats: Optional[np.ndarray] = None
 
     def build(self, wsi: Union[openslide.OpenSlide, str],
-              mask=None) -> 'ClassicEstMpp':
+              mask=None, *, masks=None, cache_job=None) -> 'ClassicEstMpp':
         '''One fingerprint per native level: the median over that level's
-        reference tiles that pass `min_std`. A level with none is left out.'''
+        reference tiles that pass `min_std`. A level with none is left out.
+        `masks` and `cache_job` keep the draw in the cache
+        (`StageInterface.reference_bank`).'''
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi = wsi
-        if mask is None:
+        if mask is None and not cache_job:
             mask = MASK_RECIPES[self.cfg.seg].build(wsi, self.device)
 
-        sampler = TileSampler(wsi, mask, self.cfg.sampler())
-        sampler.sample(native_plans(wsi, self.cfg.tile))
+        sampler, _ = reference_bank(wsi, mask, self.cfg.sampler(), self.cfg.tile,
+                                    masks=masks, cache_job=cache_job)
         images = SlideReader(wsi, resize='area').read_samples(
             sampler, ReadSpec(self.cfg.tile, self.cfg.tile))
 
@@ -192,3 +195,13 @@ class ClassicEstMpp(IdentifiedBuild):
             query_fingerprint=[float(v) for v in q_feat],
             neighbour_levels=[self.ref_levels[i] for i in idx])
 
+
+
+#: Named classic estimators, every field written out (test_config_identity's
+#: recipe lint); `--stage1 classic:<name>`.
+CLASSIC_RECIPES: Dict[str, ClassicEstMppConfig] = {
+    'default': ClassicEstMppConfig(
+        tile=256, samples=40, k=3, min_std=6.0, seed=42, seg='hest',
+        sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'],
+                            n_per_rung=40, seed=42)),
+}

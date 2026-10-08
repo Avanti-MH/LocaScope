@@ -218,7 +218,7 @@ done
 
 echo ""
 echo "======== done  (exit $status) ========"
-echo "  labels  -> result/cache/${SLURM_JOB_NAME:-MakeHaLabels}_keypoint_labels/<slide>__ds<d>__<cfg8>.safetensors"
+echo "  labels  -> result/cache/${SLURM_JOB_NAME:-MakeHaLabels}/slide=<s>/.../pretile=f3/ds=<d>/labels/"
 echo "  tables  -> result/\${SLURM_JOB_NAME}/make_ha_labels.csv, ha_labels.csv"
 echo "  figures -> result/\${SLURM_JOB_NAME}/ha_labels__<slide>_ds<d>.png"
 echo "             result/\${SLURM_JOB_NAME}/ha_demo__ds<d>__num<...>.png"

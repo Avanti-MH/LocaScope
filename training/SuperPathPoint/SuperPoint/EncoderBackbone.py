@@ -6,12 +6,9 @@
 WHY THIS IS NOT IN `Backbones.py`
 ----------------------------------
 It was planned there (spec.md 14) and it does not belong there, for a reason
-that has nothing to do with tidiness. `TileEncoderFunc._IMPLEMENTATIONS` imports
-one encoder module at a time BECAUSE each of them does
-`os.environ.setdefault('HF_HOME', ...)` above its own `import timm`, and
-huggingface_hub freezes HF_HOME into module constants when it is imported --
-first one wins. A top-level import of `aiNNModel` inside `Backbones.py` would
-put that side effect on the import path of `KeypointNet.py`, which is imported
+that has nothing to do with tidiness. An encoder module imports timm and sets
+HF_HOME when it is imported. A top-level import of `aiNNModel` inside
+`Backbones.py` would put that on the import path of `KeypointNet.py`, which is imported
 by the VGG student, by the loss tests and by every CPU-only check in
 `test_superpathpoint.py`. None of them want timm, a weights directory, or the
 five seconds.

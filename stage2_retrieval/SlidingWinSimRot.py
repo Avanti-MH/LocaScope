@@ -14,7 +14,7 @@ Cost:
     WSI features are encoded ONCE and shared across the 4 query orientations.
 
 Usage:
-    cfg = SlidingWinSimRotConfig(encoder_config('gigapath'), k=20)
+    cfg = SLIDEWIN_RECIPES['gigapath']
     r  = SlidingWinSimRot(cfg, device).build(wsi, mask)
     cs = r.retrieve(shot_img, est_mpp_result)   # stage 1's output in
     cs.best, cs.origin_l0(cs.best)
@@ -39,7 +39,7 @@ from PatchingLib          import (QueryPatchContainer, PatchGrid, region_grids, 
 from SafeSlide            import SafeSlide                                                # noqa: E402
 from SlideReader          import SlideReader                                              # noqa: E402
 from ConfigIdentity       import IdentifiedBuild, IdentifiedConfig, register              # noqa: E402
-from TileEncoderFunc      import TileEncoderConfig                                        # noqa: E402
+from TileEncoderFunc      import TileEncoderConfig, encoder_config                        # noqa: E402
 from TissueMask   import TissueRegion, TissueMask            # noqa: E402
 from stage2_retrieval.StageInterface import (Candidate, CandidateSet,  # noqa: E402
                                              ROTATIONS)
@@ -176,11 +176,21 @@ class SlidingWinSimRotConfig(IdentifiedConfig):
     BASELINE = {'tile_size': 256, 'overlap': True, 'k': 20, 'min_sep_tiles': 1.0}
 
 
+#: Named retrievers, every field written out (test_config_identity's recipe
+#: lint); `--stage2 slidewin:<name>`. The encoder is the registry's own config
+#: at fp16 -- one encoder per entry, imported when this module is.
+SLIDEWIN_RECIPES: Dict[str, SlidingWinSimRotConfig] = {
+    'gigapath': SlidingWinSimRotConfig(
+        encoder=encoder_config('gigapath').with_model(dtype='fp16'),
+        tile_size=256, overlap=True, k=100, min_sep_tiles=1.0),
+}
+
+
 class SlidingWinSimRot(IdentifiedBuild):
     """Rotation-aware sliding-window retrieval: stage 2, first phase.
 
         r = SlidingWinSimRot(
-            SlidingWinSimRotConfig(encoder_config('gigapath'))).build(wsi, mask)
+            SLIDEWIN_RECIPES['gigapath'], device).build(wsi, mask)
         cs = r.retrieve(query, est_mpp_result)          # CandidateSet
 
     `build` binds a slide; `retrieve` takes stage 1's output, builds the
@@ -443,3 +453,45 @@ class SlidingWinSimRot(IdentifiedBuild):
             if len(kept) == k:
                 break
         return CandidateSet(candidates=tuple(kept), **frame)
+
+    # ── what a bench reads off the maps of the current query ─────────────────
+    def window_tile_sims(self, c: Candidate) -> torch.Tensor:
+        """[rows, cols] cosine of every query tile against the reference tile
+        under it in window `c` -- the numbers `c.score` is the mean of."""
+        main, offset = self.sim_maps_by_rot[c.rotation][c.region_index]
+        return (main if c.lattice == 'main' else offset)[c.row, c.col]
+
+    def nearest_window(self, x_l0: float, y_l0: float, rotation: int,
+                       lattices=('main', 'offset')) -> tuple[Candidate, int, float]:
+        """`(window, rank, distance)`: the window at `rotation` whose centre is
+        nearest the level-0 point, scored; its rank among every window of the
+        current maps, every rotation, lattice and region (1 is the best, ties
+        go to it); and the centre's distance in level-0 px. With the shot's
+        true centre and rotation, that window is the truth stage 2 should find.
+        `lattices` limits the search to those lattices -- `('main',)` is the
+        nearest window of the main grid alone."""
+        q = self.qc_by_rot[rotation].grid
+        best = None
+        for ri, (main, offset) in enumerate(self.sim_maps_by_rot[rotation]):
+            grid = self.grids[ri]
+            for lattice, hm in (('main', main), ('offset', offset)):
+                if not hm.numel() or lattice not in lattices:
+                    continue
+                n_r, n_c = hm.shape[:2]
+                xs = np.array([grid.tile_origin_l0(lattice, 0, j)[0] for j in range(n_c)],
+                              dtype=np.float64) + q.grid_cols * self.tile_size * self.ds / 2.0
+                ys = np.array([grid.tile_origin_l0(lattice, i, 0)[1] for i in range(n_r)],
+                              dtype=np.float64) + q.grid_rows * self.tile_size * self.ds / 2.0
+                j = int(np.abs(xs - x_l0).argmin())
+                i = int(np.abs(ys - y_l0).argmin())
+                d = math.hypot(xs[j] - x_l0, ys[i] - y_l0)
+                if best is None or d < best[0]:
+                    best = (d, ri, lattice, i, j, hm)
+        if best is None:
+            raise ValueError('no window at this level holds the query')
+        d, ri, lattice, i, j, hm = best
+        score = float(hm[i, j].mean())
+        higher = sum(int((s > score).sum())
+                     for maps in self.sim_maps_by_rot.values()
+                     for _, _, s in self._window_scores(maps))
+        return Candidate(ri, lattice, i, j, int(rotation), score), higher + 1, d

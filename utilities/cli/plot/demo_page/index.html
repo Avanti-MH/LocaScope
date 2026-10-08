@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Window retrieval</title>
+<style>
+:root{color-scheme:light dark;--bg:light-dark(#ffffff,#17181b);--panel:light-dark(#f5f6f8,#202227);--line:light-dark(#dfe2e7,#34373d);--fg:light-dark(#1d2025,#e7e9ec);--mut:light-dark(#5b626e,#a4aab4);--sel:light-dark(#eaf1ff,#233250);--selb:light-dark(#3b6fd8,#7aa3f2);--ok:light-dark(#1d7f4e,#62d09a);--bad:light-dark(#b83232,#f28b8b)}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+.bar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.brand strong{font-size:14px}
+.brand span{font-size:12px;color:var(--mut)}
+.ctrls{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+label{display:flex;gap:6px;align-items:center;color:var(--mut);font-size:12px}
+select{font:inherit;font-size:12px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;height:26px;padding:0 6px}
+.sec{padding:12px 16px;border-bottom:1px solid var(--line)}
+.legend-row{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-bottom:8px}
+.legend{display:flex;flex-wrap:wrap;gap:6px}
+.lab{font-size:11px;font-weight:600;color:var(--mut)}
+.leg{display:inline-flex;gap:6px;align-items:center;font:inherit;font-size:12px;height:26px;padding:0 10px;border-radius:13px;border:1px solid var(--line);background:var(--bg);color:var(--mut);cursor:pointer}
+.leg[aria-pressed="true"]{color:var(--fg);background:var(--panel)}
+.leg[aria-pressed="false"] svg{opacity:.3}
+.sw{display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;margin-right:5px;vertical-align:middle}
+#plot-wrap{position:relative}
+#plot{display:block;width:100%}
+.bin{fill:transparent;cursor:pointer}
+.bin.alt{fill:light-dark(rgba(0,0,0,.028),rgba(255,255,255,.035))}
+.bin:hover{fill:light-dark(rgba(59,111,216,.07),rgba(122,163,242,.09))}
+.bin.on{fill:var(--sel);stroke:var(--selb);stroke-width:1}
+.tick{fill:var(--mut);font-size:11px}
+.gridline{stroke:var(--line);stroke-width:1}
+.zero{stroke:var(--mut);stroke-dasharray:4 3}
+.mark{fill-opacity:.7;cursor:pointer}
+#plot.hov .mark{fill-opacity:.1}
+#plot.hov .mark.hl{fill-opacity:1;stroke:var(--fg);stroke-width:1.2}
+.tip{position:absolute;pointer-events:none;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.15);white-space:nowrap;z-index:3}
+.readout{font-size:12px;color:var(--mut);margin:8px 0 6px}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;font-size:12px}
+.wide{width:100%}
+th{font-weight:600;color:var(--mut);text-align:left;padding:5px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th.sortable{cursor:pointer}
+th.sortable.on{color:var(--fg)}
+td{padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+tr.in-panel td{background:var(--sel)}
+.empty{color:var(--mut);white-space:normal;padding:12px 6px}
+.mini{font:inherit;font-size:11px;width:22px;height:22px;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:5px;cursor:pointer;margin-left:3px}
+.mini:hover{border-color:var(--selb)}
+.rk{display:inline-block;min-width:40px;padding:1px 6px;border-radius:9px;text-align:center}
+.rk.r1{color:var(--ok);background:light-dark(#e5f4eb,#17321f)}
+.rk.r10{color:var(--fg);background:var(--panel)}
+.rk.rx{color:var(--bad);background:light-dark(#fbe9e9,#3a1e1e)}
+.btn{margin-top:8px;font:inherit;font-size:12px;height:26px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);cursor:pointer}
+.panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:12px}
+.panel{border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.panel-hd{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.panel-n{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:5px;background:var(--panel);font-size:11px;font-weight:600}
+.panel-t{font-weight:600}
+.panel-m{color:var(--mut);font-size:12px}
+.imgs{display:grid;grid-template-columns:minmax(0,1.125fr) minmax(0,1fr);gap:8px}
+.imgs figure{margin:0;min-width:0}
+.imgs canvas{width:100%;height:auto;display:block;border-radius:4px;border:1px solid var(--line);background:var(--panel)}
+.imgs figcaption{font-size:11px;color:var(--mut);margin-top:3px;line-height:1.35}
+.noimg{font-size:12px;color:var(--mut);padding:10px;border:1px dashed var(--line);border-radius:6px}
+.perf tbody tr{cursor:pointer}
+.perf tbody tr:hover td{background:var(--panel)}
+.perf tbody tr.on td{background:var(--sel)}
+.armbtn{all:unset;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.armbtn:focus-visible{outline:2px solid var(--selb);outline-offset:2px;border-radius:3px}
+.pos{color:var(--ok)}
+.neg{color:var(--bad)}
+.topk{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:5px}
+.tk{all:unset;cursor:pointer;display:flex;flex-direction:column;gap:1px;min-width:0}
+.tk[hidden]{display:none}
+.tk img{width:100%;aspect-ratio:5/4;object-fit:cover;display:block;border-radius:3px;border:2px solid transparent;background:var(--panel)}
+.tk.gt img{border-color:var(--ok)}
+.tk.on img{outline:2px solid var(--selb);outline-offset:1px}
+.tk:focus-visible img{outline:2px solid var(--selb);outline-offset:1px}
+.tk span{font-size:11px;color:var(--mut);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.25}
+.tk.gt span{color:var(--ok);font-weight:600}
+.foot{display:flex;gap:10px;align-items:center}
+.foot canvas{width:120px;height:auto;border-radius:4px;border:1px solid var(--line);flex:none;background:var(--panel)}
+.foot span{font-size:12px;color:var(--mut)}
+.row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div id="app">
+<header class="bar">
+<div class="brand"><strong>Window retrieval</strong><span id="run-meta"></span></div>
+<div class="ctrls">
+<label>Dataset <select id="f-dataset"></select></label>
+<label>Downsample <select id="f-ds"></select></label>
+<label>Slide <select id="f-slide"></select></label>
+<label>X axis <select id="f-x"><option value="d_main">d_main</option><option value="d_truth">d_truth</option></select></label>
+<label>Bin <select id="f-bin"><option value="16">16 px</option><option value="64">64 px</option></select></label>
+<label>Y axis <select id="f-y"><option value="s">GT score</option><option value="margin">margin</option></select></label>
+<label><input type="checkbox" id="f-img"> with images only</label>
+</div>
+</header>
+<section class="sec">
+<div class="legend-row"><span class="lab">Pooling</span><div id="leg-pool" class="legend"></div><span class="lab">Score</span><div id="leg-score" class="legend"></div></div>
+<div id="plot-wrap"><svg id="plot" role="img" aria-label="GT score per query and arm, binned by distance from the query to the nearest grid window"></svg><div id="tip" class="tip" hidden></div></div>
+<div id="bin-head" class="readout"></div>
+<div class="tablewrap"><table id="bin-sum"><thead></thead><tbody></tbody></table></div>
+</section>
+<section class="sec">
+<div class="tablewrap"><table id="qlist" class="wide"><thead></thead><tbody></tbody></table></div>
+<button id="more" class="btn" type="button">Show all</button>
+</section>
+<section class="sec"><div id="panels" class="panels"></div></section>
+</div>
+<script src="data.js"></script>
+<script>
+(() => {
+'use strict';
+const D = window.WINDOW_DEMO;
+const app = document.getElementById('app');
+if (!D) { app.textContent = 'data.js did not load. Keep index.html next to data.js and the img folder, then reload.'; return; }
+const META = D.meta, TOKENS = META.arm_tokens, SCORES = META.scores, ARMS = META.arms, BASE_OF = META.arm_base;
+const COLORS = ['#d9822b', '#2f6fd6', '#8a4fd1', '#2a9466', '#9a6a3a', '#5a6b7d', '#c2417a', '#3b9bb5'];
+const NS = 'http://www.w3.org/2000/svg';
+const nf = new Intl.NumberFormat('en-US');
+const f3 = v => v == null ? '–' : v.toFixed(3);
+const signed = v => (v >= 0 ? '+' : '') + v.toFixed(3);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const svgEl = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+const splitArm = arm => { const i = arm.lastIndexOf('+'); return [arm.slice(0, i), arm.slice(i + 1)]; };
+const colorOf = token => COLORS[TOKENS.indexOf(token) % COLORS.length];
+const hash01 = text => { let h = 2166136261; for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; };
+
+function shapeNode(score, cx, cy, size, color) {
+  let node;
+  if (score === 'geomean') node = svgEl('rect', { x: cx - size, y: cy - size, width: 2 * size, height: 2 * size });
+  else if (score === 'min') node = svgEl('path', { d: `M${cx},${cy - size * 1.3}L${cx + size * 1.3},${cy}L${cx},${cy + size * 1.3}L${cx - size * 1.3},${cy}Z` });
+  else node = svgEl('circle', { cx, cy, r: size });
+  node.setAttribute('fill', color);
+  return node;
+}
+function armSwatch(arm) {
+  const [token, score] = splitArm(arm);
+  const s = svgEl('svg', { width: 12, height: 12, viewBox: '0 0 12 12' });
+  s.append(shapeNode(score, 6, 6, 4, colorOf(token)));
+  return s;
+}
+
+const Q = [];
+D.parts.forEach(part => part.queries.forEach(q => {
+  q.part = part; q.d_truth = Math.min(q.d_main, q.d_overlap);
+  q.label = `${part.slide} L${part.level} #${q.fov_id}`;
+  Q.push(q);
+}));
+const byId = new Map(Q.map(q => [q.id, q]));
+document.getElementById('run-meta').textContent =
+  `${META.encoder} · ${nf.format(Q.length)} queries · ${nf.format(Q.filter(q => q.img).length)} with images · top-${META.top_k}` +
+  (META.check && (META.check.equal + META.check.differ) ? ` · ranks equal to the bench CSV ${nf.format(META.check.equal)}/${nf.format(META.check.equal + META.check.differ)}` : '');
+
+const st = { dataset: 'all', ds: 'all', slide: 'all', x: 'd_main', bin: 16, y: 's', imgOnly: false,
+  pools: new Set(TOKENS), scores: new Set([SCORES.includes('mean') ? 'mean' : SCORES[0]]),
+  sel: 2, all: false, sortArm: META.baseline, next: 0, panels: [] };
+const activeArms = () => ARMS.filter(a => { const [t, s] = splitArm(a); return st.pools.has(t) && st.scores.has(s); });
+const maxX = () => st.x === 'd_main' ? 192 : 128;
+const binCount = () => maxX() / st.bin;
+const binOf = q => Math.min(binCount() - 1, Math.floor(q[st.x] / st.bin));
+const dsLabel = ds => String(Math.round(ds));
+const filtered = () => Q.filter(q => (st.dataset === 'all' || q.part.dataset === st.dataset)
+  && (st.ds === 'all' || dsLabel(q.part.ds) === st.ds) && (st.slide === 'all' || q.part.slide === st.slide)
+  && (!st.imgOnly || q.img));
+const inBin = () => filtered().filter(q => binOf(q) === st.sel);
+
+function fillSelect(id, values, labelOf) {
+  const s = document.getElementById(id);
+  s.replaceChildren(new Option('All', 'all'));
+  values.forEach(v => s.append(new Option(labelOf ? labelOf(v) : v, v)));
+}
+fillSelect('f-dataset', [...new Set(D.parts.map(p => p.dataset))].sort());
+fillSelect('f-ds', [...new Set(D.parts.map(p => dsLabel(p.ds)))].sort((a, b) => a - b), v => `ds ${v}`);
+fillSelect('f-slide', [...new Set(D.parts.map(p => p.slide))].sort());
+
+function legendButtons(id, values, isOn, toggle, swatch) {
+  const box = document.getElementById(id);
+  values.forEach(v => {
+    const b = el('button', 'leg'); b.type = 'button';
+    b.setAttribute('aria-pressed', String(isOn(v)));
+    b.append(swatch(v), v);
+    b.addEventListener('click', () => { if (toggle(v)) { b.setAttribute('aria-pressed', String(isOn(v))); update(); } });
+    box.append(b);
+  });
+}
+legendButtons('leg-pool', TOKENS, t => st.pools.has(t), t => {
+  if (st.pools.has(t)) { if (st.pools.size === 1) return false; st.pools.delete(t); } else st.pools.add(t); return true;
+}, t => { const s = svgEl('svg', { width: 12, height: 12, viewBox: '0 0 12 12' }); s.append(shapeNode('mean', 6, 6, 4, colorOf(t))); return s; });
+legendButtons('leg-score', SCORES, s => st.scores.has(s), s => {
+  if (st.scores.has(s)) { if (st.scores.size === 1) return false; st.scores.delete(s); } else st.scores.add(s); return true;
+}, s => { const n = svgEl('svg', { width: 12, height: 12, viewBox: '0 0 12 12' }); n.append(shapeNode(s, 6, 6, 4, 'currentColor')); return n; });
+
+function niceTicks(lo, hi, count) {
+  const raw = (hi - lo) / count, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map(m => m * mag).find(s => raw <= s);
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12; v += step) out.push(+v.toFixed(10));
+  return { ticks: out, step };
+}
+
+const plot = document.getElementById('plot'), plotWrap = document.getElementById('plot-wrap'), tip = document.getElementById('tip');
+function drawPlot() {
+  const W = Math.floor(plotWrap.clientWidth); if (!W) return;
+  const H = 320, m = { l: 56, r: 10, t: 10, b: 42 };
+  plot.setAttribute('width', W); plot.setAttribute('height', H); plot.replaceChildren();
+  const data = filtered(), arms = activeArms(), mx = maxX(), nb = binCount();
+  let lo = Infinity, hi = -Infinity;
+  data.forEach(q => arms.forEach(a => { const e = q.arms[a]; if (e) { lo = Math.min(lo, e[st.y]); hi = Math.max(hi, e[st.y]); } }));
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  const pad = (hi - lo) * 0.05 || 0.05; lo -= pad; hi += pad;
+  const X = v => m.l + v / mx * (W - m.l - m.r);
+  const Y = v => H - m.b - (v - lo) / (hi - lo) * (H - m.t - m.b);
+  for (let i = 0; i < nb; i++) {
+    const r = svgEl('rect', { x: X(i * st.bin), y: m.t, width: X((i + 1) * st.bin) - X(i * st.bin), height: H - m.t - m.b,
+      class: 'bin' + (i % 2 ? ' alt' : '') + (i === st.sel ? ' on' : ''), 'data-bin': i });
+    plot.append(r);
+  }
+  const { ticks, step } = niceTicks(lo, hi, 5);
+  const digits = Math.max(0, -Math.floor(Math.log10(step)));
+  ticks.forEach(v => {
+    plot.append(svgEl('line', { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), class: 'gridline' }));
+    const t = svgEl('text', { x: m.l - 6, y: Y(v) + 4, 'text-anchor': 'end', class: 'tick' }); t.textContent = v.toFixed(digits); plot.append(t);
+  });
+  if (st.y === 'margin' && lo < 0 && hi > 0) plot.append(svgEl('line', { x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0), class: 'zero' }));
+  const xStep = W < 640 && st.bin === 16 ? 32 : st.bin;
+  for (let v = 0; v <= mx; v += xStep) {
+    const t = svgEl('text', { x: X(v), y: H - m.b + 15, 'text-anchor': 'middle', class: 'tick' }); t.textContent = v; plot.append(t);
+  }
+  const xl = svgEl('text', { x: (m.l + W - m.r) / 2, y: H - 6, 'text-anchor': 'middle', class: 'tick' });
+  xl.textContent = `${st.x} — query tile grid to the nearest ${st.x === 'd_main' ? 'main' : 'main or offset'} grid point (level px)`; plot.append(xl);
+  const yl = svgEl('text', { transform: `translate(14,${(m.t + H - m.b) / 2}) rotate(-90)`, 'text-anchor': 'middle', class: 'tick' });
+  yl.textContent = st.y === 's' ? 'GT score (raw)' : 'margin = GT score − best other window'; plot.append(yl);
+  const g = svgEl('g', {});
+  data.forEach(q => {
+    const bi = binOf(q), x0 = X(bi * st.bin), sub = (X((bi + 1) * st.bin) - x0) / arms.length;
+    arms.forEach((a, j) => {
+      const e = q.arms[a]; if (!e) return;
+      const [token, score] = splitArm(a);
+      const node = shapeNode(score, x0 + sub * (j + 0.5) + (hash01(q.id + a) - 0.5) * sub * 0.6, Y(e[st.y]), 2.8, colorOf(token));
+      node.setAttribute('class', 'mark'); node.dataset.q = q.id; node.dataset.a = a;
+      g.append(node);
+    });
+  });
+  plot.append(g);
+}
+plot.addEventListener('click', ev => {
+  const t = ev.target;
+  if (t.dataset && t.dataset.q) { sendTo(t.dataset.q, st.next); return; }
+  if (t.dataset && t.dataset.bin != null) { st.sel = +t.dataset.bin; st.all = false; update(); }
+});
+plot.addEventListener('mouseover', ev => {
+  const t = ev.target; if (!t.dataset || !t.dataset.q) return;
+  const q = byId.get(t.dataset.q), e = q.arms[t.dataset.a];
+  plot.classList.add('hov');
+  plot.querySelectorAll(`[data-q="${CSS.escape(q.id)}"]`).forEach(n => n.classList.add('hl'));
+  tip.textContent = `${q.label} · ${t.dataset.a} · GT rank ${e.rank == null ? "–" : nf.format(e.rank)} · GT score ${f3(e.s)} · margin ${signed(e.margin)}${q.img ? '' : ' · no images'}`;
+  tip.hidden = false;
+  const box = plotWrap.getBoundingClientRect();
+  const x = ev.clientX - box.left, y = ev.clientY - box.top;
+  tip.style.left = Math.min(x + 12, box.width - tip.offsetWidth - 4) + 'px';
+  tip.style.top = Math.max(0, y - 34) + 'px';
+});
+plot.addEventListener('mouseout', ev => {
+  if (!ev.target.dataset || !ev.target.dataset.q) return;
+  plot.classList.remove('hov'); plot.querySelectorAll('.hl').forEach(n => n.classList.remove('hl')); tip.hidden = true;
+});
+new ResizeObserver(() => drawPlot()).observe(plotWrap);
+
+const rankBadge = r => r == null ? el('span', 'rk rx', '–') : el('span', 'rk ' + (r === 1 ? 'r1' : r <= 10 ? 'r10' : 'rx'), '#' + nf.format(r));
+const median = values => { if (!values.length) return null; const s = [...values].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+const pct = (n, d) => d ? (100 * n / d).toFixed(0) + '%' : '–';
+
+function drawBinSummary(rows) {
+  const lo = st.sel * st.bin;
+  document.getElementById('bin-head').textContent =
+    `${st.x} ${lo}–${lo + st.bin} px · ${nf.format(rows.length)} of ${nf.format(filtered().length)} queries · click a bin to select it, a mark to open its query in panel ${st.next + 1}`;
+  const table = document.getElementById('bin-sum');
+  const head = el('tr');
+  ['Arm', 'n', 'GT@1', 'GT@5', 'median GT rank', 'median margin'].forEach((t, i) => head.append(el('th', i ? 'num' : null, t)));
+  table.tHead.replaceChildren(head);
+  const body = table.tBodies[0]; body.replaceChildren();
+  activeArms().forEach(a => {
+    const entries = rows.map(q => q.arms[a]).filter(Boolean);
+    const tr = el('tr'), name = el('td'); name.append(armSwatch(a), ' ', a);
+    const ranks = entries.map(e => e.rank ?? Infinity);
+    tr.append(name, el('td', 'num', nf.format(entries.length)), el('td', 'num', pct(ranks.filter(r => r === 1).length, ranks.length)),
+      el('td', 'num', pct(ranks.filter(r => r <= 5).length, ranks.length)),
+      el('td', 'num', ranks.length ? nf.format(median(ranks)) : '–'),
+      el('td', 'num', entries.length ? signed(median(entries.map(e => e.margin))) : '–'));
+    body.append(tr);
+  });
+}
+
+const qlist = document.getElementById('qlist'), more = document.getElementById('more');
+function drawList() {
+  const arms = activeArms();
+  if (!arms.includes(st.sortArm)) st.sortArm = arms.includes(META.baseline) ? META.baseline : arms[0];
+  const head = el('tr');
+  ['Query', st.x, 'Images'].forEach((t, i) => head.append(el('th', i === 1 ? 'num' : null, t)));
+  arms.forEach(a => {
+    const th = el('th', 'num sortable' + (a === st.sortArm ? ' on' : ''));
+    th.append(armSwatch(a), ' ', a); th.title = `GT rank of ${a}; click to sort worst first`;
+    th.addEventListener('click', () => { st.sortArm = a; drawList(); });
+    head.append(th);
+  });
+  head.append(el('th', null, 'Show in panel'));
+  qlist.tHead.replaceChildren(head);
+  const rows = inBin().sort((p, q) => (q.arms[st.sortArm]?.rank ?? 0) - (p.arms[st.sortArm]?.rank ?? 0));
+  drawBinSummary(rows);
+  const shown = st.all ? rows : rows.slice(0, 12);
+  const body = qlist.tBodies[0]; body.replaceChildren();
+  if (!rows.length) {
+    const tr = el('tr'), td = el('td', 'empty', 'No query falls in this bin under the current filters. Pick another bin, or set Dataset, Downsample and Slide to All.');
+    td.colSpan = 4 + arms.length; tr.append(td); body.append(tr);
+  }
+  shown.forEach(q => {
+    const tr = el('tr'); if (st.panels.some(p => p && p.qid === q.id)) tr.className = 'in-panel';
+    tr.append(el('td', 'mono', q.label), el('td', 'num', q[st.x].toFixed(0) + ' px'), el('td', null, q.img ? 'yes' : ''));
+    arms.forEach(a => { const td = el('td', 'num'); if (q.arms[a]) td.append(rankBadge(q.arms[a].rank)); tr.append(td); });
+    const td = el('td');
+    [0, 1, 2, 3].forEach(i => { const b = el('button', 'mini', String(i + 1)); b.type = 'button'; b.dataset.q = q.id; b.dataset.slot = i; b.setAttribute('aria-label', `Show ${q.label} in panel ${i + 1}`); td.append(b); });
+    tr.append(td); body.append(tr);
+  });
+  more.hidden = rows.length <= 12;
+  more.textContent = st.all ? 'Show fewer' : `Show all ${rows.length}`;
+}
+qlist.tBodies[0].addEventListener('click', ev => { const b = ev.target.closest('.mini'); if (b) sendTo(b.dataset.q, +b.dataset.slot); });
+more.addEventListener('click', () => { st.all = !st.all; drawList(); });
+
+const images = new Map();
+function withImage(src, done) {
+  let entry = images.get(src);
+  if (!entry) { entry = { img: new Image(), ready: false, waiting: [] }; images.set(src, entry);
+    entry.img.onload = () => { entry.ready = true; entry.waiting.splice(0).forEach(f => f(entry.img)); };
+    entry.img.src = src; }
+  if (entry.ready) done(entry.img); else entry.waiting.push(done);
+}
+
+function drawQuery(canvas, img, part) {
+  canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+  const c = canvas.getContext('2d'); c.drawImage(img, 0, 0);
+  const t = META.tile * META.image_scale, w = part.cols_q * t, h = part.rows_q * t;
+  c.fillStyle = 'rgba(255,255,255,0.55)';
+  if (canvas.width > w) c.fillRect(w, 0, canvas.width - w, canvas.height);
+  if (canvas.height > h) c.fillRect(0, h, w, canvas.height - h);
+  c.strokeStyle = 'rgba(20,20,35,0.6)'; c.lineWidth = 1; c.beginPath();
+  for (let i = 0; i <= part.cols_q; i++) { const x = Math.min(w - 0.5, Math.round(i * t) + 0.5); c.moveTo(x, 0); c.lineTo(x, h); }
+  for (let j = 0; j <= part.rows_q; j++) { const y = Math.min(h - 0.5, Math.round(j * t) + 0.5); c.moveTo(0, y); c.lineTo(w, y); }
+  c.stroke();
+}
+function drawCandidate(canvas, img, part, cosines, isTruth, showValues) {
+  canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+  const c = canvas.getContext('2d'); c.drawImage(img, 0, 0);
+  const tw = canvas.width / part.cols_q, th = canvas.height / part.rows_q;
+  if (cosines) {
+    cosines.forEach((v, i) => {
+      const col = i % part.cols_q, row = Math.floor(i / part.cols_q);
+      c.fillStyle = `rgba(15,18,35,${Math.max(0, Math.min(0.65, (1 - v) * 0.9)).toFixed(2)})`;
+      c.fillRect(col * tw, row * th, tw, th);
+      if (showValues) {
+        c.font = '600 13px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+        c.lineWidth = 3; c.strokeStyle = 'rgba(0,0,0,0.7)'; c.fillStyle = '#fff';
+        c.strokeText(v.toFixed(2), (col + 0.5) * tw, (row + 0.5) * th); c.fillText(v.toFixed(2), (col + 0.5) * tw, (row + 0.5) * th);
+      }
+    });
+  }
+  c.strokeStyle = 'rgba(20,20,35,0.5)'; c.lineWidth = 1; c.beginPath();
+  for (let i = 1; i < part.cols_q; i++) { c.moveTo(Math.round(i * tw) + 0.5, 0); c.lineTo(Math.round(i * tw) + 0.5, canvas.height); }
+  for (let j = 1; j < part.rows_q; j++) { c.moveTo(0, Math.round(j * th) + 0.5); c.lineTo(canvas.width, Math.round(j * th) + 0.5); }
+  c.stroke();
+  if (isTruth) { c.strokeStyle = '#1f9e5a'; c.lineWidth = 4; c.setLineDash([10, 6]); c.strokeRect(2, 2, canvas.width - 4, canvas.height - 4); c.setLineDash([]); }
+}
+function drawMinimap(canvas, part, boxes) {
+  withImage(part.thumb, img => {
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    const c = canvas.getContext('2d'); c.drawImage(img, 0, 0);
+    const sx = canvas.width / part.slide_wh0[0], sy = canvas.height / part.slide_wh0[1];
+    boxes.forEach(b => {
+      const [x, y, w, h] = b.box0, rw = Math.max(3, w * sx), rh = Math.max(3, h * sy);
+      c.lineWidth = b.truth ? 3 : 2;
+      c.strokeStyle = b.truth ? '#1f9e5a' : b.selected ? '#3b6fd8' : 'rgba(30,30,45,0.8)';
+      c.strokeRect(x * sx, y * sy, rw, rh);
+    });
+  });
+}
+
+const panelsEl = document.getElementById('panels'), UI = [];
+for (let i = 0; i < 4; i++) {
+  const root = el('article', 'panel');
+  const hd = el('header', 'panel-hd'), title = el('span', 'panel-t'), metaLine = el('span', 'panel-m');
+  hd.append(el('span', 'panel-n', String(i + 1)), title, metaLine);
+  const imgs = el('div', 'imgs');
+  const f1 = el('figure'), cq = el('canvas'), cap1 = el('figcaption'); f1.append(cq, cap1);
+  const f2 = el('figure'), cc = el('canvas'), cap2 = el('figcaption'); f2.append(cc, cap2);
+  imgs.append(f1, f2);
+  const noimg = el('div', 'noimg', 'This query was not given pixels by the export. Raise --image-fovs and rerun to see it; its ranks and scores are below.');
+  const tools = el('div', 'row');
+  const valuesLabel = el('label'), valuesBox = el('input'); valuesBox.type = 'checkbox'; valuesBox.checked = true;
+  valuesLabel.append(valuesBox, 'tile cosine values'); tools.append(valuesLabel);
+  const table = el('table', 'perf wide'), thead = el('thead'), htr = el('tr');
+  ['Arm', 'GT rank', 'GT score', 'Top-1', 'Margin', 'rank_all'].forEach((t, j) => htr.append(el('th', j ? 'num' : null, t)));
+  thead.append(htr); const tbody = el('tbody'); table.append(thead, tbody);
+  const rows = ARMS.map(a => {
+    const tr = el('tr'); tr.dataset.arm = a;
+    const td = el('td'), btn = el('button', 'armbtn'); btn.type = 'button'; btn.append(armSwatch(a), a); td.append(btn);
+    const cells = [0, 1, 2, 3, 4].map(() => el('td', 'num'));
+    tr.append(td, ...cells); tbody.append(tr); return { tr, cells };
+  });
+  tbody.addEventListener('click', ev => { const tr = ev.target.closest('tr'); if (!tr || !st.panels[i]) return; st.panels[i].arm = tr.dataset.arm; st.panels[i].key = null; drawPanel(i); });
+  const tkLabel = el('div', 'lab'), tk = el('div', 'topk'), thumbs = [];
+  for (let j = 0; j < Math.max(6, META.top_k + 1); j++) {
+    const b = el('button', 'tk'); b.type = 'button';
+    const im = el('img'); im.alt = ''; const l1 = el('span'), l2 = el('span'); b.append(im, l1, l2);
+    b.addEventListener('click', () => { if (!st.panels[i]) return; st.panels[i].key = b.dataset.key; drawPanel(i); });
+    tk.append(b); thumbs.push({ b, im, l1, l2 });
+  }
+  tk.style.gridTemplateColumns = `repeat(${thumbs.length},minmax(0,1fr))`;
+  const foot = el('div', 'foot'), mm = el('canvas'), mmText = el('span'); foot.append(mm, mmText);
+  root.append(hd, imgs, noimg, tools, table, tkLabel, tk, foot);
+  panelsEl.append(root);
+  valuesBox.addEventListener('change', () => drawPanel(i));
+  UI.push({ title, metaLine, imgs, cq, cap1, cc, cap2, noimg, tools, valuesBox, rows, tkLabel, thumbs, mm, mmText });
+}
+
+function drawPanel(i) {
+  const ps = st.panels[i], U = UI[i];
+  if (!ps) return;
+  const q = byId.get(ps.qid), part = q.part, entry = q.arms[ps.arm];
+  const list = (entry.topk || []).map((t, k) => ({ key: t[0], score: t[1], place: k + 1 }));
+  if (!list.some(t => t.key === q.truth)) list.push({ key: q.truth, score: entry.s, place: entry.rank });
+  if (!ps.key) ps.key = list.length ? list[0].key : q.truth;
+  const current = list.find(t => t.key === ps.key) || { key: q.truth, score: entry.s, place: entry.rank };
+  const isTruth = current.key === q.truth;
+  U.title.textContent = q.label;
+  U.metaLine.textContent = `${part.dataset} · ds ${part.ds.toFixed(3).replace(/\.?0+$/, '')} · d_main ${q.d_main.toFixed(0)} px · d_overlap ${q.d_overlap.toFixed(0)} px${part.pool ? ' · ' + nf.format(part.pool) + ' main windows' : ''}`;
+  const hasImg = !!q.img;
+  U.imgs.hidden = !hasImg; U.tools.hidden = !hasImg; U.noimg.hidden = hasImg;
+  if (hasImg) {
+    // A window matched the query turned by its own rotation (0/90/180/270), so
+    // the query is shown turned the same way and cut by the window's own grid.
+    const win = part.windows[current.key];
+    const grid = win && win.rows ? { rows_q: win.rows, cols_q: win.cols } : part;
+    const qsrc = (q.imgs && win && q.imgs[win.rot]) || q.img;
+    U.cap1.textContent = `Query${win && win.rot ? ' turned ' + win.rot + '°' : ''} · ${grid.rows_q}×${grid.cols_q} tiles of ${META.tile} px (pale strip: outside the tile grid)`;
+    withImage(qsrc, img => drawQuery(U.cq, img, grid));
+    const cosines = q.cos && q.cos[current.key] ? q.cos[current.key][BASE_OF[ps.arm]] : null;
+    const minCos = cosines ? Math.min(...cosines).toFixed(2) : '–';
+    U.cap2.textContent = `${isTruth ? 'GT window' : 'Candidate #' + current.place} · ${ps.arm} ${f3(current.score)} · darker tile = lower cosine to the query tile (min ${minCos})`;
+    if (win && win.img) withImage(win.img, img => drawCandidate(U.cc, img, grid, cosines, isTruth, U.valuesBox.checked));
+  }
+  U.rows.forEach(({ tr, cells }) => {
+    const e = q.arms[tr.dataset.arm];
+    tr.classList.toggle('on', tr.dataset.arm === ps.arm);
+    if (!e) { cells.forEach(c => c.textContent = '–'); return; }
+    cells[0].replaceChildren(rankBadge(e.rank)); cells[1].textContent = f3(e.s); cells[2].textContent = f3(e.top1);
+    cells[3].textContent = signed(e.margin); cells[3].className = 'num ' + (e.margin > 0 ? 'pos' : 'neg');
+    cells[4].textContent = e.rank_all != null ? '#' + nf.format(e.rank_all) : '–';
+  });
+  U.tkLabel.textContent = hasImg ? `Top-${META.top_k} main windows of ${ps.arm}${(entry.rank ?? Infinity) > META.top_k ? ', then the GT window' : ''}` : `GT rank ${entry.rank == null ? '–' : nf.format(entry.rank)} under ${ps.arm}`;
+  U.thumbs.forEach((t, j) => {
+    const item = hasImg ? list[j] : null;
+    if (!item) { t.b.hidden = true; return; }
+    t.b.hidden = false; t.b.dataset.key = item.key;
+    const win = part.windows[item.key], gt = item.key === q.truth;
+    t.b.classList.toggle('gt', gt); t.b.classList.toggle('on', item.key === current.key);
+    if (win && win.img) t.im.src = win.img; else t.im.removeAttribute('src');
+    t.l1.textContent = (gt ? 'GT #' : '#') + nf.format(item.place); t.l2.textContent = f3(item.score);
+    t.b.setAttribute('aria-label', `${gt ? 'GT window, ' : ''}place ${item.place}, score ${f3(item.score)}`);
+  });
+  const boxes = list.filter(t => part.windows[t.key]).map(t => ({ box0: part.windows[t.key].box0, truth: t.key === q.truth, selected: t.key === current.key }));
+  boxes.sort((a, b) => (a.truth - b.truth) || (a.selected - b.selected));
+  drawMinimap(U.mm, part, boxes);
+  U.mmText.textContent = `${part.slide}: green = GT window, blue = shown candidate, dark = other top-${META.top_k} windows of ${ps.arm}.`;
+}
+
+function sendTo(qid, slot) {
+  const prev = st.panels[slot];
+  st.panels[slot] = { qid, arm: prev ? prev.arm : META.baseline, key: null };
+  st.next = (slot + 1) % 4;
+  drawList(); drawPanel(slot);
+}
+function update() { drawPlot(); drawList(); }
+
+document.querySelectorAll('.ctrls select, .ctrls input').forEach(input => input.addEventListener('change', () => {
+  const low = st.sel * st.bin;
+  st.dataset = document.getElementById('f-dataset').value; st.ds = document.getElementById('f-ds').value;
+  st.slide = document.getElementById('f-slide').value; st.x = document.getElementById('f-x').value;
+  st.bin = +document.getElementById('f-bin').value; st.y = document.getElementById('f-y').value;
+  st.imgOnly = document.getElementById('f-img').checked;
+  st.sel = Math.max(0, Math.min(binCount() - 1, Math.floor(low / st.bin)));
+  st.all = false; update();
+}));
+
+const counts = Array.from({ length: binCount() }, (_, i) => filtered().filter(q => binOf(q) === i && q.img).length);
+if (!counts[st.sel]) st.sel = counts.indexOf(Math.max(...counts));
+const seeds = inBin().filter(q => q.img).concat(inBin(), Q);
+const picked = [];
+for (const q of seeds) { if (!picked.includes(q.id)) picked.push(q.id); if (picked.length === 4) break; }
+st.panels = picked.map(id => ({ qid: id, arm: META.baseline, key: null }));
+update();
+st.panels.forEach((_, i) => drawPanel(i));
+})();
+</script>
+</body>
+</html>

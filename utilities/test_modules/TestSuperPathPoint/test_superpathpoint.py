@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import itertools
 from pathlib import Path
 import os
@@ -653,7 +654,7 @@ def t_the_pair_warps_points_and_not_the_map():
     dataset had warped the keypoint map as an image, the result would be blurred
     across four pixels and mostly gone, and it would not agree with this.
     """
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         corpus, labels_root, points = _make_stores(root)
         cfg = PairDatasetConfig(tile=TILE, in_channels=1, seed=0)
         dataset = cfg.build(corpus, labels_root, wsi_stems=[_STEM_A])
@@ -680,7 +681,7 @@ def t_the_warped_valid_mask_is_nearly_full_because_of_the_pre_tile():
     """spec.md 6.6's evidence, as a pair. With a 3x source there is nothing
     outside to sample, so the only False is the eroded rim -- and it must NOT be
     the two thirds a tile-sized source would give."""
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         corpus, labels_root, _ = _make_stores(root)
         dataset = PairDatasetConfig(tile=TILE, in_channels=1, seed=0).build(
             corpus, labels_root, wsi_stems=[_STEM_A])
@@ -698,7 +699,7 @@ def t_the_warped_valid_mask_is_nearly_full_because_of_the_pre_tile():
 def t_align_min_truncates_and_loss_weight_does_not():
     """The switch, both ways. `none` and `loss-weight` keep every tile;
     `align-min` cuts every rung to the smallest."""
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         corpus, labels_root, _ = _make_stores(root, rungs=((1.0, 4), (4.0, 1)))
         sizes = {}
         for mode in ('none', 'align-min', 'loss-weight'):
@@ -721,7 +722,7 @@ def t_every_item_says_which_slide_it_came_from():
     """`slide_index` indexes `wsi_stems`, NOT the slides that happened to have
     tiles -- otherwise a rung filter that empties one slide silently shifts
     every other slide's index and a per-slide row describes the wrong slide."""
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         corpus, labels_root, _ = _make_stores(
             root, rungs=((1.0, 2), (4.0, 3)), stems=(_STEM_A, _STEM_B))
         stems = [_STEM_B, _STEM_A]              # deliberately not sorted
@@ -752,8 +753,9 @@ def t_validation_splits_by_slide_and_the_parts_sum_to_the_whole():
     is unchanged, `val/<one stem>/...` looks complete, and the other slide is
     simply absent -- which reads as "that slide had no pairs".
     """
+    import Cache                                                  # noqa: PLC0415
     torch.manual_seed(0)
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         corpus, labels_root, _ = _make_stores(
             root, rungs=((1.0, 3),), stems=(_STEM_A, _STEM_B))
         val = PairDatasetConfig(tile=TILE, balance='none', workers=0).build(
@@ -761,7 +763,8 @@ def t_validation_splits_by_slide_and_the_parts_sum_to_the_whole():
         net = _net()
         trainer = TrainerConfig(batch_size=2, workers=0, amp=False,
                                 wandb_mode='disabled').build(
-            net, SuperPointLossConfig().build(), val, val, root)
+            net, SuperPointLossConfig().build(), val, val,
+            os.path.join(Cache.RESULT_DIR, 'trainer'))
         trainer.wandb_run = None
         row = trainer.validate()
 
@@ -808,7 +811,7 @@ def t_a_new_epoch_draws_a_new_warp_and_the_same_epoch_repeats():
     pass "the warps differ", and would throw away the reproducibility the seed
     is for -- so the same epoch read twice must give the same warp.
     """
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         corpus, labels_root, _ = _make_stores(root)
         data = PairDatasetConfig(tile=TILE, in_channels=1, balance='none',
                                  seed=0, workers=0).build(
@@ -906,17 +909,30 @@ _STEM_A = 'SLIDE_A'
 _STEM_B = 'S1103627,G7E,110127'
 
 
+@contextlib.contextmanager
+def _tree():
+    """`Cache.RESULT_DIR` pointed at a temporary directory for the length of a
+    test; yields the job the stores are written under."""
+    import Cache                                                  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as tmp:
+        saved, Cache.RESULT_DIR = Cache.RESULT_DIR, tmp
+        try:
+            yield 'TestSuperPathPoint'
+        finally:
+            Cache.RESULT_DIR = saved
+
+
 def _make_stores(root, rungs=((1.0, 2),), stems=(_STEM_A,)):
-    """A pre-tile corpus and a matching label store, in a temp directory.
+    """A pre-tile corpus in job `root`'s tree and a matching label store in
+    the tree of `<root>Labels` (call it inside `_tree()`).
 
     Written through the real `PreTileStore` and `KeypointLabelStore` rather than
     by hand, so that a change to either format breaks this test instead of
     letting it test a shape nothing produces.
     """
-    labels_root = os.path.join(root, 'labels')
+    labels_root = f'{root}Labels'
     factor = 3
-    corpus = PreTileCorpus(Path(root) / 'tiles', 'seg0', 'reg0', 'aaaa1111',
-                           'ladder-test', factor)
+    corpus = PreTileCorpus(root, 'seg0', 'reg0', 'aaaa1111', 'ladder-test', factor)
     pre_px = pre_tile_px(TILE, factor)
     margin = centre_margin(TILE, factor)
     rng = np.random.default_rng(0)

@@ -56,17 +56,23 @@ from SlideReader import SlideReader, degrade_resolution       # noqa: E402
 #: files belong together, so "how big is THIS pyramid's cache" is a question
 #: nobody could answer without re-deriving every position. `_pyramid_dir`
 #: gives every (axis, wsi_stem, root tile, finest rung) its own subdirectory --
-#: `<root>/<Axis>Stack/<key>/` -- so a directory listing is how anyone finds
-#: these, the same reason `PreTileMeta.dirname()` is human-readable.
+#: `slide=<s>/chainstack/<Axis>Stack/<key>/` -- so a directory listing is how
+#: anyone finds these.
 #:
-#: WHICH ROOT IS THE CALLER'S. Every `cache_root` here defaults to None (no
-#: cache); an entry point passes `result/cache/<made_by>_chainstack/`
-#: (`training/SuperPathPoint/cli.chainstack_root`).
+#: WHOSE CACHE IS THE CALLER'S. Every `cache_root` here is a job name, the
+#: tree the tiles go to (`_cache_dir`), and defaults to None (no cache); an
+#: entry point passes its own (`training/SuperPathPoint/cli.chainstack_root`).
+
+
+def _cache_dir(job: str, wsi_stem: str) -> str:
+    """`slide=<wsi_stem>/chainstack/` in `job`'s cache tree."""
+    from Cache import Address                                    # noqa: PLC0415
+    return str(Address(job, slide=wsi_stem).dir / 'chainstack')
 
 
 def _pyramid_dir(cache_root: str, axis: str, wsi_stem: str, root: PatchInfo,
                  tile: int, finest: float) -> str:
-    """`<cache_root>/<axis>Stack/<wsi_stem>__ds<root.ds>_x<x>_y<y>_t<tile>_to<finest>/`
+    """`<_cache_dir>/<axis>Stack/<wsi_stem>__ds<root.ds>_x<x>_y<y>_t<tile>_to<finest>/`
 
     `root` is the pyramid's own root tile -- `CStack`'s mother -- not a centre
     point, so every axis can key off the same kind of object it already has
@@ -84,7 +90,7 @@ def _pyramid_dir(cache_root: str, axis: str, wsi_stem: str, root: PatchInfo,
     rungs, so `(root.ds, finest)` already names the rung set exactly.
     """
     name = f'{wsi_stem}__ds{root.ds:g}_x{root.x}_y{root.y}_t{tile}_to{finest:g}'
-    return os.path.join(cache_root, f'{axis}Stack', name)
+    return os.path.join(_cache_dir(cache_root, wsi_stem), f'{axis}Stack', name)
 
 
 def _cache_path(cache_root: str, wsi_stem: str, x: int, y: int, ds: float,
@@ -615,8 +621,9 @@ class OwnTiles:
         out: Dict[float, np.ndarray] = {}
         missing = []
         for ds in sorted(float(r) for r in self.rungs):
-            cached = (_cache_get(self.cache_root, self.wsi_stem, x, y, ds,
-                                 self.tile) if self.cache_root else None)
+            cached = (_cache_get(_cache_dir(self.cache_root, self.wsi_stem),
+                                 self.wsi_stem, x, y, ds, self.tile)
+                      if self.cache_root else None)
             if cached is not None:
                 out[ds] = cached
             else:
@@ -628,7 +635,8 @@ class OwnTiles:
             out.update(computed)
             if self.cache_root:
                 for ds, img in computed.items():
-                    _cache_put(self.cache_root, self.wsi_stem, x, y, ds,
+                    _cache_put(_cache_dir(self.cache_root, self.wsi_stem),
+                               self.wsi_stem, x, y, ds,
                               self.tile, img)
         return {ds: out[ds] for ds in sorted(float(r) for r in self.rungs)}
 

@@ -71,7 +71,7 @@ from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noq
 from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig      # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import (                     # noqa: E402
     SlidingWinSimRot, SlidingWinSimRotConfig, _sim_tensors)
-from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer                            # noqa: E402
+from stage3_localization.SIFT_RANSAC import SIFT_RECIPES, SiftRansacLocalizer  # noqa: E402
 
 
 # ── --stages ─────────────────────────────────────────────────────────────────
@@ -257,21 +257,30 @@ def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
 
     with tempfile.TemporaryDirectory(
             dir=job_result_dir('TestLocaScopeStages')) as root:
-        # verbose: a miss says why (no file, a meta field, or the geometry)
-        store = FeatureMapCache(root, getattr(wsi, '_filename', ''),
-                                retriever.encoder, mask_cfg_from_args(args))
-        store.save(retriever.wsi_features)
-        hit = store.load(retriever.regions, ds=retriever.ds, level=retriever.level,
-                         tile_size=retriever.tile_size,
-                         overlap=retriever.overlap) is not None
-        if not hit:
-            # a rebuild would re-encode on the miss and compare an encode with
-            # an encode, which says nothing about the read
-            print('  cache read  : store MISS -- not compared\n  check-sims  : FAIL')
-            return False
-        retriever.build(wsi, mask, feature_store=store)
-        retriever.retrieve(query_np, estimate)
-        cached = {rot: list(maps) for rot, maps in retriever.sim_maps_by_rot.items()}
+        # verbose: a miss says why (the record, a meta field, or the geometry);
+        # the cache tree is pointed at the temp dir for the length of the check
+        import Cache                                              # noqa: PLC0415
+        saved_root, Cache.RESULT_DIR = Cache.RESULT_DIR, root
+        try:
+            store = FeatureMapCache('TestLocaScopeStages',
+                                    getattr(wsi, '_filename', ''),
+                                    retriever.encoder, mask_cfg_from_args(args))
+            store.save(retriever.wsi_features)
+            hit = store.load(retriever.regions, ds=retriever.ds,
+                             level=retriever.level, tile_size=retriever.tile_size,
+                             overlap=retriever.overlap) is not None
+            if not hit:
+                # a rebuild would re-encode on the miss and compare an encode
+                # with an encode, which says nothing about the read
+                print('  cache read  : store MISS -- not compared\n'
+                      '  check-sims  : FAIL')
+                return False
+            retriever.build(wsi, mask, feature_store=store)
+            retriever.retrieve(query_np, estimate)
+            cached = {rot: list(maps)
+                      for rot, maps in retriever.sim_maps_by_rot.items()}
+        finally:
+            Cache.RESULT_DIR = saved_root
     same_cache, total_c = _same_maps(new, cached)
     print(f'  cache read  : {same_cache}/{total_c} maps identical   (store hit)')
     ok = (same_old == total and same_cache == total_c and decoy == 0)
@@ -281,8 +290,9 @@ def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
 
 def run_stage3(wsi, query_qc, cs, args):
     """Stage 3 on stage 2's output."""
-    localizer = SiftRansacLocalizer(
-        min_inliers=args.min_inliers, padding=args.padding).build(wsi)
+    localizer = SiftRansacLocalizer(replace(
+        SIFT_RECIPES['default'], min_inliers=args.min_inliers,
+        padding=args.padding)).build(wsi)
     result = localizer.localize(query_qc, cs)
     print(f'  success={result.success}  matches={result.match_count}  '
          f'inliers={result.inlier_count}')

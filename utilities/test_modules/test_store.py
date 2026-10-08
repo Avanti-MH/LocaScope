@@ -35,6 +35,7 @@ WHAT THIS DEFENDS
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import os
 import sys
@@ -53,8 +54,10 @@ import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
 from PatchingLib import FeaturesMap, WsiFeaturesMap              # noqa: E402
+import Cache                                                     # noqa: E402
+from Cache import Address                                        # noqa: E402
 from Store import (FeatureMapCache, FeatureStore as FS,          # noqa: E402
-                   PooledFeatures, PreTileCorpus, PreTileStore, StoreMismatch,
+                   PooledFeatures, feature_id, PreTileCorpus, PreTileStore, StoreMismatch,
                    from_store_tensors, geometry_mismatch, raw_layout,
                    to_store_tensors)
 from PatchingLib import region_grids                             # noqa: E402
@@ -110,6 +113,39 @@ def tensors_for(meta: FS.Meta, **over) -> dict:
     return t
 
 
+#: The job every store of these tests is written under, in a temporary tree.
+JOB = 'TestStore'
+
+#: A record no code produced: these tests are about the files, and the entry
+#: only has to carry one.
+REC = {'id': 'test', 'parts': [], 'versions': {}, 'upstream': {}, 'env': {}}
+
+
+@contextlib.contextmanager
+def _tree():
+    """`Cache.RESULT_DIR` pointed at a temporary directory for the length of a
+    test, so every Address resolves inside it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        saved, Cache.RESULT_DIR = Cache.RESULT_DIR, tmp
+        try:
+            yield tmp
+        finally:
+            Cache.RESULT_DIR = saved
+
+
+def an_entry():
+    """The features entry of one draw of SLIDE_A."""
+    return Address(JOB, slide='SLIDE_A', seg='hest-e3b0c442', region='abcd1234',
+                   plan='native-cam256x256', draw='samp0001').entry('features')
+
+
+def _save(meta, fid=None, **tensors):
+    """`FS.save` into `an_entry()`, the variant named as `feature_id` would
+    name it for the stand-in encoder."""
+    return FS.save(an_entry(), fid or f'ds{meta.ds:g}-{meta.pooling}-enc-enc12345',
+                   REC, meta=meta, **tensors)
+
+
 def t_meta_round_trips_through_strings():
     m = a_meta()
     s = m.to_strings()
@@ -128,27 +164,29 @@ def t_meta_round_trips_through_strings():
     return 'every field, 4.00003 kept apart from 4, 4.00003374274531 exact'
 
 
-def t_path_is_the_key():
-    """Writer and reader compute one path from the same values; every value
-    that makes a different store moves it."""
-    root = Path('/r')
-    m = a_meta()
-    want = root / 'hest-e3b0c442/SLIDE_A/abcd1234/samp0001_native/ds4.00003_cls_avg.safetensors'
-    assert FS.path(root, m) == want, FS.path(root, m)
-    base = FS.path(root, m)
-    for over in (dict(seg_id='hsv-1'), dict(region_id='ffff'), dict(sampler_id='s2'),
-                 dict(plan='native-L0'), dict(ds=4.0), dict(pooling='tokens'),
-                 dict(wsi_stem='SLIDE_B')):
-        assert FS.path(root, dataclasses.replace(m, **over)) != base, over
-    grid = dataclasses.replace(m, coverage='grid')
-    assert FS.path(root, grid).parent.name == 'grid-t256-o0'
-    return 'each identity field moves it'
+def t_feature_id_names_the_variant():
+    """Writer and reader compute one id from the same values; every value that
+    makes a different store moves it, and a grid lands under its own level."""
+    enc = _Encoder()
+    assert feature_id(enc, 'cls', 4.00003) == 'ds4.00003-cls-enc-enc12345'
+    assert feature_id(enc, 'cls') == 'cls-enc-enc12345', 'ds left in a multi-level id'
+    base = feature_id(enc, 'cls', 4.00003)
+    for other in (feature_id(enc, 'cls', 4.0), feature_id(enc, 'tokens', 4.00003),
+                  feature_id(_Encoder('enc99999'), 'cls', 4.00003)):
+        assert other != base, other
+    with _tree():
+        cache = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', enc, _Recipe(), verbose=False)
+        p = cache.path(ds=4.0, tile_size=256, overlap=False)
+        assert p.parts[-7:] == (JOB, 'slide=SLIDE_A', 'seg=hest-e3b0c442',
+                                'region=abcd1234', 'grid=t256-o0', 'features',
+                                'features_ds4-cls-enc-enc12345.safetensors'), p.parts
+    return 'ds, pooling and encoder move it; the grid is its own level'
 
 
 def t_save_load_round_trip():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         m = a_meta()
-        path = FS.save(root, meta=m, extra={'fov_id': torch.arange(4, dtype=torch.int32)},
+        path = _save(meta=m, extra={'fov_id': torch.arange(4, dtype=torch.int32)},
                        **tensors_for(m))
         got, meta = FS.load(path)
         assert meta.created_at, 'created_at not stamped'
@@ -158,14 +196,15 @@ def t_save_load_round_trip():
         part, _ = FS.load(path, keys=('x',))
         assert set(part) == {'x'}
         assert not [p for p in Path(root).rglob('*') if p.name.endswith('.tmp')]
-        assert FS.levels(path.parent, 'cls_avg') == {1: path}
+        assert path.name == 'features_ds4.00003-cls_avg-enc-enc12345.safetensors', path.name
+        assert an_entry().stored('ds4.00003-cls_avg-enc-enc12345')['members'] == [path.name]
     return 'core, extra, keys=, no temp left'
 
 
 def t_require_refuses_and_names_the_field():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         m = a_meta()
-        path = FS.save(root, meta=m, **tensors_for(m))
+        path = _save(meta=m, **tensors_for(m))
         FS.load(path, require={'encoder_id': 'enc12345', 'coverage': 'sample'})
         try:
             FS.load(path, require={'encoder_id': 'other'})
@@ -176,39 +215,39 @@ def t_require_refuses_and_names_the_field():
 
 
 def t_save_refuses_what_would_load_wrong():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         m = a_meta()
         t = tensors_for(m)
-        rejects(lambda: FS.save(root, meta=m, **dict(t, features=t['features'].double())), 'fp16')
-        rejects(lambda: FS.save(root, meta=a_meta(slots=('cls',)), **t), 'slot names')
-        rejects(lambda: FS.save(root, meta=a_meta(dim=9), **t), 'meta.dim')
-        rejects(lambda: FS.save(root, meta=m, **dict(t, x=t['x'].long())), 'int32')
-        rejects(lambda: FS.save(root, meta=a_meta(coverage='all'), **t), 'coverage')
-        rejects(lambda: FS.save(root, meta=a_meta(sample_seed=None), **t), 'sample_seed')
-        rejects(lambda: FS.save(root, meta=a_meta(sampler_id=''), **t), 'sampler_id')
-        rejects(lambda: FS.save(root, meta=m, extra={'x': torch.zeros(4)}, **t), 'collides')
+        rejects(lambda: _save(meta=m, **dict(t, features=t['features'].double())), 'fp16')
+        rejects(lambda: _save(meta=a_meta(slots=('cls',)), **t), 'slot names')
+        rejects(lambda: _save(meta=a_meta(dim=9), **t), 'meta.dim')
+        rejects(lambda: _save(meta=m, **dict(t, x=t['x'].long())), 'int32')
+        rejects(lambda: _save(meta=a_meta(coverage='all'), **t), 'coverage')
+        rejects(lambda: _save(meta=a_meta(sample_seed=None), **t), 'sample_seed')
+        rejects(lambda: _save(meta=a_meta(sampler_id=''), **t), 'sampler_id')
+        rejects(lambda: _save(meta=m, extra={'x': torch.zeros(4)}, **t), 'collides')
         # A grid store IS the slide: it must carry the grid columns and every tile.
         g = a_meta(coverage='grid', n_available=4, sampler_id='', plan='', sample_seed=None)
-        rejects(lambda: FS.save(root, meta=g, **t), 'region')
+        rejects(lambda: _save(meta=g, **t), 'region')
         cols = dict(region=torch.zeros(4, dtype=torch.int16),
                     grid_rc=torch.zeros(4, 2, dtype=torch.int32))
-        FS.save(root, meta=g, **t, **cols)
-        rejects(lambda: FS.save(root, meta=dataclasses.replace(g, n_available=5), **t, **cols),
+        _save(meta=g, **t, **cols)
+        rejects(lambda: _save(meta=dataclasses.replace(g, n_available=5), **t, **cols),
                 'n_available')
     return 'dtype (fp64), slots, dim, coverage, collisions, a partial grid'
 
 
 def t_a_tokens_store_says_where_its_cells_sat():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         tok = a_meta(pooling='tokens', slots=tuple(f'c{i}' for i in range(4)),
                      slot_layout='grid:2x2', feat_hw=(2, 2))
-        FS.save(root, meta=tok, **tensors_for(tok))
-        rejects(lambda: FS.save(root, meta=dataclasses.replace(tok, feat_hw=None),
+        _save(meta=tok, **tensors_for(tok))
+        rejects(lambda: _save(meta=dataclasses.replace(tok, feat_hw=None),
                                 **tensors_for(tok)), 'feat_hw')
-        rejects(lambda: FS.save(root, meta=dataclasses.replace(tok, feat_hw=(4, 1)),
+        rejects(lambda: _save(meta=dataclasses.replace(tok, feat_hw=(4, 1)),
                                 **tensors_for(tok)), 'implies')
         q = dataclasses.replace(tok, pooling='query_tokens')
-        rejects(lambda: FS.save(root, meta=dataclasses.replace(q, feat_hw=None),
+        rejects(lambda: _save(meta=dataclasses.replace(q, feat_hw=None),
                                 **tensors_for(q)), 'feat_hw')
     return 'tokens and query_tokens both held to feat_hw'
 
@@ -301,40 +340,40 @@ PATH = dict(ds=DS, tile_size=TILE, overlap=True)
 
 
 def t_map_cache_hits_and_misses_for_the_right_reasons():
-    with tempfile.TemporaryDirectory() as root:
-        cache = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
+    with _tree() as root:
+        cache = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                                 verbose=False)
         assert cache.load(REGIONS, **GEO) is None, 'a hit before any write'
         path = cache.save(a_wfm())
         assert path == cache.path(**PATH), (path, cache.path(**PATH))
-        assert path.parts[-5:-1] == ('hest-e3b0c442', 'SLIDE_A', 'abcd1234',
-                                     'grid-t256-o1'), path
+        assert path.parts[-6:-1] == ('slide=SLIDE_A', 'seg=hest-e3b0c442',
+                                     'region=abcd1234', 'grid=t256-o1', 'features'), path
         back = cache.load(REGIONS, **GEO)
         assert back is not None and back.n_patches() == a_wfm().n_patches()
         # the address is right, the encoder is not: a miss
-        other = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder('enc99999'),
+        other = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder('enc99999'),
                                 _Recipe(), verbose=False)
         assert other.load(REGIONS, **GEO) is None, 'another encoder was served'
         # the address is right, the regions are not: the gate
         assert cache.load(REGIONS[:2], **GEO) is None, 'narrowed regions served'
         # another recipe is another address
-        moved = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(),
+        moved = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder(),
                                 _Recipe(region='ffff0000'), verbose=False)
         assert moved.path(**PATH) != path
-        ro = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
+        ro = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                              mode='r', verbose=False)
         assert ro.save(a_wfm()) is None, "mode='r' wrote"
         # same address, same ids, other grid code: the record makes it stale
         saved = FS.VERSION
         try:
             FS.VERSION = saved + 1
-            bumped = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(),
+            bumped = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder(),
                                      _Recipe(), verbose=False)
             assert bumped.load(REGIONS, **GEO) is None, \
                 'a store from before a VERSION bump was served'
         finally:
             FS.VERSION = saved
-        again = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(),
+        again = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder(),
                                 _Recipe(), verbose=False)
         assert again.load(REGIONS, **GEO) is not None, 'the decoy broke the hit'
     return 'hit, encoder miss, gate miss, VERSION miss, recipe moves the address'
@@ -348,7 +387,7 @@ TILE_P, FACTOR = 64, 3
 
 
 def a_corpus(root, **over) -> PreTileCorpus:
-    base = dict(root=Path(root), seg_id='hest-e3b0c442', region_id='abcd1234',
+    base = dict(root=root, seg_id='hest-e3b0c442', region_id='abcd1234',
                 sampler_id='samp0001', plan='ladder-1-2', factor=FACTOR)
     base.update(over)
     return PreTileCorpus(**base)
@@ -368,18 +407,22 @@ def a_pre(value: int) -> np.ndarray:
 
 
 def t_corpus_addresses_by_every_key():
-    base = a_corpus('/r')
-    want = Path('/r/hest-e3b0c442/SLIDE_A/abcd1234_samp0001_ladder-1-2/f3/ds4')
-    assert base.rung_dir('SLIDE_A', 4.0) == want, base.rung_dir('SLIDE_A', 4.0)
-    for over in (dict(seg_id='hsv-1'), dict(region_id='ffff'), dict(sampler_id='s2'),
-                 dict(plan='ladder-1'), dict(factor=5)):
-        assert a_corpus('/r', **over).set_dir('SLIDE_A') != base.set_dir('SLIDE_A'), over
+    base = a_corpus(JOB)
+    with _tree():
+        got = base.rung_dir('SLIDE_A', 4.0)
+        assert got.parts[-9:] == (
+            JOB, 'slide=SLIDE_A', 'seg=hest-e3b0c442', 'region=abcd1234',
+            'plan=ladder-1-2', 'draw=samp0001', 'pretile=f3', 'ds=4', 'tiles'), got
+        for over in (dict(seg_id='hsv-1'), dict(region_id='ffff'),
+                     dict(sampler_id='s2'), dict(plan='ladder-1'), dict(factor=5)):
+            assert (a_corpus(JOB, **over).set_dir('SLIDE_A')
+                    != base.set_dir('SLIDE_A')), over
     return 'mask, draw, plan and factor each move it'
 
 
 def t_rung_round_trip_and_the_index_is_last():
-    with tempfile.TemporaryDirectory() as root:
-        corpus = a_corpus(root)
+    with _tree():
+        corpus = a_corpus(JOB)
         meta = a_pre_meta(corpus)
         folder = PreTileStore.create(corpus, meta)
         records = [PreTileStore.Record(index=i, x=i * 100, y=5, bucket='bg00_15',
@@ -400,13 +443,14 @@ def t_rung_round_trip_and_the_index_is_last():
 
 
 def t_rungs_sort_by_ds_and_a_wrong_size_is_refused():
-    with tempfile.TemporaryDirectory() as root:
-        corpus = a_corpus(root)
+    with _tree():
+        corpus = a_corpus(JOB)
         for ds in (16.0, 1.0, 4.0):
             meta = a_pre_meta(corpus, ds=ds)
             folder = PreTileStore.create(corpus, meta)
             PreTileStore.write_index(folder, [])
-        assert [d.name for d in corpus.rung_dirs('SLIDE_A')] == ['ds1', 'ds4', 'ds16']
+        assert [d.parent.name for d in corpus.rung_dirs('SLIDE_A')] == [
+            'ds=1', 'ds=4', 'ds=16']
         meta = a_pre_meta(corpus, ds=2.0)
         folder = PreTileStore.create(corpus, meta)
         rejects(lambda: PreTileStore.save_tile(
@@ -421,8 +465,8 @@ def t_pixels_come_back_byte_exact_in_rgb_order():
     writes BGR, read reverses it) survives an all-equal check on a grey tile."""
     image = np.random.default_rng(0).integers(
         0, 256, (TILE_P * FACTOR,) * 2 + (3,), dtype=np.uint8)
-    with tempfile.TemporaryDirectory() as root:
-        corpus = a_corpus(root)
+    with _tree():
+        corpus = a_corpus(JOB)
         meta = a_pre_meta(corpus)
         folder = PreTileStore.create(corpus, meta)
         record = PreTileStore.Record(index=3, x=1024, y=2048)
@@ -440,8 +484,8 @@ def t_every_record_axis_survives_the_index():
                                 score=0.83, overlap_max=0.25, inherit_id=7,
                                 origin='jitter', parent_x=36, parent_y=200),
             PreTileStore.Record(index=1, x=300, y=400, bucket='bg00_15', score=0.02)]
-    with tempfile.TemporaryDirectory() as root:
-        corpus = a_corpus(root)
+    with _tree():
+        corpus = a_corpus(JOB)
         folder = PreTileStore.create(corpus, a_pre_meta(corpus))
         PreTileStore.write_index(folder, want)
         assert PreTileStore.load_index(folder) == want
@@ -452,7 +496,7 @@ def t_every_record_axis_survives_the_index():
 def t_level0_geometry_is_self_consistent():
     """`x`/`y` are the TILE's top-left, the pre-tile's is `margin_l0` up-left,
     the centre half a footprint in -- three expressions, one point."""
-    meta = dataclasses.replace(a_pre_meta(a_corpus('/r')), ds=4.0)
+    meta = dataclasses.replace(a_pre_meta(a_corpus(JOB)), ds=4.0)
     record = PreTileStore.Record(index=0, x=10_000, y=20_000)
     assert meta.tile_footprint_l0 == TILE_P * 4.0
     px, py = record.pre_origin_l0(meta)
@@ -463,16 +507,16 @@ def t_level0_geometry_is_self_consistent():
 
 
 def t_a_corpus_key_round_trips_and_the_meta_spells_the_same():
-    corpus = a_corpus('/r')
-    assert PreTileCorpus.from_key('/r', corpus.key) == corpus
+    corpus = a_corpus(JOB)
+    assert PreTileCorpus.from_key(JOB, corpus.key) == corpus
     assert a_pre_meta(corpus).corpus_key == corpus.key
-    rejects(lambda: PreTileCorpus.from_key('/r', 'not-a-key'), 'not a pre-tile')
+    rejects(lambda: PreTileCorpus.from_key(JOB, 'not-a-key'), 'not a pre-tile')
     return corpus.key
 
 
 def t_unfinished_is_refused_and_overwrite_needs_saying():
-    with tempfile.TemporaryDirectory() as root:
-        corpus = a_corpus(root)
+    with _tree():
+        corpus = a_corpus(JOB)
         meta = a_pre_meta(corpus)
         folder = PreTileStore.create(corpus, meta)
         rejects(lambda: PreTileStore.load_index(folder), 'did not finish')
@@ -501,36 +545,36 @@ def slot_ramp(meta: FS.Meta, dtype=torch.float16) -> dict:
 
 
 def t_a_raw_store_keeps_every_slot_in_the_models_order():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         m = a_raw_meta()
-        path = FS.save(root, meta=m, **slot_ramp(m))
+        path = _save(meta=m, **slot_ramp(m))
         got, meta = FS.load(path)
         assert meta.slots == m.slots and meta.slot_layout == 'raw:3+2x2', meta
         assert got['features'].shape == (4, 7, 8)
         assert [int(got['features'][0, k, 0]) for k in range(7)] == list(range(7)), (
             'a slot moved: registers and cells are in the model\'s order')
-        assert path.name == 'ds4.00003_raw.safetensors', path.name
+        assert path.name == 'features_ds4.00003-raw-enc-enc12345.safetensors', path.name
         # the three values written by three lines have to agree
         t = slot_ramp(m)
-        rejects(lambda: FS.save(root, meta=a_raw_meta(slot_layout=raw_layout(1, (2, 2))), **t),
+        rejects(lambda: _save(meta=a_raw_meta(slot_layout=raw_layout(1, (2, 2))), **t),
                 'imply')
-        rejects(lambda: FS.save(root, meta=a_raw_meta(feat_hw=None), **t), 'feat_hw')
-        rejects(lambda: FS.save(root, meta=a_raw_meta(slot_layout='none'), **t), 'raw store says')
-        rejects(lambda: FS.save(root, meta=a_meta(slot_layout=raw_layout(3, (2, 2))),
+        rejects(lambda: _save(meta=a_raw_meta(feat_hw=None), **t), 'feat_hw')
+        rejects(lambda: _save(meta=a_raw_meta(slot_layout='none'), **t), 'raw store says')
+        rejects(lambda: _save(meta=a_meta(slot_layout=raw_layout(3, (2, 2))),
                                 **tensors_for(a_meta())), 'raw store says')
         six = a_raw_meta(slots=('cls', 'r0', 'r1', 'p0', 'p1', 'p2'))
-        rejects(lambda: FS.save(root, meta=six, **slot_ramp(six)), 'has 7 slots, got 6')
+        rejects(lambda: _save(meta=six, **slot_ramp(six)), 'has 7 slots, got 6')
     return '7 slots in order; layout, feat_hw, prefix and count must agree'
 
 
 def t_the_dtype_a_tensor_has_is_the_dtype_it_keeps():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         m = a_meta()
         t16 = tensors_for(m)
         f32 = (torch.arange(4 * 2 * 8, dtype=torch.float32).reshape(4, 2, 8) / 3.0)
-        p16 = FS.save(root, meta=m, **t16)
+        p16 = _save(meta=m, **t16)
         assert FS.load(p16)[0]['features'].dtype == torch.float16
-        p32 = FS.save(root, meta=a_meta(pooling='cls_std'),
+        p32 = _save(meta=a_meta(pooling='cls_std'),
                       **dict(t16, features=f32))
         back = FS.load(p32)[0]['features']
         assert back.dtype == torch.float32 and torch.equal(back, f32), (
@@ -545,9 +589,9 @@ def t_the_dtype_a_tensor_has_is_the_dtype_it_keeps():
 
 
 def t_a_chunked_read_is_the_whole_read_cut_up():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         m = a_meta(n_tiles=10)
-        path = FS.save(root, meta=m, **tensors_for(m))
+        path = _save(meta=m, **tensors_for(m))
         whole = FS.load(path)[0]['features']
         assert FS.n_rows(path) == 10
         for rows in (1, 3, 4, 10, 100):
@@ -576,13 +620,13 @@ def _pooled_for(container=None, spec=(14, 14), prefix=1, dim=DIM):
 
 def t_several_poolings_of_one_slide_sit_side_by_side():
     pooled, n = _pooled_for()
-    with tempfile.TemporaryDirectory() as root:
-        cache = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
+    with _tree() as root:
+        cache = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                                 verbose=False)
         paths = cache.save_pooled(REGIONS, pooled, **GEO)
         assert set(paths) == {'cls', 'raw'} and paths['cls'] != paths['raw']
-        assert paths['raw'].name == 'ds4_raw.safetensors', paths['raw'].name
-        assert paths['raw'].parent == paths['cls'].parent, 'not in one key directory'
+        assert paths['raw'].name == 'features_ds4-raw-enc-enc12345.safetensors', paths['raw'].name
+        assert paths['raw'].parent == paths['cls'].parent, 'not in one entry'
         assert cache.check(REGIONS, 'raw', **GEO).slot_layout == 'raw:1+14x14'
         got, meta = cache.load_pooled(REGIONS, 'raw', **GEO)
         assert torch.equal(got['features'], pooled['raw'].features)
@@ -596,12 +640,12 @@ def t_several_poolings_of_one_slide_sit_side_by_side():
         assert cache.load(REGIONS, **GEO).n_patches() == n
         # the checks every read makes
         assert cache.check(REGIONS[:2], 'raw', **GEO) is None, 'narrowed regions served'
-        other = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder('enc99999'),
+        other = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder('enc99999'),
                                 _Recipe(), verbose=False)
         assert other.check(REGIONS, 'raw', **GEO) is None, 'another encoder was served'
         assert cache.check(REGIONS, 'rings3', **GEO) is None, 'a pooling nobody wrote'
         assert cache.iter_pooled(REGIONS, 'rings3', **GEO) is None
-        ro = FeatureMapCache(root, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
+        ro = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', _Encoder(), _Recipe(),
                              mode='r', verbose=False)
         assert ro.save_pooled(REGIONS, pooled, **GEO) == {}, "mode='r' wrote"
         bad = PooledFeatures(pooled['cls'].features[:-1], ('cls',), 'none')
@@ -612,15 +656,16 @@ def t_several_poolings_of_one_slide_sit_side_by_side():
 def t_an_fp32_encoder_writes_fp32_and_anything_else_writes_fp16():
     def encoder_at(dtype):
         e = _Encoder()
-        e.cfg = SimpleNamespace(model=SimpleNamespace(torch_dtype=lambda: dtype))
+        e.cfg = SimpleNamespace(model=SimpleNamespace(torch_dtype=lambda: dtype),
+                                identity_id=e.identity_id)
         return e
 
     seen = {}
     for name, enc in (('fp32', encoder_at(torch.float32)),
                       ('fp16', encoder_at(torch.float16)),
                       ('unsaid', _Encoder())):
-        with tempfile.TemporaryDirectory() as root:
-            cache = FeatureMapCache(root, '/data/g/SLIDE_A.svs', enc, _Recipe(),
+        with _tree() as root:
+            cache = FeatureMapCache(JOB, '/data/g/SLIDE_A.svs', enc, _Recipe(),
                                     verbose=False)
             path = cache.save(a_wfm())
             seen[name] = FS.load(path)[0]['features'].dtype
@@ -743,7 +788,7 @@ def run_precision(args) -> int:
                                            max_abs=float(part.max()),
                                            over_60000=int((part > 60000).sum())))
                 # through the real Store, exactly as a cache would keep it
-                with tempfile.TemporaryDirectory() as root:
+                with _tree():
                     meta = FS.Meta(
                         wsi_stem=name, wsi_path='', level=level, ds=1.0, mpp=0.0,
                         base_mpp=0.0, tile_size=256, overlap=False, pooling='raw',
@@ -755,7 +800,7 @@ def run_precision(args) -> int:
                         sampler_id='precision', plan='precision', sample_seed=0)
                     # two tensors, not one passed twice: safetensors refuses
                     # tensors that share memory
-                    path = FS.save(root, meta=meta, features=half,
+                    path = _save(meta=meta, features=half,
                                    x=torch.zeros(len(tiles), dtype=torch.int32),
                                    y=torch.zeros(len(tiles), dtype=torch.int32))
                     stored = FS.load(path)[0]['features']

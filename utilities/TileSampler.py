@@ -1994,6 +1994,13 @@ class TileSampler:
         self.write(folder / 'index.csv', folder / 'meta.json', extra_meta)
         return folder
 
+    @classmethod
+    def index_row(cls, i: int, meta) -> Dict[str, object]:
+        """Sample `meta` at row `i` of its draw as the draw's index holds it:
+        `COLUMNS`, `index` first. One definition, so a table that lists some
+        of a draw's samples (a prototype's support) reads like the index."""
+        return {'index': int(i), **{c: getattr(meta, c) for c in cls.COLUMNS[1:]}}
+
     def write(self, index_path: Union[str, Path], meta_path: Union[str, Path],
               extra_meta: Optional[Dict[str, object]] = None) -> None:
         """`save`'s two files at paths of the caller's choosing -- the cache's
@@ -2004,8 +2011,7 @@ class TileSampler:
             writer = csv.writer(handle)
             writer.writerow(self.COLUMNS)
             for i, s in enumerate(self.samples):
-                m = s.meta
-                writer.writerow([i] + [getattr(m, c) for c in self.COLUMNS[1:]])
+                writer.writerow(list(self.index_row(i, s.meta).values()))
 
         meta = {
             'sampler_id': self.cfg.identity_id(),

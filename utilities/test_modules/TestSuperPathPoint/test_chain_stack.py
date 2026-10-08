@@ -29,6 +29,7 @@ Sections:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import tempfile
@@ -378,10 +379,23 @@ def t_derive_refuses_own_rather_than_guessing():
     raise AssertionError("source='own' should have raised")
 
 
+@contextlib.contextmanager
+def _tree():
+    """`Cache.RESULT_DIR` pointed at a temporary directory for the length of a
+    test; yields the job the corpora are written under."""
+    import Cache                                                  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as tmp:
+        saved, Cache.RESULT_DIR = Cache.RESULT_DIR, tmp
+        try:
+            yield 'TestChainStack'
+        finally:
+            Cache.RESULT_DIR = saved
+
+
 def _corpus(root, sampler_id):
-    """A corpus address under `root`; only `sampler_id` varies between tests."""
-    return PreTileCorpus(Path(root), 'seg0', 'reg0', sampler_id,
-                         'ladder-test', _FACTOR)
+    """A corpus address in job `root`'s tree; only `sampler_id` varies
+    between tests."""
+    return PreTileCorpus(root, 'seg0', 'reg0', sampler_id, 'ladder-test', _FACTOR)
 
 
 def _make_store(root, wsi_stem, ds, tile, sampler_id, records):
@@ -412,7 +426,7 @@ def _make_store(root, wsi_stem, ds, tile, sampler_id, records):
 def t_FStack_from_own_is_lazy_and_reads_a_chain_on_getitem():
     """`chains()` (metadata only) finds the chain; `x[inherit_id]` is where
     `FStack.read` -- a real pixel read -- actually happens."""
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         _make_store(root, 'SLIDE_A', 1.0, _TILE, 'aaaa1111',
                    [dict(index=0, x=1000, y=1000, inherit_id=7)])
         _make_store(root, 'SLIDE_A', 2.0, _TILE, 'aaaa1111',
@@ -431,7 +445,7 @@ def t_FStack_from_own_is_lazy_and_reads_a_chain_on_getitem():
 def t_RStack_from_own_scans_every_rung_not_just_one():
     """own's batch can span more than one base_rung in a single run -- both
     must show up, not just whichever folder `find` happens to see first."""
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         _make_store(root, 'SLIDE_A', 1.0, _TILE, 'bbbb2222',
                    [dict(index=0, x=0, y=0), dict(index=1, x=200, y=200)])
         _make_store(root, 'SLIDE_A', 4.0, _TILE, 'bbbb2222',
@@ -449,20 +463,21 @@ def t_RStack_from_own_cache_off_by_default_on_when_asked():
     """`cache_root` defaults to `None` (unlike every other `cache_root` in
     this module) -- degrade is cheap, see `from_own`'s docstring. Passing one
     must make a second access hit the cache instead of recomputing."""
-    with tempfile.TemporaryDirectory() as root, \
-        tempfile.TemporaryDirectory() as cache_root:
+    with _tree() as root:
+        cache_root = 'TestChainStackTiles'
+        tile_dir = ChainStack._cache_dir(cache_root, 'SLIDE_A')
         _make_store(root, 'SLIDE_A', 1.0, _TILE, 'cccc3333',
                    [dict(index=5, x=300, y=400)])
         off = RStack.from_own(_corpus(root, 'cccc3333'), 'SLIDE_A', [1.0, 2.0], tile=_TILE)
         off[0]
-        if ChainStack._cache_get(cache_root, 'SLIDE_A', 300, 400, 2.0, _TILE) is not None:
+        if ChainStack._cache_get(tile_dir, 'SLIDE_A', 300, 400, 2.0, _TILE) is not None:
             raise AssertionError('a fresh cache_root must start empty')
         on = RStack.from_own(_corpus(root, 'cccc3333'), 'SLIDE_A', [1.0, 2.0], tile=_TILE,
                              cache_root=cache_root)
         on[0]
-        if ChainStack._cache_get(cache_root, 'SLIDE_A', 300, 400, 2.0, _TILE) is None:
+        if ChainStack._cache_get(tile_dir, 'SLIDE_A', 300, 400, 2.0, _TILE) is None:
             raise AssertionError('cache_root was given but nothing was written')
-    return "cache_root=None writes nothing, cache_root=<dir> does"
+    return "cache_root=None writes nothing, cache_root=<job> does"
 
 
 def t_CStack_from_own_builds_forest_geometry_without_a_wsi():
@@ -470,7 +485,7 @@ def t_CStack_from_own_builds_forest_geometry_without_a_wsi():
     need a real `wsi` at all (only `__getitem__` does, for the descendants) --
     passing `None` and never touching it proves the split is real, not just
     documented."""
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         _make_store(root, 'SLIDE_A', 16.0, _TILE, 'dddd4444',
                    [dict(index=0, x=10_000, y=10_000)])
         forest = CStack.from_own(_corpus(root, 'dddd4444'), 'SLIDE_A', [4.0, 8.0, 16.0], None,

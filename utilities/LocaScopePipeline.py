@@ -43,13 +43,16 @@ slide.
 Usage:
 
     masks = MaskMaker(MASK_RECIPES['hest'], job, device)   # job's mask cache
-    est = knn_estimator('gigapath', masks.cfg, device=device)
-    ret = SlidingWinSimRot(
-        SlidingWinSimRotConfig(encoder_config('gigapath')), device)
-    loc = SiftRansacLocalizer()
+    est = KnnEstMpp(KNN_RECIPES['gigapath'], device)
+    ret = SlidingWinSimRot(SLIDEWIN_RECIPES['gigapath'], device)
+    loc = SiftRansacLocalizer(SIFT_RECIPES['default'])
     pl  = LocaScopePipeline(wsi, est, ret, loc, masks).build()
     result = pl.run(shot_img)
-    # result.est_mpp, result.routed_level, result.retrieval, result.refine
+    # result.est_mpp, result.routed_level, result.retrieval, result.refine, result.ranks
+
+    r1 = pl.stage1(shot_img)                  # or each stage alone, for a caller
+    qc, cs = pl.stage2(shot_img, r1.chosen_level)   # that keeps what each made
+    ranks = pl.stage3(qc, cs)
 """
 
 from __future__ import annotations
@@ -59,7 +62,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import openslide
@@ -100,6 +103,10 @@ class LocaScopeQueryResult:
     retriever: object = None      # SlidingWinSimRot
     localizer: object = None      # SiftRansacLocalizer
     query_qc:  object = None      # QueryPatchContainer at the winning rotation
+    # Every stage's own output: the EstMppResult, and one SiftRansacResult per
+    # verified candidate (`refine` is the first of them).
+    stage1:    object = None
+    ranks:     Optional[list] = None
 
 
 
@@ -109,12 +116,13 @@ class LocaScopePipeline:
     def __init__(
         self,
         wsi:                 Union[openslide.OpenSlide, str],
-        estimator,                    # stage 1, built, not yet bound
-        retriever:           SlidingWinSimRot,
-        localizer:           SiftRansacLocalizer,
+        estimator,                    # stage 1, built, not yet bound; None: not run here
+        retriever:           Optional[SlidingWinSimRot],
+        localizer:           Optional[SiftRansacLocalizer],
         masks:               'MaskMaker',
-        feature_store_root:  Optional[str] = None,
+        feature_cache_job:   Optional[str] = None,
         feature_store_mode:  str = 'rw',
+        bank_cache_job:      Optional[str] = None,
     ):
         # SafeSlide, not OpenSlide: a MIRAX read that lands on a cell the
         # scanner never wrote raises, and that raise latches on the handle, so
@@ -129,8 +137,11 @@ class LocaScopePipeline:
         # which is what a cache has to ask before trusting a stored feature map.
         self.masks               = masks
         self.mask_cfg            = masks.cfg
-        self.feature_store_root  = feature_store_root
+        self.feature_cache_job   = feature_cache_job
         self.feature_store_mode  = feature_store_mode
+        # Whose cache stage 1 keeps its reference bank in (the draw and its
+        # features); None: made in memory every build.
+        self.bank_cache_job      = bank_cache_job
 
         # SafeSlide.base_mpp: the one definition of the slide's scale.
         self.base_mpp = wsi.base_mpp   # raises if the slide carries no mpp
@@ -145,7 +156,7 @@ class LocaScopePipeline:
         self.localizer           = localizer
         # The tile the query is cut at is the retriever's, which compares it
         # against tiles of that size.
-        self.tile_size           = retriever.tile_size
+        self.tile_size           = None if retriever is None else retriever.tile_size
         self._level_reason: Dict[int, Optional[str]] = {}   # None = usable
 
     # ── One-time setup ────────────────────────────────────────────────────────
@@ -161,11 +172,16 @@ class LocaScopePipeline:
         # The same mask to stage 1, so its reference bank and stage 2's
         # retriever agree on which regions are tissue (a method that samples
         # nothing ignores it -- StageInterface.MppEstimator).
-        self.estimator.build(self.wsi, mask=self.mask)
+        if self.estimator is not None:
+            self.estimator.build(self.wsi, mask=self.mask, masks=self.masks,
+                                 cache_job=self.bank_cache_job)
         # Stage 2 and 3 bound to the same slide and mask. No level is built
         # here: the retriever builds the one stage 1 routes a shot to, once.
-        self.retriever.build(self.wsi, self.mask, feature_store=self._feature_store())
-        self.localizer.build(self.wsi)
+        if self.retriever is not None:
+            self.retriever.build(self.wsi, self.mask,
+                                 feature_store=self._feature_store())
+        if self.localizer is not None:
+            self.localizer.build(self.wsi)
         self._level_reason = {}
         self._built = True
         return self
@@ -179,16 +195,16 @@ class LocaScopePipeline:
     def _feature_store(self):
         '''The feature-map cache for this slide, or None when no root was given.
 
-        `feature_store_root` is `Cache.cache_root(<job>, 'features') /
-        encoder_tag`. Built here because the file's address needs the whole
-        mask recipe -- the segmentation and the region prep -- and this is the
-        only object that holds it.
+        `feature_cache_job` is whose cache the grid features are read from and
+        written to. Built here because the address needs the whole mask recipe
+        -- the segmentation and the region prep -- and this is the only object
+        that holds it.
         '''
-        if not self.feature_store_root:
+        if not self.feature_cache_job:
             return None
         from Store import FeatureMapCache
         return FeatureMapCache(
-            self.feature_store_root, getattr(self.wsi, '_filename', ''),
+            self.feature_cache_job, getattr(self.wsi, '_filename', ''),
             self.retriever.encoder, self.mask_cfg, mode=self.feature_store_mode)
 
     def _level_ready(self, level: int) -> Optional[str]:
@@ -217,10 +233,53 @@ class LocaScopePipeline:
         self._level_reason[level] = reason
         return reason
 
+    # ── One stage at a time ───────────────────────────────────────────────────
+    #
+    # A caller that keeps each stage's output (the bench) runs them one by one:
+    # a stage it already has is read back instead, and the next one is handed
+    # what was read. `run` is the three in a row.
+
+    def stage1(self, img_np: np.ndarray):
+        """Stage 1: the estimator's EstMppResult -- the mpp and the routed level."""
+        return self.estimator.estimate(img_np)
+
+    def stage2(self, img_np: np.ndarray, level: int
+               ) -> Tuple[QueryPatchContainer, CandidateSet]:
+        """Stage 2 at `level`: the query cut at the retriever's tile, and the
+        candidate windows. Raises `UnusableLevel` when the level has no
+        feature map. The retriever's similarity maps stay on it until the next
+        query, for whatever the caller reads off them."""
+        reason = self._level_ready(level)
+        if reason:
+            raise UnusableLevel(reason)
+        self.retriever.build_wsi_features(level=level)
+        qc = QueryPatchContainer(img_np)
+        qc.extract_all(self.tile_size, overlap=self.retriever.overlap)
+        self.retriever.build_query_features(qc)
+        self.retriever.compute_sim_maps()
+        return qc, self.retriever.candidate_set()
+
+    def candidates_at(self, level: int, candidates) -> CandidateSet:
+        """A CandidateSet of `candidates` (stage 2's, read back) in `level`'s
+        frame -- what stage 3 takes. The level's grids come from its feature
+        map, read from the cache when it is there."""
+        reason = self._level_ready(level)
+        if reason:
+            raise UnusableLevel(reason)
+        self.retriever.build_wsi_features(level=level)
+        return CandidateSet(candidates=tuple(candidates), level=self.retriever.level,
+                            ds=self.retriever.ds, grids=tuple(self.retriever.grids))
+
+    def stage3(self, qc: QueryPatchContainer, cs: CandidateSet
+               ) -> List[SiftRansacResult]:
+        """Stage 3: one SiftRansacResult per verified candidate, in rank order."""
+        return self.localizer.localize_top(qc, cs)
+
     # ── Per-shot end-to-end ───────────────────────────────────────────────────
     def run(self, img_np: np.ndarray, keep_objects: bool = False) -> LocaScopeQueryResult:
         """Run all 3 stages on one shot image, each on the previous one's
-        output: EstMppResult -> CandidateSet -> SiftRansacResult.
+        output: EstMppResult -> CandidateSet -> SiftRansacResult per verified
+        candidate.
 
         `keep_objects=True` attaches the retriever / localizer / query container
         to the result so diagnostics can plot keypoints, matches and homography.
@@ -229,15 +288,12 @@ class LocaScopePipeline:
         if not self._built:
             raise RuntimeError('LocaScopePipeline not built; call .build() first.')
 
-        # Stage 1 — estimate mpp AND route to a pyramid level (`chosen_level`,
-        # the estimator's own snap). Stage 2 searches that level; it does not
-        # choose again.
         # Each stage ends in host values (an mpp, topk lists, a homography), so
         # the GPU has finished by the time a clock is read.
         t = {}
         t0 = time.perf_counter()
         try:
-            r1 = self.estimator.estimate(img_np)
+            r1 = self.stage1(img_np)
             est_mpp = float(r1.estimated_mpp)
             level = r1.chosen_level
         except Exception as e:
@@ -252,31 +308,36 @@ class LocaScopePipeline:
         reason = self._level_ready(level)
         t['t_level_s'] = time.perf_counter() - t0
         if reason:
-            return LocaScopeQueryResult(est_mpp, level, True, None, None, reason, **t)
+            return LocaScopeQueryResult(est_mpp, level, True, None, None, reason,
+                                        stage1=r1, **t)
         t0 = time.perf_counter()
         try:
-            qc = QueryPatchContainer(img_np)
-            qc.extract_all(self.tile_size, overlap=self.retriever.overlap)
-            retrieval = self.retriever.retrieve(qc, r1)
+            qc, retrieval = self.stage2(img_np, level)
         except Exception as e:
             return LocaScopeQueryResult(
                 est_mpp, level, False, None, None,
-                f'stage2 failed: {type(e).__name__}: {e}', **t)
+                f'stage2 failed: {type(e).__name__}: {e}', stage1=r1, **t)
         t['t_stage2_s'] = time.perf_counter() - t0
 
-        # Stage 3 — SIFT+RANSAC inside the best candidate
+        # Stage 3 — SIFT+RANSAC inside the first n_verify candidates
         t0 = time.perf_counter()
         try:
-            refine = self.localizer.localize(qc, retrieval, rank=0)
+            ranks = self.stage3(qc, retrieval)
         except Exception as e:
             return LocaScopeQueryResult(
                 est_mpp, level, False, retrieval, None,
-                f'stage3 failed: {type(e).__name__}: {e}', **t)
+                f'stage3 failed: {type(e).__name__}: {e}', stage1=r1, **t)
         t['t_stage3_s'] = time.perf_counter() - t0
 
         return LocaScopeQueryResult(
-            est_mpp, level, False, retrieval, refine, None, **t,
+            est_mpp, level, False, retrieval, ranks[0] if ranks else None, None,
+            stage1=r1, ranks=ranks, **t,
             retriever = self.retriever if keep_objects else None,
             localizer = self.localizer if keep_objects else None,
             query_qc  = qc             if keep_objects else None,
         )
+
+
+class UnusableLevel(RuntimeError):
+    """The routed level has no feature map to search (the mask left no region
+    that holds a tile there, or its build failed)."""

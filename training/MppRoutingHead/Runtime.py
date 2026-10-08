@@ -227,8 +227,7 @@ def wandb_epoch_metrics(rows: List[Dict]) -> Dict[str, float]:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  scoring -- the same numbers bench_mpp_feature_decomposition.py's score()
-#  reports, so the two are comparable without a conversion
+#  scoring
 # ══════════════════════════════════════════════════════════════════════════
 
 def score(pred_class: torch.Tensor, true_class: torch.Tensor,

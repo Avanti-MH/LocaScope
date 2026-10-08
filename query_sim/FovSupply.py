@@ -256,7 +256,7 @@ class FovSupply:
     #: The code between a position and its photo: the read through the
     #: objective at the position's ds, the domain gap drawn from `photo_rng`
     #: of the draw's seed and the position (ConfigIdentity rule 3).
-    VERSION = 0
+    VERSION = 1
 
     def __init__(self, microscope: Render, plan: PlanSpec,
                  cfg: SamplerConfig,
@@ -306,6 +306,20 @@ class FovSupply:
         if not isinstance(cfg, SamplerConfig):
             raise TypeError(f'FovSupply takes a SamplerConfig, got '
                             f'{type(cfg).__name__}')
+
+    @property
+    def render_entry(self) -> Optional[Entry]:
+        """The render entry (`cached(..., render_job=)`); None without one."""
+        return self._render
+
+    @property
+    def render_address(self):
+        """The `render=<gap>` level of these photos in the render job's tree,
+        where what is made from them is addressed (the bench's stage entries,
+        `.on()` their own job). None without a render entry."""
+        if self._render is None:
+            return None
+        return self._render.address.at(render=self.microscope.cfg.identity_id())
 
     @property
     def sampler(self) -> TileSampler:
@@ -409,12 +423,27 @@ class FovSupply:
             if folder is not None:
                 folder.mkdir()
             for i, m, image, params in self._rendered(todo, workers):
-                rows.append(_cells(i, params))
+                rows.append({**_cells(i, params),
+                             **{k: _cell(v) for k, v in self.geometry(m).items()}})
                 if folder is not None:
                     _write_png(folder / f'{i}.png', image)
                 yield i, m, image, params
             _write_render(put('render', '.csv'), rows)
 
+
+    def geometry(self, meta) -> Dict[str, float]:
+        """Where a position's photo was taken, as the render row holds it: the level
+        and ds it was placed at, the camera's nominal mpp and sensor, and the
+        level-0 rectangle the camera read, top-left and centre. The centre is
+        the photo's centre at any rotation or scale -- both are about it."""
+        cam = self.camera_for(meta.ds)
+        x0, y0 = meta.fov_rect[0], meta.fov_rect[1]
+        w0, h0 = cam.rect_w_l0, cam.rect_h_l0
+        return dict(
+            level=int(meta.level), ds=float(meta.ds), nominal_mpp=float(cam.mpp),
+            sensor_w=int(cam.output_w), sensor_h=int(cam.output_h),
+            x0=int(x0), y0=int(y0), w0=float(w0), h0=float(h0),
+            center_x0=x0 + w0 / 2.0, center_y0=y0 + h0 / 2.0)
     def render_record(self) -> dict:
         """The identity record of this draw's photos: the gap and every
         VERSION between a position and its pixels, the draw upstream."""
@@ -449,6 +478,12 @@ def _cell(value) -> str:
     trips), empty for None."""
     return '' if value is None else repr(value) if isinstance(value, float) else str(value)
 
+#: The render-row cells that say where a photo was taken (`FovSupply.geometry`),
+#: beside the parameters the gap drew.
+GEOMETRY = ('level', 'ds', 'nominal_mpp', 'sensor_w', 'sensor_h',
+            'x0', 'y0', 'w0', 'h0', 'center_x0', 'center_y0')
+
+
 
 def _value(cell: str):
     """`_cell` undone: None, a bool, an int or a float, else the string."""
@@ -466,7 +501,8 @@ def _value(cell: str):
 
 def _params(row: Dict[str, str]) -> dict:
     """A render row's parameters as the photo's own `params` had them."""
-    return {k: _value(v) for k, v in row.items() if k != 'index'}
+    return {k: _value(v) for k, v in row.items()
+            if k != 'index' and k not in GEOMETRY}
 
 
 def _cells(index: int, params: dict) -> Dict[str, str]:
@@ -490,7 +526,7 @@ def _read_render(path) -> Dict[int, Dict[str, str]]:
 
 def _check_cells(entry, rid, index, stored, params) -> None:
     now = _cells(index, params)
-    bad = sorted(k for k in set(now) | set(stored) if now.get(k, '') != stored.get(k, ''))
+    bad = sorted(k for k in now if now[k] != stored.get(k, ""))
     if bad:
         raise RuntimeError(
             f'{entry.path("render", rid, ".csv")}: index {index} was rendered '

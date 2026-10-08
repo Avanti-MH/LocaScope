@@ -214,6 +214,15 @@ def t_record_names_what_differs():
     up = CI.record(Outer(), seg_id='hest-2')
     assert CI.record_diff(up, want) == \
         ["upstream.seg_id: stored 'hest-2', now 'hest-1'"], CI.record_diff(up, want)
+    # a key the caller adds is compared (a smoke run's limit is not a full
+    # run's); a key only the stored record has is provenance and is not
+    full = dict(want, limit=0, tables=['output', 'matches'])
+    smoke = dict(full, limit=5)
+    assert CI.record_diff(smoke, full) == ['limit: stored 5, now 0'], CI.record_diff(smoke, full)
+    older = dict(full, tables=['output'])
+    assert CI.record_diff(older, full) == \
+        ["tables: stored ['output'], now ['output', 'matches']"]
+    assert CI.record_diff(dict(full, members=['x'], source='a/b.svs'), full) == []
 
 
 def t_routing_data_record_moves_with_what_makes_the_tiles():
@@ -269,7 +278,7 @@ _MODULES = ('TileEncoderFunc', 'GigaPathFunc', 'Uni2Func', 'ConchVitFunc',
             'stage1_estimation.KnnEstMpp', 'stage1_estimation.ClassifierEstMpp',
             'stage1_estimation.PrototypeEstMpp',
             'stage1_estimation.estimate_mpp_classic',
-            'stage2_retrieval.SlidingWinSimRot')
+            'stage2_retrieval.SlidingWinSimRot', 'stage3_localization.SIFT_RANSAC')
 _SUPERPATHPOINT = ('SuperPoint.Backbones', 'SuperPoint.Datasets',
                    'SuperPoint.Decoders', 'SuperPoint.EncoderBackbone',
                    'SuperPoint.Heads', 'SuperPoint.HomographicAdaptation',
@@ -505,6 +514,13 @@ _RECIPE_MODULES = {
     'TileSampler': 'utilities/TileSampler.py',
     'FovSupply': 'query_sim/FovSupply.py',
     'common.Corpora': 'training/SuperPathPoint/common/Corpora.py',
+    'stage1_estimation.KnnEstMpp': 'stage1_estimation/KnnEstMpp.py',
+    'stage1_estimation.ClassifierEstMpp': 'stage1_estimation/ClassifierEstMpp.py',
+    'stage1_estimation.PrototypeEstMpp': 'stage1_estimation/PrototypeEstMpp.py',
+    'stage1_estimation.estimate_mpp_classic':
+        'stage1_estimation/estimate_mpp_classic.py',
+    'stage2_retrieval.SlidingWinSimRot': 'stage2_retrieval/SlidingWinSimRot.py',
+    'stage3_localization.SIFT_RANSAC': 'stage3_localization/SIFT_RANSAC.py',
 }
 
 
@@ -541,7 +557,10 @@ def _incomplete_calls(module, value) -> list:
     for call in ast.walk(value):
         if not isinstance(call, ast.Call):
             continue
-        cls = _resolve(module, call.func)
+        try:
+            cls = _resolve(module, call.func)
+        except TypeError:
+            continue                    # a method of a call result, not a class
         if not (isinstance(cls, type) and dataclasses.is_dataclass(cls)):
             continue
         fields = {f.name for f in dataclasses.fields(cls) if f.init}
@@ -729,6 +748,47 @@ def t_config_flag_parsers_refuse_abbreviations():
                         found.append(f'{rel}:{c.lineno}')
     assert not found, ('parsers that add config flags without '
                        'allow_abbrev=False: ' + ', '.join(found))
+
+
+#: The level kinds of `Cache.TREE`, as they begin a path component.
+_TREE_KINDS = ('dataset', 'slide', 'seg', 'region', 'grid', 'plan', 'draw',
+               'pretile', 'ds', 'render', 'stage1', 'stage2')
+
+
+def t_cache_paths_are_spelt_in_cache_only():
+    """`Cache.py` is the one module that spells a `<kind>=` path: everything
+    else asks an Address (`.dir`, `.entry`, `.children`). Found here: a string
+    in code (not a docstring) that globs a level (`'ds=*'`) or holds one inside
+    a path (`'/slide='`), and any call of the retired `cache_root`. Identity
+    parts (`f'plan={...}'`) are not paths and are not looked at."""
+    import ast
+    import re
+    kinds = '|'.join(_TREE_KINDS)
+    pattern = re.compile(rf'(^(?:{kinds})=\*)|(/(?:{kinds})=)')
+    found = []
+    for top in _LINT_ROOTS:
+        for dirpath, _, files in os.walk(_ROOT / top):
+            for name in files:
+                path = Path(dirpath) / name
+                rel = path.relative_to(_ROOT).as_posix()
+                if (not name.endswith('.py') or 'test_modules' in rel
+                        or 'FewShotEoMT' in rel or rel == 'utilities/Cache.py'):
+                    continue
+                tree = ast.parse(path.read_text(errors='replace'))
+                docs = {id(n.value) for n in ast.walk(tree)
+                        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                            and id(node) not in docs and pattern.search(node.value)):
+                        found.append(f'{rel}:{node.lineno} {node.value!r}')
+                    if isinstance(node, ast.Call):
+                        f = node.func
+                        called = f.id if isinstance(f, ast.Name) else (
+                            f.attr if isinstance(f, ast.Attribute) else '')
+                        if called == 'cache_root':
+                            found.append(f'{rel}:{node.lineno} cache_root(...)')
+    assert not found, ('cache paths spelt outside Cache.py:\n  '
+                       + '\n  '.join(found))
 
 
 def t_recipes_equal_the_configs_they_replace():

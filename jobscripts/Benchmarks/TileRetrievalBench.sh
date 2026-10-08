@@ -20,180 +20,52 @@ ml load cuda/12.6
 conda activate gigapath
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
+# ---------------- Tile-level retrieval: which pooling finds the tile ---------
+#
+# Every store is a cache entry in CACHE_JOB's tree (bench_tile_retrieval's
+# docstring has the addresses): per (slide, level) a reference draw with its
+# tokens, and the queries' render with the query tiles and the grid tiles they
+# answer to. A rerun encodes only what is missing.
+#
+#   PHASE=dump   reads the slides, encodes, writes the stores (GPU)
+#   PHASE=eval   reads the stores only -- no model; sbatch it alone any time
+#   PHASE=all    dump, then eval  (default)
 
-# Runs write outside the checkout; see utilities/_paths.py
-RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
-
-# ---------------- Does a different pooling find what CLS misses? -------------
-#
-# TILE-LEVEL retrieval bench: a query tile against every reference tile.
-# WindowRetrievalBench.sh asks the same question one level up (a whole FoV
-# window through stage 2). Formerly PoolingBench.sh / bench_gigapath_pooling.py;
-# renamed 2026-09-29 because the bench takes any --encoder and the old name said
-# neither the level nor that.
-#
-# GigaPath computes 197 tokens per tile and keeps one: timm pools with
-# global_pool='token', which is x[:, 0]. Retrieval's largest failure bucket is
-# "the truth was never proposed" (32.3% of 1398 shots), which is a statement
-# about the descriptor, so this asks whether keeping some of the other 196
-# helps. It touches neither retrieval nor the pipeline -- it is a tile-level
-# retrieval task built from stores.
-#
-# Design and the reasoning behind each choice: log/TODO.log, the 2026-08-08
-# entry "197 個 token 只用了 1 個".
-#
-# ONE GPU is deliberate. gigapath_encode_tokens calls forward_features on the
-# unwrapped module, so DataParallel would be bypassed anyway, and the whole run
-# is under 100k tiles -- minutes on a single card. Asking for four would queue
-# longer for no gain.
-#
-# MEMORY: 128G, not the 600G BenchLocaScope needs. That job reads an unmasked
-# region whole (method='', 18.7 Gpx at L0, RSS 339 GB observed); this one
-# computes grid coordinates from PatchGrid.from_size, which touches no pixels,
-# and then reads 256x256 tiles individually.
-
-# The stores are a cache under the one rule: result/cache/<job>_features/<tag>/.
-# Dump writes it, the pairing check and eval read it, and all three name the
-# same job so none of them reads a directory the dump never wrote to.
-FEATURES_CACHE_JOB="${FEATURES_CACHE_JOB:-TileRetrievalBench}"
-
-# Spelled the same way as WindowRetrievalBench.sh, and spelled ONCE: the bench
-# appends this tag to the cache root itself. Every call below passes --encoder
-# for that reason.
+PHASE="${PHASE:-all}"
+CACHE_JOB="${CACHE_JOB:-TileRetrievalBench}"
 ENCODER="${ENCODER:-gigapath}"
-HEAD="${HEAD:-}"          # conch_vit needs `HEAD=trunk`: this bench calls
-                          # encoder.tokens(), and the attentional pooler has
-                          # no token axis to pool.
-TAG="$ENCODER${HEAD:+_$HEAD}"
-OUT="$RESULT_ROOT/cache/${FEATURES_CACHE_JOB}_features"
-
-# Inside the tagged directory, not beside it: the report is written from those
-# stores and a second encoder would otherwise overwrite the first one's.
-REPORT="$OUT/$TAG"/reference_report.txt
-
-K=2000                # reference tiles per (slide, level)
-K_FLOOR=2000          # floor for coarse levels; they take min(available, this)
-QUERIES=1000          # query tiles per (slide, level): 500 positions x 2 rotations
-MASK_DS=4             # segmentation resolution
-SEED=0
-
-# Empty runs every slide in the gt csv. Set to a substring for one slide.
+HEAD="${HEAD:-}"          # conch_vit needs HEAD=trunk: this bench calls tokens()
+K="${K:-2000}"            # reference tiles at L0; max(K/ds^2, K_FLOOR) per level
+K_FLOOR="${K_FLOOR:-2000}"
+QUERIES="${QUERIES:-500}" # query positions per (slide, level), one tile each
+SEED="${SEED:-0}"
+DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
+N_WSI="${N_WSI:-5}"
 ONLY_WSI="${ONLY_WSI:-}"
-# Empty runs every level present. Set e.g. "0 1" to restrict.
 ONLY_LEVELS="${ONLY_LEVELS:-}"
 
-# ---------------- background quota on the distractor pool --------------------
-#
-# The reference pool used to be a uniform draw over the retrieval grid, which
-# sounds neutral and is not. On BRACS_1228 at level 0 the median grid position
-# is 72% background and 46% of them are pure background (result/RefStore). Those
-# distractors can never outrank an answer, so a nominal pool of 3000 was an
-# effective pool of roughly half that -- and the share differs per level, so the
-# per-level numbers were comparing descriptor difficulty and pool composition at
-# the same time.
-#
-# QUOTA_FLOOR_LT15 is the main knob: the least of the pool that must be
-# tissue-dense. Raising it makes the distractors harder, lowering it makes them
-# emptier.
-#
-# It does NOT reach the old uniform draw. At 0 the allocation gives 10% to the
-# middle band and pours the remaining 90% into the background buckets in order,
-# which is emptier than uniform, not equal to it -- a uniform draw is
-# proportional to what the grid happens to offer, and the quota shape in
-# plan_level cannot express "proportional". Reproducing the old composition
-# would need a mode that does not exist yet.
-#
-# The pool SIZE is unchanged -- the bench keeps its own k / ds**2 rule and feeds
-# it to the sampler as the target. Only the composition moves.
+ARGS=(--encoder "$ENCODER" --cache-job "$CACHE_JOB" -k "$K" --k-floor "$K_FLOOR"
+      --queries "$QUERIES" --seg hest --seed "$SEED"
+      --datasets $DATASETS --n-wsi "$N_WSI")
+[ -n "$HEAD" ] && ARGS+=(--head "$HEAD")
+[ -n "$ONLY_WSI" ] && ARGS+=(--wsi "$ONLY_WSI")
+[ -n "$ONLY_LEVELS" ] && ARGS+=(--levels $ONLY_LEVELS)
 
-echo "======== tile retrieval dump  k=$K  queries=$QUERIES per (slide, level) ========"
-echo "out=$OUT"
-echo
-
-WSI_FLAG=""
-[ -n "$ONLY_WSI" ] && WSI_FLAG="--wsi $ONLY_WSI"
-LEVEL_FLAG=""
-[ -n "$ONLY_LEVELS" ] && LEVEL_FLAG="--levels $ONLY_LEVELS"
-
-python utilities/bench_modules/bench_tile_retrieval.py \
-  --phase dump \
-  --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
-  --features-cache-job "$FEATURES_CACHE_JOB" \
-  -k $K --k-floor $K_FLOOR --queries $QUERIES \
-  --seg hest --mask-ds $MASK_DS --seed $SEED \
-  $WSI_FLAG $LEVEL_FLAG
-DUMP_RC=$?
-
-if [ $DUMP_RC -ne 0 ]; then
-  echo ""
-  echo "======== dump failed (exit $DUMP_RC) -- not evaluating ========"
-  exit $DUMP_RC
+if [ "$PHASE" = "dump" ] || [ "$PHASE" = "all" ]; then
+  echo "======== dump  k=$K  queries=$QUERIES per (slide, level) ========"
+  python -u utilities/bench_modules/bench_tile_retrieval.py --phase dump "${ARGS[@]}"
+  rc=$?
+  [ $rc -ne 0 ] && { echo "======== dump failed (exit $rc) ========"; exit $rc; }
 fi
 
-# Gate, not decoration. If a query's answer indices do not land in the paired
-# reference store, every question is unanswerable, every pooling scores the same
-# nothing, and the report reads "no pooling improves recall" -- a finding rather
-# than a bug. Cheap enough to always run.
-echo ""
-echo "======== verifying answer indices ========"
-python utilities/cli/inspect_cache_store/inspect_feature_store.py "$OUT/$TAG" --pairs
-PAIR_RC=$?
-
-if [ $PAIR_RC -ne 0 ]; then
+if [ "$PHASE" = "eval" ] || [ "$PHASE" = "all" ]; then
   echo ""
-  echo "!!!!!!!! pairing check FAILED -- skipping eval on purpose !!!!!!!!"
-  echo "  A report written from stores that do not pair would look legitimate"
-  echo "  and be wrong. Read the output above, fix, and rerun."
-  exit $PAIR_RC
+  echo "======== eval (no model) ========"
+  python utilities/bench_modules/bench_tile_retrieval.py --phase eval "${ARGS[@]}" || exit $?
 fi
 
 echo ""
-echo "======== eval (no GPU; rerun on a login node any time) ========"
-python utilities/bench_modules/bench_tile_retrieval.py \
-  --phase eval --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
-  --features-cache-job "$FEATURES_CACHE_JOB" --report "$REPORT"
-
-echo ""
-echo "======== done ========"
-echo "  stores  $OUT/$TAG/"
-echo "  report  $REPORT"
-echo ""
-echo "  The report ends with the same paired tables as log/WindowRetrievalBench --"
-echo "  W/L/T against the cls baseline, top@f%, truth@k and gap@k -- printed by"
-echo "  the same code (utilities/dump_function/RetrievalReport.py), so the two"
-echo "  benches' columns mean the same thing and can be read side by side."
-echo "  What differs is the unit: a row there is one FoV window through stage"
-echo "  2, a row here is one tile against a store. Expect the absolute numbers"
-echo "  to differ; it is the ORDERING of the arms that is comparable."
-echo ""
-echo "  Read it for CONSISTENCY across the 25 (slide, level) combinations, not"
-echo "  for a winner in any one of them. A pooling that leads on one slide and"
-echo "  not the next has told you nothing -- that is how classify_region died"
-echo "  (see the M4.2 entry in log/TODO.log)."
-echo ""
-echo "  Re-eval without re-dumping:"
-echo "    python utilities/bench_modules/bench_tile_retrieval.py --phase eval \\"
-echo "        --encoder $ENCODER${HEAD:+ --head $HEAD}"
-echo "  Delta histograms:"
-echo "    python utilities/cli/inspect_cache_store/inspect_feature_store.py --pairs --hist"
-
-# ---------------- reading a root that holds more than one sampling rule -------
-#
-# sampler_id is in cfg_hash, so a quota dump and the older uniform dump land on
-# DIFFERENT filenames and neither overwrites the other. They coexist, which is
-# the point: the comparison needs both.
-#
-#   --phase eval    needs --encoder now (it appends the tag to --out), but no
-#                   sampler selector. It keys stores by cfg_hash and pairs a
-#                   query store only with the reference of the same hash, so
-#                   each batch is scored on its own and both appear in one
-#                   report. The header line of every combination now prints the
-#                   sampler, 'uniform (pre-quota)' for the old ones.
-#
-#   bench_mpp_estimate  DOES need one, because it looks a store up by
-#                   (slide, level, pooling) and would find two:
-#                       --sampler-id ''        the pre-quota uniform draws
-#                       --sampler-id <hash>    one quota config
-#                   Omitting it raises and names both files rather than picking
-#                   one silently. The hash is printed by the dump, on the line
-#                   under each level.
+echo "======== done -> result/${SLURM_JOB_NAME:-TileRetrievalBench}/$ENCODER${HEAD:+_$HEAD}/reference_report.txt ========"
+echo "  Read it for CONSISTENCY across the (slide, level) combinations, not for a"
+echo "  winner in any one of them. A pooling that leads on one slide and not the"
+echo "  next has told you nothing -- that is how classify_region died (M4.2)."

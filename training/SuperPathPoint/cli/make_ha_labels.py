@@ -4,8 +4,9 @@
     python training/SuperPathPoint/cli/make_ha_labels.py --tile 256
     python training/SuperPathPoint/cli/make_ha_labels.py --tile 256 --limit 100
 
-Outputs (in result/cache/<this job>_keypoint_labels/, --labels-cache-job):
-    <wsi_stem>__ds<d>__<cfg8>.safetensors
+Outputs (beside each pre-tile rung in this job's cache tree, .../ds=<d>/labels/;
+--labels-cache-job):
+    labels_<label id>.safetensors + record_<label id>.json
     make_ha_labels.csv          in result/<SLURM_JOB_NAME or MakeHaLabels>/
 
 argparse, a loop, printed progress. What decides anything is in
@@ -149,7 +150,7 @@ def main():
     ap.add_argument('--overwrite', action='store_true')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
-    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
+    args.labels_root = labels_root(args)   # the labelling job
 
     out_dir = args.out or job_result_dir('MakeHaLabels')
     os.makedirs(out_dir, exist_ok=True)

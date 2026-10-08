@@ -62,7 +62,8 @@ from SafeSlide import SafeSlide                                         # noqa: 
 from Checkpoints import build_from_checkpoint                          # noqa: E402
 from Features import encode_raw, trunk_raw                              # noqa: E402
 
-from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
+from stage1_estimation.StageInterface import (EstMppResult, routed_level,  # noqa: E402
+                                              weights_path)
 from stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
 
 
@@ -186,7 +187,7 @@ class ClassifierEstMpp(IdentifiedBuild):
         self.cfg = cfg
         self.device = torch.device(device)
         self.head, self.encoder, self._ckpt = build_from_checkpoint(
-            cfg.weights, self.device)
+            weights_path(cfg.weights), self.device)
 
         # A config built BY HAND (not via from_checkpoint) can name an
         # (encoder, classifier, reduction, tile_size) that disagrees with what
@@ -239,11 +240,12 @@ class ClassifierEstMpp(IdentifiedBuild):
         self.wsi = None
 
     def build(self, wsi: Union[openslide.OpenSlide, str],
-              mask=None) -> 'ClassifierEstMpp':
+              mask=None, *, masks=None, cache_job=None) -> 'ClassifierEstMpp':
         '''Bind the WSI queries will be routed against. Cheap -- see this
         module's docstring for why, in contrast to a KNN estimator's own
-        `build_samples`/`build_ref_features`. `mask` is accepted and unused:
-        nothing is sampled from the slide (StageInterface.MppEstimator).'''
+        `build_samples`/`build_ref_features`. `mask`, `masks` and `cache_job`
+        are accepted and unused: nothing is sampled from the slide
+        (StageInterface.MppEstimator).'''
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi = wsi
@@ -302,3 +304,18 @@ class ClassifierEstMpp(IdentifiedBuild):
             chosen_ds=chosen_ds, chosen_mpp=chosen_mpp,
             chosen_level=chosen_level,
             predicted_class=predicted_class, vote_extra=vote_extra)
+
+
+#: Named classifier estimators, every field written out (test_config_identity's
+#: recipe lint); `--stage1 classifier:<name>`. One entry per checkpoint a run
+#: should score -- a template to copy, not a list of every trained head.
+#: `weights` is relative to the results root (`StageInterface.weights_path`);
+#: building checks every other field against the checkpoint and refuses a
+#: disagreement (`ClassifierEstMpp.__init__`).
+CLASSIFIER_RECIPES: Dict[str, ClassifierEstMppConfig] = {
+    'gigapath-arcface': ClassifierEstMppConfig(
+        encoder='gigapath', classifier='arcface', reduction='fixed',
+        tile_size=256,
+        weights='MppRoutingHead/weights/gigapath_frozen_arcface_best.pt',
+        vote='mean_probability'),
+}

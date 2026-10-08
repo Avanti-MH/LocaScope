@@ -249,7 +249,7 @@ def calibrate(tile: int, draws: int, seed: int,
 
     They are computed by different lines from different quantities, so their
     AGREEING is evidence that both are right. A tolerance would not be: this is
-    the same discipline as `inspect_feature_store --pairs`.
+    the same discipline as a check scored against a decoy.
     """
     margin = centre_margin(tile, factor)
     pre = pre_tile_px(tile, factor)

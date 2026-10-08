@@ -64,7 +64,7 @@ import json
 import numbers
 import sys
 import typing
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 # torch is imported where a model is BUILT, not here. Every config in the repo
 # goes through this module -- the mask recipe, the sampler's, query_sim's -- and
@@ -287,7 +287,10 @@ def check_fingerprint(owner: type, got: str, pinned: Dict[int, str]) -> str:
 def record_diff(stored: Optional[Dict[str, Any]], want: Dict[str, Any]) -> List[str]:
     """Why `stored` is not `want`, one line per difference; empty when it is.
     A missing record is a difference: an artifact that cannot say what made
-    it is not the one asked for."""
+    it is not the one asked for. Every key `want` carries is compared -- the
+    five `record` writes and whatever a caller adds (a bench's tables, its
+    limit); a key only `stored` has is provenance (`members`, `source`) and
+    is not."""
     if not stored:
         return ['no identity record']
     out = []
@@ -305,6 +308,9 @@ def record_diff(stored: Optional[Dict[str, Any]], want: Dict[str, Any]) -> List[
         sa, sb = set(stored.get('parts') or ()), set(want.get('parts') or ())
         out += [f'part only in stored: {p}' for p in sorted(sa - sb)]
         out += [f'part only now: {p}' for p in sorted(sb - sa)]
+    for key in sorted(set(want) - {'id', 'upstream', 'versions', 'env', 'parts'}):
+        if stored.get(key) != want.get(key):
+            out.append(f'{key}: stored {stored.get(key)!r}, now {want.get(key)!r}')
     return out
 
 
@@ -596,6 +602,27 @@ def config_from(name: str, **over):
         raise KeyError(
             f'no config registered as {name!r}. Registered: {known}') from None
     return cls(**over)
+
+
+def method_recipe(spec: str, methods: Dict[str, Tuple[str, str, str]]):
+    """`(method, recipe, config, cls)` for `spec` = `<method>:<recipe>`.
+
+    `methods` is a stage package's own table, method -> (module, the recipe
+    table's name in it, the class the config builds); the module is imported
+    only when its method is asked for, as `TileEncoderFunc._IMPLEMENTATIONS`
+    does for encoders."""
+    import importlib                                              # noqa: PLC0415
+    method, sep, name = str(spec).partition(':')
+    if not sep or method not in methods:
+        raise KeyError(f'{spec!r} is not <method>:<recipe>; the methods are '
+                       f'{sorted(methods)}')
+    module_name, table, cls_name = methods[method]
+    module = importlib.import_module(module_name)
+    recipes = getattr(module, table)
+    if name not in recipes:
+        raise KeyError(f'{method} has no recipe {name!r}; {table} holds '
+                       f'{sorted(recipes)}')
+    return method, name, recipes[name], getattr(module, cls_name)
 
 
 def config_json(cfg) -> str:

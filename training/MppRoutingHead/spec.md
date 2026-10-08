@@ -2,11 +2,9 @@
 
 Trains a classifier head that routes an unknown tile/photo to the DsLadder
 rung (equivalently, the mpp) it was taken at. Sits next to `KnnEstMpp`
-(stage 1's production estimator) and the subspace-projected KNN candidate
-(`run_sampler_routing` in `utilities/bench_modules/
-bench_mpp_feature_decomposition.py`) as a candidate that has to beat both on
-the same `sampler_routing` scorecard (`level_accuracy`,
-`mpp_error_relative_p50`) before it can replace either.
+(stage 1's production estimator) as a candidate that has to beat it on the
+stage 1 bench (`bench_stage1_mpp.py`, `analyze_stage1_metrics.py`) before it
+can replace it.
 
 Ultimate goal (not this package): a model that, given a handful of prototype
 tiles each labelled with their own mpp/ds, tells an unknown tile which
@@ -59,9 +57,8 @@ Relation / Siamese, for the same "still reading" reason.
 | **baseline 3** | ConvNeXt V2 Tiny (`aiNNModel/ConvNeXtV2Func.py`, NEW), `convnextv2_tiny.fcmae_ft_in22k_in1k` init | **fine-tuned end-to-end** |
 
 No subspace projection on either arm — raw encoder features straight into the
-head, per the user's own call: `bench_mpp_feature_decomposition.py`'s
-`subspace_knn` part settled that ranking-by-correlation subspaces lose to the
-full space, so there is nothing to gain from adding that step here.
+head: ranking-by-correlation subspaces lose to the full space, so there is
+nothing to gain from adding that step here.
 
 ### Head candidates (settled 2026-09-15)
 
@@ -358,10 +355,8 @@ worker happens to touch that WSI first).
 
 Per WSI, per rung: `DsLadder(rungs=DEFAULT_RUNGS).plan_for(wsi, tile_size)` +
 `TileSampler` with plain default `RichnessConfig()` (SuperPoint stageA's own
-recipe — caps `bg85_95`/`bg95_100` at 0) and `OverlapConfig()` (0 overlap) —
-the exact recipe `sample_reference_and_query_positions` in
-`bench_mpp_feature_decomposition.py` already uses. "Disjoint" means what it
-means there: one draw per WSI never repeats a position. It does NOT mean a
+recipe — caps `bg85_95`/`bg95_100` at 0) and `OverlapConfig()` (0 overlap).
+"Disjoint" means one draw per WSI never repeats a position. It does NOT mean a
 ref/query split — there is no KNN reference bank here, every drawn position
 is directly a training example. Train and eval never share a WSI (different
 `AccessDatasets` ids), so there is no cross-split leakage to guard against
@@ -374,10 +369,9 @@ and not the raw `QueryFromWSI`+`simulate_microscope_photo` pair the first
 draft used) carrying that position's rung label. Nothing is cut up afterwards:
 the sensor is already the tile.
 
-The constraint that made `sampler_routing` score correctly instead of 0.000
-everywhere (2026-09-14) still holds and is what this satisfies — the encoder
-must see the query at the reference tiles' own effective scale, so a whole
-frame must never be encoded as one vector. Rendering at tile size reaches that
+The constraint this satisfies: the encoder must see the query at the
+reference tiles' own effective scale, so a whole frame must never be encoded
+as one vector. Rendering at tile size reaches that
 from the other direction: instead of rendering a frame and splitting it, the
 frame is never rendered.
 
@@ -886,16 +880,6 @@ nothing there needed to change.
 Every touched file `py_compile`s clean; NOT run
 (no `python` execution on the login node — see `who-runs-commands` — so the
 actual `Camera`/encoder/DataLoader-worker wiring is unverified at runtime).
-
-Found and fixed while writing this: the first draft's `sampler_routing`-style
-query rendering (still live in `bench_mpp_feature_decomposition.py`, already
-run once) calls `QueryFromWSI(..., MPixels=args.mpixels, mpp=gt_mpp)`
-WITHOUT `wh_ratio`, silently rendering at `QueryFromWSI`'s own `4:3` default
-instead of CLAUDE.md's `45:32` real-photo spec. That bench still renders
-frames, so the spec still applies to it; `Datasets.py` no longer renders a
-frame at all (see "The camera's sensor is ONE TILE").
-`bench_mpp_feature_decomposition.py` itself is NOT fixed — flagged, not
-touched, since nobody asked for that file to change this session.
 
 Not yet written: the jobscript (`jobscripts/MppRoutingHeadJobs/Train.sh`), and
 arms **2-2 (NCM)** and **2-4 (Mahalanobis)**. Those two are not blocked on

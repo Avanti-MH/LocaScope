@@ -152,16 +152,21 @@ def _extract_own(axis: str, corpus: PreTileCorpus, wsi_path: str, args,
 def _other_corpora(corpus: PreTileCorpus, wsi_stem: str):
     """Sibling corpora of this slide under the same mask, with finished rungs:
     `{set directory name: [ds...]}`."""
-    base = corpus.root / corpus.seg_id / wsi_stem
-    mine = corpus.set_dir(wsi_stem)
+    from Cache import Address                                     # noqa: PLC0415
+    region = Address(corpus.root, slide=wsi_stem, seg=corpus.seg_id,
+                     region=corpus.region_id)
+    mine = corpus.address(wsi_stem)
     found = {}
-    for f_dir in base.glob('*/f*'):
-        if f_dir == mine:
-            continue
-        rungs = sorted(float(d.name[2:]) for d in f_dir.glob('ds*')
-                       if (d / 'index.csv').exists())
-        if rungs:
-            found[f'{f_dir.parent.name}/{f_dir.name}'] = rungs
+    for plan in region.children('plan'):
+        for draw in region.at(plan=plan).children('draw'):
+            for pre in region.at(plan=plan, draw=draw).children('pretile'):
+                at = region.at(plan=plan, draw=draw, pretile=pre)
+                if at == mine:
+                    continue
+                rungs = sorted(float(d) for d in at.children('ds')
+                               if (at.at(ds=d).dir / 'tiles' / 'index.csv').exists())
+                if rungs:
+                    found[f'{plan}/{draw}/{pre}'] = rungs
     return found
 
 

@@ -5,8 +5,8 @@
         --datasets 'bracs/test#val' --tile 256 --n 500
 
 Outputs:
-    result/cache/<--pretile-cache-job>_pretiles/<seg_id>/<slide>/
-        <region_id>_<sampler_id>_<plan>/f<factor>/ds<d>/000000.png ... index.csv, meta.json
+    result/cache/<--pretile-cache-job>/slide=<s>/seg=/region=/plan=/draw=<sampler>/
+        pretile=f<factor>/ds=<d>/tiles/000000.png ... index.csv, meta.json
     extract_pretiles.csv        in result/<SLURM_JOB_NAME or ExtractPreTiles>/
 
 argparse, a loop, and printed progress. Everything that decides anything is in

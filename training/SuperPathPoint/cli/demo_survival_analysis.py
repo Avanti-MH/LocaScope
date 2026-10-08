@@ -238,7 +238,7 @@ def _correlate(a, b) -> float:
 
 def _cache_stats(cache_root):
     """`(n_files, n_bytes)` under `cache_root`, ANY depth (`rglob`, not
-    `glob` -- tiles sit in `cache_root/<Axis>Stack/<pyramid>/*.png`)."""
+    `glob` -- tiles sit in `<dir>/<Axis>Stack/<pyramid>/*.png`)."""
     if not cache_root or not os.path.isdir(cache_root):
         return 0, 0
     files = list(Path(cache_root).rglob('*.png'))
@@ -442,7 +442,9 @@ def _run_chains_stack(args, out_dir: str) -> None:
                                     for a in 'FRC')
 
     print(f"slide: {wsi_path}")
-    files_before, bytes_before = _cache_stats(cache_root)
+    # this slide's tile cache in the job's tree
+    tile_dir = ChainStack._cache_dir(cache_root, wsi_stem) if cache_root else None
+    files_before, bytes_before = _cache_stats(tile_dir)
 
     r_own_stack = None
     c_own_mother = c_own_img = c_own_groups = lineage_own = whole_tree_own = None
@@ -529,7 +531,7 @@ def _run_chains_stack(args, out_dir: str) -> None:
                                           mother, mother_img, args.tile,
                                           cache_root)
 
-    files_after, bytes_after = _cache_stats(cache_root)
+    files_after, bytes_after = _cache_stats(tile_dir)
     print(f"local cache: +{files_after - files_before} files, "
           f"+{(bytes_after - bytes_before)/1024:.0f} KB THIS RUN "
           f"({files_after} files, {bytes_after/1024:.0f} KB total on disk)")

@@ -37,6 +37,7 @@ Sections:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import tempfile
@@ -269,7 +270,7 @@ def t_the_cap_is_the_configs_and_not_the_data_maximum():
 
 def _meta(**over) -> LabelMeta:
     base = dict(wsi_stem='SLIDE_A', ds=4.0, tile=TILE, ha_id='aaaa1111',
-                pretile_id='bbbb2222', score_threshold=0.005,
+                pretile_id='seg0/reg0_bbbb2222_ladder-1-2/f3', score_threshold=0.005,
                 points_per_megapixel=30000.0, nms_radius=4, border=4)
     base.update(over)
     return LabelMeta(**base)
@@ -311,6 +312,24 @@ def t_provenance_does_not_change_the_filename():
 #  4. store
 # ══════════════════════════════════════════════════════════════════════════════
 
+#: The rung every label set of these tests sits beside.
+_RUNG = dict(wsi_stem='SLIDE_A', ds=4.0,
+             pretile_id='seg0/reg0_bbbb2222_ladder-1-2/f3')
+
+
+@contextlib.contextmanager
+def _tree():
+    """`Cache.RESULT_DIR` pointed at a temporary directory for the length of a
+    test; yields the job the labels are written under."""
+    import Cache                                                  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as tmp:
+        saved, Cache.RESULT_DIR = Cache.RESULT_DIR, tmp
+        try:
+            yield 'TestLabels'
+        finally:
+            Cache.RESULT_DIR = saved
+
+
 def _batch(n=3, cap=8):
     points = [np.array([[i + 1, i + 2]], np.int16) for i in range(n)]
     return batch_from_lists([(100 * i, 200 * i) for i in range(n)], points,
@@ -319,7 +338,7 @@ def _batch(n=3, cap=8):
 
 
 def t_write_then_read_returns_the_same_arrays():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         batch = _batch()
         meta = _meta(n_tiles=len(batch), cap=batch.cap)
         path = KeypointLabelStore.save(root, batch, meta)
@@ -339,7 +358,7 @@ def t_write_then_read_returns_the_same_arrays():
 
 
 def t_require_refuses_rather_than_falls_back():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         batch = _batch()
         path = KeypointLabelStore.save(root, batch,
                                        _meta(n_tiles=len(batch), cap=batch.cap))
@@ -353,24 +372,24 @@ def t_require_refuses_rather_than_falls_back():
 
 
 def t_find_one_refuses_two_rounds_and_takes_ha_id():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         batch = _batch()
         for ha_id in ('aaaa1111', 'eeee5555'):
             KeypointLabelStore.save(
                 root, batch, _meta(ha_id=ha_id, n_tiles=len(batch),
                                    cap=batch.cap))
         try:
-            KeypointLabelStore.find_one(root, wsi_stem='SLIDE_A')
+            KeypointLabelStore.find_one(root, **_RUNG)
         except LabelMismatch as e:
             assert '2 label sets' in str(e), str(e)
         else:
             raise AssertionError('find_one picked one of two rounds')
-        assert KeypointLabelStore.find_one(root, ha_id='eeee5555').exists()
+        assert KeypointLabelStore.find_one(root, ha_id='eeee5555', **_RUNG).exists()
     return 'ambiguous refused, ha_id resolves it'
 
 
 def t_save_validates_the_meta_against_the_batch():
-    with tempfile.TemporaryDirectory() as root:
+    with _tree() as root:
         batch = _batch(n=3)
         for meta, why in ((_meta(n_tiles=99, cap=batch.cap), 'wrong n_tiles'),
                           (_meta(n_tiles=3, cap=batch.cap, ha_id=''),

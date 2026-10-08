@@ -1356,14 +1356,10 @@ class TileEncoder(IdentifiedBuild):
 #: "not registered" for a module nobody imported -- the failure its docstring
 #: names. This table is what turns a --encoder flag into the right import.
 #:
-#: They are imported ONE AT A TIME, and that is not laziness. Every
-#: implementation module sets os.environ.setdefault('HF_HOME', ...) above its
-#: own `import timm`, and huggingface_hub freezes HF_HOME into module constants
-#: when IT is imported. setdefault is first-one-wins, so importing all three
-#: would let whichever landed first decide where the other two look for weights:
-#: CONCH's checkpoint downloaded into prov-gigapath/model_weights, several
-#: gigabytes re-fetched, and a directory name that does not say what is in it.
-#: Nothing raises. Importing only the one asked for is the whole fix.
+#: A module is imported when its encoder is asked for, so a run loads only
+#: the timm/transformers code it uses. Importing several is safe: every
+#: implementation sets HF_HOME to the same `_paths.MODEL_WEIGHTS_DIR`, and
+#: jobscripts/_env.sh exports it before python starts.
 _IMPLEMENTATIONS = {
     'gigapath':    'GigaPathFunc',
     'uni2':        'Uni2Func',

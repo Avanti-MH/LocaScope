@@ -69,11 +69,11 @@ C_CORPUS="${C_CORPUS:-}"
 # -- RStack.from_own's docstring: degrade is cheap, not worth the disk IO at
 # scale. Set for a small/demo run where re-generating the same few tiles
 # repeatedly is worth not recomputing at all.
-# CHAINSTACK_CACHE_JOB: whose result/cache/<job>_chainstack/ tile cache to use
+# CHAINSTACK_CACHE_JOB: whose tile cache (result/cache/<job>/slide=<s>/chainstack/) to use
 # (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
 CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
 
-# result/cache/<PRETILE_CACHE_JOB>_pretiles/: where stageA already is, and
+# result/cache/<PRETILE_CACHE_JOB>/: where stageA already is, and
 # where F's and C's own corpora are written beside it.
 PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
 
@@ -86,7 +86,7 @@ echo "======== PrepareChainStack ========"
 echo "  slide  ${WSI_NAME:-<all 12, no WSI_NAME given>}"
 echo "  axes   $AXES"
 echo "  tile   $TILE   rungs ${RUNGS}   c-rungs ${C_RUNGS}"
-echo "  pre-tiles  result/cache/${PRETILE_CACHE_JOB}_pretiles/"
+echo "  pre-tiles  result/cache/${PRETILE_CACHE_JOB}/"
 echo ""
 
 python training/SuperPathPoint/cli/prepare_chain_stack.py \

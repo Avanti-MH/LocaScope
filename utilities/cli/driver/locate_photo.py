@@ -58,6 +58,7 @@ import re
 import sys
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -79,10 +80,10 @@ from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
                                       checker_in_footprint)
 from LocaScopePipeline import LocaScopePipeline                      # noqa: E402
 from CpuBudget import CpuBudget                                       # noqa: E402
-from stage1_estimation.KnnEstMpp import knn_estimator                 # noqa: E402
+from stage1_estimation.KnnEstMpp import KNN_RECIPES, KnnEstMpp     # noqa: E402
 from stage2_retrieval.SlidingWinSimRot import (               # noqa: E402
-    SlidingWinSimRot, SlidingWinSimRotConfig)
-from stage3_localization.SIFT_RANSAC import SiftRansacLocalizer       # noqa: E402
+    SlidingWinSimRot, SLIDEWIN_RECIPES)
+from stage3_localization.SIFT_RANSAC import SIFT_RECIPES, SiftRansacLocalizer  # noqa: E402
 from TileEncoderFunc   import encoder_config, encoder_names                # noqa: E402
 
 
@@ -499,14 +500,16 @@ def main():
     t0 = time.perf_counter()
     # Each stage from its own config; stage 1 and stage 2 build their own
     # encoders (stage 1 from the registry name, stage 2 from `cfg` above).
-    estimator = knn_estimator(args.encoder, mask_cfg, tile_size=256,
-                              samples=100, k=5, device=device)
+    recipe = KNN_RECIPES[args.encoder]
+    estimator = KnnEstMpp(replace(
+        recipe, mask_cfg=mask_cfg,
+        sampler_cfg=replace(recipe.sampler_cfg, n_per_rung=100)), device=device)
     budget = CpuBudget.for_job(processes=1).apply()
     print(f'  {budget.line()}', flush=True)
     retriever = SlidingWinSimRot(
-        SlidingWinSimRotConfig(cfg, tile_size=256, overlap=True), device,
+        replace(SLIDEWIN_RECIPES['gigapath'], encoder=cfg), device,
         read_workers=budget.workers)
-    localizer = SiftRansacLocalizer(min_inliers=10, padding=2)
+    localizer = SiftRansacLocalizer(SIFT_RECIPES['default'])
     pl = LocaScopePipeline(args.wsi, estimator, retriever, localizer, masks).build()
     masks.close()                       # the segmenter is not needed again
     print(f'  base_mpp={pl.base_mpp:.4f}  levels={pl.wsi.level_count}  '

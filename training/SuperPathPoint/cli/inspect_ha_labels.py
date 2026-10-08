@@ -69,8 +69,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                   # noqa: E402
 import numpy as np                                                # noqa: E402
 
-from cli import (add_labels_args, job_result_dir, labels_root,      # noqa: E402
-                 pretile_root)
+from cli import (add_corpus_arg, add_labels_args, add_pretile_args,  # noqa: E402
+                 corpus_arg, job_result_dir, labels_root, pretile_root)
 
 
 from common import KeypointLabelStore                # noqa: E402
@@ -107,9 +107,12 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_labels_args(ap)
-    ap.add_argument('--pretile-cache-job', default='ExtractPreTiles',
-                    help='the job that made the pre-tiles the labels name')
-    ap.add_argument('--wsi-stem', nargs='*', default=None)
+    # --pretile-cache-job, --seg, --tile, --corpus: whose labels to read is
+    # computed from the corpus they were made on, rung by rung
+    add_pretile_args(ap)
+    add_corpus_arg(ap)
+    ap.add_argument('--wsi-stem', nargs='*', default=None,
+                    help='slides to read; default every slide the corpus has')
     ap.add_argument('--ds', type=float, nargs='*', default=None)
     ap.add_argument('--examples', type=int, default=3,
                     help='tiles drawn with their points, per label set')
@@ -122,15 +125,21 @@ def main():
                     help='N for those runs. Match what made the labels')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
-    args.labels_root = labels_root(args)   # result/cache/<made_by>_keypoint_labels/
+    args.labels_root = labels_root(args)   # the labelling job
 
     out_dir = args.out or job_result_dir('InspectHaLabels')
     os.makedirs(out_dir, exist_ok=True)
 
-    paths = KeypointLabelStore.find(args.labels_root)
+    corpus = corpus_arg(args)
+    paths = []
+    for stem in (args.wsi_stem or corpus.slides()):
+        for folder in corpus.rung_dirs(stem):
+            ds = PreTileStore.load_meta(folder).ds
+            paths += KeypointLabelStore.find(args.labels_root, wsi_stem=stem,
+                                             ds=ds, pretile_id=corpus.key)
     if not paths:
-        print(f'no labels under {args.labels_root}. Run cli/make_ha_labels.py '
-              f'first.')
+        print(f'no labels in the tree of {args.labels_root} for corpus {corpus.key}. '
+              f'Run cli/make_ha_labels.py first.')
         return 1
 
     rows = []

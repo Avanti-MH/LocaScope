@@ -34,18 +34,14 @@ The levels of an address are addresses only. A job that reads another job's
 mask builds the same levels `.on()` that job's root: the levels above an entry
 may hold no files of their own in the reader's tree.
 
-THE PER-OBJECT ROOTS
----------------------
-    result/cache/<made_by>_<object>/<config level>/<config level>/...
-
-The feature stores, the pre-tiles and SuperPathPoint's labels and chain stacks
-are still addressed under a root of their own (`cache_root`), one directory per
-config the content depends on, upstream above downstream. Masks, draws, renders
-and splits are `TREE` entries.
-
-`made_by` is the job that PRODUCED the cache, not a job that reads it, in both
-forms: every CLI defaults to its own job name, and a reader that wants another
-job's cache names it explicitly (`--mask-cache-job`, `--draw-cache-job`, ...).
+WHO MADE IT
+-----------
+`made_by` is the job that PRODUCED the cache, not a job that reads it: every
+CLI defaults to its own job name, and a reader that wants another job's cache
+names it explicitly (`--mask-cache-job`, `--draw-cache-job`, ...). Every cache
+is in this tree -- masks, draws, renders, splits, features, stage results,
+pre-tiles, keypoint labels, chain-stack tiles -- and this module is the only
+one that spells a `<kind>=` path (test_config_identity's lint).
 
 WHAT IS HERE AND WHAT IS NOT
 -----------------------------
@@ -110,7 +106,7 @@ ENTRIES: Dict[str, Tuple[str, ...]] = {
     'stage3':     ('stage2',),
     'tiles':      ('ds',),
     'labels':     ('ds',),
-    'chainstack': ('ds',),
+    'chainstack': ('slide',),
 }
 
 #: The key of an entry record that lists the variant's files; Cache's own.
@@ -201,6 +197,20 @@ class Address:
 
     def entry(self, kind: str) -> 'Entry':
         return Entry(self, kind)
+
+    def children(self, kind: str) -> List[str]:
+        """The values of the `<kind>=` directories directly under this
+        address, sorted: what one known level holds, one level down -- the
+        rungs of one slide's corpus, say. Not a search: nothing below that
+        level is looked at."""
+        if TREE.get(kind) != self.leaf:
+            raise ValueError(f'{kind!r} does not nest under {self.leaf!r} in the '
+                             f'cache tree')
+        if not self.dir.is_dir():
+            return []
+        prefix = f'{kind}='
+        return sorted(p.name[len(prefix):] for p in self.dir.glob(f'{prefix}*')
+                      if p.is_dir())
 
     def __eq__(self, other) -> bool:
         return (isinstance(other, Address) and self.made_by == other.made_by
@@ -326,14 +336,6 @@ class Entry:
 
 
 # ── where ─────────────────────────────────────────────────────────────────────
-
-def cache_root(made_by: str, obj: str) -> Path:
-    """`result/cache/<made_by>_<obj>/`. Not created here: a reader pointed at
-    another job's cache should find it missing, not find it freshly empty."""
-    if not made_by or not obj:
-        raise ValueError(f'cache_root needs both names, got {made_by!r}, {obj!r}')
-    return Path(RESULT_DIR) / 'cache' / f'{made_by}_{obj}'
-
 
 def wsi_stem_of(wsi_or_path) -> str:
     """The slide's name without directory or extension -- the `<slide>` level

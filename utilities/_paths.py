@@ -7,7 +7,7 @@ another. What each of those legitimately owns is its default job name, which
 is the argument to job_result_dir.
 
 It imports os and sys and nothing else on purpose. Files that are careful about
-their startup cost -- analyze_locascope_metrics is one -- can import this
+their startup cost can import this
 without pulling in torch or openslide.
 """
 

@@ -1,7 +1,7 @@
 """Homographic Adaptation's output on disk: one sparse point set per tile.
 
     points = points_from_prob(result.mean_prob, result.counts, cfg)
-    LabelStore.save(root, batch, LabelMeta.of(...))
+    LabelStore.save(job, batch, LabelMeta.of(...))   # beside its rung, in job's tree
 
     batch, meta = LabelStore.load(path, require={'wsi_stem': 'BRACS_1228'})
     xy = batch.points_of(i)          # [n_kp[i], 2] int16, tile coordinates
@@ -325,10 +325,27 @@ class LabelMeta:
         return cls(**kwargs)
 
 
+# ── where ────────────────────────────────────────────────────────────────────
+#
+# A label set sits beside the rung it was made from, in the labelling job's
+# tree: the pre-tile corpus's address (`Store.PreTileCorpus`) down to the
+# rung's `ds=` level, then `labels/`. The variants of one rung are its label
+# sets -- round 1 and round 2 of Stage A differ in `ha_id` and coexist there.
+#
+#   .../draw=<sampler>/pretile=f<k>/ds=<d>/labels/labels_<id>.safetensors
+#                                                 record_<id>.json
+
+def _entry(job: str, wsi_stem: str, ds: float, pretile_id: str):
+    from Store import PreTileCorpus                               # noqa: PLC0415
+    return PreTileCorpus.from_key(job, pretile_id).address(
+        wsi_stem, ds).entry('labels')
+
+
 # ── write ────────────────────────────────────────────────────────────────────
 
 def save(root, batch: LabelBatch, meta: LabelMeta) -> Path:
-    """Validate, then write atomically to root/<meta.filename()>."""
+    """Validate, then write the label set as one variant of its rung's
+    `labels` entry in job `root`'s tree, the record last."""
     if len(batch) != meta.n_tiles:
         raise ValueError(
             f'meta says {meta.n_tiles} tiles, the batch has {len(batch)}. '
@@ -345,20 +362,17 @@ def save(root, batch: LabelBatch, meta: LabelMeta) -> Path:
 
     meta = dataclasses.replace(
         meta, created_at=meta.created_at or time.strftime('%Y-%m-%dT%H:%M:%S'))
-
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / meta.filename()
-    tmp = path.with_suffix('.tmp')
-    save_file({'tile_x': np.ascontiguousarray(batch.tile_x),
-               'tile_y': np.ascontiguousarray(batch.tile_y),
-               'kp_xy': np.ascontiguousarray(batch.kp_xy),
-               'kp_score': np.ascontiguousarray(batch.kp_score),
-               'kp_count': np.ascontiguousarray(batch.kp_count),
-               'n_kp': np.ascontiguousarray(batch.n_kp)},
-              str(tmp), metadata=meta.to_strings())
-    os.replace(tmp, path)
-    return path
+    entry = _entry(root, meta.wsi_stem, meta.ds, meta.pretile_id)
+    lid = meta.identity_id()
+    with entry.writing(lid, meta.to_strings()) as put:
+        save_file({'tile_x': np.ascontiguousarray(batch.tile_x),
+                   'tile_y': np.ascontiguousarray(batch.tile_y),
+                   'kp_xy': np.ascontiguousarray(batch.kp_xy),
+                   'kp_score': np.ascontiguousarray(batch.kp_score),
+                   'kp_count': np.ascontiguousarray(batch.kp_count),
+                   'n_kp': np.ascontiguousarray(batch.n_kp)},
+                  str(put('labels', '.safetensors')), metadata=meta.to_strings())
+    return entry.path('labels', lid, '.safetensors')
 
 
 # ── read ─────────────────────────────────────────────────────────────────────
@@ -393,35 +407,36 @@ def load(path, *, require: Optional[Dict[str, object]] = None
     return LabelBatch(**tensors), meta
 
 
-def find(root, **eq) -> List[Path]:
-    """Label files under `root` matching the given fields, by metadata."""
+def find(root, *, wsi_stem: str, ds: float, pretile_id: str, **eq) -> List[Path]:
+    """The label sets of one rung -- the corpus `pretile_id`, slide `wsi_stem`,
+    rung `ds` -- in job `root`'s tree whose metadata matches `eq`. Lists that
+    one entry's variants; no other directory is looked at."""
+    entry = _entry(root, wsi_stem, ds, pretile_id)
     hits = []
-    for candidate in sorted(Path(root).glob('*.safetensors')):
-        try:
-            meta = load_meta(candidate)
-        except Exception:                                        # noqa: BLE001
-            continue                      # not ours; leave other files alone
+    for lid in entry.ids():
+        path = entry.path('labels', lid, '.safetensors')
+        meta = load_meta(path)
         if all(getattr(meta, k, None) == v for k, v in eq.items()):
-            hits.append(candidate)
+            hits.append(path)
     return hits
 
 
-def find_one(root, **eq) -> Path:
-    """The single label file matching `eq`, or an error naming the ones that did.
+def find_one(root, *, wsi_stem: str, ds: float, pretile_id: str, **eq) -> Path:
+    """The single label set matching, or an error naming the ones that did.
 
-    Never `find()[0]`: a root legitimately holds round-1 and round-2 labels of
-    the same slide and rung -- they differ in `ha_id` and coexist -- and picking
-    whichever sorted first would train round 3 on round 1.
+    Never `find()[0]`: a rung legitimately holds round-1 and round-2 labels --
+    they differ in `ha_id` and coexist -- and picking whichever sorted first
+    would train round 3 on round 1.
     """
-    hits = find(root, **eq)
+    hits = find(root, wsi_stem=wsi_stem, ds=ds, pretile_id=pretile_id, **eq)
     if len(hits) == 1:
         return hits[0]
+    entry = _entry(root, wsi_stem, ds, pretile_id)
     query = ', '.join(f'{k}={v!r}' for k, v in sorted(eq.items())) or '(no filter)'
     if not hits:
         raise LabelMismatch(
-            f'no labels under {root} matching {query}. Present: '
-            f'{[p.name for p in sorted(Path(root).glob("*.safetensors"))]}')
+            f'no labels in {entry.dir} matching {query}. Present: {entry.ids()}')
     raise LabelMismatch(
-        f'{len(hits)} label sets under {root} match {query}, and this call '
+        f'{len(hits)} label sets in {entry.dir} match {query}, and this call '
         f'needs one. Narrow it with ha_id=... :\n' +
         '\n'.join(f'  {p.name}   ha {load_meta(p).ha_id}' for p in hits))

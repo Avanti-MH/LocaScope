@@ -8,34 +8,37 @@ bucket is a statement about the descriptor, and the descriptor throws away 196 o
 its 197 tokens (timm pools with global_pool='token'). This bench asks whether
 keeping some of them helps, without touching retrieval or the pipeline.
 
-Two phases, because they cost very different things:
-
-    --phase dump    reads the WSIs, encodes, writes token stores. Needs a GPU
-                    (one is enough) and a few hours for the full corpus.
-    --phase eval    reads only the stores. No GPU, no WSI, no model -- runs on a
-                    login node in seconds, so every pooling idea after the first
-                    is free.
+    --phase dump    reads the slides, encodes, writes the token stores. Needs a
+                    GPU; a few hours for the full corpus.
+    --phase eval    reads only the stores. No GPU, no slide pixels, no model --
+                    every pooling idea after the first is free.
+    --phase all     both.
 
 The shape of the question
 -------------------------
-For each (slide, level):
+For each (slide, level), every store a cache entry in --cache-job's tree:
 
-    reference set   tiles at the PRODUCTION grid positions -- main grid and the
-                    half-tile-shifted overlap grid, the same two the retriever
-                    scores. Coordinates come from PatchGrid.from_size, which is
-                    pure geometry, so nothing large is read: an unsegmented region at
-                    L0 is 18.7 Gpx and reading it whole once cost 3h43m.
+    reference   a TileSampler draw on this level's rung under the reference-bank
+                recipe (max(k / ds^2, k_floor) tiles), its tokens beside it:
+                .../plan=ladder-<ds>-cam256x256/draw=<ref sampler>/features/
+                    features_ds<d>-tokens-<encoder>.safetensors
 
-    query set       one 256 x 256 photo per position, each position shot at 0 and
-                    90 degrees: FovSupply places the positions (a random draw
-                    under the reference bank's richness contract) and the
-                    Render photographs them.
+    queries     one 256 x 256 photo per position of a random draw
+                (`query_fov`: FOV_RECIPES['bench']'s gap on a one-tile sensor),
+                through FovSupply's render, each at the rotation the gap drew:
+                .../draw=<query sampler>/render=<gap>/features/
+                    features_<id>.safetensors   the query tiles
+                    answers_<id>.safetensors    the grid tiles they answer to
+                (<id> = ds<d>-query_tokens-<encoder>)
 
-    the answer      computed, not searched: Render.output_tile_origins inverts the
-                    capture to a level-0 coordinate, and the nearest tile in each
-                    of the two grids is an answer. Both are recorded separately,
-                    since which one wins is the measurable half of "is the
-                    half-tile overlap grid earning its keep".
+    the answer  computed, not searched: Render.output_tile_origins inverts the
+                capture to a level-0 coordinate, and the nearest tile in each
+                of the two production grids (main, and the half-tile-shifted
+                overlap grid) is an answer. `ans_main` / `ans_ovlp` index the
+                `answers` file of the same variant.
+
+The same-level pool is the answers and the reference draw; a level either side
+is its own draw, scored by the nearest tile to each query's centre.
 
 delta -- how far a query tile sits from the grid position it is matched to -- is
 recorded, not swept. A query position is drawn uniformly, so delta comes with a
@@ -60,15 +63,16 @@ _paths.setup_import_paths()
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
-from _paths import encoder_tag                                      # noqa: E402
 import Cache                                                        # noqa: E402
 from AccessDatasets import list_names, locate                        # noqa: E402
-from Store import FeatureStore as FS                                # noqa: E402
+from ConfigIdentity import record                                   # noqa: E402
+from Store import FeatureStore as FS, encoder_names as enc_names, feature_id  # noqa: E402
 from dump_function import RetrievalReport as RR                     # noqa: E402
 from PatchingLib import PatchGrid                                   # noqa: E402
+from ReadGeometry import ReadSpec                                   # noqa: E402
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TileSampler import (SAMPLER_RECIPES, PlanSpec, SamplerConfig,  # noqa: E402
-                         TileSampler, assign_buckets, native_plans)
+                         TileSampler)
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import (encoder_config, encoder_names,          # noqa: E402
                              pool_slots, pooling_kinds)
@@ -83,9 +87,11 @@ POOLINGS = ('cls', 'cls_avg', 'cls_std', 'rings3', 'grid2x2')
 #: sits at (256i, 256j) and overlap at (256i+128, 256j+128), so the union is a
 #: checkerboard whose deep holes, like (128, 0), are 128 from every occupied
 #: point. A query further than this from both is in the uncovered margin at a
-#: region edge -- see dump_one. inspect_feature_store.py gates on the same
-#: number, and must, or the gate and the dump would disagree about what is legal.
+#: region edge -- see dump_one.
 DELTA_UNION = 128.0
+
+#: 0 grid, 1 jitter, 2 inherit -- TileSampler's `origin`, as a column.
+ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
 
 
 # ── grid coordinates, without reading any pixels ──────────────────────────────
@@ -96,8 +102,7 @@ def grid_coords(mask, level: int, ds: float, tile_size: int = TILE):
     Returns (xy, region, rowcol, kind) where xy is [n, 2] level-0 top-left.
     PatchGrid.from_size takes sizes and offsets only -- no image -- so this costs
     nothing even where the region is the whole slide. PatchInfo.kind already
-    separates the main grid from the half-tile-shifted one, so the two grids need
-    no arithmetic here.
+    separates the main grid from the half-tile-shifted one.
     """
     xs, ys, regs, rows, cols, kinds = [], [], [], [], [], []
     for ri, region in enumerate(mask.tissue_regions):
@@ -141,27 +146,23 @@ def nearest_in(centres: np.ndarray, pts: np.ndarray, chunk: int = 4096):
     return idx, off
 
 
-# ── one (slide, level) ────────────────────────────────────────────────────────
+# ── where each store is ──────────────────────────────────────────────────────
 
-#: 0 grid, 1 jitter, 2 inherit -- TileSampler's `origin`, as a column.
-ORIGIN_CODE = {'grid': 0, 'jitter': 1, 'inherit': 2}
-
-
-def reference_config(k: int, seed: int) -> SamplerConfig:
-    """The draw every level's reference pool is cut by -- before the per-level
-    size: `SAMPLER_RECIPES['reference-bank']`. `n_per_rung` is `k`, the L0
-    size; each level takes `min(grid, max(k / ds**2, k_floor))`, and that rule
-    is part of the store's address through `plan_label`."""
-    return dataclasses.replace(SAMPLER_RECIPES['reference-bank'],
-                               n_per_rung=k, seed=seed)
+def reference_config(k: int, k_floor: int, seed: int, ds: float) -> SamplerConfig:
+    """The draw one level's reference pool is cut by: the reference-bank
+    recipe, `max(k / ds**2, k_floor)` tiles -- k at level 0, fewer where a
+    coarse level has fewer positions. A level that holds fewer comes back
+    short in the sampler's report."""
+    return dataclasses.replace(
+        SAMPLER_RECIPES['reference-bank'],
+        n_per_rung=max(int(round(k / (ds * ds))), k_floor), seed=seed)
 
 
 def query_fov(n_positions: int, seed: int) -> FovRecipe:
     """The query photos: `FOV_RECIPES['bench']` -- its gap, its draw -- on a
     one-tile sensor, `n_positions` positions drawn uniformly
     (`candidates='random'`). Not the lattice, which IS the main grid and would
-    put every query exactly on its answer. The rotation is set per shot
-    (`dump_one`'s `rots`); everything else the gap does is on."""
+    put every query exactly on its answer."""
     fov = FOV_RECIPES['bench']
     return dataclasses.replace(
         fov, sensor=(TILE, TILE),
@@ -169,278 +170,210 @@ def query_fov(n_positions: int, seed: int) -> FovRecipe:
                                     seed=seed, candidates='random'))
 
 
-def plan_label(k_floor: int, n_query: int, seed: int, rots=(0, 90)) -> str:
-    """The rung plan -- one native rung per pyramid level -- the per-level
-    sizing floor, which changes which tiles a coarse level holds, and the
-    camera: the tile size is not in `sampler_id`, so it is named here. Then
-    the query set: where its positions are drawn, the gap they are shot
-    through and at which rotations (`q<id>`), which the reference draw's
-    `sampler_id` does not see."""
-    from ConfigIdentity import enc, short_id                      # noqa: PLC0415
-    from ReadGeometry import ReadSpec                             # noqa: PLC0415
-    q = query_fov(math.ceil(n_query / len(rots)), seed)
-    queries = short_id([
-        f'sampler={enc(q.sampler.identity_id())}',
-        f'gap={enc(q.gap.identity_id())}', f'rots={enc(tuple(rots))}'])
-    return f'native-floor{k_floor}-{ReadSpec(TILE, TILE).key()}-q{queries}'
+class Level:
+    """One (slide, level): the reference draw's and the queries' addresses,
+    computed from the flags alone -- no mask, no pixels, no model."""
+
+    def __init__(self, path: str, level: int, ds: float, args, masks, encoder_cfg):
+        self.path, self.level, self.ds = path, int(level), float(ds)
+        self.stem = Cache.wsi_stem_of(path)
+        job = args.cache_job
+        self.ref_cfg = reference_config(args.k, args.k_floor, args.seed, ds)
+        self.ref_plan = PlanSpec('ladder', (self.ds,), camera=ReadSpec(TILE, TILE))
+        self.ref_entry = TileSampler.draw_address(
+            job, self.stem, masks.cfg, self.ref_plan
+        ).at(draw=self.ref_cfg.identity_id()).entry('features')
+        self.ref_id = feature_id(encoder_cfg, 'tokens', self.ds)
+        self.q = query_fov(args.queries, args.seed)
+        self.cam = Render(SlideReader(path), self.q.sensor, self.q.gap, ds=self.ds,
+                          seed=args.seed)
+        self.q_plan = PlanSpec('ladder', (self.ds,), camera=self.cam.spec)
+        self.q_entry = TileSampler.draw_address(
+            job, self.stem, masks.cfg, self.q_plan
+        ).at(draw=self.q.sampler.identity_id(),
+             render=self.cam.cfg.identity_id()).entry('features')
+        self.q_id = feature_id(encoder_cfg, 'query_tokens', self.ds)
 
 
-def dump_one(wsi_path: str, level: int, out_root: Path, *,
-             mask, masks, encoder, device, spec,
-             k: int, k_floor: int, n_query: int, seed: int,
-             encoder_id: str, batch_size: int,
-             rots=(0, 90)) -> dict:
-    slide = SafeSlide(wsi_path)
-    stem = Path(wsi_path).stem
-    base_mpp = slide.base_mpp  # SafeSlide.base_mpp: mean of mpp-x/y, one definition
-    ds = float(slide.level_downsamples[level])
-    level_mpp = base_mpp * ds
+# ── one (slide, level) ────────────────────────────────────────────────────────
 
+def _tensors(rows_xy, extra, region=None, grid_rc=None) -> dict:
+    out = dict(x=torch.from_numpy(rows_xy[:, 0].astype(np.int32)),
+               y=torch.from_numpy(rows_xy[:, 1].astype(np.int32)), extra=extra)
+    if region is not None:
+        out.update(region=torch.from_numpy(region.astype(np.int16)),
+                   grid_rc=torch.from_numpy(grid_rc.astype(np.int32)))
+    return out
+
+
+def dump_one(lv: Level, *, mask, masks, encoder, args) -> None:
+    slide = SafeSlide(lv.path)
+    try:
+        _dump_one(lv, slide, mask=mask, masks=masks, encoder=encoder, args=args)
+    finally:
+        slide.close()
+
+
+def _dump_one(lv: Level, slide, *, mask, masks, encoder, args) -> None:
+    level, ds = lv.level, lv.ds
+    base_mpp = slide.base_mpp
+    spec = encoder.model_spec
+    reader = SlideReader(slide)
+    rec_ref = record(encoder, also=(FS, SlideReader), draw=lv.ref_cfg.identity_id())
+    rec_q = record(encoder, also=(FS, SlideReader, FovSupply),
+                   render=lv.cam.cfg.identity_id())
+    common = dict(wsi_stem=lv.stem, wsi_path=str(lv.path), level=level, ds=ds,
+                  mpp=base_mpp * ds, base_mpp=base_mpp, tile_size=TILE,
+                  overlap=True, dim=spec['dim'], feat_hw=tuple(spec['feat_hw']),
+                  num_prefix=spec['num_prefix'], encoder_id=enc_names(encoder)[1],
+                  seg_id=masks.cfg.seg_id(), region_id=masks.cfg.region_id(),
+                  coverage='sample')
+    slots, layout = pool_slots('tokens', spec)
+
+    # ── the reference draw ──────────────────────────────────────────────────
+    if lv.ref_entry.status(lv.ref_id, rec_ref)[0] == 'hit':
+        print(f'  L{level}: reference {FS.path(lv.ref_entry, lv.ref_id)} -- there',
+              flush=True)
+    else:
+        draw = TileSampler.cached(lv.path, lv.ref_cfg, lv.ref_plan, args.cache_job,
+                                  masks=masks)
+        metas = [s.meta for s in draw]
+        names = list(lv.ref_cfg.richness.names)
+        t0 = time.time()
+        imgs = reader.read_samples(metas, ReadSpec(TILE, TILE))
+        feats = pooling_kinds(encoder.tokens(imgs), 'tokens', spec)
+        col = lambda f, dt: torch.from_numpy(np.array([f(m) for m in metas], dtype=dt))  # noqa: E731
+        meta = FS.Meta(pooling='tokens', slots=slots, slot_layout=layout,
+                       n_available=len(metas), n_tiles=len(metas),
+                       sampler_id=lv.ref_cfg.identity_id(), plan=lv.ref_plan.key(),
+                       sample_seed=args.seed, buckets=tuple(names), **common)
+        xy = np.array([[m.x, m.y] for m in metas], dtype=np.int64).reshape(-1, 2)
+        FS.save(lv.ref_entry, lv.ref_id, rec_ref, meta=meta,
+                features=feats.to(torch.float16), **_tensors(xy, {
+                    'white_frac': col(lambda m: m.score, np.float32),
+                    'bucket': col(lambda m: names.index(m.bucket), np.int8),
+                    'origin': col(lambda m: ORIGIN_CODE[m.origin], np.int8),
+                    'parent_x': col(lambda m: m.parent_x, np.int64),
+                    'parent_y': col(lambda m: m.parent_y, np.int64)}))
+        print(f'  L{level}: reference {len(metas):,} tiles '
+              f'(asked {lv.ref_cfg.n_per_rung:,})  {time.time() - t0:.0f}s  -> '
+              f'{FS.path(lv.ref_entry, lv.ref_id)}', flush=True)
+
+    # ── the queries and their answers ───────────────────────────────────────
+    if lv.q_entry.status(lv.q_id, rec_q)[0] == 'hit':
+        print(f'  L{level}: queries {FS.path(lv.q_entry, lv.q_id)} -- there',
+              flush=True)
+        return
     g = grid_coords(mask, level, ds)
     if g is None:
         print(f'  L{level}: no region can host a {TILE}px tile -- skipped', flush=True)
-        slide.close()
-        return {}
+        return
     grid_xy, grid_region, grid_rowcol, grid_kind = g
-    n_grid_positions = len(grid_xy)
     gcen = grid_xy + (TILE * ds) / 2.0                 # grid tile centres, level-0
-
-    # queries: one TILE x TILE photo per position, every position shot at each
-    # of `rots`. FovSupply places them -- a TileSampler draw on this level's
-    # rung under the bench recipe's richness, so a query is on tissue for the
-    # reason every benchmark FoV is -- and photographs them through the Render.
-    # `candidates='random'`: a disjoint lattice IS the main grid, and every
-    # query would sit exactly on its answer.
-    q = query_fov(math.ceil(n_query / len(rots)), seed)
-    cam = Render(SlideReader(slide), q.sensor, q.gap, ds=ds, seed=seed)
-    plan = PlanSpec('ladder', (ds,), camera=cam.spec)
-    supply = FovSupply(cam, plan, q.sampler, mask)
-    query_imgs, query_centres, query_rots, query_fov_ids, query_rowcol = [], [], [], [], []
     try:
-        positions = [s.meta for s in supply.sampler]
+        supply = FovSupply.cached(lv.cam, lv.q_plan, lv.q.sampler, masks=masks,
+                                  draw_job=args.cache_job, render_job=args.cache_job)
     except RuntimeError as exc:
-        if 'No FoV position' not in str(exc):
-            raise
-        positions = []
-    for fov_id, meta in enumerate(positions):
+        print(f'  L{level}: no query position -- skipped '
+              f'({str(exc).splitlines()[0]})', flush=True)
+        return
+    imgs, centres, rots, fov_ids, rowcol = [], [], [], [], []
+    for index, meta, img, params in supply.shots(workers=args.workers):
         x, y = meta.fov_rect[0], meta.fov_rect[1]
-        for r in rots:
-            # the answer through the angle and scale this shot was taken at:
-            # the one tile is the sensor's centre, so its level-0 centre is
-            # the FoV's whatever they are, and the stage shift is left as the
-            # irreducible error it models (`Render.output_to_level0`)
-            img, params = supply.photo(meta, rotation=r)
-            for rr, cc, u, v, cx, cy in cam.output_tile_origins(
-                    x, y, TILE, rot_deg=float(params['rot_deg']),
-                    scale=float(params['scale'])):
-                query_imgs.append(np.ascontiguousarray(img[v:v + TILE, u:u + TILE]))
-                query_centres.append((cx, cy))
-                query_rots.append(r)
-                query_fov_ids.append(fov_id)
-                query_rowcol.append((rr, cc))
-    n_fov_made = len(positions)
-
-    if not query_imgs:
-        print(f'  L{level}: no query position could be placed -- skipped', flush=True)
-        slide.close()
-        return {}
-
-    query_centres = np.asarray(query_centres, dtype=np.float64)
+        angle = float(params['rot_deg']) + float(params['angle_jitter'])
+        for rr, cc, u, v, cx, cy in supply.camera_for(meta.ds).output_tile_origins(
+                x, y, TILE, rot_deg=angle, scale=float(params['scale'])):
+            imgs.append(np.ascontiguousarray(img[v:v + TILE, u:u + TILE]))
+            centres.append((cx, cy))
+            rots.append(int(params['rot_deg']))
+            fov_ids.append(index)
+            rowcol.append((rr, cc))
+    if not imgs:
+        print(f'  L{level}: no query tile -- skipped', flush=True)
+        return
+    centres = np.asarray(centres, dtype=np.float64)
     main_idx = np.where(grid_kind == 0)[0]
     ovlp_idx = np.where(grid_kind == 1)[0]
-    am_rel, ans_main_offset = nearest_in(gcen[main_idx], query_centres)
-    ao_rel, ans_ovlp_offset = nearest_in(gcen[ovlp_idx], query_centres) if len(ovlp_idx) else (am_rel, ans_main_offset)
-    ans_main_g = main_idx[am_rel]
-    ans_ovlp_g = ovlp_idx[ao_rel] if len(ovlp_idx) else ans_main_g
+    am, off_main = nearest_in(gcen[main_idx], centres)
+    if len(ovlp_idx):
+        ao, off_ovlp = nearest_in(gcen[ovlp_idx], centres)
+        ans_ovlp_g = ovlp_idx[ao]
+    else:
+        ans_ovlp_g, off_ovlp = main_idx[am], off_main
+    ans_main_g = main_idx[am]
 
-    # Drop the tiles no grid position covers.
-    #
-    # from_size lays whole tiles only, so a region's right and bottom keep a
-    # margin of up to 255 px with no main grid point in it, and the overlap grid
-    # is inset another 128. A FoV near the region edge puts tiles in that margin,
-    # where the nearest grid position sits 300+ px away -- past a 256 px tile, so
-    # the "answer" shares no pixels with the query. Every pooling gets those
-    # wrong, equally, which is dilution rather than evidence.
-    #
-    # 128 is the covering radius of the two grids together: main at (256i, 256j)
-    # and overlap at (256i+128, 256j+128) form a checkerboard whose deep holes
-    # are 128 from every occupied point. Inside the grids' extent this bound
-    # always holds, so what it removes is exactly the uncovered margin -- 0.52%
-    # of queries measured over 23 combinations, losing no FoV entirely.
-    near = np.minimum(np.hypot(ans_main_offset[:, 0], ans_main_offset[:, 1]),
-                      np.hypot(ans_ovlp_offset[:, 0], ans_ovlp_offset[:, 1]))
+    # Drop the tiles no grid position covers: from_size lays whole tiles only,
+    # so a region's right and bottom keep a margin with no grid point, and a
+    # query there shares no pixels with its "answer". Every pooling gets those
+    # wrong equally, which is dilution rather than evidence. 128 is the
+    # covering radius of the two grids together; inside their extent it always
+    # holds, so what it removes is exactly the uncovered margin.
+    near = np.minimum(np.hypot(*off_main.T), np.hypot(*off_ovlp.T))
     keep = near <= DELTA_UNION * ds
     if not keep.all():
-        n_drop = int((~keep).sum())
-        # Split by rotation: a square tile turned about its centre has the
-        # same centre, so the drops should be even across rotations -- the
-        # margin PatchGrid leaves. Uneven drops would mean the answer
-        # arithmetic depends on the angle.
-        rot_a = np.asarray(query_rots)[~keep]
-        by_rot = '  '.join(f'rot{r}={int((rot_a == r).sum())}' for r in rots)
-        query_imgs = [im for im, k in zip(query_imgs, keep) if k]
-        query_centres, query_rots = query_centres[keep], [r for r, k in zip(query_rots, keep) if k]
-        query_fov_ids = [f for f, k in zip(query_fov_ids, keep) if k]
-        query_rowcol = [rc for rc, k in zip(query_rowcol, keep) if k]
-        ans_main_offset, ans_ovlp_offset = ans_main_offset[keep], ans_ovlp_offset[keep]
-        ans_main_g, ans_ovlp_g = ans_main_g[keep], ans_ovlp_g[keep]
-        print(f'  L{level}: dropped {n_drop} of {len(keep)} query tiles that fell '
-              f'in the uncovered margin at a region edge  ({by_rot})', flush=True)
+        print(f'  L{level}: dropped {int((~keep).sum())} of {len(keep)} query '
+              f'tiles in the uncovered margin at a region edge', flush=True)
+    sel = np.where(keep)[0]
+    imgs = [imgs[i] for i in sel]
+    centres, off_main, off_ovlp = centres[sel], off_main[sel], off_ovlp[sel]
+    ans_main_g, ans_ovlp_g = ans_main_g[sel], ans_ovlp_g[sel]
+    rots = [rots[i] for i in sel]
+    fov_ids = [fov_ids[i] for i in sel]
+    rowcol = [rowcol[i] for i in sel]
 
-    # reference: a COMPOSITION-CONTROLLED draw, plus every answer.
-    #
-    # Not uniform over the grid: 46% of level-0 grid positions on BRACS_1228
-    # are pure background, distractors that can never outrank an answer, and
-    # the share differs per level, so per-level numbers would compare
-    # descriptor difficulty and pool composition at the same time. TileSampler under the
-    # reference-bank richness contract holds the composition fixed, which is
-    # what makes one pooling comparable with another. Its disjoint lattice IS
-    # the main grid (test_tile_sampler: "the main grid is exactly patchgrids"),
-    # so a drawn tile carries its region / grid position / kind.
-    #
-    # The answers stay mandatory whatever the draw chose: an answer missing
-    # from the pool is an unanswerable question that scores as a miss.
-    base_cfg = reference_config(k, seed)
-    level_cfg = dataclasses.replace(
-        base_cfg, n_per_rung=min(n_grid_positions,
-                                 max(int(round(k / (ds * ds))), k_floor)))
-    rung = next(p for p in native_plans(slide, TILE) if p.level == level)
-    drawn = [s.meta for s in TileSampler(slide, mask, level_cfg, slide=stem).sample([rung])]
-    names = list(level_cfg.richness.names)
-
-    grid_index = {(int(x), int(y)): i for i, (x, y) in enumerate(grid_xy)}
-    ans_all = np.unique(np.concatenate([ans_main_g, ans_ovlp_g]))
-    chosen = {(m.x, m.y) for m in drawn}
-    answers_to_add = [int(i) for i in ans_all
-                      if (int(grid_xy[i, 0]), int(grid_xy[i, 1])) not in chosen]
-    answer_white = mask.white_fractions(grid_xy[answers_to_add], level, TILE) \
-        if answers_to_add else np.zeros(0, np.float32)
-    answer_bucket = assign_buckets(answer_white, level_cfg.richness.edges)
-
-    rows = []                                    # one dict per reference tile
-    for m in drawn:
-        g = grid_index.get((m.x, m.y))
-        rows.append(dict(x=m.x, y=m.y, bucket=names.index(m.bucket), score=m.score,
-                         origin=ORIGIN_CODE[m.origin], parent_x=m.parent_x,
-                         parent_y=m.parent_y, grid=g))
-    for i, white_i, bucket_i in zip(answers_to_add, answer_white, answer_bucket):
-        rows.append(dict(x=int(grid_xy[i, 0]), y=int(grid_xy[i, 1]),
-                         bucket=int(bucket_i), score=float(white_i),
-                         origin=ORIGIN_CODE['grid'], parent_x=-1, parent_y=-1, grid=i))
-
-    print(f'  L{level}  mpp={level_mpp:.4f}  grid={n_grid_positions:,} '
-          f'(main {len(main_idx):,} / ovlp {len(ovlp_idx):,})  '
-          f'ref={len(rows):,} (drawn {len(drawn)} + answers {len(answers_to_add)})  '
-          f'queries={len(query_imgs):,} from {n_fov_made} FoV', flush=True)
-    counts = np.bincount([r['bucket'] for r in rows], minlength=len(names))
-    print(f'      sampler {base_cfg.identity_id()}   '
-          + '  '.join(f'{b}={int(c)}' for b, c in zip(names, counts)), flush=True)
-
-    # Read the reference tiles. Every one is on tissue: the answers are grid
-    # tiles of a mask region and the distractors a TileSampler draw on the same
-    # mask, and an unscanned block is glass to the mask -- so nothing is
-    # filtered after the read.
-    from ReadGeometry import ReadSpec                             # noqa: PLC0415
-    reader = SlideReader(slide)
+    # the answers: every grid tile some query answers to, once
+    ans_g = np.unique(np.concatenate([ans_main_g, ans_ovlp_g]))
+    pos = {int(g_): i for i, g_ in enumerate(ans_g)}
     t0 = time.time()
-    ref_imgs, kept = [], rows
-    for row in rows:
-        image = reader.read(row['x'], row['y'], ReadSpec(TILE, TILE), ds, level=level)
+    ans_imgs = []
+    for i in ans_g:
+        image = reader.read(int(grid_xy[i, 0]), int(grid_xy[i, 1]),
+                            ReadSpec(TILE, TILE), ds, level=level)
         if image is None:
-            raise RuntimeError(f'{row} runs off the slide')
-        ref_imgs.append(image)
-    t_read = time.time() - t0
-
-    def column(name, dtype):
-        return np.array([r[name] for r in kept], dtype=dtype)
-
-    def from_grid(array, missing, dtype):
-        return np.array([array[r['grid']] if r['grid'] is not None else missing
-                         for r in kept], dtype=dtype)
-
-    ref_xy = np.array([[r['x'], r['y']] for r in kept], dtype=np.int64)
-    ref_region = from_grid(grid_region, -1, np.int32)
-    ref_rowcol = np.array([grid_rowcol[r['grid']] if r['grid'] is not None
-                           else (-1, -1) for r in kept],
-                          dtype=np.int32).reshape(len(kept), 2)
-    ref_kind = from_grid(grid_kind, -1, np.int8)
-    where = {(int(x), int(y)): i for i, (x, y) in enumerate(ref_xy)}
-
-    ref_tokens = encoder.tokens(ref_imgs)
-    query_tokens = encoder.tokens(query_imgs)
-    print(f'      read {t_read:.0f}s   encode {time.time() - t0 - t_read:.0f}s',
-          flush=True)
-
-    common = dict(wsi_stem=stem, wsi_path=str(wsi_path), level=level, ds=ds,
-                  mpp=level_mpp, base_mpp=base_mpp, tile_size=TILE, overlap=True,
-                  dim=spec['dim'], feat_hw=tuple(spec['feat_hw']),
-                  num_prefix=spec['num_prefix'], encoder_id=encoder_id,
-                  seg_id=masks.cfg.seg_id(), region_id=masks.cfg.region_id(),
-                  coverage='sample', sample_seed=seed,
-                  sampler_id=base_cfg.identity_id(),
-                  plan=plan_label(k_floor, n_query, seed, rots))
-
-    written = {}
-    for tag, tok in (('ref', ref_tokens), ('query', query_tokens)):
-        feats = pooling_kinds(tok, 'tokens', spec)
-        slots, layout = pool_slots('tokens', spec)
-        n = feats.shape[0]
-        if tag == 'ref':
-            xy, reg, rc = ref_xy, ref_region, ref_rowcol
-            extra = {
-                'kind': torch.from_numpy(ref_kind.astype(np.int16)),
-                'white_frac': torch.from_numpy(column('score', np.float32)),
-                'bucket': torch.from_numpy(column('bucket', np.int8)),
-                'origin': torch.from_numpy(column('origin', np.int8)),
-                'parent_x': torch.from_numpy(column('parent_x', np.int64)),
-                'parent_y': torch.from_numpy(column('parent_y', np.int64)),
-            }
-            pooling = 'tokens'
-        else:
-            xy = np.stack([query_centres[:, 0] - TILE * ds / 2,
-                           query_centres[:, 1] - TILE * ds / 2], 1).astype(np.int64)
-            reg = np.full(n, -1, dtype=np.int64)
-            rc = np.asarray(query_rowcol, dtype=np.int64)
-            extra = {
-                'ans_main': torch.tensor(
-                    [where[(int(grid_xy[v, 0]), int(grid_xy[v, 1]))]
-                     for v in ans_main_g], dtype=torch.int32),
-                'ans_ovlp': torch.tensor(
-                    [where[(int(grid_xy[v, 0]), int(grid_xy[v, 1]))]
-                     for v in ans_ovlp_g], dtype=torch.int32),
+            raise RuntimeError(f'answer tile {grid_xy[i].tolist()} runs off the slide')
+        ans_imgs.append(image)
+    ans_feats = pooling_kinds(encoder.tokens(ans_imgs), 'tokens', spec)
+    q_feats = pooling_kinds(encoder.tokens(imgs), 'tokens', spec)
+    q_xy = np.stack([centres[:, 0] - TILE * ds / 2,
+                     centres[:, 1] - TILE * ds / 2], 1).astype(np.int64)
+    qs = dict(sampler_id=lv.q.sampler.identity_id(), plan=lv.q_plan.key(),
+              sample_seed=args.seed)
+    n_q, n_a = len(imgs), len(ans_g)
+    FS.write(lv.q_entry, lv.q_id, rec_q, {
+        'features': dict(
+            meta=FS.Meta(pooling='query_tokens', slots=slots, slot_layout=layout,
+                         n_available=n_q, n_tiles=n_q, **qs, **common),
+            features=q_feats.to(torch.float16),
+            **_tensors(q_xy, {
+                'ans_main': torch.tensor([pos[int(v)] for v in ans_main_g],
+                                         dtype=torch.int32),
+                'ans_ovlp': torch.tensor([pos[int(v)] for v in ans_ovlp_g],
+                                         dtype=torch.int32),
                 # level-n px, so it is comparable across levels
-                'delta_main': torch.from_numpy((ans_main_offset / ds).astype(np.int16)),
-                'delta_ovlp': torch.from_numpy((ans_ovlp_offset / ds).astype(np.int16)),
-                'fov_id': torch.tensor(query_fov_ids, dtype=torch.int32),
-                'rot': torch.tensor(query_rots, dtype=torch.int32),
-            }
-            pooling = 'query_tokens'
-
-        meta = FS.Meta(pooling=pooling, slots=slots, slot_layout=layout,
-                       n_available=(n_grid_positions if tag == 'ref' else n),
-                       n_tiles=n, buckets=tuple(names), **common)
-        p = FS.save(out_root, meta=meta,
-                    features=feats.to(torch.float16),
-                    x=torch.from_numpy(xy[:, 0].astype(np.int32)),
-                    y=torch.from_numpy(xy[:, 1].astype(np.int32)),
-                    region=torch.from_numpy(reg.astype(np.int16)),
-                    grid_rc=torch.from_numpy(rc.astype(np.int32)),
-                    extra=extra)
-        written[tag] = p
-        print(f'      {tag:5s} -> {p}  '
-              f'{p.stat().st_size / 1e9:.2f} GB', flush=True)
-
-    slide.close()
-    return written
+                'delta_main': torch.from_numpy((off_main / ds).astype(np.int16)),
+                'delta_ovlp': torch.from_numpy((off_ovlp / ds).astype(np.int16)),
+                'fov_id': torch.tensor(fov_ids, dtype=torch.int32),
+                'rot': torch.tensor(rots, dtype=torch.int32)},
+                region=np.full(n_q, -1), grid_rc=np.asarray(rowcol).reshape(-1, 2))),
+        'answers': dict(
+            meta=FS.Meta(pooling='tokens', slots=slots, slot_layout=layout,
+                         n_available=len(grid_xy), n_tiles=n_a, **qs, **common),
+            features=ans_feats.to(torch.float16),
+            **_tensors(grid_xy[ans_g], {
+                'kind': torch.from_numpy(grid_kind[ans_g].astype(np.int16))},
+                region=grid_region[ans_g], grid_rc=grid_rowcol[ans_g]))})
+    print(f'  L{level}: {n_q:,} query tiles from {len(set(fov_ids))} FoV, '
+          f'{n_a:,} answer tiles  {time.time() - t0:.0f}s  -> '
+          f'{FS.path(lv.q_entry, lv.q_id)}', flush=True)
 
 
 # ── eval ──────────────────────────────────────────────────────────────────────
 #
-# Reads stores only -- no GPU, no WSI, no model. The cross-level answers are not
-# in the dump (ans_main / ans_ovlp index the SAME level) but they do not need to
-# be: every store carries each tile's level-0 x/y, so "which tile of ref(L-1)
+# Reads stores only -- no GPU, no model. The cross-level answers are not in the
+# dump (ans_main / ans_ovlp index the SAME level's answers) but they do not need
+# to be: every store carries each tile's level-0 x/y, so "which tile of ref(L-1)
 # covers this query" is a nearest-neighbour question answerable from
-# coordinates. That is what those four tensors are for.
+# coordinates.
 
 def _centres(t, ds: float) -> np.ndarray:
     return np.stack([t['x'].numpy().astype(np.float64) + TILE * ds / 2.0,
@@ -577,17 +510,15 @@ def _table(rows, head, title, note=''):
     return out
 
 
-def eval_one(query_path: Path, query_meta, refs: dict, poolings, rec: dict = None,
-             whitens=WHITENS) -> list:
+def eval_one(query_tensors: dict, query_meta, refs: dict, poolings,
+             rec: dict = None, whitens=WHITENS) -> list:
     """One (slide, level): three tables, each answering a different question.
+    `refs` is `{level_delta: (tensors, meta)}`, the pools already read.
 
     Fills `rec` with the same numbers so eval_all can ask the question no single
     combination can answer -- whether an ordering holds everywhere.
     """
-    query_tensors, _ = FS.load(query_path)
-
-    # Same rule as dump_one, applied again here so a store written before that
-    # rule existed still scores correctly. A query further than DELTA_UNION from
+    # The rule dump_one applies, held here too. A query further than DELTA_UNION from
     # both grids sits in the margin PatchGrid leaves at a region edge: no
     # reference tile shares pixels with it, so every pooling misses it equally
     # and it only dilutes the comparison. Measured at 0.52% of queries.
@@ -601,10 +532,8 @@ def eval_one(query_path: Path, query_meta, refs: dict, poolings, rec: dict = Non
     query_centres = _centres(query_tensors, query_meta.ds)
     n_queries = query_tensors['features'].shape[0]
 
-    loaded, ans = {}, {}
-    for level_delta, (ref_path, ref_meta) in refs.items():
-        ref_tensors, _ = FS.load(ref_path)
-        loaded[level_delta] = (ref_tensors, ref_meta)
+    loaded, ans = dict(refs), {}
+    for level_delta, (ref_tensors, ref_meta) in loaded.items():
         ans[level_delta], _ = nearest_in(_centres(ref_tensors, ref_meta.ds), query_centres)
 
     sampler_name = f'{query_meta.sampler_id}_{query_meta.plan}'
@@ -750,16 +679,16 @@ def eval_one(query_path: Path, query_meta, refs: dict, poolings, rec: dict = Non
             rec['n_fov'] = int(len(np.unique(query_tensors['fov_id'].numpy())))
     head = (f'{"pooling":10s}'
             + ''.join(f'{f"{lo}-{hi}":>9s}' for lo, hi in bins)
-            + f'{"interior":>10s}{"edge":>8s}{"rot0":>8s}{"rot90":>8s}')
+            + f'{"interior":>10s}{"edge":>8s}{"rot0":>8s}{"rot!=0":>8s}')
     counts = ', '.join(f'{lo}-{hi}: {int(((delta >= lo) & (delta < hi)).sum())}'
                        for lo, hi in bins)
     lines += _table(rows, head, 'phase 1 at L, r@1 split by what makes it harder',
                     f'delta px (nearest of both grids) [{counts}];  '
                     f'interior/edge = position in the FoV '
                     f'({int((~edge).sum())}/{int(edge.sum())});  '
-                    f'rot0/rot90 = the query turned 90 deg against a reference '
+                    f'rot0/rot!=0 = the query at 0, or turned 90/180/270 deg, against a reference '
                     f'that was not, with NO rotation search here -- production '
-                    f'wraps the encoder in one, so rot90 is a lower bound and a '
+                    f'wraps the encoder in one, so rot!=0 is a lower bound and a '
                     f'pooling can lead it just by being rotation invariant '
                     f'({int((rot == 0).sum())}/{int((rot != 0).sum())})')
 
@@ -929,11 +858,11 @@ def _summary(recs: list, poolings, whitens=WHITENS) -> list:
                         + (f'{"-":>15s}{"-":>15s}' if m == 'cls' else
                            f'{lead0:>+14.1f}%{lead9:>+14.1f}%'))
         lines += _table(rows,
-                        f'{"pooling":10s}{"rot0 r@1":>11s}{"rot90 r@1":>13s}'
-                        f'{"lead at rot0":>15s}{"lead at rot90":>15s}',
+                        f'{"pooling":10s}{"rot0 r@1":>11s}{"rot!=0 r@1":>13s}'
+                        f'{"lead at rot0":>15s}{"lead at rot!=0":>15s}',
                         'phase 1 at L by rotation -- median r@1 across combinations',
                         'the two lead columns are the point. A pooling whose lead '
-                        'is only at rot90 is not a better descriptor, it is a '
+                        'is only at rot!=0 is not a better descriptor, it is a '
                         'rotation-invariant one, and production already gets that '
                         'from the rotation search around the encoder. Read the '
                         'rot0 lead as the descriptor claim')
@@ -957,46 +886,66 @@ def _summary(recs: list, poolings, whitens=WHITENS) -> list:
     return lines
 
 
-def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
-             whitens=WHITENS) -> int:
-    """Every query store under `root`, against the reference stores BESIDE it.
 
-    A query store and its references share one key directory by construction
-    (same slide, same mask, same draw), so pairing is a directory listing, not
-    a hash comparison. The cross-level references are the same directory's
-    files one level either side.
-    """
+def _pool(lv: Level):
+    """`(tensors, meta)` of the same-level pool: the answers, then every
+    reference tile that is not one of them. None when either is missing."""
+    qpath = FS.path(lv.q_entry, lv.q_id)
+    apath = FS.path(lv.q_entry, lv.q_id, 'answers')
+    rpath = FS.path(lv.ref_entry, lv.ref_id)
+    if not (qpath.is_file() and apath.is_file() and rpath.is_file()):
+        return None
+    a, _ = FS.load(apath)
+    r, rmeta = FS.load(rpath)
+    seen = {(int(x), int(y)) for x, y in zip(a['x'], a['y'])}
+    extra = torch.tensor([(int(x), int(y)) not in seen
+                          for x, y in zip(r['x'], r['y'])], dtype=torch.bool)
+    pool = {k: torch.cat([a[k], r[k][extra]]) for k in ('features', 'x', 'y')}
+    return pool, rmeta
+
+
+def _ref(lv: Level):
+    rpath = FS.path(lv.ref_entry, lv.ref_id)
+    return FS.load(rpath) if rpath.is_file() else None
+
+
+def eval_all(levels: list, poolings=POOLINGS, out_txt=None, whitens=WHITENS) -> int:
+    """Every (slide, level) the flags address, against its pools: the same
+    level's (answers + its reference draw) and one level either side (their
+    draws)."""
     lines, recs = [], []
-    queries = sorted(Path(root).rglob('ds*_query_tokens.safetensors'))
-    if not queries:
-        sys.exit(f'no query stores under {root}')
-    for query_path in queries:
-        query_meta = FS.load_meta(query_path)
-        if wsi_filter and wsi_filter not in query_meta.wsi_stem:
-            continue
-        by_level = {}
-        for ref_path in FS.files(query_path.parent, 'tokens'):
-            ref_meta = FS.load_meta(ref_path)
-            by_level[ref_meta.level] = (ref_path, ref_meta)
-        lv = query_meta.level
-        refs = {d: by_level[lv + d] for d in (-1, 0, 1) if lv + d in by_level}
-        if 0 not in refs:
-            lines.append(f'{query_meta.wsi_stem} L{lv}: no same-level reference '
-                         f'-- skipped')
-            continue
-        rec = {'stem': query_meta.wsi_stem, 'level': lv, 'p1': {}, 'p2': {},
-               'delta': {}, 'rot': {}, 'white': {}, 'step': None, 'pool': 0,
-               'n_fov': 0, 'sampler': '', 'rows': []}
-        lines += eval_one(query_path, query_meta, refs, poolings, rec=rec, whitens=whitens)
-        recs.append(rec)
+    by_slide = {}
+    for lv in levels:
+        by_slide.setdefault(lv.stem, {})[lv.level] = lv
+    for stem, at in sorted(by_slide.items()):
+        for level, lv in sorted(at.items()):
+            qpath = FS.path(lv.q_entry, lv.q_id)
+            same = _pool(lv)
+            if same is None:
+                lines.append(f'{stem} L{level}: no query or reference store '
+                             f'({qpath}) -- skipped')
+                continue
+            query_tensors, query_meta = FS.load(qpath)
+            refs = {0: same}
+            for d in (-1, 1):
+                if level + d in at:
+                    got = _ref(at[level + d])
+                    if got is not None:
+                        refs[d] = got
+            rec = {'stem': stem, 'level': level, 'p1': {}, 'p2': {},
+                   'delta': {}, 'rot': {}, 'white': {}, 'step': None, 'pool': 0,
+                   'n_fov': 0, 'sampler': '', 'rows': []}
+            lines += eval_one(query_tensors, query_meta, refs, poolings, rec=rec,
+                              whitens=whitens)
+            recs.append(rec)
+    if not recs:
+        sys.exit('no (slide, level) has both its stores')
 
     lines += _summary(recs, poolings, whitens)
 
     # The same tables bench_window_retrieval prints, from the same code in
-    # utilities/dump_function/RetrievalReport.py. Last because they are the widest reading:
-    # everything above is one (slide, level) at a time, and these aggregate.
-    # per_slide is on because this bench spans two pyramid steps (4x on SVS, 2x
-    # on MRXS) and a per-slide block is where that shows.
+    # utilities/dump_function/RetrievalReport.py. Last because they are the
+    # widest reading: everything above is one (slide, level) at a time.
     rows = [r for rec in recs for r in rec['rows']]
     if rows:
         lines.append(f'\n\n{"#" * 90}')
@@ -1008,6 +957,7 @@ def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
     text = '\n'.join(lines)
     print(text)
     if out_txt:
+        Path(out_txt).parent.mkdir(parents=True, exist_ok=True)
         Path(out_txt).write_text(text + '\n')
         print(f'\nwrote {out_txt}')
     return 0
@@ -1016,10 +966,11 @@ def eval_all(root: Path, wsi_filter=None, poolings=POOLINGS, out_txt=None,
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--phase', choices=['dump', 'eval'], default='dump')
+    ap = argparse.ArgumentParser(allow_abbrev=False)
+    ap.add_argument('--phase', choices=['dump', 'eval', 'all'], default='all')
     ap.add_argument('--report', default=None,
-                    help='eval only: also write the tables to this path')
+                    help='eval: also write the tables here. Default '
+                         'result/<job>/<encoder>/reference_report.txt')
     ap.add_argument('--poolings', nargs='+', default=list(POOLINGS),
                     help=f'eval only, default {" ".join(POOLINGS)}')
     ap.add_argument('--whitens', nargs='*', default=list(WHITENS),
@@ -1028,67 +979,47 @@ def main() -> int:
                          f'table -- it costs one eigh per (pooling, slot). '
                          f'Default {" ".join(WHITENS)}')
     # The slides: the first --n-wsi of each dataset's recorded --split, the
-    # ones every other bench scores. Every native level of each; a level with
-    # no room for a FoV is skipped.
+    # ones every other bench scores. Every native level of each.
     ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
     ap.add_argument('--split', default='test', choices=['val', 'test'])
     ap.add_argument('--n-wsi', type=int, default=5, help='slides per dataset')
+    ap.add_argument('--cache-job', default=None,
+                    help="whose cache the stores are written to (dump) and read "
+                         "from (eval). Default: this job")
     ap.add_argument('--mask-cache-job', default='MppRoutingHead',
                     help="masks are read from this job's cache")
-    # default=None rather than the path itself, so that "the user named a
-    # directory" stays distinguishable from "we chose one". Only the second gets
-    # the encoder level appended, and BOTH phases resolve it the same way or
-    # eval reads a directory dump never wrote to.
-    ap.add_argument('--out', default=None,
-                    help='store root, used verbatim. Default result/cache/'
-                         '<--features-cache-job>_features/<encoder>/')
-    ap.add_argument('--features-cache-job', default=None,
-                    help='whose feature cache to write (dump) or read (eval): '
-                         'result/cache/<this>_features/. Default: this job')
     ap.add_argument('--wsi', default=None, help='substring filter, for a small run')
     ap.add_argument('--levels', type=int, nargs='+', default=None)
     ap.add_argument('-k', type=int, default=5000, help='reference tiles at L0')
     ap.add_argument('--k-floor', type=int, default=500)
     ap.add_argument('--queries', type=int, default=400,
-                    help='query tiles per (slide, level) -- the same unit as -k '
-                         'and as every table eval prints.')
+                    help='query positions per (slide, level), one tile each')
     add_mask_args(ap)
     ap.add_argument(
         '--encoder', default='gigapath', choices=encoder_names(),
-        help='which tile encoder. Only the module for THIS one is imported: '
-             'every implementation sets HF_HOME above its own timm import and '
-             'setdefault is first-one-wins, so importing all three would point '
-             'two of them at the wrong weight cache -- silently. See '
-             'TileEncoderFunc._IMPLEMENTATIONS. The stores this writes carry '
-             'encoder_id in their filenames, so two encoders cannot overwrite '
-             "each other's dumps.")
+        help='which tile encoder. Its config names every store '
+             '(Store.feature_id), so two encoders cannot overwrite each other.')
     ap.add_argument(
         '--head', default='',
-        help="which exit of the model, empty for its own default. Only CONCH "
-             "has two, and it needs --head trunk to run here at all: this "
-             "bench calls encoder.tokens(), while CONCH's default attentional "
-             "pooler hands back ONE 512-d vector with no token axis. trunk is "
-             "the bare ViT, the same shape GigaPath and UNI2 have, which is "
-             "what makes the three comparable rather than merely all runnable. "
-             "The head reaches identity_id and so reaches the store filenames.")
+        help="which exit of the model, empty for its own default. CONCH needs "
+             "--head trunk here: this bench calls encoder.tokens(), and CONCH's "
+             "default attentional pooler hands back ONE vector with no token axis.")
     ap.add_argument('--batch-size', type=int, default=256)
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args()
+    args.cache_job = args.cache_job or Cache.job_name('TileRetrievalBench')
+    from CpuBudget import CpuBudget                               # noqa: PLC0415
+    args.workers = CpuBudget.for_job(processes=1).apply().workers
 
-    # Resolved once, before the phase split, or eval would read a directory
-    # dump never wrote to.
-    tag = encoder_tag(args.encoder, args.head)
-    store_root = (Path(args.out) if args.out else
-                  Cache.cache_root(args.features_cache_job or
-                                   Cache.job_name('TileRetrievalBench'), 'features') / tag)
+    # fp32 and single card on purpose: the stores have to stay comparable
+    # across runs. The config alone names them, so eval builds no model.
+    over = {'head': args.head} if args.head else {}
+    cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
+        .with_model(dtype='fp32')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    masks = MaskMaker(mask_cfg_from_args(args), args.mask_cache_job, device)
 
-    if args.phase == 'eval':
-        # No GPU, no WSI, no model -- everything needed is in the stores.
-        return eval_all(store_root, wsi_filter=args.wsi,
-                        poolings=tuple(args.poolings), out_txt=args.report,
-                        whitens=tuple(args.whitens))
-
-    combos = {}
+    levels = []
     for dataset in args.datasets:
         dataset_split = f'{dataset}#{args.split}'
         names = list_names(dataset=dataset_split)
@@ -1098,72 +1029,46 @@ def main() -> int:
             path = str(locate(name, dataset=dataset_split).path)
             if args.wsi and args.wsi not in path:
                 continue
-            slide = SafeSlide(path)
-            combos[path] = {lv for lv in range(slide.level_count)
-                            if not args.levels or lv in args.levels}
-            slide.close()
-    if not combos:
+            with SafeSlide(path) as slide:
+                lds = list(slide.level_downsamples)
+            levels += [Level(path, lv, ds, args, masks, cfg)
+                       for lv, ds in enumerate(lds)
+                       if not args.levels or lv in args.levels]
+    if not levels:
         sys.exit('no (slide, level) pairs matched')
+    print(f'cache {args.cache_job}   encoder {enc_names(cfg)[0]} '
+          f'{enc_names(cfg)[1]}   mask {masks.cfg.seg_id()}/{masks.cfg.region_id()}',
+          flush=True)
 
-    out_root = store_root
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'device={device}  out={out_root}')
+    if args.phase in ('dump', 'all'):
+        encoder = cfg.build(device)
+        print(f'device={device}  spec={encoder.model_spec}\n', flush=True)
+        stems = {}
+        for lv in levels:
+            stems.setdefault(lv.path, []).append(lv)
+        for path, todo in stems.items():
+            print(f'== {Path(path).stem}   levels {[lv.level for lv in todo]}',
+                  flush=True)
+            with SafeSlide(path) as slide:
+                mask, _ = masks.mask(slide)
+            if not mask.tissue_regions:
+                print('  no region survived the filters -- skipped', flush=True)
+                continue
+            for lv in todo:
+                try:
+                    dump_one(lv, mask=mask, masks=masks, encoder=encoder, args=args)
+                except Exception as e:                      # noqa: BLE001
+                    import traceback
+                    print(f'  L{lv.level} FAILED: {type(e).__name__}: {e}', flush=True)
+                    traceback.print_exc()
+        masks.close()
+        del encoder
 
-    # fp32 and single card on purpose -- this writes stores that existing ones
-    # have to stay comparable with. encoder_id is derived rather than typed, so
-    # a changed checkpoint or precision cannot keep the old name -- and neither
-    # can a changed encoder, which is why --encoder cannot collide with the
-    # stores already on disk.
-    # Passed only when given, so gigapath and uni2 keep the identity_id of the
-    # stores already on disk.
-    over = {'head': args.head} if args.head else {}
-    cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
-        .with_model(dtype='fp32')
-    encoder = cfg.build(device)
-    # The ModelOutputSpec itself: pooling_kinds and StoreMeta read dim / feat_hw /
-    # num_prefix off it by name, so there is nothing to convert.
-    spec = encoder.model_spec
-    encoder_id = encoder.identity_id()
-    print(f'spec={spec}\n')
-
-    masks = MaskMaker(mask_cfg_from_args(args), device=device,
-                      made_by=args.mask_cache_job)
-    print(f'reference draw {reference_config(args.k, args.seed).identity_id()}_'
-          f'{plan_label(args.k_floor, args.queries, args.seed)}   mask {masks.cfg.seg_id()}/'
-          f'{masks.cfg.region_id()}', flush=True)
-
-    for wsi_path, levels in sorted(combos.items()):
-        print(f'== {Path(wsi_path).stem}   levels {sorted(levels)}', flush=True)
-        slide = SafeSlide(wsi_path)
-        t0 = time.time()
-        # The recipe's segmentation and region prep, LocaScopePipeline's own.
-        # Level-independent, which is why it is here and the per-level "can
-        # this region host a tile" test lives in grid_coords.
-        mask, _ = masks.mask(slide)
-        print(f'  mask: tissue={mask.tissue_fraction() * 100:.1f}%  '
-              f'{len(mask.tissue_regions)} regions  '
-              f'({time.time() - t0:.0f}s)', flush=True)
-        if not mask.tissue_regions:
-            print('  no region survived the filters -- skipped', flush=True)
-            slide.close()
-            continue
-        n_per_level = args.queries
-        for lv in sorted(levels):
-            try:
-                dump_one(wsi_path, lv, out_root, mask=mask, masks=masks,
-                         encoder=encoder, device=device, spec=spec,
-                         k=args.k, k_floor=args.k_floor, n_query=n_per_level,
-                         seed=args.seed, encoder_id=encoder_id,
-                         batch_size=args.batch_size)
-            except Exception as e:                          # noqa: BLE001
-                import traceback
-                print(f'  L{lv} FAILED: {type(e).__name__}: {e}', flush=True)
-                traceback.print_exc()
-        slide.close()
-
-    masks.close()
-    print('\ndone. inspect with:')
-    print(f'  python utilities/cli/inspect_cache_store/inspect_feature_store.py {out_root} --pairs')
+    if args.phase in ('eval', 'all'):
+        report = args.report or str(Path(_paths.job_result_dir(
+            'TileRetrievalBench', encoder=enc_names(cfg)[0])) / 'reference_report.txt')
+        return eval_all(levels, poolings=tuple(args.poolings), out_txt=report,
+                        whitens=tuple(args.whitens))
     return 0
 
 

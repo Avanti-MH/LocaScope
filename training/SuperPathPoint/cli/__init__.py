@@ -16,12 +16,12 @@ from _paths import LOG_DIR, OUTPUT_ROOT, RESULT_DIR, job_result_dir  # noqa: F40
 
 # ── the pre-tile corpora every entry point here reads ──────────────────────
 #
-# ONE ROOT FOR ALL OF THEM. `made_by` is the job that produced a cache, and
+# ONE JOB FOR ALL OF THEM. `made_by` is the job that produced a cache, and
 # every SuperPathPoint corpus -- stage A from extract_pretiles, F's and C's
 # own from prepare_chain_stack, which calls the same writer -- is produced by
-# the one extraction code path. So they share `<PRETILE_JOB>_pretiles/`, the
-# corpus key tells them apart below it, and a reader names another job's root
-# only through `--pretile-cache-job`.
+# the one extraction code path. So they share PRETILE_JOB's tree, the corpus
+# address tells them apart in it (Store.PreTileCorpus), and a reader names
+# another job only through `--pretile-cache-job`.
 PRETILE_JOB = 'ExtractPreTiles'
 #: The mask SuperPathPoint's corpora are drawn through, and who made it.
 PRETILE_SEG = 'uni2_pca'
@@ -35,8 +35,7 @@ def add_pretile_args(ap, *, tile: bool = True) -> None:
     from TileSampler import PRE_TILE_FACTOR                        # noqa: PLC0415
     from TissueMaskConfig import MASK_RECIPES                      # noqa: PLC0415
     ap.add_argument('--pretile-cache-job', default=PRETILE_JOB,
-                    help='the job that made the pre-tiles: result/cache/'
-                         '<this>_pretiles/')
+                    help='the job whose cache tree holds the pre-tiles')
     ap.add_argument('--mask-cache-job', default=MASK_JOB,
                     help='the job whose cache holds the masks: result/cache/<this>/')
     ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default=PRETILE_SEG,
@@ -48,15 +47,18 @@ def add_pretile_args(ap, *, tile: bool = True) -> None:
         ap.add_argument('--tile', type=int, default=256)
 
 
-def pretile_root(args):
-    from Cache import cache_root                                   # noqa: PLC0415
-    return cache_root(args.pretile_cache_job, 'pretiles')
+def pretile_root(args) -> str:
+    """The job whose tree holds the pre-tiles: what `PreTileCorpus` takes as
+    its root."""
+    return args.pretile_cache_job
 
 
 # ── the two caches made from those corpora ───────────────────────────────────
 #
-# `<made_by>_<object>/` like every other cache: the producer defaults to its
+# In the producer's tree like every other cache: the producer defaults to its
 # own job name, a reader to the producer's, and either is named with the flag.
+# The labels sit beside the rung they were made from (`KeypointLabelStore`),
+# the chain-stack tiles under their slide (`ChainStack`).
 #: Who makes the keypoint labels: make_ha_labels.py, MakeHaLabels.sh.
 LABELS_JOB = 'MakeHaLabels'
 #: The chain-stack tile cache has no single producer: whichever entry point
@@ -66,30 +68,29 @@ LABELS_JOB = 'MakeHaLabels'
 
 
 def add_labels_args(ap, *, produces: bool = False) -> None:
-    """`--labels-cache-job`: whose keypoint labels, result/cache/<this>_
-    keypoint_labels/. The producer defaults to its own job name, a reader to
-    LABELS_JOB."""
+    """`--labels-cache-job`: whose tree holds the keypoint labels. The
+    producer defaults to its own job name, a reader to LABELS_JOB."""
     from Cache import job_name                                     # noqa: PLC0415
     ap.add_argument('--labels-cache-job',
                     default=job_name(LABELS_JOB) if produces else LABELS_JOB,
-                    help='the job that made the keypoint labels: result/cache/'
-                         '<this>_keypoint_labels/')
+                    help='the job whose cache tree holds the keypoint labels')
 
 
 def labels_root(args) -> str:
-    from Cache import cache_root                                   # noqa: PLC0415
-    return str(cache_root(args.labels_cache_job, 'keypoint_labels'))
+    """The job whose tree holds the keypoint labels: what
+    `KeypointLabelStore` takes as its root."""
+    return args.labels_cache_job
 
 
 def add_chainstack_args(ap, job: str, *, on: bool) -> None:
     """`--chainstack-cache-job` (default `job`, this entry point's own name):
-    whose chain-stack tiles, result/cache/<this>_chainstack/. `on` keeps the
+    whose chain-stack tiles (`slide=<s>/chainstack/` in its tree). `on` keeps the
     entry point's own default -- the analyses cache, prepare_chain_stack does
     not (RStack.from_own says why) -- and the flag flips it."""
     from Cache import job_name                                     # noqa: PLC0415
     ap.add_argument('--chainstack-cache-job', default=job_name(job),
                     help='the job whose chain-stack tile cache is read and '
-                         'written: result/cache/<this>_chainstack/')
+                         'written')
     if on:
         ap.add_argument('--no-chainstack-cache', dest='chainstack_cache',
                         action='store_false', help='read every tile fresh')
@@ -99,11 +100,11 @@ def add_chainstack_args(ap, job: str, *, on: bool) -> None:
 
 
 def chainstack_root(args):
-    """The tile cache's root, or None when it is switched off."""
-    from Cache import cache_root                                   # noqa: PLC0415
+    """The job whose tree holds the tile cache, or None when it is switched
+    off."""
     if not args.chainstack_cache:
         return None
-    return str(cache_root(args.chainstack_cache_job, 'chainstack'))
+    return args.chainstack_cache_job
 
 
 def corpus_from_args(args, name: str, rungs=None):

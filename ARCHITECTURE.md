@@ -364,6 +364,17 @@ config 的值只寫在一個地方：基礎模組裡的 RECIPES 表。每個 ent
 | `SAMPLER_RECIPES` | `utilities/TileSampler.py` | `lattice`（class 預設寫出來，給 diagnostic 當起點）、`reference-bank`（stage 1 的參考庫、tile bench 的參考 store） |
 | `FOV_RECIPES` | `query_sim/FovSupply.py` | `bench`（四個 bench 共用，`--fov`）、`plain`（class 預設寫出來）、`routing-query`、`routing-support-native`（MppRoutingHead 的兩個相機模板） |
 | `RECIPES` | `training/SuperPathPoint/common/Corpora.py` | `stageA`、`stageB-fOwn`、`stageB-cOwn` |
+| `KNN_RECIPES` | `stage1_estimation/KnnEstMpp.py` | `gigapath`、`uni2`（`--stage1 knn:<名>`） |
+| `CLASSIFIER_RECIPES` | `stage1_estimation/ClassifierEstMpp.py` | 範本 `gigapath-arcface`；一個 checkpoint 一個 entry，由使用者決定列哪些 |
+| `PROTOTYPE_RECIPES` | `stage1_estimation/PrototypeEstMpp.py` | 範本 `uni2-mean-cosine-tau` |
+| `CLASSIC_RECIPES` | `stage1_estimation/estimate_mpp_classic.py` | `default` |
+| `SLIDEWIN_RECIPES` | `stage2_retrieval/SlidingWinSimRot.py` | `gigapath`（`--stage2 slidewin:<名>`，k=100） |
+| `SIFT_RECIPES` | `stage3_localization/SIFT_RANSAC.py` | `default`（`--stage3 sift:<名>`，n_verify=10） |
+
+stage 的 recipe 一個方法一張表，放在方法自己的模組；每個 stage package 的 `__init__.py` 有一張 `METHODS`
+表（方法名 → 模組、表、class），`recipe('<方法>:<recipe>')` 用到才 import。一個 stage 結果的 id 是
+`<方法>-<recipe>-<16hex>`，hex 是 config 的 identity；覆寫過欄位的 config 標籤不變、hex 不同。classifier 和
+prototype 的 `weights` 是相對 `result/` 的路徑；建構時逐欄和 checkpoint 比對，不一致就拒絕。
 
 `FovRecipe` 是一批 FoV 的完整描述：`sensor`、`gap`（DomainGapConfig）、`sampler`（SamplerConfig）、
 `rungs`（`'native'` 表示每張 slide 自己的層，或明確的 ds tuple）、`max_ds`。它沒有自己的 id：
@@ -404,6 +415,8 @@ seg = replace(MASK_RECIPES['uni2_pca'].seg, workers=budget.workers)
    `RichnessConfig`、`OverlapConfig`、`InheritConfig`、`DomainGapConfig`、`TissueMaskConfig`、各個 `*SegConfig`、`FovRecipe`。
 4. **加 config flag 的 parser 必須 `allow_abbrev=False`**：用了 `add_config_args`、`add_fov_args`、
    `add_encoder_args` 的工具，否則 `--fov` 這類較短的 flag 可能被當成另一個 flag 的縮寫。
+5. **cache 路徑只在 `Cache.py` 拼**：其他程式碼（docstring、測試除外）不准有 glob 一層的字串（`'ds=*'`）、
+   路徑裡夾著 `/<kind>=` 的字串，也不准呼叫已刪除的 `cache_root`。要列出某層底下有什麼，用 `Address.children`。
 
 另外 `moved recipes are the same configs` 用凍結的舊寫法逐一比對：mask 四個、`lattice`、`reference-bank`、
 corpus 三個、routing 兩個，config 相等、id 相同；routing data record 寫死為 `e1b6e602ac441e1b`。
@@ -415,8 +428,50 @@ corpus 三個、routing 兩個，config 相等、id 相同；routing data record
 - **訓練 config**（`TrainerConfig`、`HaConfig`、`HeadConfig`、`RenderConfig` …）：由訓練腳本的 CLI 決定，
   值寫進 checkpoint 的 record。
 - **從存檔還原的 config**：`from_checkpoint`、`config_from_json`，值來自當時的紀錄。
-- **stage config**（`KnnEstMppConfig`、`SlidingWinSimRotConfig`）：目前由 `knn_estimator` 等函式的參數預設值決定，
-  要不要做成 recipe 尚未決定（見 `log/TODO.log`）。
+
+## Cache：每個 job 一棵樹
+
+所有 cache 都在 `result/cache/<made_by>/` 底下的一棵樹裡，`utilities/Cache.py` 是唯一拼路徑的地方。
+`Cache.TREE` 定義哪一層掛在哪一層下面，`Cache.ENTRIES` 定義每種 entry 掛在哪一層：
+
+```
+<made_by>/
+├── dataset=<key>/split/                                   WsiSplit（make_split.py 唯一寫入）
+└── slide=<stem>/
+    ├── mask/                                              MaskMaker
+    ├── chainstack/                                        ChainStack 讀過的 tile
+    └── seg=<seg_id>/region=<region_id>/
+        ├── grid=t<tile>-o<0|1>/features/                  FeatureMapCache（stage 2 的整層特徵）
+        └── plan=<PlanSpec.key()>/
+            ├── draw/                                      TileSampler.cached（index_<sampler>.csv）
+            └── draw=<sampler>/
+                ├── features/                              參考庫、tile bench 參考的特徵
+                ├── pretile=f<k>/ds=<d>/{tiles/, labels/}  SuperPathPoint 的 pre-tile、keypoint labels
+                ├── render/                                FovSupply.cached（render_<gap>.csv，選用 photos_<gap>/）
+                └── render=<gap>/
+                    ├── features/                          tile bench 的 query 與答案 tile
+                    ├── stage1/                            每個方法一個 variant
+                    └── stage1=<s1|oracle>/
+                        ├── stage2/
+                        └── stage2=<s2>/stage3/
+```
+
+- **`<kind>=<id>/` 是一個選定的輸入；`<kind>/` 是從同一個輸入算出來的兄弟 variant**，每個 variant 是
+  `record_<id>.json` 加上 `<role>_<id>.<ext>` 的檔案（`Cache.Entry`）。
+- **record 最後寫**（`Entry.writing`）：中途被殺的寫入讀起來是 miss。`Entry.status` 把存下的 record 和這次會寫的比對：
+  hit、miss，或 stale（列出不同的欄位），stale 就原地重算。record 裡有 config 的 parts、每段程式碼的 VERSION、
+  上游 id、函式庫版本；有 checkpoint 的 stage 另有檔案指紋。
+- **讀取方從自己的參數算地址**，不掃 root 找看起來對的東西。`Address.children(kind)` 只列一個已知地址正下方那一層，
+  給「這張 slide 這個 corpus 有哪些 rung」這種問題用。
+- **`made_by` 是產生 cache 的 job**：每個工具預設用自己的 job 名，讀別人的用 `--<kind>-cache-job`。
+- **features 的 variant id** 是 `Store.feature_id`：`[ds<d>-]<pooling>-<encoder tag>-<encoder config id>`。
+  用 config 的 id，不載入模型也算得出來（eval、畫圖）；weights 寫在 record 裡。
+- **stage 結果**：`bench_locascope`、`bench_stage1_mpp` 一張 slide 一個 stage 一個 entry，整張跑完才寫；
+  每個表都有 `index`（FoV 在 draw 裡的列號），真值在 render 的列裡，分析端（`plot_locascope.py`、
+  `analyze_stage1_metrics.py`）用同一組參數算出地址再 join。命中的 stage 不載入模型。
+- **刪除**：`utilities/cli/inspect_cache_store/purge_cache.py --job J --level slide=<s> seg=<id>`
+  刪整棵子樹（例如丟掉一個 mask recipe 底下的所有東西），`--entry K --id I` 刪一個 variant；
+  預設只列出，`--yes` 才刪。
 
 ## 原則
 

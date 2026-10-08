@@ -126,7 +126,7 @@ QUANTILES="${QUANTILES:-0.5 0.9 0.99}"
 # Which pre-tile cache the three axes' corpora are read from
 # (prepare_chain_stack.py's addresses; nothing is extracted here).
 PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
-# CHAINSTACK_CACHE_JOB: whose result/cache/<job>_chainstack/ tile cache to use
+# CHAINSTACK_CACHE_JOB: whose tile cache (result/cache/<job>/slide=<s>/chainstack/) to use
 # (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
 CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
 

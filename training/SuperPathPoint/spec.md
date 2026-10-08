@@ -2503,8 +2503,7 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 模組，所以存 hsv、hest 或 uni2_pca 的遮罩用同一個格式。
 
 第 2 支薄到只剩 argparse、迴圈、印進度；建構邏輯在 `MaskMaker.slide_mask`（未命中
-才建分割器）。`Store.py` 與 `utilities/cli/build_cache/build_reference_store.py` 是同一個
-分法，而 CLAUDE.md 說庫層不放 CLI 解析與 print。
+才建分割器）。這和 `Store.py` 是同一個分法：CLAUDE.md 說庫層不放 CLI 解析與 print。
 
 **每個遮罩檔存兩個 tensor**：`mask`（一片一個 bit / cell）與 `components`
 （`[rows, cols, k]` float16，581-814 MB）。理由在 §13 的 `background_threshold`：

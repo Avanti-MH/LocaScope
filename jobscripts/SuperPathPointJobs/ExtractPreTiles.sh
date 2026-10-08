@@ -252,11 +252,11 @@ OVERLAPPING_SHARE="${OVERLAPPING_SHARE:-$_ovshare}"
 # contract's mix.
 BUCKET_FRAME="${BUCKET_FRAME:-$_frame}"
 
-# ONE ROOT FOR EVERY CORPUS: result/cache/<CACHE_JOB>_pretiles/. Below it
+# ONE TREE FOR EVERY CORPUS: result/cache/<CACHE_JOB>/. In it
 # each corpus has its own address -- mask, region, sampler, rung plan, factor
 # (utilities/Store.py, PreTileCorpus) -- so re-extracting at another setting
 # adds a directory beside the old one, and a reader reads exactly one of them.
-# prepare_chain_stack.py writes F's and C's own corpora into the same root.
+# prepare_chain_stack.py writes F's and C's own corpora into the same tree.
 CACHE_JOB="${CACHE_JOB:-ExtractPreTiles}"
 # Which mask the tiles are cut through, and which job made it.
 SEG="${SEG:-uni2_pca}"
@@ -266,7 +266,7 @@ echo "======== ExtractPreTiles  corpus: stageA ========"
 echo "  tile $TILE   pre-tile $((TILE * 3))   n $N"
 echo "  chains: share $INHERIT_SHARE   source ds $INHERIT_SOURCE_RUNG   bucket $BUCKET_FRAME"
 echo "  lattice step $GRID_STEP   max overlap $MAX_OVERLAP"
-echo "  cache : result/cache/${CACHE_JOB}_pretiles/   mask: $SEG (${MASK_CACHE_JOB})"
+echo "  cache : result/cache/${CACHE_JOB}/   mask: $SEG (${MASK_CACHE_JOB})"
 echo "  slides: ${DATASETS} ${N_WSI:+(n $N_WSI each)} ${WSI}   rungs: ${DS:-DsLadder default}"
 echo ""
 
@@ -292,7 +292,7 @@ status=$?
 
 echo ""
 echo "======== done  (exit $status) ========"
-echo "  pre-tiles -> result/cache/${CACHE_JOB}_pretiles/<seg_id>/<slide>/<region>_<sampler>_<plan>/f3/ds<d>/"
+echo "  pre-tiles -> result/cache/${CACHE_JOB}/slide=<s>/.../draw=<sampler>/pretile=f3/ds=<d>/tiles/"
 echo "             (the corpus key is printed at the top of the log)"
 echo "  table     -> result/\${SLURM_JOB_NAME}/extract_pretiles.csv"
 echo ""

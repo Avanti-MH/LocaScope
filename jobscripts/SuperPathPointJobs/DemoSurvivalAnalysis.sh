@@ -63,7 +63,7 @@ PARTS="${PARTS:-chains_stack merge_grid visualize}"
 WSI_NAME="${WSI_NAME:-}"
 TILE="${TILE:-256}"
 C_RUNGS="${C_RUNGS:-1.0 2.0 4.0 8.0 16.0}"
-# CHAINSTACK_CACHE_JOB: whose result/cache/<job>_chainstack/ tile cache to use
+# CHAINSTACK_CACHE_JOB: whose tile cache (result/cache/<job>/slide=<s>/chainstack/) to use
 # (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
 CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
 PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-}"   # empty = ExtractPreTiles

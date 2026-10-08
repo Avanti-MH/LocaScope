@@ -1,8 +1,7 @@
 '''Stage 1 (mpp estimation) by a K-nearest-neighbour vote over a WSI's own
 pyramid, in the shape `StageInterface.MppEstimator` describes.
 
-    cfg = KnnEstMppConfig(encoder='gigapath')
-    est = KnnEstMpp(cfg, device).build(wsi)
+    est = KnnEstMpp(KNN_RECIPES['gigapath'], device).build(wsi, mask)
     result = est.estimate(query_img)   # query_img: RGB uint8 np.ndarray
 
 A KNN vote over whichever backbone `cfg.encoder` names (`TileEncoderFunc`'s
@@ -51,9 +50,10 @@ from TileEncoderFunc import encoder_config                              # noqa: 
 from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
 from TissueMask import TissueMask                        # noqa: E402
 from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
-                         TileSampler, native_plans)
+                         TileSampler)
 
-from stage1_estimation.StageInterface import EstMppResult, routed_level   # noqa: E402
+from stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
+                                              routed_level)
 from ReadGeometry import ReadSpec                                        # noqa: E402
 from SlideReader import SlideReader                                     # noqa: E402
 
@@ -96,9 +96,18 @@ class KnnEstMppConfig(IdentifiedConfig):
         default_factory=lambda: SAMPLER_RECIPES['reference-bank'])
     k: int = 5
     tile_size: int = 256
+    #: How many of each level's drawn tiles the vote uses -- the first ones of
+    #: the draw. None: every one. The draw (`sampler_cfg.n_per_rung`) is what is
+    #: cached; this picks from it, so several bank sizes share one draw.
+    n_per_level: Optional[int] = None
 
     BASELINE = {'mask_cfg': 'TissueMaskConfig', 'sampler_cfg': 'SamplerConfig',
-                'k': 5, 'tile_size': 256}
+                'k': 5, 'tile_size': 256, 'n_per_level': None}
+
+    def __post_init__(self):
+        if self.n_per_level is not None and self.n_per_level < 1:
+            raise ValueError(f'n_per_level must be positive or None, got '
+                             f'{self.n_per_level}')
 
 
 # ── result ───────────────────────────────────────────────────────────────────
@@ -125,6 +134,7 @@ class KnnClassifier:
     Debug state is stored after predict() for visualization:
         last_indices      [M, k] — which reference tiles each query patch matched
         last_patch_labels [M]    — per-patch median label before global median
+        last_sims         [M, k] — their cosines
     '''
 
     def __init__(self, ref_feats: torch.Tensor, ref_labels: np.ndarray, k: int = 5):
@@ -133,6 +143,7 @@ class KnnClassifier:
         self.k = k
         self.last_indices: Optional[torch.Tensor] = None    # [M, k]
         self.last_patch_labels: Optional[np.ndarray] = None # [M]
+        self.last_sims: Optional[torch.Tensor] = None       # [M, k]
 
     def predict(self, query_feats: torch.Tensor) -> float:
         '''query_feats: [M, D] L2-normalized. Returns median-of-medians label.'''
@@ -140,6 +151,7 @@ class KnnClassifier:
         sims = query_feats @ self.ref_feats.T          # [M, N]
         topk = sims.topk(k, dim=1)
         self.last_indices = topk.indices               # [M, k]
+        self.last_sims = topk.values                   # [M, k]
         self.last_patch_labels = np.median(
             self.ref_labels[self.last_indices.cpu().numpy()], axis=1
         )                                              # [M]
@@ -168,8 +180,11 @@ class KnnEstMpp(IdentifiedBuild):
         self.wsi = None
         self.mask: Optional[TissueMask] = None
         self.sampler: Optional[TileSampler] = None
+        self.plan = None
+        self.masks, self.cache_job = None, None
         self.ref_feats: Optional[torch.Tensor] = None    # [N, D]
         self.ref_mpps: Optional[List[float]] = None
+        self.ref_index: List[int] = []
         self.knn: Optional[KnnClassifier] = None
         self.qc: Optional[QueryPatchContainer] = None
         self.qfm: Optional[FeaturesMap] = None
@@ -178,13 +193,20 @@ class KnnEstMpp(IdentifiedBuild):
     # ── build: reference bank, sampled from the target WSI itself ───────────
 
     def build(self, wsi: Union[openslide.OpenSlide, str],
-             mask: Optional[TissueMask] = None) -> 'KnnEstMpp':
+              mask: Optional[TissueMask] = None, *, masks=None,
+              cache_job: Optional[str] = None) -> 'KnnEstMpp':
         '''Bind `wsi` and build its reference bank. Expensive -- see this
-        module's docstring for why, in contrast to `ClassifierEstMpp.build`.'''
+        module's docstring for why, in contrast to `ClassifierEstMpp.build`.
+
+        With `cache_job` (and `masks`, the MaskMaker `mask` came from) the
+        bank's draw is a cache entry and so are its encoded features, beside
+        it: `.../draw=<sampler>/features/features_<pooling>-<encoder>`. A
+        second build of the slide reads both and encodes nothing.'''
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
         self.wsi = wsi
         self.mask = mask
+        self.masks, self.cache_job = masks, cache_job
         self.sampler = None
         self.ref_feats = None
         self._build_samples()
@@ -199,38 +221,104 @@ class KnnEstMpp(IdentifiedBuild):
 
         One rung per PYRAMID level -- this bank's labels ARE the levels'
         mpps, so the magnifications are the slide's own and not a fixed
-        ladder. Why the default richness is as strict as it is: this bank is
-        the reference every query's mpp is voted against, so a tile that is
-        mostly background carries no scale information and only adds a wrong
-        neighbour -- see `SAMPLER_RECIPES['reference-bank']`.
+        ladder (`StageInterface.reference_bank`). Why the default richness is
+        as strict as it is: this bank is the reference every query's mpp is
+        voted against, so a tile that is mostly background carries no scale
+        information and only adds a wrong neighbour -- see
+        `SAMPLER_RECIPES['reference-bank']`.
         '''
-        if self.mask is None:
+        if self.mask is None and not self.cache_job:
             self.mask = self.cfg.mask_cfg.build(self.wsi, self.device)
-        self.sampler = TileSampler(self.wsi, self.mask, self.cfg.sampler_cfg)
-        self.sampler.sample(native_plans(self.wsi, self.cfg.tile_size))
+        if self.masks is not None and self.masks.cfg != self.cfg.mask_cfg:
+            raise ValueError('the MaskMaker passed to build() is not this '
+                             "estimator's mask recipe (cfg.mask_cfg)")
+        self.sampler, self.plan = reference_bank(
+            self.wsi, self.mask, self.cfg.sampler_cfg, self.cfg.tile_size,
+            masks=self.masks, cache_job=self.cache_job)
         return self.sampler
 
+    def _features_entry(self):
+        '''`(entry, id, record)` of the bank's features in the cache job's
+        tree, beside the draw; None without a cache job.'''
+        if not getattr(self, 'cache_job', None):
+            return None
+        from ConfigIdentity import record                             # noqa: PLC0415
+        from Store import FeatureStore, feature_id                    # noqa: PLC0415
+        sid = self.cfg.sampler_cfg.identity_id()
+        entry = TileSampler.draw_address(
+            self.cache_job, self.sampler.slide, self.masks.cfg, self.plan
+        ).at(draw=sid).entry('features')
+        rec = record(self.encoder, also=(FeatureStore, SlideReader), draw=sid)
+        return entry, feature_id(self.encoder, self.encoder.feature_pooling), rec
+
     def _build_ref_features(self) -> torch.Tensor:
-        '''Encode all sampled tiles; build the KnnClassifier.'''
+        '''Encode all sampled tiles -- or read them back from the cache --
+        and build the KnnClassifier.'''
         if self.sampler is None:
             self._build_samples()
-        # Straight off the slide through SlideReader: the level rule, level px
-        # and filter every other read in the project uses. Native plans need
-        # no resampling; 'area' is the ladder's filter where one would.
-        images = SlideReader(self.wsi, resize='area').read_samples(
-            self.sampler, ReadSpec(self.cfg.tile_size, self.cfg.tile_size))
-        self.ref_feats = self.encoder(images)               # [N, D]
+        cached = self._features_entry()
+        self.ref_feats = None
+        if cached is not None:
+            from Store import FeatureStore                            # noqa: PLC0415
+            entry, fid, rec = cached
+            state, diff = entry.status(fid, rec)
+            if state == 'hit':
+                tensors, _ = FeatureStore.load(FeatureStore.path(entry, fid))
+                self.ref_feats = tensors['features'][:, 0].to(self.device)
+            elif state == 'stale':
+                print(f'  [knn bank] {entry.record_path(fid)} is stale, encoding '
+                      f'again: ' + '; '.join(diff), flush=True)
+        if self.ref_feats is None:
+            # Straight off the slide through SlideReader: the level rule, level
+            # px and filter every other read in the project uses. Native plans
+            # need no resampling; 'area' is the ladder's filter where one would.
+            images = SlideReader(self.wsi, resize='area').read_samples(
+                self.sampler, ReadSpec(self.cfg.tile_size, self.cfg.tile_size))
+            self.ref_feats = self.encoder(images)               # [N, D]
+            if cached is not None:
+                self._save_ref_features(*cached)
         # mpp is derived here rather than carried on the tile. It was a copy
         # of `base_mpp * level_downsample` stored at sampling time, and a
         # stored copy of a derived number is one that can go stale against
         # the handle it came from -- which is exactly what a KNN's LABELS
         # must not do.
+        metas = [s.meta for s in self.sampler]
+        #: The draw rows the vote uses: the first `n_per_level` of each level.
+        self.ref_index = _first_per_level(metas, self.cfg.n_per_level)
         self.ref_mpps = [self.wsi.base_mpp
-                         * self.wsi.level_downsamples[s.meta.level]
-                         for s in self.sampler]
+                         * self.wsi.level_downsamples[metas[j].level]
+                         for j in self.ref_index]
         self.knn = KnnClassifier(
-            self.ref_feats, np.array(self.ref_mpps), k=self.cfg.k)
+            self.ref_feats[self.ref_index], np.array(self.ref_mpps), k=self.cfg.k)
         return self.ref_feats
+
+    def _save_ref_features(self, entry, fid, rec) -> None:
+        from Store import FeatureMeta, FeatureStore, encoder_names    # noqa: PLC0415
+        feats = self.ref_feats.detach()
+        if feats.dtype not in (torch.float16, torch.float32):
+            feats = feats.float()
+        metas = [s.meta for s in self.sampler]
+        pooling = self.encoder.feature_pooling
+        spec = self.encoder.model_spec
+        n = len(metas)
+        meta = FeatureMeta(
+            wsi_stem=self.sampler.slide,
+            wsi_path=str(getattr(self.wsi, '_filename', '') or ''),
+            level=-1, ds=0.0, mpp=0.0, base_mpp=float(self.wsi.base_mpp),
+            tile_size=self.cfg.tile_size, overlap=False, pooling=pooling,
+            slots=(pooling,), slot_layout='none', dim=int(feats.shape[-1]),
+            feat_hw=spec.feat_hw, num_prefix=spec.num_prefix,
+            encoder_id=encoder_names(self.encoder)[1],
+            seg_id=self.masks.cfg.seg_id(), region_id=self.masks.cfg.region_id(),
+            coverage='sample', n_available=n, n_tiles=n,
+            sampler_id=self.cfg.sampler_cfg.identity_id(), plan=self.plan.key(),
+            sample_seed=int(self.cfg.sampler_cfg.seed))
+        FeatureStore.save(
+            entry, fid, rec, meta=meta, features=feats.unsqueeze(1),
+            x=torch.tensor([m.x for m in metas], dtype=torch.int32),
+            y=torch.tensor([m.y for m in metas], dtype=torch.int32),
+            extra={'level': torch.tensor([m.level for m in metas],
+                                         dtype=torch.int16)})
 
     # ── per-query ────────────────────────────────────────────────────────
 
@@ -286,19 +374,56 @@ class KnnEstMpp(IdentifiedBuild):
             chosen_ds=chosen_ds, chosen_mpp=chosen_mpp,
             chosen_level=chosen_level)
 
+    def neighbour_rows(self) -> List[dict]:
+        '''The last `estimate`'s vote as table rows, one per (query patch, k):
+        the reference tile it matched -- `ref_index` is the tile's row in this
+        slide's bank draw, `ref_level` and `ref_ds` its label -- and their
+        cosine. Patches in the order `estimate` voted them.'''
+        if self.knn is None or self.knn.last_indices is None:
+            return []
+        metas = [s.meta for s in self.sampler]
+        idx = self.knn.last_indices.cpu().numpy()
+        sims = self.knn.last_sims.float().cpu().numpy()
+        out = []
+        for p in range(idx.shape[0]):
+            for k in range(idx.shape[1]):
+                j = self.ref_index[int(idx[p, k])]
+                m = metas[j]
+                out.append(dict(patch=p, k=k + 1, ref_index=j,
+                                ref_level=int(m.level),
+                                ref_ds=float(self.wsi.level_downsamples[m.level]),
+                                ref_x=int(m.x), ref_y=int(m.y),
+                                cosine=float(sims[p, k])))
+        return out
 
-def knn_estimator(encoder_name: str, mask_cfg: TissueMaskConfig,
-                  tile_size: int = 256, samples: int = 40, k: int = 5,
-                  seed: int = 42,
-                  device: Union[str, torch.device, None] = None) -> KnnEstMpp:
-    '''The KNN estimator with the pipeline's reference bank: `samples` tiles per rung, the bank's richness, overlap
-    sampling. `mask_cfg` names the recipe of the mask its build() will be
-    handed, so its identity says where that mask came from.'''
-    if device is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    cfg = KnnEstMppConfig(
-        encoder=encoder_name, mask_cfg=mask_cfg,
+
+#: Named KNN estimators, every field written out (test_config_identity's recipe
+#: lint); `--stage1 knn:<name>`. The reference bank is 40 tiles per pyramid
+#: level under the reference-bank recipe; `mask_cfg` is the recipe of the mask
+#: build() is handed, so a caller searching another mask replaces it.
+KNN_RECIPES: Dict[str, KnnEstMppConfig] = {
+    'gigapath': KnnEstMppConfig(
+        encoder='gigapath', mask_cfg=MASK_RECIPES['hest'],
         sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'],
-                            n_per_rung=samples, seed=seed),
-        k=k, tile_size=tile_size)
-    return KnnEstMpp(cfg, device=device)
+                            n_per_rung=40, seed=42),
+        k=5, tile_size=256, n_per_level=None),
+    'uni2': KnnEstMppConfig(
+        encoder='uni2', mask_cfg=MASK_RECIPES['hest'],
+        sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'],
+                            n_per_rung=40, seed=42),
+        k=5, tile_size=256, n_per_level=None),
+}
+
+
+def _first_per_level(metas, n: Optional[int]) -> List[int]:
+    """Rows of `metas` (a draw, in its order) keeping the first `n` of each
+    level; every row when `n` is None."""
+    if n is None:
+        return list(range(len(metas)))
+    seen: Dict[int, int] = {}
+    out = []
+    for j, m in enumerate(metas):
+        seen[m.level] = seen.get(m.level, 0) + 1
+        if seen[m.level] <= n:
+            out.append(j)
+    return out
