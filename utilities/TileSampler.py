@@ -193,10 +193,11 @@ second thing to keep in step with them.
 
 PERSISTENCE
 ============
-`save()` writes the metadata table: `index.csv` and `meta.json`, the layout
-`Store.PreTileStore` uses, whose PNGs `extract_pretiles` writes through a
-camera. The axis columns join `index.csv`; `stack_kind` and the config belong
-to the batch and go in `meta.json`.
+`save()` writes the metadata table: `index.csv` and `meta.json`. Pixels are
+never written: whoever reads a draw reads them on demand through a camera
+(SuperPathPoint's `Corpora.Corpus.read`, `FovSupply`). The axis columns join
+`index.csv`; `stack_kind` and the config belong to the batch and go in
+`meta.json`.
 
 THE CONTROL ARM
 ================
@@ -296,8 +297,8 @@ class PlanSpec:
             base = 'native'
         else:
             base = 'ladder-' + '-'.join(f'{r:g}' for r in self.rungs)
-        # '-', never '_': a cache directory is `<region_id>_<sampler_id>_<plan>`
-        # and `PreTileCorpus` splits it on the first two underscores
+        # '-', never '_': the key is a `plan=` level value, and Cache admits
+        # no `_` in one (`Cache._NAME`)
         return f'{base}-{self.camera.key()}'
 
     def plans_for(self, wsi) -> List[RungPlan]:
@@ -905,7 +906,7 @@ class SamplerConfig(IdentifiedConfig):
 #:                 buckets that admits, on the disjoint lattice.
 SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
     'lattice': SamplerConfig(
-        n_per_rung=500, seed=0,
+        n_per_rung=100, seed=0,
         richness=RichnessConfig(
             scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
             floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
@@ -920,7 +921,7 @@ SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
                               on_incomplete='drop'),
         candidates='lattice', max_tries_per_tile=5),
     'reference-bank': SamplerConfig(
-        n_per_rung=500, seed=0,
+        n_per_rung=100, seed=0,
         richness=RichnessConfig(
             scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
             floors=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -1985,9 +1986,8 @@ class TileSampler:
         """`index.csv` + `meta.json`: coordinates and metadata, with the
         pixels read on demand by whoever loads it, through a camera.
 
-        The layout is `Store.PreTileStore`'s, not a second one. What this adds
-        is the axis columns. Pixels are not written here: `extract_pretiles`
-        is the one writer of them.
+        Pixels are not written here: a reader of the draw reads them through a
+        camera.
         """
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)

@@ -250,7 +250,7 @@ ViT 那條多一個要學的隨機模組，結果會混進「upsample 學不學�
 | 檔案 | 內容 |
 |---|---|
 | `SurvivalAnalysis/ChainStack.py` | 見下 |
-| `test_modules/TestSuperPathPoint/test_chain_stack.py` | 21 個測試：幾何/本地快取（原本在 `test_survival.py` 的部分）+ `own`（`from_tile`/`base_rung`/三個 `from_own`，都對著假 `PreTileStore` fixture） |
+| `test_modules/TestSuperPathPoint/test_chain_stack.py` | 21 個測試：幾何/本地快取（原本在 `test_survival.py` 的部分）+ `own`（`from_tile`/`base_rung`/三個 `from_own`，都對著假 corpus fixture：draw 給定、像素用畫的） |
 | `jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh` | `chain-stack` stage |
 | `cli/prepare_chain_stack.py` / `jobscripts/.../PrepareChainStack.sh` | 一條龍入口，見下 |
 
@@ -270,15 +270,14 @@ ViT 那條多一個要學的隨機模組，結果會混進「upsample 學不學�
   的降解——比 `base_rung=1` 更模糊，不是「差不多模糊」，確認過是刻意的。
   `footprint(..., base_rung=...)` 要跟著回報真正的窗口大小。（`SurvivalMeta`
   還沒有 `base_rung` 欄位，等真的有非 1.0 的呼叫端再補。）
-- **C**：子嗣純幾何算出來（`CStack.pyramid`），不需要 TileSampler/PreTileStore/
-  inherit。母 tile 兩個來源：重用 F 讀過的同中心同階，或 own（`stageB-cOwn`，
+- **C**：子嗣純幾何算出來（`CStack.pyramid`），不需要 corpus/inherit。母 tile 兩個來源：重用 F 讀過的同中心同階，或 own（`stageB-cOwn`，
   單一階、只抽 5 張，還沒抽）。
 
 **own 的兩層架構**：`RStack.from_tile(image, base_rung, rungs, tile=...)` 是
 三個來源共用的底層原語——一張已讀進來的圖 + 它自己的 ds → 一個 RStack，純函式，
 不吃 `Chain`/`wsi`/store。`derive(chain, ..., source=...)` 是 F/C 來源的單條
 chain 便利包裝，內部呼叫 `from_tile`；**`source='own'` 故意不是這裡的分支**——
-own 的 tile 是獨立的 `PreTileStore` record，沒有 `Chain` 可餵，傳
+own 的 tile 是 corpus 裡獨立的一個位置，沒有 `Chain` 可餵，傳
 `source='own'` 進 `derive` 直接 `ValueError`。
 
 列舉層 `from_own`（`FStack`/`RStack`/`CStack` 各自一個，留在 `ChainStack.py`
@@ -287,31 +286,27 @@ own 的 tile 是獨立的 `PreTileStore` record，沒有 `Chain` 可餵，傳
 metadata 一直都在，pixel 只有 `__getitem__` 才讀）：
 
 - `FStack.from_own` → `OwnChains`，`x[inherit_id]` 呼叫 `FStack.read`
-- `RStack.from_own` → `OwnTiles`，位置索引（不是 `record.index`——own 的批次
-  可能橫跨好幾階、好幾個資料夾，`record.index` 只在同一資料夾內唯一），`x[i]`
-  讀 `PreTileStore.read_tile` 再呼叫 `from_tile`。`cache_root` 預設關——
+- `RStack.from_own` → `OwnTiles`，位置索引（own 的批次可能橫跨好幾階），`x[i]`
+  用 `Corpus.read` 讀 pre-tile、裁中心，再呼叫 `from_tile`。`cache_root` 預設關——
   `degrade_resolution` 只是記憶體裡的 resize，不像 WSI 讀取那麼貴，大規模跑
   的時候開它只是白花磁碟 IO，只有 demo/小量重複讀才需要
 - `CStack.from_own` → `OwnForest`，跟 F/R 不一樣的地方：整片森林的幾何在
-  `from_own()` 當下就全部建好，`x[i]` 才讀像素——母 tile 直接是這筆 record
-  自己的 store 像素，子嗣仍要 `wsi`（子嗣永遠沒有 store 版本）。回傳
+  `from_own()` 當下就全部建好，`x[i]` 才讀像素——母 tile 直接是 corpus 這個
+  位置的像素，子嗣仍要 `wsi`（子嗣的位置是算出來的，不在任何 draw 裡）。回傳
   `(mother, mother_image, groups_by_ds, images_by_ds)`，母子的圖都在
 
 其他順手做的：`CStack.read` 改名 `read_tree`（跟 `FStack.read`/`RStack.derive`
 同名不同形狀的問題，`OwnForest.__getitem__` 開始呼叫它之後不再是死碼）；
-`PreTileStore.read_tile`+`centre_crop` 抽成共用的 `_read_store_tile`（原本在
+讀 pre-tile + `centre_crop` 抽成共用的 `_read_store_tile`（原本在
 `FStack.read`/`OwnTiles`/`OwnForest` 三處各寫一次）；`chains()`/
 `Datasets.py`（`HomographyPairDataset.build()`）都加了可選的 `sampler_id`
 參數，`result/cache/tiles/` 現在一個根目錄裝下 stageA 跟全部 own 語料，不用
 `tiles_chains` 這種另開目錄的方式分開。
 
-**`cli/prepare_chain_stack.py`**：決定三軸各自的 `sampler_id`，直接從
-`_RECIPES`（F/C own 兩份 `SamplerConfig` 的唯一定義）算出 `sampler_id()`，不
-猜磁碟上哪個 store 屬於誰。找不到就直接用 `MaskStore`/`TissueMask` 讀
-mask，呼叫（重構成吃關鍵字參數的）`extract_pretiles._extract_slide` 現場抽——
-同一個 process，不開 subprocess，不碰 `ExtractPreTiles.sh`。R 一律指向
-`stageA`，找不到就報錯請人去跑 `ExtractPreTiles.sh`，不會現抽——那是獨立、
-人工跑的訓練語料，不該是這裡的 side effect。
+**`cli/prepare_chain_stack.py`**：三軸各自的 corpus 從 `Corpora.RECIPES`
+（`AXIS_RECIPE`）算出來，不猜磁碟上哪個屬於誰。corpus 就是一個 draw：第一次讀
+那張 slide 時由 `TileSampler.cached` 抽（mask 走 `MaskMaker`），之後讀回；像素
+在 `from_own(...)[i]` 時才讀。R 讀 `stageA`。
 
 寫的過程中抓到的真的 bug（供以後參考）：`OwnTiles.__getitem__` 一度少了
 `centre_crop`（會把整張 pre-tile 硬縮成 tile，不是裁中心那塊）；重構
@@ -627,15 +622,10 @@ spec.md §3.2「歸因」一節。2.3 的相依型比對能替「鄰域新生（
 
 ## 3. 訓練有語意的 keypoint
 
-### 3.0 pretile 抽取要不要能在 process 內跑（還沒決定）
+### 3.0 pretile 抽取
 
-2.1③ 的 `prepare_chain_stack.py` 現在用**選項 A**：subprocess 呼叫
-`extract_pretiles.py` 做現抽現用，不動它的程式碼。**選項 B** 記在這裡，還沒決定
-要不要做：把 `extract_pretiles.py` 的 `_plans_for`/`_sampler_config`/
-`_extract_slide` 從吃 `argparse.Namespace` 改成吃關鍵字參數，讓抽取能在同一個
-process 內跑，不用開 subprocess。等 Stage C 真的要把三軸包成 dataset 餵
-dataloader、subprocess 的開銷（每個 sample 開一個新 python process）撐不住的
-那天，再回頭做 B。
+沒有抽取這一步了：corpus 是一個 draw，像素在 dataset 的 `__getitem__` 裡讀
+（`Corpora.Corpus.read`，每個 worker 自己開 reader）。
 
 硬依賴：label 就是 2.5 的決定 + 2.2-2.4 的輸出。
 

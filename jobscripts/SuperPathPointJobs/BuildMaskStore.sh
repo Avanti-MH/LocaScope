@@ -125,7 +125,7 @@ echo ""
 
 # No --fit-tiles: the recipe (MASK_RECIPES['uni2_pca']) is the one place the
 # fit size lives. Overriding it here would give the masks a different seg_id,
-# and probe_tile_yield / extract_pretiles / prepare_chain_stack -- which read
+# and probe_tile_yield / the SuperPathPoint corpora -- which read
 # the plain recipe -- would then find no mask at all.
 python utilities/cli/build_cache/build_mask_store.py \
   "${SLIDES[@]}" \

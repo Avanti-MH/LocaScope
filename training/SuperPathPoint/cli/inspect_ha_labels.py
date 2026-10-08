@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """spec.md 12 step 5: the decision point. Are these labels worth training on?
 
-    python training/SuperPathPoint/cli/inspect_ha_labels.py
-    python training/SuperPathPoint/cli/inspect_ha_labels.py --with-model --tiles 8
+    python training/SuperPathPoint/cli/inspect_ha_labels.py --datasets 'bracs/test#val'
+    python training/SuperPathPoint/cli/inspect_ha_labels.py --wsi BRACS_1228 --with-model --tiles 8
 
 Outputs (in result/<SLURM_JOB_NAME or InspectHaLabels>/):
     ha_labels__<slide>_ds<d>.png
@@ -69,12 +69,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                   # noqa: E402
 import numpy as np                                                # noqa: E402
 
-from cli import (add_corpus_arg, add_labels_args, add_pretile_args,  # noqa: E402
-                 corpus_arg, job_result_dir, labels_root, pretile_root)
+from cli import (add_corpus_args, add_labels_args, add_slides_args,  # noqa: E402
+                 corpus_arg, job_result_dir, labels_root, slides_from_args)
 
 
+from Cache import wsi_stem_of                                     # noqa: E402
 from common import KeypointLabelStore                # noqa: E402
-from Store import PreTileCorpus, PreTileStore                    # noqa: E402
 from common.KeypointLabelStore import points_from_prob             # noqa: E402
 from TileSampler import centre_crop  # noqa: E402
 
@@ -107,12 +107,10 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_labels_args(ap)
-    # --pretile-cache-job, --seg, --tile, --corpus: whose labels to read is
-    # computed from the corpus they were made on, rung by rung
-    add_pretile_args(ap)
-    add_corpus_arg(ap)
-    ap.add_argument('--wsi-stem', nargs='*', default=None,
-                    help='slides to read; default every slide the corpus has')
+    # --corpus, --seg, --tile, the jobs: whose labels to read is computed
+    # from the corpus they were made on, slide by slide
+    add_corpus_args(ap)
+    add_slides_args(ap)
     ap.add_argument('--ds', type=float, nargs='*', default=None)
     ap.add_argument('--examples', type=int, default=3,
                     help='tiles drawn with their points, per label set')
@@ -132,34 +130,26 @@ def main():
 
     corpus = corpus_arg(args)
     paths = []
-    for stem in (args.wsi_stem or corpus.slides()):
-        for folder in corpus.rung_dirs(stem):
-            ds = PreTileStore.load_meta(folder).ds
-            paths += KeypointLabelStore.find(args.labels_root, wsi_stem=stem,
-                                             ds=ds, pretile_id=corpus.key)
+    for slide in slides_from_args(args):
+        for ds, tiles in corpus.tiles(slide, args.ds).items():
+            paths += [(p, tiles) for p in KeypointLabelStore.find(
+                args.labels_root, corpus, wsi_stem=wsi_stem_of(slide), ds=ds)]
     if not paths:
         print(f'no labels in the tree of {args.labels_root} for corpus {corpus.key}. '
               f'Run cli/make_ha_labels.py first.')
         return 1
 
     rows = []
-    for path in paths:
-        meta = KeypointLabelStore.load_meta(path)
-        if args.wsi_stem and meta.wsi_stem not in args.wsi_stem:
-            continue
-        if args.ds and not any(abs(meta.ds - d) < 1e-6 for d in args.ds):
-            continue
-
+    for path, tiles in paths:
         batch, meta = KeypointLabelStore.load(path)
         print(f'\n{meta.wsi_stem}  ds {meta.ds:g}  tile {meta.tile}', flush=True)
         print(f'  {len(batch)} tiles   n_kp mean {meta.mean_n_kp:.0f}  '
               f'min {batch.n_kp.min()}  max {batch.n_kp.max()}  '
               f'cap {batch.cap}  at-cap {batch.at_cap}', flush=True)
 
-        folder = _pretiles_for(pretile_root(args), meta)
-        agreement = (_agreement(folder, meta, args) if args.with_model and folder
+        agreement = (_agreement(corpus, tiles, meta, args) if args.with_model
                      else {})
-        figure = _draw(batch, meta, folder, agreement, out_dir, args)
+        figure = _draw(batch, meta, corpus, tiles, agreement, out_dir, args)
         print(f'  figure -> {os.path.basename(figure)}', flush=True)
 
         row = {'wsi_stem': meta.wsi_stem, 'ds': meta.ds, 'tile': meta.tile,
@@ -192,24 +182,7 @@ def main():
     return 0
 
 
-def _pretiles_for(root, meta):
-    """The pre-tile rung these labels were made from, or None.
-
-    Addressed by `pretile_id`, the corpus key the labels recorded, not by
-    (slide, rung): two extractions of the same slide and rung differ in seed or
-    sampler, and drawing the labels of one over the images of the other would
-    look almost right.
-    """
-    folder = PreTileCorpus.from_key(root, meta.pretile_id).rung_dir(
-        meta.wsi_stem, meta.ds)
-    if (folder / 'index.csv').exists():
-        return folder
-    print(f'  no finished pre-tile rung at {folder}; drawing without images',
-          flush=True)
-    return None
-
-
-def _agreement(folder, meta, args):
+def _agreement(corpus, tiles, meta, args):
     """Two independent HA runs per tile, scored against a shifted decoy."""
     import torch                                                  # noqa: PLC0415
 
@@ -219,11 +192,11 @@ def _agreement(folder, meta, args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ha = HaConfig(num=args.num).build(TeacherConfig().build(device))
 
-    records = PreTileStore.load_index(folder)[:int(args.tiles)]
+    records = tiles[:int(args.tiles)]
     shift = 2 * int(meta.nms_radius) + 1
     hits, decoys = [], []
     for record in records:
-        pre = PreTileStore.read_tile(folder, record)
+        pre = corpus.read(record)
         sets = []
         for seed in (11, 22):        # two draws, not two seeds of one draw
             result = ha.run(pre, meta.tile, rng=np.random.default_rng(seed),
@@ -266,15 +239,14 @@ def _match_rate(a: np.ndarray, b: np.ndarray, radius: int) -> float:
     return float((delta.max(axis=2).min(axis=1) <= radius).mean())
 
 
-def _draw(batch, meta, folder, agreement, out_dir, args):
+def _draw(batch, meta, corpus, tiles, agreement, out_dir, args):
     """One figure per label set: examples, n_kp, scores, coverage."""
     n_examples = min(int(args.examples), len(batch))
     fig, axes = plt.subplots(2, max(n_examples, 3),
                              figsize=(4.2 * max(n_examples, 3), 8.6),
                              squeeze=False)
 
-    records = PreTileStore.load_index(folder) if folder else []
-    by_position = {(r.x, r.y): r for r in records}
+    by_position = {(t.meta.x, t.meta.y): t for t in tiles}
 
     for i in range(max(n_examples, 3)):
         ax = axes[0][i]
@@ -282,9 +254,8 @@ def _draw(batch, meta, folder, agreement, out_dir, args):
             ax.axis('off')
             continue
         record = by_position.get((int(batch.tile_x[i]), int(batch.tile_y[i])))
-        if folder and record is not None:
-            image = centre_crop(PreTileStore.read_tile(folder, record),
-                                int(meta.tile))
+        if record is not None:
+            image = centre_crop(corpus.read(record), int(meta.tile))
             ax.imshow(image)
         else:
             ax.set_facecolor('0.9')

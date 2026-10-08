@@ -87,7 +87,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #                                              span decoy, the 0.5 gate, views,
 #                                              the tiled read, the mask cache
 #   store        test_store.py                 the stores: layout, identity,
-#                                              round trips, and the refusals
+#                test_corpora.py               round trips, and the refusals
 #                test_keypoint_label_store.py  that keep a reader from getting
 #                                              the WRONG artefact rather than
 #                                              none
@@ -109,7 +109,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #                                              real model can say what its patch
 #                                              size and its input size are
 #   ladder-wsi   test_ds_ladder.py --wsi       the plan for a real 4x and a
-#                                              real 2x pyramid, printed
+#                test_corpora.py --wsi         real 2x pyramid, printed; a
+#                                              corpus read centred on its tile
 #   demo         demo_homography.py            the figure, synthetic + a WSI tile
 #   seg          test_uni2_pca_seg.py          step 3a's segmenter. Loads UNI2,
 #                                              and with backbone-model one of
@@ -274,8 +275,10 @@ for stage in $STAGES; do
       # data, no model. The typed-geometry regression (a mask_ds that came
       # back as the string '14.0' after six correct mask files had been
       # written) lives with SlideMask now, in the `mask` stage above.
-      run "store  (features, map cache, pre-tile corpora: address, codec)" \
+      run "store  (features, map cache: address, codec)" \
         python utilities/test_modules/test_store.py
+      run "store  (corpus: the key and the draw's address)" \
+        python "$TESTS"/test_corpora.py
       run "store  (label store: threshold/NMS/border/cap, padding, two rounds)" \
         python "$TESTS"/test_keypoint_label_store.py
       ;;
@@ -589,6 +592,12 @@ for stage in $STAGES; do
       run "ladder-wsi  2x pyramid  $(basename "$WSI_2X")" \
         python "$TESTS"/test_ds_ladder.py \
           --wsi "$WSI_2X" --tile-size "$TILE"
+      # A corpus reads its pre-tiles on demand: the centre crop must be the
+      # tile at the draw's position, against the tile one step over.
+      run "ladder-wsi  corpus read  $(basename "$WSI_4X")" \
+        python "$TESTS"/test_corpora.py --wsi "$WSI_4X"
+      run "ladder-wsi  corpus read  $(basename "$WSI_2X")" \
+        python "$TESTS"/test_corpora.py --wsi "$WSI_2X"
       ;;
 
     demo)

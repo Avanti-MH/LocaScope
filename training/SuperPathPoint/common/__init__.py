@@ -11,8 +11,6 @@ from common import KeypointLabelStore
 from common.KeypointLabelStore import (LabelBatch, LabelMeta, LabelMismatch,
                                        batch_from_lists, cap_for,
                                        nms_max_pool, points_from_prob)
-from Store import (PreTileCorpus, PreTileMeta, PreTileRecord, PreTileStore,
-                   StoreMismatch)
 from TileSampler import (PRE_TILE_FACTOR, centre_crop, centre_margin,
                          pre_tile_px)
 from common.Homography import (HOMOGRAPHY_DEFAULTS, HomographySample,
@@ -40,14 +38,11 @@ __all__ = [
     'ShapeMismatch',
     # DsLadder
     'DEFAULT_RUNGS', 'DsLadder', 'RungPlan', 'LEVEL_REL_TOL',
-    # Pre-tiles (utilities/Store.py). `PreTileStore` is a namespace class --
-    # `.create` / `.save_tile` / `.load_index` -- and `PreTileCorpus` is the
-    # key a reader passes to find one extraction.
-    'PreTileStore', 'PreTileCorpus', 'PreTileMeta', 'PreTileRecord',
-    'StoreMismatch', 'PRE_TILE_FACTOR', 'pre_tile_px', 'centre_margin',
-    'centre_crop',
-    # KeypointLabelStore. The module for the same reason as above -- `save`,
-    # `load` and `find_one` are names three stores here share.
+    # The pre-tile geometry (utilities/TileSampler.py). A corpus is
+    # common/Corpora.Corpus, imported by name.
+    'PRE_TILE_FACTOR', 'pre_tile_px', 'centre_margin', 'centre_crop',
+    # KeypointLabelStore: the module, because `save`,
+    # `load` and `find_one` are generic names.
     'KeypointLabelStore', 'LabelBatch', 'LabelMeta', 'LabelMismatch',
     'points_from_prob', 'nms_max_pool', 'batch_from_lists', 'cap_for',
 ]

@@ -123,9 +123,9 @@ DECOY_SEED="${DECOY_SEED:-0}"
 
 QUANTILES="${QUANTILES:-0.5 0.9 0.99}"
 
-# Which pre-tile cache the three axes' corpora are read from
-# (prepare_chain_stack.py's addresses; nothing is extracted here).
-PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
+# Whose cache the three axes' draws are read from (prepare_chain_stack.py's
+# addresses); a draw not there yet is drawn into it.
+DRAW_CACHE_JOB="${DRAW_CACHE_JOB:-SuperPathPointCorpus}"
 # CHAINSTACK_CACHE_JOB: whose tile cache (result/cache/<job>/slide=<s>/chainstack/) to use
 # (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
 CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
@@ -156,7 +156,7 @@ echo ""
 python training/SuperPathPoint/cli/survival_alpha_analysis.py \
   --checkpoint "$CHECKPOINT" \
   --wsi-name "$WSI_NAME" \
-  --pretile-cache-job "$PRETILE_CACHE_JOB" \
+  --draw-cache-job "$DRAW_CACHE_JOB" \
   --tile "$TILE" \
   --rungs $RUNGS \
   --c-rungs $C_RUNGS \

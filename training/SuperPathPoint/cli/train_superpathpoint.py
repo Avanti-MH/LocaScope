@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
-from cli import (add_corpus_arg, add_labels_args, add_pretile_args,  # noqa: E402
+from cli import (add_corpus_args, add_labels_args,  # noqa: E402
                  corpus_arg, job_result_dir, labels_root)
 
 
@@ -105,8 +105,7 @@ VAL_SLIDES = ('BRACS_1598', 'S1103627,G7E,110127')
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    add_pretile_args(ap)            # --tile: v1 is 256; 512, 1024 are separate models
-    add_corpus_arg(ap)
+    add_corpus_args(ap)             # --tile: v1 is 256; 512, 1024 are separate models
     add_labels_args(ap)
     ap.add_argument('--channels', type=int, default=1, choices=(1, 3),
                     help='1 = model_256_gray, 3 = model_256_rgb. Same labels')
@@ -218,7 +217,7 @@ def main():
     corpus = corpus_arg(args)
     print(f'corpus {corpus.key}', flush=True)
     train_set = data_cfg.build(corpus, args.labels_root,
-                               wsi_stems=args.train_slides, rungs=args.ds,
+                               slides=args.train_slides, rungs=args.ds,
                                ha_id=args.ha_id)
     # The validation set takes `balance='none'`: balancing the held-out set
     # would change what the reported number is a number ABOUT, and the point of
@@ -227,7 +226,7 @@ def main():
         tile=args.tile, in_channels=args.channels, balance='none',
         seed=args.seed, workers=args.workers,
         homography=data_cfg.homography).build(
-            corpus, args.labels_root, wsi_stems=args.val_slides,
+            corpus, args.labels_root, slides=args.val_slides,
             rungs=args.ds, ha_id=args.ha_id)
     print(f'train  {train_set.summary()}', flush=True)
     print(f'val    {val_set.summary()}', flush=True)
@@ -263,6 +262,8 @@ def main():
                 # The corpus the pairs were cut from, so a re-score reads the
                 # same one without being told (reeval_density).
                 'corpus': corpus.key,
+                'corpus_recipe': corpus.name,
+                'corpus_rungs': json.dumps(list(corpus.rungs)),
                 'ha_id': args.ha_id or '(the only one present)',
                 'init': 'superpoint-v6' if args.pretrained else 'random',
             })

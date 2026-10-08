@@ -24,12 +24,11 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  spec.md 12 steps 4 and 5: Homographic Adaptation, then the decision point
 # =============================================================================
 #
-# FOUR STAGES, AND THE ONLY ONE THAT NEEDS NO PRE-TILE STORE IS `demo`.
+# FOUR STAGES, AND THE ONLY ONE THAT NEEDS NO CORPUS IS `demo`.
 #
 #   demo      one pre-tile cut straight off the slide: three single views with
 #             their own keypoints beside the HA aggregate at three thresholds,
-#             one aggregate panel per DEMO_NUM. Minutes. Reads no store, so it
-#             is the only stage that runs while step 3c is still going.
+#             one aggregate panel per DEMO_NUM. Minutes. Reads no corpus.
 #   measure   one slide, one rung, 100 tiles at N=100. Ten minutes. Prints
 #             seconds per tile and extrapolates the three models' GPU-hours.
 #   labels    every rung of every slide. Hours to days -- and how many is
@@ -108,16 +107,21 @@ SCORE_THRESHOLD=0.015
 # did.
 LADDER="0.001 0.015 0.025"
 
-# Which corpus: a recipe name from common/Corpora.RECIPES, or a corpus key as
-# extract_pretiles prints it. ONE corpus by address -- the pre-tile cache holds
-# stage A and stage B of the same slides on purpose, and labelling both is this
-# step run twice, half of it on a corpus nobody asked for.
+# Which corpus: a recipe name from common/Corpora.RECIPES. ONE corpus by
+# address -- the draw cache holds stage A and stage B of the same slides on
+# purpose, and labelling both is this step run twice, half of it on a corpus
+# nobody asked for. A slide whose draw is not cached yet is drawn here, into
+# DRAW_CACHE_JOB's tree, and its pixels are read from the slide as HA needs them.
 CORPUS="${CORPUS:-stageA}"
-PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-ExtractPreTiles}"
+DRAW_CACHE_JOB="${DRAW_CACHE_JOB:-SuperPathPointCorpus}"
 
-# The demo cuts its own pre-tile off the slide rather than reading the store,
-# so it needs a path and not a stem -- which is what lets it run while step 3c
-# is still filling the pre-tile cache. Same slide as MEASURE_SLIDE below.
+# The slides labelled and inspected: AccessDatasets ids or <id>#<split>, N_WSI
+# of each (empty: all).
+DATASETS="${DATASETS:-bracs/test#val ki67_with_photo#val}"
+N_WSI="${N_WSI:-}"
+
+# The demo cuts its own pre-tile off the slide rather than reading a corpus.
+# Same slide as MEASURE_SLIDE below.
 WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
 
 # The measurement's slide and rung. ds 4 is native on both pyramid shapes, so
@@ -154,8 +158,8 @@ for stage in $STAGE; do
           --tile "$TILE" --num "$NUM" \
           --score-threshold "$SCORE_THRESHOLD" \
           --threshold-ladder $LADDER \
-          --corpus "$CORPUS" --pretile-cache-job "$PRETILE_CACHE_JOB" \
-          --wsi-stem "$MEASURE_SLIDE" --ds "$MEASURE_DS" \
+          --corpus "$CORPUS" --draw-cache-job "$DRAW_CACHE_JOB" \
+          --wsi "$MEASURE_SLIDE" --ds "$MEASURE_DS" \
           --limit "$MEASURE_TILES" \
           --out "/work/u26130998/result/${SLURM_JOB_NAME:-MakeHaLabels}/measure"
       echo ""
@@ -174,14 +178,14 @@ for stage in $STAGE; do
           --tile "$TILE" --num "$NUM" \
           --score-threshold "$SCORE_THRESHOLD" \
           --threshold-ladder $LADDER \
-          --corpus "$CORPUS" --pretile-cache-job "$PRETILE_CACHE_JOB"
+          --corpus "$CORPUS" --draw-cache-job "$DRAW_CACHE_JOB" \
+          --datasets $DATASETS ${N_WSI:+--n-wsi "$N_WSI"}
       ;;
 
     demo)
       # spec.md 14's cli/demo_ha.py, and the picture that makes the threshold
       # argument checkable rather than arithmetic. Cuts its own pre-tile off
-      # the slide through the same DsLadder plan extract_pretiles uses, so it
-      # runs while step 3c is still going.
+      # the slide through the same DsLadder plan a corpus is drawn over.
       #
       # THREE VIEW PANELS FIRST. The teacher is not viewpoint-invariant, and
       # HA rests entirely on that: each view fires on a different subset, and
@@ -206,7 +210,8 @@ for stage in $STAGE; do
       run "inspect  (the decision point, --with-model)" \
         python training/SuperPathPoint/cli/inspect_ha_labels.py \
           --with-model --tiles "$INSPECT_TILES" --num "$NUM" \
-          --pretile-cache-job "$PRETILE_CACHE_JOB"
+          --corpus "$CORPUS" --draw-cache-job "$DRAW_CACHE_JOB" \
+          --datasets $DATASETS ${N_WSI:+--n-wsi "$N_WSI"}
       ;;
 
     *)
@@ -218,7 +223,7 @@ done
 
 echo ""
 echo "======== done  (exit $status) ========"
-echo "  labels  -> result/cache/${SLURM_JOB_NAME:-MakeHaLabels}/slide=<s>/.../pretile=f3/ds=<d>/labels/"
+echo "  labels  -> result/cache/${SLURM_JOB_NAME:-MakeHaLabels}/slide=<s>/.../draw=<sampler>/labels/"
 echo "  tables  -> result/\${SLURM_JOB_NAME}/make_ha_labels.csv, ha_labels.csv"
 echo "  figures -> result/\${SLURM_JOB_NAME}/ha_labels__<slide>_ds<d>.png"
 echo "             result/\${SLURM_JOB_NAME}/ha_demo__ds<d>__num<...>.png"

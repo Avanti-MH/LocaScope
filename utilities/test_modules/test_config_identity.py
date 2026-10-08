@@ -752,7 +752,7 @@ def t_config_flag_parsers_refuse_abbreviations():
 
 #: The level kinds of `Cache.TREE`, as they begin a path component.
 _TREE_KINDS = ('dataset', 'slide', 'seg', 'region', 'grid', 'plan', 'draw',
-               'pretile', 'ds', 'render', 'stage1', 'stage2')
+               'render', 'stage1', 'stage2')
 
 
 def t_cache_paths_are_spelt_in_cache_only():

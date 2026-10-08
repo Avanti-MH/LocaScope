@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
-from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
+from cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
                  chainstack_root, job_result_dir)
 
 
@@ -157,7 +157,7 @@ def _one_f_chain(chain, net, *, tile: int, rungs, score_threshold: float,
                  decoy_kind: str, decoy_magnitude: float, rng):
     order = sorted(float(r) for r in rungs)
     stack = FStack.read(chain, tile=tile)
-    origins = {d: (float(chain.members[d][1].x), float(chain.members[d][1].y))
+    origins = {d: (float(chain.members[d].meta.x), float(chain.members[d].meta.y))
               for d in order}
     scales = {d: ChainStack.rung_scale(d, 'F') for d in order}
     detections, per_rung, maps = SurvivalProcess.detect_all_rungs(
@@ -176,19 +176,19 @@ def _one_f_chain(chain, net, *, tile: int, rungs, score_threshold: float,
     return order, anchors, source_rung, dist, score, decoy_dist, decoy_score
 
 
-def _one_r_tile(folder, record, meta, net, *, tile: int, rungs,
+def _one_r_tile(corpus, tile_of, net, *, tile: int, rungs,
                 score_threshold: float, decoy_kind: str,
                 decoy_magnitude: float, rng):
     """Same shape as `_one_f_chain`: `RStack.from_own(...)[i]` degrades one
     real tile into `Dict[ds, image]`, exactly what `FStack.read` returns.
     The only difference is the origin -- 'R''s footprint never moves, so
-    every rung shares the SAME corner (the record's own `(x, y)`), and
+    every rung shares the SAME corner (the tile's own `(x, y)`), and
     `rung_scale('R', ...) == 1.0` at every rung.
     """
     order = sorted(float(r) for r in rungs)
-    image = ChainStack._read_store_tile(folder, record, int(tile))
-    stack = RStack.from_tile(image, float(meta.ds), order, tile=tile)
-    origin = (float(record.x), float(record.y))
+    image = ChainStack._read_store_tile(corpus, tile_of, int(tile))
+    stack = RStack.from_tile(image, float(tile_of.meta.ds), order, tile=tile)
+    origin = (float(tile_of.meta.x), float(tile_of.meta.y))
     origins = {d: origin for d in order}
     scales = {d: ChainStack.rung_scale(d, 'R') for d in order}
     detections, per_rung, maps = SurvivalProcess.detect_all_rungs(
@@ -232,7 +232,7 @@ def _one_f_chain_probability_map(chain, net, *, tile: int, rungs,
     """
     order = sorted(float(r) for r in rungs)
     stack = FStack.read(chain, tile=tile)
-    origins = {d: (float(chain.members[d][1].x), float(chain.members[d][1].y))
+    origins = {d: (float(chain.members[d].meta.x), float(chain.members[d].meta.y))
               for d in order}
     scales = {d: ChainStack.rung_scale(d, 'F') for d in order}
     detections, per_rung, maps = SurvivalProcess.detect_all_rungs(
@@ -247,7 +247,7 @@ def _one_f_chain_probability_map(chain, net, *, tile: int, rungs,
     return order, anchors, combined_maps, origins, scales, decoy_shift
 
 
-def _one_r_tile_probability_map(folder, record, meta, net, *, tile: int,
+def _one_r_tile_probability_map(corpus, tile_of, net, *, tile: int,
                                 rungs, score_threshold: float,
                                 decoy_kind: str, decoy_magnitude: float, rng):
     """Candidates 1/2's own version of `_one_r_tile` -- SEPARATE function,
@@ -259,9 +259,9 @@ def _one_r_tile_probability_map(folder, record, meta, net, *, tile: int,
     `_one_r_tile` does.
     """
     order = sorted(float(r) for r in rungs)
-    image = ChainStack._read_store_tile(folder, record, int(tile))
-    stack = RStack.from_tile(image, float(meta.ds), order, tile=tile)
-    origin = (float(record.x), float(record.y))
+    image = ChainStack._read_store_tile(corpus, tile_of, int(tile))
+    stack = RStack.from_tile(image, float(tile_of.meta.ds), order, tile=tile)
+    origin = (float(tile_of.meta.x), float(tile_of.meta.y))
     origins = {d: origin for d in order}
     scales = {d: ChainStack.rung_scale(d, 'R') for d in order}
     detections, per_rung, maps = SurvivalProcess.detect_all_rungs(
@@ -822,7 +822,7 @@ def main():
                          "knob, not yet tuned' -- finer catches a sharper "
                          "peak more precisely at more compute per anchor "
                          "per rung")
-    add_pretile_args(ap)
+    add_corpus_args(ap, corpus=False)
     prepare_chain_stack.add_axis_corpus_args(ap)
     ap.add_argument('--rungs', type=float, nargs='+',
                     default=[1.0, 2.0, 4.0, 8.0, 16.0])
@@ -961,7 +961,7 @@ def main():
                 own = RStack.from_own(corpus['R'], args.wsi_stem,
                                       args.rungs, tile=args.tile,
                                       cache_root=None)
-                chainstacks = list(own.items)
+                chainstacks = [(own.corpus, t) for t in own.items]
                 if probability_map_method:
                     per_chainstack = lambda args_tuple: _one_r_tile_probability_map(  # noqa: E731
                         *args_tuple, net, tile=args.tile, rungs=args.rungs,

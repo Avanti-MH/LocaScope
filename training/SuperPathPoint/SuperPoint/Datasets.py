@@ -1,6 +1,6 @@
 """The training pair: one tile, one warped view of it, and both label maps.
 
-    ds = PairDatasetConfig().build(corpus, labels_root, wsi_stems, rungs)  # Store.PreTileCorpus
+    ds = PairDatasetConfig().build(corpus, labels_root, slides=..., rungs=...)  # Corpora.Corpus
     batch = ds[0]
         image, warped_image        [C, tile, tile] float in [0, 1]
         keypoint_map, warped_...   [tile, tile] float 0/1
@@ -55,17 +55,16 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from Cache import wsi_stem_of
 from ConfigIdentity import IdentifiedConfig, register
 
 from common import KeypointLabelStore
-from Store import PreTileStore
 from common.Homography import inside, points_input_to_output, sample_homography
 from common.HomographyConfig import HomographyConfig
 from TileSampler import centre_crop, centre_margin
@@ -122,19 +121,17 @@ class PairDatasetConfig(IdentifiedConfig):
     NOT_IDENTITY = ('seed', 'workers')
     BASELINE = _PAIR_BASELINE
 
-    def build(self, corpus, labels_root, *, wsi_stems: Sequence[str],
+    def build(self, corpus, labels_root, *, slides: Sequence[str],
               rungs: Optional[Sequence[float]] = None,
               ha_id: Optional[str] = None) -> 'HomographyPairDataset':
         return HomographyPairDataset(self, corpus, labels_root,
-                                     wsi_stems=wsi_stems, rungs=rungs,
-                                     ha_id=ha_id)
+                                     slides=slides, rungs=rungs, ha_id=ha_id)
 
 
 @dataclass
 class PairItem:
     """One index entry. Deliberately small: this list is held per worker."""
-    folder: Path
-    record: PreTileStore.Record
+    tile: object                  # Corpora.Tile: the slide, the draw row, the meta
     points: np.ndarray            # [n, 2] int16, tile coordinates
     rung: float
     rung_index: int
@@ -150,84 +147,77 @@ class PairItem:
 
 
 class HomographyPairDataset(Dataset):
-    """Pre-tiles plus HA labels in, `(I, I', H, label, label')` out.
+    """A corpus's tiles plus HA labels in, `(I, I', H, label, label')` out.
 
-    FORK-SAFE BY CONSTRUCTION, which is the whole reason step 3c exists: the
-    only files a worker opens are PNGs. No OpenSlide handle crosses a fork, and
-    the MIRAX reopen storm that `log/TODO.log` measured at 752 reopens in one
-    read cannot happen here (spec.md 6.5).
+    FORK-SAFE: the index is built from the draws, which open no slide on a
+    hit, and the pixels are read in the worker that asks for them
+    (`Corpus.read` opens one reader per slide per process), so no OpenSlide
+    handle crosses a fork.
     """
 
     def __init__(self, cfg: PairDatasetConfig, corpus, labels_root, *,
-                 wsi_stems: Sequence[str],
+                 slides: Sequence[str],
                  rungs: Optional[Sequence[float]] = None,
                  ha_id: Optional[str] = None):
         if cfg.balance not in BALANCE_MODES:
             raise ValueError(
                 f'balance must be one of {BALANCE_MODES}, got {cfg.balance!r}')
+        if int(corpus.tile) != int(cfg.tile):
+            raise ValueError(
+                f'corpus {corpus.key} is drawn for {corpus.tile} px tiles and '
+                f'this dataset trains on {cfg.tile}: another model\'s corpus')
         self.cfg = cfg
+        self.corpus = corpus
         self.items: List[PairItem] = []
 
         rung_values = sorted({float(r) for r in rungs}) if rungs else None
         found_rungs: List[float] = []
 
-        # ONE CORPUS, BY ADDRESS. A cache root legitimately holds two corpora
-        # of the same slides -- stage A and stage B, on purpose -- and reading
-        # both would call their union a corpus: twice the tiles and a bucket
-        # distribution that is neither's. `corpus` (a Store.PreTileCorpus) is
-        # one extraction's directory, so the union cannot be formed. It is
-        # passed by the caller, not stored on `cfg`: it selects the data, it
-        # is not a property of the training distribution.
-        for stem in wsi_stems:
-          for folder in corpus.rung_dirs(stem):
-            meta = PreTileStore.load_meta(folder)
-            if meta.tile != int(cfg.tile):
-                raise ValueError(
-                    f'{folder} holds {meta.tile} px tiles and this dataset '
-                    f'trains on {cfg.tile}: the corpus was cut for another '
-                    f'model')
-            if rung_values is not None and not any(
-                    abs(meta.ds - r) < 1e-6 for r in rung_values):
-                continue
-
-            query = dict(wsi_stem=meta.wsi_stem, ds=meta.ds,
-                         pretile_id=meta.corpus_key)
+        # ONE CORPUS, BY ADDRESS. A cache legitimately holds two corpora of
+        # the same slides -- stage A and stage B, on purpose -- and reading
+        # both would call their union a corpus. `corpus` is one draw, so the
+        # union cannot be formed. It is passed by the caller, not stored on
+        # `cfg`: it selects the data, it is not a property of the training
+        # distribution.
+        stems = []
+        for slide in slides:
+          stem = wsi_stem_of(slide)
+          stems.append(stem)
+          for ds, tiles in corpus.tiles(slide, rung_values).items():
+            query = dict(wsi_stem=stem, ds=ds)
             if ha_id:
                 query['ha_id'] = ha_id
-            # find_one and not find()[0]: a labels root legitimately holds
-            # round-1 and round-2 labels of the same tiles, and picking whichever
+            # find_one and not find()[0]: a draw legitimately holds round-1
+            # and round-2 labels of the same tiles, and picking whichever
             # sorted first would train round 3 on round 1.
             batch, _ = KeypointLabelStore.load(
-                KeypointLabelStore.find_one(labels_root, **query))
+                KeypointLabelStore.find_one(labels_root, corpus, **query))
 
-            records = {(r.x, r.y): r for r in PreTileStore.load_index(folder)}
-            if meta.ds not in found_rungs:
-                found_rungs.append(meta.ds)
+            at = {(t.meta.x, t.meta.y): t for t in tiles}
+            if ds not in found_rungs:
+                found_rungs.append(ds)
             for i in range(len(batch)):
                 key = (int(batch.tile_x[i]), int(batch.tile_y[i]))
-                record = records.get(key)
-                if record is None:
-                    # The label store names a position the pre-tile store does
-                    # not have. Skipping would hide a store pair that does not
-                    # belong together, which is exactly what `pretile_id` is
-                    # supposed to make impossible.
+                tile = at.get(key)
+                if tile is None:
+                    # The labels name a position the draw does not have.
+                    # Skipping would hide a pair that does not belong
+                    # together, which is what `corpus_id` makes impossible.
                     raise KeyError(
-                        f'{folder.name} has no pre-tile at {key}, but its '
-                        f'labels list one. The two stores do not belong '
-                        f'together despite matching pretile_id')
+                        f'{stem} ds {ds:g} has no tile at {key} in corpus '
+                        f'{corpus.key}, but its labels list one')
                 self.items.append(PairItem(
-                    folder=folder, record=record, points=batch.points_of(i),
-                    rung=meta.ds, rung_index=-1,
-                    pre_tile_factor=int(meta.pre_tile_factor),
-                    slide=meta.wsi_stem))
+                    tile=tile, points=batch.points_of(i), rung=ds,
+                    rung_index=-1, pre_tile_factor=int(corpus.factor),
+                    slide=stem))
 
         self.rungs = sorted(found_rungs)
         index_of = {r: i for i, r in enumerate(self.rungs)}
-        # Numbered off `wsi_stems` and not off what was found, so that the index
+        # Numbered off `slides` and not off what was found, so that the index
         # of a slide does not move when a rung filter happens to exclude every
         # tile of one -- a per-slide row keyed by a shifting integer is a row
         # that silently changes which slide it describes.
-        self.slides = [str(s) for s in wsi_stems]
+        self.slides = stems
         slide_of = {s: i for i, s in enumerate(self.slides)}
         for item in self.items:
             item.rung_index = index_of[item.rung]
@@ -308,7 +298,7 @@ class HomographyPairDataset(Dataset):
         shape = (tile, tile)
         margin = centre_margin(tile, item.pre_tile_factor)
 
-        pre = PreTileStore.read_tile(item.folder, item.record)
+        pre = self.corpus.read(item.tile)
         image = centre_crop(pre, tile)
 
         # Seeded per (seed, ITEM, EPOCH). The index term is what makes a

@@ -74,7 +74,7 @@ flowchart LR
   subgraph D["D 下游"]
     EN["TileEncoder（GPU）→ head / KNN / retrieval"]
     QP["QueryPatchContainer（照片切 tile）"]
-    ST["Store / sampler cache / PreTileStore"]
+    ST["Store / sampler cache"]
   end
 
   RS -. 預留範圍 .-> TS
@@ -243,7 +243,7 @@ window bench query FovSupply → reader.read                → 無幾何  → e
 Stage 1 bench      TileSampler.cached ladder → FovSupply(sampler=) → 完整 → stage 1 各方法
 BenchLocaScope     FovSupply → reader.read                → 完整    → pipeline
 window bench 參考  格點    → reader.read_grid            → 無      → encoder → 分數
-pre-tile          隨機    → reader.read（邊距、area）     → 無      → PreTileStore
+pre-tile（Corpus） 隨機    → reader.read（邊距、area）     → 無      → HA / 訓練
 pipeline 參考      格點    → reader.read_grid            → 無      → retrieval   ← pipeline 遷移時改
 stage 3           候選    → reader.read（臨時 ReadSpec） → 無      → SIFT        ← 之後改
 真實照片           —                                     —         → 切 tile → stage 1/2/3

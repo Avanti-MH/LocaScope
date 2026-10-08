@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for utilities/Store.py -- feature stores, the feature-map cache, and
-pre-tile rungs.
+"""Tests for utilities/Store.py -- feature stores and the feature-map cache.
 
     python utilities/test_modules/test_store.py
     python utilities/test_modules/test_store.py --with-model [--only-model]
@@ -23,8 +22,6 @@ WHAT THIS DEFENDS
                   cannot say where its cells sat, a draw passed off as the slide
     the gate      a feature map restored onto a mask it was not built from --
                   the one error the address cannot catch alone
-    pre-tiles     a rung is a dataset only once its index is written, and a
-                  finished one is never appended to
     raw           the model's own output stored whole -- prefix slots and cells,
                   in the model's order -- and told apart from the reduced
                   'tokens'; the dtype the tensor has is the dtype it keeps; a
@@ -57,7 +54,7 @@ from PatchingLib import FeaturesMap, WsiFeaturesMap              # noqa: E402
 import Cache                                                     # noqa: E402
 from Cache import Address                                        # noqa: E402
 from Store import (FeatureMapCache, FeatureStore as FS,          # noqa: E402
-                   PooledFeatures, feature_id, PreTileCorpus, PreTileStore, StoreMismatch,
+                   PooledFeatures, feature_id, StoreMismatch,
                    from_store_tensors, geometry_mismatch, raw_layout,
                    to_store_tensors)
 from PatchingLib import region_grids                             # noqa: E402
@@ -377,152 +374,6 @@ def t_map_cache_hits_and_misses_for_the_right_reasons():
                                 _Recipe(), verbose=False)
         assert again.load(REGIONS, **GEO) is not None, 'the decoy broke the hit'
     return 'hit, encoder miss, gate miss, VERSION miss, recipe moves the address'
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  pre-tiles
-# ══════════════════════════════════════════════════════════════════════════════
-
-TILE_P, FACTOR = 64, 3
-
-
-def a_corpus(root, **over) -> PreTileCorpus:
-    base = dict(root=root, seg_id='hest-e3b0c442', region_id='abcd1234',
-                sampler_id='samp0001', plan='ladder-1-2', factor=FACTOR)
-    base.update(over)
-    return PreTileCorpus(**base)
-
-
-def a_pre_meta(corpus, ds=1.0, stem='SLIDE_A') -> PreTileStore.Meta:
-    return PreTileStore.Meta(wsi_stem=stem, ds=ds, tile=TILE_P, seg_id=corpus.seg_id,
-                             region_id=corpus.region_id, sampler_id=corpus.sampler_id,
-                             plan=corpus.plan, pre_tile_factor=corpus.factor)
-
-
-def a_pre(value: int) -> np.ndarray:
-    side = TILE_P * FACTOR
-    img = np.zeros((side, side, 3), np.uint8)
-    img[..., 0] = value
-    return img
-
-
-def t_corpus_addresses_by_every_key():
-    base = a_corpus(JOB)
-    with _tree():
-        got = base.rung_dir('SLIDE_A', 4.0)
-        assert got.parts[-9:] == (
-            JOB, 'slide=SLIDE_A', 'seg=hest-e3b0c442', 'region=abcd1234',
-            'plan=ladder-1-2', 'draw=samp0001', 'pretile=f3', 'ds=4', 'tiles'), got
-        for over in (dict(seg_id='hsv-1'), dict(region_id='ffff'),
-                     dict(sampler_id='s2'), dict(plan='ladder-1'), dict(factor=5)):
-            assert (a_corpus(JOB, **over).set_dir('SLIDE_A')
-                    != base.set_dir('SLIDE_A')), over
-    return 'mask, draw, plan and factor each move it'
-
-
-def t_rung_round_trip_and_the_index_is_last():
-    with _tree():
-        corpus = a_corpus(JOB)
-        meta = a_pre_meta(corpus)
-        folder = PreTileStore.create(corpus, meta)
-        records = [PreTileStore.Record(index=i, x=i * 100, y=5, bucket='bg00_15',
-                                       inherit_id=i % 2) for i in range(3)]
-        for r in records:
-            PreTileStore.save_tile(folder, r, a_pre(10 + r.index), meta)
-        assert corpus.rung_dirs('SLIDE_A') == [], 'a rung counted before its index'
-        PreTileStore.write_index(folder, records)
-        assert corpus.rung_dirs('SLIDE_A') == [folder]
-        assert corpus.slides() == ['SLIDE_A']
-        back = PreTileStore.load_meta(folder, require={'sampler_id': 'samp0001'})
-        assert back.n_tiles == 3 and back.created_at, back
-        assert PreTileStore.load_index(folder) == records
-        assert int(PreTileStore.read_tile(folder, records[2])[0, 0, 0]) == 12
-        rejects(lambda: PreTileStore.create(corpus, meta), 'finished')
-        rejects(lambda: PreTileStore.load_meta(folder, require={'plan': 'other'}), 'plan')
-    return '3 tiles; unfinished invisible; finished refuses a second write'
-
-
-def t_rungs_sort_by_ds_and_a_wrong_size_is_refused():
-    with _tree():
-        corpus = a_corpus(JOB)
-        for ds in (16.0, 1.0, 4.0):
-            meta = a_pre_meta(corpus, ds=ds)
-            folder = PreTileStore.create(corpus, meta)
-            PreTileStore.write_index(folder, [])
-        assert [d.parent.name for d in corpus.rung_dirs('SLIDE_A')] == [
-            'ds=1', 'ds=4', 'ds=16']
-        meta = a_pre_meta(corpus, ds=2.0)
-        folder = PreTileStore.create(corpus, meta)
-        rejects(lambda: PreTileStore.save_tile(
-            folder, PreTileStore.Record(index=0, x=0, y=0),
-            np.zeros((TILE_P * FACTOR - 2,) * 2 + (3,), np.uint8), meta), 'meta says')
-    return 'ds1 < ds4 < ds16, not lexical; a short pre-tile refused'
-
-
-def t_pixels_come_back_byte_exact_in_rgb_order():
-    """Exact, not close: a lossy codec passes any tolerance and still rings at
-    every 8x8 block edge, which is a corner. Noise, because an R/B swap (save
-    writes BGR, read reverses it) survives an all-equal check on a grey tile."""
-    image = np.random.default_rng(0).integers(
-        0, 256, (TILE_P * FACTOR,) * 2 + (3,), dtype=np.uint8)
-    with _tree():
-        corpus = a_corpus(JOB)
-        meta = a_pre_meta(corpus)
-        folder = PreTileStore.create(corpus, meta)
-        record = PreTileStore.Record(index=3, x=1024, y=2048)
-        PreTileStore.save_tile(folder, record, image, meta)
-        PreTileStore.write_index(folder, [record])
-        assert (PreTileStore.read_tile(folder, record) == image).all(), (
-            'pixels changed: a lossy codec, or the channel order reversed once')
-    return f'{image.shape[0]} px noise, exact'
-
-
-def t_every_record_axis_survives_the_index():
-    """bucket / score / overlap_max / inherit_id / origin / parent: properties
-    of the RUN that placed the tile, none recoverable from (x, y) afterwards."""
-    want = [PreTileStore.Record(index=0, x=100, y=200, clip_px=37, bucket='bg50_70',
-                                score=0.83, overlap_max=0.25, inherit_id=7,
-                                origin='jitter', parent_x=36, parent_y=200),
-            PreTileStore.Record(index=1, x=300, y=400, bucket='bg00_15', score=0.02)]
-    with _tree():
-        corpus = a_corpus(JOB)
-        folder = PreTileStore.create(corpus, a_pre_meta(corpus))
-        PreTileStore.write_index(folder, want)
-        assert PreTileStore.load_index(folder) == want
-        assert PreTileStore.load_meta(folder).n_clipped == 1
-    return 'every column exact, n_clipped counted'
-
-
-def t_level0_geometry_is_self_consistent():
-    """`x`/`y` are the TILE's top-left, the pre-tile's is `margin_l0` up-left,
-    the centre half a footprint in -- three expressions, one point."""
-    meta = dataclasses.replace(a_pre_meta(a_corpus(JOB)), ds=4.0)
-    record = PreTileStore.Record(index=0, x=10_000, y=20_000)
-    assert meta.tile_footprint_l0 == TILE_P * 4.0
-    px, py = record.pre_origin_l0(meta)
-    cx, cy = record.centre_l0(meta)
-    half = meta.tile_footprint_l0 * FACTOR / 2
-    assert abs(px + half - cx) < 1e-6 and abs(py + half - cy) < 1e-6, (px, cx)
-    return f'margin {meta.margin_l0:g} L0'
-
-
-def t_a_corpus_key_round_trips_and_the_meta_spells_the_same():
-    corpus = a_corpus(JOB)
-    assert PreTileCorpus.from_key(JOB, corpus.key) == corpus
-    assert a_pre_meta(corpus).corpus_key == corpus.key
-    rejects(lambda: PreTileCorpus.from_key(JOB, 'not-a-key'), 'not a pre-tile')
-    return corpus.key
-
-
-def t_unfinished_is_refused_and_overwrite_needs_saying():
-    with _tree():
-        corpus = a_corpus(JOB)
-        meta = a_pre_meta(corpus)
-        folder = PreTileStore.create(corpus, meta)
-        rejects(lambda: PreTileStore.load_index(folder), 'did not finish')
-        PreTileStore.write_index(folder, [])
-        assert PreTileStore.create(corpus, meta, overwrite=True) == folder
-    return 'no index refused; overwrite=True reopens the same rung'
 
 
 # ══════════════════════════════════════════════════════════════════════════════

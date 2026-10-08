@@ -92,9 +92,11 @@ from common.Homography import invert, points_input_to_output     # noqa: E402
 from common.Interfaces import ShapeMismatch, check_shapes        # noqa: E402
 from common.KeypointLabelStore import (LabelMeta,                # noqa: E402
                                        batch_from_lists)
-from Store import (PreTileCorpus, PreTileMeta, PreTileRecord,  # noqa: E402
-                   PreTileStore)
-from TileSampler import centre_crop, centre_margin, pre_tile_px  # noqa: E402
+from dataclasses import dataclass                                # noqa: E402
+from types import SimpleNamespace                               # noqa: E402
+
+from TileSampler import SampleMeta, pre_tile_px                 # noqa: E402
+from common.Corpora import Corpus, recipe_config                 # noqa: E402
 from common.KeypointLabelStore import points_from_prob        # noqa: E402
 from SuperPoint.Backbones import VggBackbone, VggBackboneConfig  # noqa: E402
 from SuperPoint.Datasets import PairDatasetConfig, splat         # noqa: E402
@@ -657,7 +659,7 @@ def t_the_pair_warps_points_and_not_the_map():
     with _tree() as root:
         corpus, labels_root, points = _make_stores(root)
         cfg = PairDatasetConfig(tile=TILE, in_channels=1, seed=0)
-        dataset = cfg.build(corpus, labels_root, wsi_stems=[_STEM_A])
+        dataset = cfg.build(corpus, labels_root, slides=[_STEM_A])
         assert len(dataset) == 2, len(dataset)
 
         item = dataset[0]
@@ -684,7 +686,7 @@ def t_the_warped_valid_mask_is_nearly_full_because_of_the_pre_tile():
     with _tree() as root:
         corpus, labels_root, _ = _make_stores(root)
         dataset = PairDatasetConfig(tile=TILE, in_channels=1, seed=0).build(
-            corpus, labels_root, wsi_stems=[_STEM_A])
+            corpus, labels_root, slides=[_STEM_A])
         rim = 3
         fractions = []
         for i in range(len(dataset)):
@@ -704,7 +706,7 @@ def t_align_min_truncates_and_loss_weight_does_not():
         sizes = {}
         for mode in ('none', 'align-min', 'loss-weight'):
             dataset = PairDatasetConfig(tile=TILE, balance=mode, seed=0).build(
-                corpus, labels_root, wsi_stems=[_STEM_A])
+                corpus, labels_root, slides=[_STEM_A])
             sizes[mode] = (len(dataset),
                            [round(float(w), 2) for w in dataset.rung_weight])
         assert sizes['none'][0] == 5, sizes
@@ -719,7 +721,7 @@ def t_align_min_truncates_and_loss_weight_does_not():
 
 
 def t_every_item_says_which_slide_it_came_from():
-    """`slide_index` indexes `wsi_stems`, NOT the slides that happened to have
+    """`slide_index` indexes `slides`, NOT the slides that happened to have
     tiles -- otherwise a rung filter that empties one slide silently shifts
     every other slide's index and a per-slide row describes the wrong slide."""
     with _tree() as root:
@@ -727,7 +729,7 @@ def t_every_item_says_which_slide_it_came_from():
             root, rungs=((1.0, 2), (4.0, 3)), stems=(_STEM_A, _STEM_B))
         stems = [_STEM_B, _STEM_A]              # deliberately not sorted
         dataset = PairDatasetConfig(tile=TILE, balance='none').build(
-            corpus, labels_root, wsi_stems=stems)
+            corpus, labels_root, slides=stems)
         assert dataset.slides == stems, dataset.slides
         seen = collections.Counter()
         for i in range(len(dataset)):
@@ -740,7 +742,7 @@ def t_every_item_says_which_slide_it_came_from():
         # the decoy: drop one slide's rungs and the OTHER slide's index must
         # not move. A dict built from what was found would renumber here.
         one = PairDatasetConfig(tile=TILE, balance='none').build(
-            corpus, labels_root, wsi_stems=stems, rungs=[4.0])
+            corpus, labels_root, slides=stems, rungs=[4.0])
         assert one.slides == stems, one.slides
         return (f'{seen[_STEM_A]} + {seen[_STEM_B]}, indices stable; '
                 f'the second stem holds {_STEM_B.count(",")} commas')
@@ -759,7 +761,7 @@ def t_validation_splits_by_slide_and_the_parts_sum_to_the_whole():
         corpus, labels_root, _ = _make_stores(
             root, rungs=((1.0, 3),), stems=(_STEM_A, _STEM_B))
         val = PairDatasetConfig(tile=TILE, balance='none', workers=0).build(
-            corpus, labels_root, wsi_stems=[_STEM_A, _STEM_B])
+            corpus, labels_root, slides=[_STEM_A, _STEM_B])
         net = _net()
         trainer = TrainerConfig(batch_size=2, workers=0, amp=False,
                                 wandb_mode='disabled').build(
@@ -816,7 +818,7 @@ def t_a_new_epoch_draws_a_new_warp_and_the_same_epoch_repeats():
         data = PairDatasetConfig(tile=TILE, in_channels=1, balance='none',
                                  seed=0, workers=0).build(
                                      corpus, labels_root,
-                                     wsi_stems=[_STEM_A])
+                                     slides=[_STEM_A])
 
         data.set_epoch(0)
         first = data[0]['warped_image']
@@ -922,45 +924,57 @@ def _tree():
             Cache.RESULT_DIR = saved
 
 
-def _make_stores(root, rungs=((1.0, 2),), stems=(_STEM_A,)):
-    """A pre-tile corpus in job `root`'s tree and a matching label store in
-    the tree of `<root>Labels` (call it inside `_tree()`).
+@dataclass(frozen=True)
+class _Corpus(Corpus):
+    """A corpus whose draw is given (`table`) and whose pixels are painted --
+    random, seeded by the tile's position -- so no slide is opened."""
+    table: tuple = ()
 
-    Written through the real `PreTileStore` and `KeypointLabelStore` rather than
-    by hand, so that a change to either format breaks this test instead of
-    letting it test a shape nothing produces.
+    @staticmethod
+    def path_of(slide):
+        return str(slide)
+
+    def draw(self, slide):
+        return [SimpleNamespace(meta=m) for m in self.table if m.slide == slide]
+
+    def read(self, tile):
+        pre = pre_tile_px(self.tile, self.factor)
+        m = tile.meta
+        rng = np.random.default_rng((m.x, m.y, int(m.ds)))
+        return rng.integers(0, 256, (pre, pre, 3), dtype=np.uint8)
+
+
+def _make_stores(root, rungs=((1.0, 2),), stems=(_STEM_A,)):
+    """A corpus whose draws are given and a matching label set in the tree of
+    `<root>Labels` (call it inside `_tree()`).
+
+    The labels are written through the real `KeypointLabelStore` and the
+    corpus is a real `Corpus` with its draw and its read stood in for, so a
+    change to either format breaks this test instead of letting it test a
+    shape nothing produces.
     """
     labels_root = f'{root}Labels'
-    factor = 3
-    corpus = PreTileCorpus(root, 'seg0', 'reg0', 'aaaa1111', 'ladder-test', factor)
-    pre_px = pre_tile_px(TILE, factor)
-    margin = centre_margin(TILE, factor)
-    rng = np.random.default_rng(0)
+    table = tuple(
+        SampleMeta(slide=stem, ds=float(ds), level=0, x=1000 * i, y=2000 * i,
+                   tile_size=TILE, read_size=TILE,
+                   footprint_l0=int(round(TILE * ds)))
+        for stem, (ds, count) in itertools.product(stems, rungs)
+        for i in range(count))
+    mask = SimpleNamespace(seg_id=lambda: 'seg0', region_id=lambda: 'reg0')
+    corpus = _Corpus('test', mask, recipe_config('stageA'),
+                     tuple(sorted({float(ds) for ds, _ in rungs})), TILE, 3,
+                     root, root, table)
     points = np.array([[12, 40], [33, 20], [50, 51]], np.int16)
 
     for stem, (ds, count) in itertools.product(stems, rungs):
-        meta = PreTileMeta(wsi_stem=stem, ds=float(ds), tile=TILE,
-                           seg_id=corpus.seg_id, region_id=corpus.region_id,
-                           sampler_id=corpus.sampler_id, plan=corpus.plan,
-                           seed=0, segmenter_id='seg0000',
-                           pre_tile_factor=factor, level=0, level_ds=1.0,
-                           shrink=1.0, read_size=pre_px)
-        folder = PreTileStore.create(corpus, meta)
-        records = []
-        for i in range(count):
-            image = rng.integers(0, 256, (pre_px, pre_px, 3), dtype=np.uint8)
-            record = PreTileRecord(index=i, x=1000 * i, y=2000 * i)
-            PreTileStore.save_tile(folder, record, image, meta)
-            records.append(record)
-        PreTileStore.write_index(folder, records)
-
+        tiles = corpus.tiles(stem)[float(ds)]
         batch = batch_from_lists(
-            [(r.x, r.y) for r in records], [points] * count,
+            [(t.meta.x, t.meta.y) for t in tiles], [points] * count,
             [np.full(len(points), 0.5, np.float32)] * count,
             [np.full(len(points), 9, np.uint8)] * count, cap=16)
-        KeypointLabelStore.save(labels_root, batch, LabelMeta(
+        KeypointLabelStore.save(labels_root, corpus, batch, LabelMeta(
             wsi_stem=stem, ds=float(ds), tile=TILE, ha_id='ha000000',
-            pretile_id=meta.corpus_key, n_tiles=len(batch), cap=batch.cap))
+            corpus_id=corpus.key, n_tiles=len(batch), cap=batch.cap))
     return corpus, labels_root, points
 
 

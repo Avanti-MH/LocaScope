@@ -1,6 +1,6 @@
 """The three axes of Stage B. spec.md 3.2 "三個軸，一張表".
 
-    chains = chains(corpus, wsi_stem, tile=256)      # corpus: Store.PreTileCorpus
+    chains = chains(corpus, wsi_stem, tile=256)      # corpus: Corpora.Corpus
     f = FStack.read(chains[7], tile=256)             # {ds: [tile,tile,3] uint8}
     r = RStack.derive(chains[7], rungs, tile=256)     # derived, no second read
     groups = CStack.pyramid(chains[7].cx, chains[7].cy, rungs, tile=256)
@@ -9,7 +9,7 @@ Each class answers a DIFFERENT SHAPE of question and is split the same way
 internally: a `footprint`/`pyramid` staticmethod that is PURE GEOMETRY (no
 pixel read, no store, no WSI handle -- can be called and tested with no
 corpus at all), and a `read`/`derive` staticmethod that is the IO built on
-top of it (`PreTileStore`, `TileSampler`'s `degrade_resolution`). Keeping the
+top of it (`Corpus.read`, `TileSampler`'s `degrade_resolution`). Keeping the
 split inside each class rather than only across files is what lets a test
 call `FStack.footprint(...)` without a store existing anywhere.
 
@@ -20,7 +20,7 @@ call `FStack.footprint(...)` without a store existing anywhere.
 WHAT A CHAIN IS AND WHY INCOMPLETE ONES ARE DROPPED
 =====================================================
 A chain is one level-0 centre with a tile at every rung -- `inherit_id` in the
-pre-tile index groups them. A chain missing a rung is DROPPED rather than
+corpus's draw groups them. A chain missing a rung is DROPPED rather than
 carried with a gap, `TileSampler.stacks`'s reason: a four-rung chain handed over
 as if it were six reads as "the keypoint died at the two missing rungs" when it
 means "those rungs never cut a tile there", and telling those two apart is the
@@ -38,22 +38,19 @@ from typing import Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
-from Store import PreTileStore                               # noqa: E402
 from TileSampler import centre_crop                          # noqa: E402
 from PatchingLib import PatchGrid, PatchInfo                  # noqa: E402
 from ReadGeometry import ReadSpec                             # noqa: E402
 from SlideReader import SlideReader, degrade_resolution       # noqa: E402
 
-#: Local on-disk cache for tiles that do NOT come from a tracked `TileSampler`
-#: extraction -- `CStack`'s descendant reads. NOT `PreTileStore`: `PreTileMeta`
-#: is one extraction RUN's identity (`sampler_id`, `segmenter_id`,
-#: rejection-sampling counts) and a computed tile's position was never
-#: sampled -- forcing it through that schema would invent a `sampler_id` for
-#: something that has none.
+#: Local on-disk cache for tiles that do NOT come from a `TileSampler` draw --
+#: `CStack`'s descendant reads. NOT a corpus: a corpus is one draw's identity
+#: (`sampler_id`, the mask, the plan) and a computed tile's position was never
+#: sampled -- filing it there would invent a `sampler_id` for something that
+#: has none.
 #:
-#: ONE DIRECTORY PER PYRAMID, NOT ONE FLAT POOL, for the same reason a flat
-#: `PreTileStore` root would be wrong: in a flat pool nothing on disk says which
-#: files belong together, so "how big is THIS pyramid's cache" is a question
+#: ONE DIRECTORY PER PYRAMID, NOT ONE FLAT POOL: in a flat pool nothing on disk
+#: says which files belong together, so "how big is THIS pyramid's cache" is a question
 #: nobody could answer without re-deriving every position. `_pyramid_dir`
 #: gives every (axis, wsi_stem, root tile, finest rung) its own subdirectory --
 #: `slide=<s>/chainstack/<Axis>Stack/<key>/` -- so a directory listing is how
@@ -137,7 +134,7 @@ def _read_wsi_tile(wsi, x: int, y: int, ds: float, tile: int, *,
     THE SAME READ EVERY PRE-TILE GOT, NOT A SECOND SPELLING
     =========================================================
     `SlideReader(wsi, resize='area').read` of a plain tile at `ds`: the level
-    rule, the level px and the filter `extract_pretiles` read the pre-tiles
+    rule, the level px and the filter `Corpora.Corpus.read` reads the pre-tiles
     with -- which is what keeps a 'C' descendant tile and an 'F' tile at the
     same `ds` reading the pyramid the same way.
     """
@@ -154,22 +151,22 @@ def _read_wsi_tile(wsi, x: int, y: int, ds: float, tile: int, *,
     return image
 
 
-def _read_store_tile(folder, record, tile: int) -> np.ndarray:
-    """One real tile, centre-cropped from its `PreTileStore` pre-tile.
+def _read_store_tile(corpus, tile_of, tile: int) -> np.ndarray:
+    """One real tile of a corpus: the centre crop of `corpus.read(tile_of)`.
 
     Shared by `FStack.read`, `RStack`'s own tiles and `CStack`'s own mother
-    tile (`OwnTiles`/`OwnForest.__getitem__`). The pre-tile is `pre_tile_factor` times
-    the tile (warp context, spec.md 6.6); the tile is its centre crop, which
-    is what every other consumer uses (`Datasets.__getitem__`). One
-    definition keeps the three from silently cropping differently -- the same reason `_read_wsi_tile` exists for the WSI side.
+    tile (`OwnTiles`/`OwnForest.__getitem__`). The read is the pre-tile,
+    `factor` times the tile (warp context, spec.md 6.6); the tile is its centre
+    crop, which is what every other consumer uses (`Datasets.__getitem__`).
+    One definition keeps the three from silently cropping differently -- the
+    same reason `_read_wsi_tile` exists for the WSI side.
     """
-    pre = PreTileStore.read_tile(folder, record)
-    return centre_crop(pre, int(tile))
+    return centre_crop(corpus.read(tile_of), int(tile))
 
 
 @dataclass
 class Chain:
-    """One level-0 centre, and the pre-tile of every rung at it."""
+    """One level-0 centre, and the corpus tile of every rung at it."""
     wsi_stem: str
     inherit_id: int
     #: level-0 CENTRE, not the top-left. The centre is what the rungs share --
@@ -178,8 +175,10 @@ class Chain:
     #: each caller re-derives with its own rounding.
     cx: float
     cy: float
-    #: ds -> (store folder, index record). Sorted finest first by `rungs`.
-    members: Dict[float, tuple]
+    #: ds -> `Corpora.Tile`. Sorted finest first by `rungs`.
+    members: Dict[float, object]
+    #: The corpus the members are read from (`FStack.read`).
+    corpus: object = None
 
     @property
     def rungs(self) -> List[float]:
@@ -190,7 +189,7 @@ def chains(corpus, wsi_stem: str, *, tile: int,
            rungs: Optional[Sequence[float]] = None) -> Dict[int, Chain]:
     """Every COMPLETE chain of one slide, keyed by `inherit_id`.
 
-    Complete against `rungs` when given, and against whatever rungs the store
+    Complete against `rungs` when given, and against whatever rungs the draw
     holds when not. The explicit form is the one to use: "complete" measured
     against what happened to be extracted cannot notice a rung that failed to
     extract at all.
@@ -199,32 +198,26 @@ def chains(corpus, wsi_stem: str, *, tile: int,
     'F' members; 'R' derives from the same object and 'C' roots its pyramid
     at the same `(cx, cy)`. There is one `chains()`, not one per class.
 
-    `corpus` (a `Store.PreTileCorpus`) is ONE extraction: stage A and stage
-    B share a cache root on purpose, and their different sampler_ids put them
-    in different directories, so a chain can never be assembled from two.
+    `corpus` (a `Corpora.Corpus`) is ONE draw: stage A and stage B share a
+    cache on purpose, and their different sampler_ids put them at different
+    addresses, so a chain can never be assembled from two.
     """
     want = sorted(float(r) for r in rungs) if rungs else None
-    found: Dict[int, Dict[float, tuple]] = {}
+    found: Dict[int, Dict[float, object]] = {}
     centres: Dict[int, tuple] = {}
     seen_rungs = set()
-    # ONE CORPUS, BY ADDRESS. Two corpora in one root both number their chains
-    # from 0, so a union would MERGE CHAINS THAT ARE NOT THE SAME CHAIN -- a
+    # ONE CORPUS, BY ADDRESS. Two corpora both number their chains from 0,
+    # so a union would MERGE CHAINS THAT ARE NOT THE SAME CHAIN -- a
     # "complete" one could be four rungs of one corpus and two of another at a
-    # different level-0 centre. The corpus key is the directory, so one call
-    # reads one extraction and there is nothing to refuse.
-    for folder in corpus.rung_dirs(wsi_stem):
-        meta = PreTileStore.load_meta(folder)
-        if want is not None and not any(abs(meta.ds - r) < 1e-6 for r in want):
-            continue
-        seen_rungs.add(float(meta.ds))
-        for record in PreTileStore.load_index(folder):
-            cid = int(getattr(record, 'inherit_id', -1))
+    # different level-0 centre. One call reads one draw.
+    for ds, tiles in corpus.tiles(wsi_stem, want).items():
+        seen_rungs.add(ds)
+        for t in tiles:
+            cid = int(t.meta.inherit_id)
             if cid < 0:
                 continue
-            found.setdefault(cid, {})[float(meta.ds)] = (folder, record, meta)
-            if float(meta.ds) == min(seen_rungs):
-                half = 0.5 * float(meta.tile) * float(meta.ds)
-                centres[cid] = (record.x + half, record.y + half)
+            found.setdefault(cid, {})[ds] = t
+            centres.setdefault(cid, t.centre_l0)
 
     target = want if want is not None else sorted(seen_rungs)
     out: Dict[int, Chain] = {}
@@ -233,7 +226,7 @@ def chains(corpus, wsi_stem: str, *, tile: int,
             continue
         cx, cy = centres.get(cid, (float('nan'), float('nan')))
         out[cid] = Chain(wsi_stem=wsi_stem, inherit_id=cid,
-                         cx=cx, cy=cy, members=members)
+                         cx=cx, cy=cy, members=members, corpus=corpus)
     return out
 
 
@@ -287,10 +280,10 @@ def rung_shrink(ds: float, stack_kind: str) -> float:
 class OwnChains:
     """`FStack.from_own`'s result. LAZY -- same idiom as `TileSampler.Sample`
     ("metadata always, pixels only if asked for"): every chain's identity
-    (`inherit_id`, centre, which store/record backs each rung) is already
+    (`inherit_id`, centre, which corpus tile backs each rung) is already
     known from `chains()`, which never reads a pixel. `__getitem__` is where
     `FStack.read` actually happens, once per access -- so building this over
-    a store with thousands of chains costs nothing until something is
+    a draw with thousands of chains costs nothing until something is
     actually indexed.
     """
     chains: Dict[int, Chain]
@@ -332,23 +325,18 @@ class FStack:
 
     @staticmethod
     def read(chain: Chain, *, tile: int) -> Dict[float, np.ndarray]:
-        """`{ds: [tile, tile, 3] uint8}` read from the store, one per rung.
-
-        The stored image is the PRE-TILE (`pre_tile_factor` times the tile, so a
-        warp has somewhere to come from); the tile is its centre crop, which is
-        what every other consumer uses (`Datasets.__getitem__`). Cropping here
-        rather than storing both is what keeps the two from disagreeing about
-        where the centre is.
+        """`{ds: [tile, tile, 3] uint8}` read from the corpus, one per rung
+        (`_read_store_tile`: the centre crop of the pre-tile).
         """
         out = {}
-        for ds, (folder, record, _meta) in sorted(chain.members.items()):
-            out[float(ds)] = _read_store_tile(folder, record, int(tile))
+        for ds, member in sorted(chain.members.items()):
+            out[float(ds)] = _read_store_tile(chain.corpus, member, int(tile))
         return out
 
     @staticmethod
     def from_own(corpus, wsi_stem: str, *, tile: int,
                 rungs: Optional[Sequence[float]] = None) -> OwnChains:
-        """Every complete chain in `stageB-fOwn`'s store -- LAZY, see
+        """Every complete chain in `stageB-fOwn`'s draw -- LAZY, see
         `OwnChains`. `chains()` already does the whole enumeration (groups by
         `inherit_id`, drops incomplete chains); this just wraps its result so
         `__getitem__` can call `read()` on demand instead of eagerly reading
@@ -388,9 +376,9 @@ class RStack:
 
     `source='C'`/`source='own'` are the two OTHER ways to get an 'R' tile.
     `source='C'` is a WSI bypass, same as `CStack` itself -- it
-    reads via `CStack.read_one`/`_read_wsi_tile`, not `PreTileStore`, because
-    the descendant it reads was never a `TileSampler` draw either. `own` is a
-    third `PreTileStore`-backed corpus (`stageB-rOwn`), independently sampled
+    reads via `CStack.read_one`/`_read_wsi_tile`, not a corpus, because the
+    descendant it reads was never a `TileSampler` draw either. `own` is a
+    third corpus (`stageB-rOwn`), independently sampled
     -- not a `derive` branch (see below), reached instead through
     `RStack.from_own`.
 
@@ -404,7 +392,7 @@ class RStack:
 
     `own` DOES NOT FIT `derive`'S SIGNATURE. `derive(chain, ...)` requires a `Chain` --
     `cx`/`cy`/`inherit_id`-grouped `members` -- and a `stageB-rOwn` tile has
-    none of that: it is a standalone `PreTileStore` record, independently
+    none of that: it is a standalone corpus tile, independently
     sampled, never grouped by `inherit_id`. Forcing it through `derive` would
     mean inventing a fake one-member `Chain` per tile just to satisfy a
     parameter the tile does not actually have.
@@ -513,8 +501,8 @@ class RStack:
 
         `source='own'` IS NOT A VALID VALUE HERE, ON PURPOSE -- see the class
         docstring's "own does not fit derive's signature". An own tile is a
-        standalone `PreTileStore` record with no `Chain` to pass in; calling
-        `from_tile` directly, once per record `stageB-rOwn` yields, is the
+        standalone corpus tile with no `Chain` to pass in; calling
+        `from_tile` directly, once per tile `stageB-rOwn` yields, is the
         correct shape once that enumeration is written -- there is nothing
         for `derive` to do with a `chain` it would never receive.
         """
@@ -553,20 +541,20 @@ class RStack:
         if source == 'own':
             raise ValueError(
                 "source='own' does not fit derive()'s signature -- an own "
-                "tile is a standalone PreTileStore record with no Chain to "
+                "tile is a standalone corpus tile with no Chain to "
                 "pass in here. Use RStack.from_own(...)[i] instead, which "
-                "reads the record and calls from_tile for you -- see the "
+                "reads the tile and calls from_tile for you -- see the "
                 "class docstring")
         raise ValueError(f"source must be 'F', 'C' or 'own', got {source!r}")
 
     @staticmethod
     def from_own(corpus, wsi_stem: str, rungs: Sequence[float], *,
                 tile: int, cache_root: Optional[str] = None) -> 'OwnTiles':
-        """Every record in `stageB-rOwn`'s store -- LAZY, see `OwnTiles`.
+        """Every tile of `stageB-rOwn`'s draw -- LAZY, see `OwnTiles`.
 
-        Scans EVERY rung the store holds, not one -- own's batch can span
+        Takes EVERY rung the draw holds, not one -- own's batch can span
         more than one `base_rung` in a single run (e.g. 100 tiles at ds 1
-        AND 100 at ds 4), each record an independent draw with no chain to
+        AND 100 at ds 4), each tile an independent draw with no chain to
         keep them together, unlike `chains()` which groups by `inherit_id`.
 
         `cache_root` DEFAULTS OFF (unlike every other `cache_root` in
@@ -579,27 +567,21 @@ class RStack:
         few figures repeatedly is worth not recomputing at all; leave it
         `None` for anything that scans a real corpus.
         """
-        items = []
-        for folder in corpus.rung_dirs(wsi_stem):
-            meta = PreTileStore.load_meta(folder)
-            for record in PreTileStore.load_index(folder):
-                items.append((folder, record, meta))
-        return OwnTiles(items, list(rungs), int(tile), wsi_stem, cache_root)
+        items = [t for ts in corpus.tiles(wsi_stem).values() for t in ts]
+        return OwnTiles(corpus, items, list(rungs), int(tile), wsi_stem,
+                        cache_root)
 
 
 @dataclass
 class OwnTiles:
     """`RStack.from_own`'s result. LAZY, same idiom as `OwnChains` -- every
-    record's identity (`(folder, record, meta)`) is already known (cheap,
-    `load_index` reads a CSV, no pixel decode); `__getitem__` is where
-    `_read_store_tile` + `RStack.from_tile` actually happen.
-
-    Indexed by PLAIN POSITION (0..len-1), not `record.index` -- own's batch
-    can span several rungs (several folders), and `record.index` is only
-    unique WITHIN one folder (it IS that record's filename, `PreTileStore`
-    dirname docstring); the same index number recurs in every folder.
+    tile's identity (a `Corpora.Tile`) is already known from the draw, no
+    pixel read; `__getitem__` is where `_read_store_tile` +
+    `RStack.from_tile` actually happen. Indexed by plain position
+    (0..len-1) over every rung.
     """
-    items: List[tuple]                       # (folder, record, meta)
+    corpus: object
+    items: List[object]                      # Corpora.Tile
     rungs: Sequence[float]
     tile: int
     wsi_stem: str
@@ -616,8 +598,8 @@ class OwnTiles:
         is cheap, this is a convenience for small/repeated runs, not a
         performance fix.
         """
-        folder, record, meta = self.items[i]
-        x, y = int(record.x), int(record.y)
+        t = self.items[i]
+        x, y = int(t.meta.x), int(t.meta.y)
         out: Dict[float, np.ndarray] = {}
         missing = []
         for ds in sorted(float(r) for r in self.rungs):
@@ -629,8 +611,8 @@ class OwnTiles:
             else:
                 missing.append(ds)
         if missing:
-            image = _read_store_tile(folder, record, self.tile)
-            computed = RStack.from_tile(image, float(meta.ds), missing,
+            image = _read_store_tile(self.corpus, t, self.tile)
+            computed = RStack.from_tile(image, float(t.meta.ds), missing,
                                         tile=self.tile)
             out.update(computed)
             if self.cache_root:
@@ -671,9 +653,9 @@ class CStack:
     HANDLE -- same contract as `utilities/PatchingLib.PatchGrid`, which it is
     built on rather than a new tiling scheme (spec.md 3.2 "子嗣格子的切法：
     沿用 PatchGrid，不是新排列"). `read_one`/`read` are the IO half, built on
-    `_read_wsi_tile`'s local disk cache (module docstring) rather than
-    `PreTileStore` -- a descendant's position was computed, not sampled, so
-    `PreTileMeta`'s extraction-run identity does not describe it.
+    `_read_wsi_tile`'s local disk cache (module docstring) rather than a
+    corpus -- a descendant's position was computed, not sampled, so a draw's
+    identity does not describe it.
 
     ONLY `main` RECURSES
     ======================
@@ -881,37 +863,36 @@ class CStack:
     def from_own(corpus, wsi_stem: str, rungs: Sequence[float], wsi, *,
                 tile: int, cache_root: Optional[str] = None
                 ) -> 'OwnForest':
-        """Every record in `stageB-cOwn`'s store -> one tree each, as a
+        """Every tile of `stageB-cOwn`'s draw -> one tree each, as a
         mother -- LAZY, see `OwnForest`, but UNLIKE `OwnChains`/`OwnTiles`:
         the GEOMETRY for every tree in the forest is built here, up front
         (`pyramid()` is pure -- cheap even for hundreds of trees). Only the
-        PIXELS wait for `__getitem__`: the mother's (store-backed,
-        `_read_store_tile`, this record IS the mother) and every
+        PIXELS wait for `__getitem__`: the mother's (corpus-backed,
+        `_read_store_tile`, this tile IS the mother) and every
         descendant's (`wsi`-backed, `CStack.read_tree`, never store-backed --
         see the class docstring).
 
-        Scans every rung the store holds, same reason as `RStack.from_own`.
-        Each record roots its OWN tree at its OWN `meta.ds` -- `rungs` must
-        not ask for anything coarser than that record's `ds`, or `pyramid()`
-        would silently build from a DIFFERENT, coarser mother than the one
-        this record actually is.
+        Takes every rung the draw holds, same reason as `RStack.from_own`.
+        Each tile roots its OWN tree at its OWN `ds` -- `rungs` must not ask
+        for anything coarser than that tile's `ds`, or `pyramid()` would
+        silently build from a DIFFERENT, coarser mother than the one this
+        tile actually is.
         """
         items = []
-        for folder in corpus.rung_dirs(wsi_stem):
-            meta = PreTileStore.load_meta(folder)
-            for record in PreTileStore.load_index(folder):
-                if any(float(r) > float(meta.ds) + 1e-6 for r in rungs):
+        for ds, tiles in corpus.tiles(wsi_stem).items():
+            for t in tiles:
+                if any(float(r) > ds + 1e-6 for r in rungs):
                     raise ValueError(
                         f'rungs {sorted(rungs)} asks for something coarser '
-                        f'than this record\'s own ds {meta.ds:g} -- that '
-                        f'record cannot be the mother of a pyramid rooted '
-                        f'above itself')
-                cx, cy = record.centre_l0(meta)
-                c_rungs = sorted({float(meta.ds), *(float(r) for r in rungs)})
+                        f'than this tile\'s own ds {ds:g} -- that tile '
+                        f'cannot be the mother of a pyramid rooted above '
+                        f'itself')
+                cx, cy = t.centre_l0
+                c_rungs = sorted({ds, *(float(r) for r in rungs)})
                 mother = CStack.mother(cx, cy, max(c_rungs), tile=tile)
                 groups_by_ds = CStack.pyramid(cx, cy, c_rungs, tile=tile)
-                items.append((folder, record, meta, mother, groups_by_ds))
-        return OwnForest(items, wsi, wsi_stem, int(tile), cache_root)
+                items.append((t, mother, groups_by_ds))
+        return OwnForest(corpus, items, wsi, wsi_stem, int(tile), cache_root)
 
     @staticmethod
     def from_mother(mother_image: np.ndarray, cx: float, cy: float,
@@ -947,11 +928,12 @@ class OwnForest:
     """`CStack.from_own`'s result. LAZY like `OwnChains`/`OwnTiles`, but the
     GEOMETRY for the whole forest is already built (`from_own` did it) --
     `__getitem__` is where every PIXEL read happens: the mother's own
-    store-backed pixels (this record always IS the mother) and every
+    corpus-backed pixels (this tile always IS the mother) and every
     descendant's (`wsi`-backed, never store-backed -- descendant positions
     are computed, not sampled, see the class docstring).
     """
-    items: List[tuple]       # (folder, record, meta, mother, groups_by_ds)
+    corpus: object
+    items: List[tuple]       # (Corpora.Tile, mother, groups_by_ds)
     wsi: object
     wsi_stem: str
     tile: int
@@ -967,8 +949,8 @@ class OwnForest:
         """`(mother, mother_image, groups_by_ds, images_by_ds)` -- geometry
         AND pixels for both the mother and every descendant, all at once.
         """
-        folder, record, _meta, mother, groups_by_ds = self.items[i]
-        mother_image = _read_store_tile(folder, record, self.tile)
+        t, mother, groups_by_ds = self.items[i]
+        mother_image = _read_store_tile(self.corpus, t, self.tile)
         images_by_ds = CStack.read_tree(groups_by_ds, self.wsi,
                                         wsi_stem=self.wsi_stem, root=mother,
                                         tile=self.tile,

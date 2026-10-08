@@ -56,11 +56,11 @@ mean are both in [0, 1] but they are not the same quantity. Suppressing what
 only one view saw is the entire mechanism, so the aggregate having FEWER points
 than a single view at the same threshold is the mechanism working, not a bug.
 
-NO PRE-TILE STORE NEEDED
---------------------------
+NO CORPUS NEEDED
+----------------
 `--wsi` cuts a pre-tile straight off the slide through the same `DsLadder` plan
-that `extract_pretiles` uses, so this runs while step 3c is still going.
-`--corpus` (with `--wsi-stem`) reads a stored one instead.
+a corpus is drawn over. `--corpus` takes tile `--index` of that corpus's draw of
+`--wsi` at `--ds` instead.
 """
 
 from __future__ import annotations
@@ -79,13 +79,11 @@ import matplotlib                                               # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
-from cli import (add_corpus_arg, add_pretile_args, corpus_arg,  # noqa: E402
-                 job_result_dir)
+from cli import add_corpus_args, corpus_arg, job_result_dir  # noqa: E402
 
 
 import torch                                                    # noqa: E402
 
-from Store import PreTileStore                                  # noqa: E402
 from common.Homography import sample_homography                 # noqa: E402
 from common.HomographyConfig import HomographyConfig            # noqa: E402
 from common.KeypointLabelStore import points_from_prob          # noqa: E402
@@ -168,16 +166,15 @@ def read_pre_tile(args) -> tuple:
     pre_px = pre_tile_px(args.tile, args.pre_tile_factor)
 
     if args.corpus:
-        if not args.wsi_stem:
-            raise SystemExit('--corpus reads a stored pre-tile: pass --wsi-stem')
-        folder = corpus_arg(args).rung_dir(args.wsi_stem, args.ds)
-        meta = PreTileStore.load_meta(folder)
-        records = PreTileStore.load_index(folder)
-        record = records[int(args.index) % len(records)]
-        pre = PreTileStore.read_tile(folder, record)
-        return pre, (f'{meta.wsi_stem}  ds {meta.ds:g}  '
-                     f'pre-tile #{record.index} at level-0 '
-                     f'({record.x}, {record.y})')
+        corpus = corpus_arg(args)
+        tiles = corpus.tiles(args.wsi, [args.ds]).get(float(args.ds))
+        if not tiles:
+            raise SystemExit(f'corpus {corpus.key} has no ds {args.ds:g} tile '
+                             f'of {args.wsi}')
+        t = tiles[int(args.index) % len(tiles)]
+        return corpus.read(t), (f'{t.meta.slide}  ds {t.meta.ds:g}  '
+                                f'tile #{t.index} at level-0 '
+                                f'({t.meta.x}, {t.meta.y})')
 
     from demo_homography import wsi_tile                        # noqa: PLC0415
 
@@ -224,7 +221,8 @@ def main():
                             'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs')
     ap.add_argument('--ds', type=float, default=4.0)
     ap.add_argument('--tile', type=int, default=256)
-    add_pretile_args(ap, tile=False)     # --pre-tile-factor, and the cache
+    # --corpus (None: cut straight off --wsi), --pre-tile-factor, the jobs
+    add_corpus_args(ap, tile=False, corpus=None)
     ap.add_argument('--num', type=int, nargs='+', default=[100],
                     help='views to aggregate. One panel per value, so '
                          '`--num 10 100` shows what the tenfold cost buys')
@@ -246,9 +244,8 @@ def main():
                          'Drawn as the red cross and named in the legend')
     ap.add_argument('--nms-radius', type=int, default=4)
     ap.add_argument('--border', type=int, default=4)
-    add_corpus_arg(ap, default=None)     # given: read a stored pre-tile
-    ap.add_argument('--wsi-stem', default=None)
-    ap.add_argument('--index', type=int, default=0)
+    ap.add_argument('--index', type=int, default=0,
+                    help="with --corpus: which tile of the draw's --ds rung")
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available()
                     else 'cpu')
     ap.add_argument('--out', default=None)

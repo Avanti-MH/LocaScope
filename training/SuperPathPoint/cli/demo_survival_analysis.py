@@ -32,7 +32,7 @@ PART "chains_stack" -- smoke-test all three axes' OWN and REUSE-F paths
 against a REAL slide
 =====================================================================
 `test_chain_stack.py` (2.1①) proved the geometry is correct against synthetic
-coordinates, and `own`'s wiring against a fake `PreTileStore` fixture. What
+coordinates, and `own`'s wiring against a fake corpus fixture. What
 neither can catch: a wrong pyramid LEVEL, a transposed axis, an off-by-one in
 `_read_wsi_tile`'s level resolution -- anything that still produces a
 plausible `tile x tile` RGB array. Those only show up against real tissue,
@@ -189,7 +189,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
-from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
+from cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
                  chainstack_root, job_result_dir)
 
 
@@ -456,8 +456,7 @@ def _run_chains_stack(args, out_dir: str) -> None:
         if not len(f_own):
             raise RuntimeError(
                 f'F has no complete chain for {wsi_stem} in '
-                f'{f_corpus.key} -- run '
-                f'prepare_chain_stack.py --axes F for this slide first')
+                f'{f_corpus.key}: its draw holds no chain over every rung')
         chain_id = next(iter(f_own))
         chain = f_own.chains[chain_id]
         print(f"centre: ({chain.cx:.0f}, {chain.cy:.0f}), chain {chain_id}")
@@ -2539,9 +2538,8 @@ def _run_scale_diagnostic(args, out_dir: str) -> None:
     chain_ids = list(f_own)[:args.n_scale_tiles]
     if not chain_ids:
         raise SystemExit(f'no complete F chain for {entry.name} in '
-                         f'{f_corpus.key} -- run '
-                         f'prepare_chain_stack.py --axes F for this slide '
-                         f'first')
+                         f'{f_corpus.key}: its draw holds no chain over '
+                         f'every rung')
     if len(chain_ids) < args.n_scale_tiles:
         print(f'  only {len(chain_ids)} complete chains available, wanted '
              f'{args.n_scale_tiles}', flush=True)
@@ -2802,7 +2800,7 @@ def main():
                          f'defaults to {DEFAULT_WSI_NAME} if unset; '
                          'merge_grid needs it only with --checkpoint/'
                          '--real-flow')
-    add_pretile_args(ap)
+    add_corpus_args(ap, corpus=False)
     prepare_chain_stack.add_axis_corpus_args(ap)
     ap.add_argument('--c-rungs', type=float, nargs='+',
                     default=[1.0, 2.0, 4.0, 8.0, 16.0],

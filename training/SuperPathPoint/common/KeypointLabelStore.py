@@ -1,7 +1,7 @@
 """Homographic Adaptation's output on disk: one sparse point set per tile.
 
     points = points_from_prob(result.mean_prob, result.counts, cfg)
-    LabelStore.save(job, batch, LabelMeta.of(...))   # beside its rung, in job's tree
+    LabelStore.save(job, corpus, batch, LabelMeta.of(...))   # under its draw
 
     batch, meta = LabelStore.load(path, require={'wsi_stem': 'BRACS_1228'})
     xy = batch.points_of(i)          # [n_kp[i], 2] int16, tile coordinates
@@ -65,15 +65,15 @@ from ConfigIdentity import enc, short_id
 
 #: Bumped when a field changes MEANING. Adding one with a default does not need
 #: it. ConfigIdentity's first rule.
-SCHEMA_VERSION = '1'
+SCHEMA_VERSION = '2'
 
 #: What makes two label sets different. `ha_id` folds the whole adaptation --
 #: its config AND the teacher's config AND the teacher's weights -- so nothing
 #: here has to enumerate `num` or `patch_ratio` and then fail to be updated when
-#: a field appears. `pretile_id` is in because the POSITIONS come from a
-#: pre-tile store: same slide, same rung, different seed is a different set of
+#: a field appears. `corpus_id` is in because the POSITIONS come from a
+#: corpus's draw: same slide, same rung, different seed is a different set of
 #: tiles and therefore a different set of labels.
-_IDENTITY_FIELDS = ('wsi_stem', 'ds', 'tile', 'ha_id', 'pretile_id',
+_IDENTITY_FIELDS = ('wsi_stem', 'ds', 'tile', 'ha_id', 'corpus_id',
                     'score_threshold', 'points_per_megapixel', 'nms_radius',
                     'border')
 
@@ -262,7 +262,7 @@ class LabelMeta:
     ds:        float
     tile:      int
     ha_id:     str        # HomographicAdaptation.identity_id(): HA cfg + teacher
-    pretile_id: str       # PreTileMeta.corpus_key: which positions
+    corpus_id: str        # Corpora.Corpus.key: which positions
 
     #: The two knobs that decide what a point IS. Identity, because a store cut
     #: at one threshold cannot be re-cut at another.
@@ -284,7 +284,7 @@ class LabelMeta:
 
     @classmethod
     def of(cls, batch: LabelBatch, *, wsi_stem: str, ds: float, tile: int,
-           ha, pretile_meta, score_threshold: float,
+           ha, corpus, score_threshold: float,
            points_per_megapixel: float, nms_radius: int = 4, border: int = 4,
            aggregation: str = 'mean', wsi_path: str = '') -> 'LabelMeta':
         """Read the identity off the objects that determine it.
@@ -295,7 +295,7 @@ class LabelMeta:
         """
         return cls(
             wsi_stem=wsi_stem, ds=float(ds), tile=int(tile),
-            ha_id=ha.identity_id(), pretile_id=pretile_meta.corpus_key,
+            ha_id=ha.identity_id(), corpus_id=corpus.key,
             score_threshold=float(score_threshold),
             points_per_megapixel=float(points_per_megapixel),
             nms_radius=int(nms_radius), border=int(border),
@@ -325,27 +325,29 @@ class LabelMeta:
         return cls(**kwargs)
 
 
-# ── where ────────────────────────────────────────────────────────────────────
+# ── where ──────────────────────────────────────────────────────────────────
 #
-# A label set sits beside the rung it was made from, in the labelling job's
-# tree: the pre-tile corpus's address (`Store.PreTileCorpus`) down to the
-# rung's `ds=` level, then `labels/`. The variants of one rung are its label
-# sets -- round 1 and round 2 of Stage A differ in `ha_id` and coexist there.
+# A label set sits under the draw it was made from, in the labelling job's
+# tree: the corpus's address (`Corpora.Corpus.address`), then `labels/`. One
+# variant per (rung, labelling): `ds` and `ha_id` are both identity, so round 1
+# and round 2 of Stage A, and every rung, coexist there.
 #
-#   .../draw=<sampler>/pretile=f<k>/ds=<d>/labels/labels_<id>.safetensors
-#                                                 record_<id>.json
+#   .../draw=<sampler>/labels/labels_<id>.safetensors
+#                             record_<id>.json
 
-def _entry(job: str, wsi_stem: str, ds: float, pretile_id: str):
-    from Store import PreTileCorpus                               # noqa: PLC0415
-    return PreTileCorpus.from_key(job, pretile_id).address(
-        wsi_stem, ds).entry('labels')
+def _entry(job: str, corpus, wsi_stem: str):
+    return corpus.address(wsi_stem, job).entry('labels')
 
 
 # ── write ────────────────────────────────────────────────────────────────────
 
-def save(root, batch: LabelBatch, meta: LabelMeta) -> Path:
-    """Validate, then write the label set as one variant of its rung's
-    `labels` entry in job `root`'s tree, the record last."""
+def save(root, corpus, batch: LabelBatch, meta: LabelMeta) -> Path:
+    """Validate, then write the label set as one variant of the `labels`
+    entry under `corpus`'s draw of its slide, in job `root`'s tree, the
+    record last."""
+    if meta.corpus_id != corpus.key:
+        raise ValueError(f'labels made on corpus {meta.corpus_id}, filed under '
+                         f'{corpus.key}')
     if len(batch) != meta.n_tiles:
         raise ValueError(
             f'meta says {meta.n_tiles} tiles, the batch has {len(batch)}. '
@@ -362,7 +364,7 @@ def save(root, batch: LabelBatch, meta: LabelMeta) -> Path:
 
     meta = dataclasses.replace(
         meta, created_at=meta.created_at or time.strftime('%Y-%m-%dT%H:%M:%S'))
-    entry = _entry(root, meta.wsi_stem, meta.ds, meta.pretile_id)
+    entry = _entry(root, corpus, meta.wsi_stem)
     lid = meta.identity_id()
     with entry.writing(lid, meta.to_strings()) as put:
         save_file({'tile_x': np.ascontiguousarray(batch.tile_x),
@@ -407,11 +409,12 @@ def load(path, *, require: Optional[Dict[str, object]] = None
     return LabelBatch(**tensors), meta
 
 
-def find(root, *, wsi_stem: str, ds: float, pretile_id: str, **eq) -> List[Path]:
-    """The label sets of one rung -- the corpus `pretile_id`, slide `wsi_stem`,
+def find(root, corpus, *, wsi_stem: str, ds: float, **eq) -> List[Path]:
+    """The label sets of one rung -- `corpus`'s draw of slide `wsi_stem`,
     rung `ds` -- in job `root`'s tree whose metadata matches `eq`. Lists that
     one entry's variants; no other directory is looked at."""
-    entry = _entry(root, wsi_stem, ds, pretile_id)
+    entry = _entry(root, corpus, wsi_stem)
+    eq = dict(eq, ds=float(ds))
     hits = []
     for lid in entry.ids():
         path = entry.path('labels', lid, '.safetensors')
@@ -421,18 +424,18 @@ def find(root, *, wsi_stem: str, ds: float, pretile_id: str, **eq) -> List[Path]
     return hits
 
 
-def find_one(root, *, wsi_stem: str, ds: float, pretile_id: str, **eq) -> Path:
+def find_one(root, corpus, *, wsi_stem: str, ds: float, **eq) -> Path:
     """The single label set matching, or an error naming the ones that did.
 
     Never `find()[0]`: a rung legitimately holds round-1 and round-2 labels --
     they differ in `ha_id` and coexist -- and picking whichever sorted first
     would train round 3 on round 1.
     """
-    hits = find(root, wsi_stem=wsi_stem, ds=ds, pretile_id=pretile_id, **eq)
+    hits = find(root, corpus, wsi_stem=wsi_stem, ds=ds, **eq)
     if len(hits) == 1:
         return hits[0]
-    entry = _entry(root, wsi_stem, ds, pretile_id)
-    query = ', '.join(f'{k}={v!r}' for k, v in sorted(eq.items())) or '(no filter)'
+    entry = _entry(root, corpus, wsi_stem)
+    query = ', '.join(f'{k}={v!r}' for k, v in sorted(dict(eq, ds=ds).items()))
     if not hits:
         raise LabelMismatch(
             f'no labels in {entry.dir} matching {query}. Present: {entry.ids()}')

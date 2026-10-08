@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""spec.md 12 step 4: run Homographic Adaptation over a pre-tile store.
+"""spec.md 12 step 4: run Homographic Adaptation over a corpus.
 
-    python training/SuperPathPoint/cli/make_ha_labels.py --tile 256
-    python training/SuperPathPoint/cli/make_ha_labels.py --tile 256 --limit 100
+    python training/SuperPathPoint/cli/make_ha_labels.py --datasets 'bracs/test#val'
+    python training/SuperPathPoint/cli/make_ha_labels.py --wsi BRACS_1228 --limit 100
 
-Outputs (beside each pre-tile rung in this job's cache tree, .../ds=<d>/labels/;
---labels-cache-job):
+Outputs (under each slide's draw of the corpus in this job's cache tree,
+.../draw=<sampler>/labels/; --labels-cache-job), one variant per rung:
     labels_<label id>.safetensors + record_<label id>.json
     make_ha_labels.csv          in result/<SLURM_JOB_NAME or MakeHaLabels>/
 
@@ -54,15 +54,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
-from cli import (add_corpus_arg, add_labels_args, add_pretile_args,  # noqa: E402
-                 corpus_arg, job_result_dir, labels_root)
+from cli import (add_corpus_args, add_labels_args, add_slides_args,  # noqa: E402
+                 corpus_arg, job_result_dir, labels_root, slides_from_args)
 
 
 import numpy as np                                                # noqa: E402
 import torch                                                      # noqa: E402
 
+from Cache import wsi_stem_of                                     # noqa: E402
 from common import KeypointLabelStore                # noqa: E402
-from Store import PreTileStore                                   # noqa: E402
 from common.KeypointLabelStore import (LabelMeta, batch_from_lists,  # noqa: E402
                                        cap_for, points_from_prob)
 from SuperPoint.HomographicAdaptation import HaConfig              # noqa: E402
@@ -105,11 +105,9 @@ DEFAULT_POINTS_PER_MPX = 30000.0
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    add_pretile_args(ap)            # --tile: which extraction to read, v1 is 256
-    add_corpus_arg(ap)
+    add_corpus_args(ap)             # --corpus, --tile (v1 is 256), the jobs
+    add_slides_args(ap)             # --datasets / --n-wsi / --wsi
     add_labels_args(ap, produces=True)
-    ap.add_argument('--wsi-stem', nargs='*', default=None,
-                    help='slides to do. Default: every slide the corpus has')
     ap.add_argument('--ds', type=float, nargs='*', default=None,
                     help='rungs to do. Default: every one present')
     ap.add_argument('--num', type=int, default=100,
@@ -162,24 +160,19 @@ def main():
     print(f'ha {ha.identity_id()}   N={args.num}   device {device}', flush=True)
 
     corpus = corpus_arg(args)
-    stores = _stores(corpus, args)
-    if not stores:
-        print(f'no finished pre-tile rungs at {corpus.root}/{corpus.key}. '
-              f'Run cli/extract_pretiles.py first.')
-        return 1
-    print(f'{len(stores)} (slide, rung) stores', flush=True)
+    print(f'corpus {corpus.key}   draws in {corpus.job}', flush=True)
+    rungs = _rungs(corpus, slides_from_args(args), args)
+    print(f'{len(rungs)} (slide, rung) cells', flush=True)
 
     rows, failures = [], []
-    for index, folder in enumerate(stores, 1):
-        meta = PreTileStore.load_meta(folder)
-        print(f'\n[{index}/{len(stores)}] {meta.wsi_stem}  ds {meta.ds:g}',
-              flush=True)
+    for index, (path, ds, tiles) in enumerate(rungs, 1):
+        stem = wsi_stem_of(path)
+        print(f'\n[{index}/{len(rungs)}] {stem}  ds {ds:g}', flush=True)
         try:
-            rows.append(_label_one(folder, meta, ha, args))
+            rows.append(_label_one(corpus, path, ds, tiles, ha, args))
         except Exception as e:                                   # noqa: BLE001
             print(f'    FAILED  {type(e).__name__}: {e}', flush=True)
-            failures.append((f'{meta.wsi_stem} ds{meta.ds:g}',
-                             f'{type(e).__name__}: {e}'))
+            failures.append((f'{stem} ds{ds:g}', f'{type(e).__name__}: {e}'))
 
     summary = os.path.join(out_dir, 'make_ha_labels.csv')
     if rows:
@@ -197,23 +190,21 @@ def main():
     return 1 if failures else 0
 
 
-def _stores(corpus, args):
-    """Every finished rung of ONE corpus matching the filters, coarse rungs last.
+def _rungs(corpus, paths, args):
+    """`[(slide path, ds, [Tile])]` of ONE corpus over `paths`, `--ds` only
+    when given, coarse rungs last.
 
-    One corpus by address, never a search by tile size: a cache root holds
-    stage A and stage B of the same slides on purpose, and a search that
-    returned both would spend the hours-to-days HA step twice and write labels
-    for a corpus nobody asked for -- nothing would raise, and the extra labels
-    would look exactly like the wanted ones.
+    One corpus by address, never a search: a cache holds stage A and stage B
+    of the same slides on purpose, and a search that returned both would
+    spend the hours-to-days HA step twice and write labels for a corpus nobody
+    asked for -- nothing would raise, and the extra labels would look exactly
+    like the wanted ones.
     """
-    kept = []
-    for stem in (args.wsi_stem or corpus.slides()):
-        for folder in corpus.rung_dirs(stem):
-            ds = PreTileStore.load_meta(folder).ds
-            if args.ds and not any(abs(ds - d) < 1e-6 for d in args.ds):
-                continue
-            kept.append(folder)
-    return sorted(kept, key=lambda p: PreTileStore.load_meta(p).ds)
+    out = []
+    for path in paths:
+        out += [(path, ds, tiles)
+                for ds, tiles in corpus.tiles(path, args.ds).items()]
+    return sorted(out, key=lambda cell: cell[1])
 
 
 def _ladder_of(args):
@@ -229,11 +220,12 @@ def _ladder_of(args):
     return ladder, np.zeros(len(ladder), np.int64)
 
 
-def _label_one(folder, meta, ha, args):
-    """One (slide, rung): every pre-tile through HA, one store file out."""
+def _label_one(corpus, path, ds, tiles, ha, args):
+    """One (slide, rung): every pre-tile through HA, one label set out."""
+    stem = wsi_stem_of(path)
     existing = KeypointLabelStore.find(
-        args.labels_root, wsi_stem=meta.wsi_stem, ds=meta.ds,
-        ha_id=ha.identity_id(), pretile_id=meta.corpus_key)
+        args.labels_root, corpus, wsi_stem=stem, ds=ds,
+        ha_id=ha.identity_id())
     if existing and not args.overwrite:
         print(f'    have it: {existing[0].name}   (--overwrite to redo)',
               flush=True)
@@ -242,13 +234,11 @@ def _label_one(folder, meta, ha, args):
         # because `csv.DictWriter` takes its fieldnames from the FIRST row and
         # raises on any later row that carries a different set -- a reused rung
         # landing first would otherwise decide the schema for the whole file.
-        return _row(meta, have, seconds=0.0, reused=True,
+        return _row(have, seconds=0.0, reused=True,
                     ladder=_ladder_of(args)[0])
 
-    records = PreTileStore.load_index(folder)
-    if args.limit:
-        records = records[:int(args.limit)]
-    cap = cap_for(meta.tile, args.points_per_megapixel)
+    records = tiles[:int(args.limit)] if args.limit else tiles
+    cap = cap_for(corpus.tile, args.points_per_megapixel)
     # One generator for the whole rung, so the draws of tile k do not depend on
     # how many tiles came before it in a previous run -- reproducible per rung,
     # which is the unit that gets re-run.
@@ -263,8 +253,8 @@ def _label_one(folder, meta, ha, args):
     positions, points, scores, counts = [], [], [], []
     started = time.time()
     for i, record in enumerate(records):
-        pre = PreTileStore.read_tile(folder, record)
-        result = ha.run(pre, meta.tile, rng=rng, factor=meta.pre_tile_factor)
+        pre = corpus.read(record)
+        result = ha.run(pre, corpus.tile, rng=rng, factor=corpus.factor)
         xy, score, seen = points_from_prob(
             result.prob, result.counts,
             score_threshold=args.score_threshold,
@@ -282,7 +272,7 @@ def _label_one(folder, meta, ha, args):
         ladder_kept += np.array([(ref_score > t).sum() for t in ladder],
                                 np.int64)
 
-        positions.append((record.x, record.y))
+        positions.append((record.meta.x, record.meta.y))
         points.append(xy)
         scores.append(score)
         counts.append(seen)
@@ -295,12 +285,13 @@ def _label_one(folder, meta, ha, args):
 
     batch = batch_from_lists(positions, points, scores, counts, cap)
     label_meta = LabelMeta.of(
-        batch, wsi_stem=meta.wsi_stem, ds=meta.ds, tile=meta.tile, ha=ha,
-        pretile_meta=meta, score_threshold=args.score_threshold,
+        batch, wsi_stem=stem, ds=ds, tile=corpus.tile, ha=ha,
+        corpus=corpus, score_threshold=args.score_threshold,
         points_per_megapixel=args.points_per_megapixel,
         nms_radius=args.nms_radius, border=args.border,
-        aggregation=ha.cfg.aggregation, wsi_path=meta.wsi_path)
-    path = KeypointLabelStore.save(args.labels_root, batch, label_meta)
+        aggregation=ha.cfg.aggregation, wsi_path=str(path))
+    written = KeypointLabelStore.save(args.labels_root, corpus, batch,
+                                      label_meta)
 
     print(f'    n_kp  mean {label_meta.mean_n_kp:.0f}  min {batch.n_kp.min()}  '
           f'max {batch.n_kp.max()}  cap {cap}  at-cap {batch.at_cap}', flush=True)
@@ -310,8 +301,8 @@ def _label_one(folder, meta, ha, args):
         print(f'    WARNING  {batch.at_cap} tiles hit the cap, so the CAP '
               f'selected rather than the threshold. Raise '
               f'--points-per-megapixel and redo this rung', flush=True)
-    print(f'    wrote {path.name}   ({seconds / 60:.1f} min)', flush=True)
-    return _row(meta, label_meta, seconds=seconds, reused=False,
+    print(f'    wrote {written.name}   ({seconds / 60:.1f} min)', flush=True)
+    return _row(label_meta, seconds=seconds, reused=False,
                 ladder=ladder, ladder_kept=ladder_kept)
 
 
@@ -334,7 +325,7 @@ def _print_ladder(ladder, kept, chosen: float, n_tiles: int) -> None:
               f'{100.0 * (1 - k / base):5.1f}% filtered{mark}')
 
 
-def _row(pre_meta, label_meta, *, seconds, reused, ladder=None,
+def _row(label_meta, *, seconds, reused, ladder=None,
          ladder_kept=None):
     tiles = max(label_meta.n_tiles, 1)
     # The ladder as three fixed columns rather than one packed string, so a
@@ -354,7 +345,7 @@ def _row(pre_meta, label_meta, *, seconds, reused, ladder=None,
             ladder_cols['kept_frac_vs_ref'] = round(chosen / base, 4)
     return {'wsi_stem': label_meta.wsi_stem, 'ds': label_meta.ds,
             'tile': label_meta.tile, 'n_tiles': label_meta.n_tiles,
-            'ha_id': label_meta.ha_id, 'pretile_id': label_meta.pretile_id,
+            'ha_id': label_meta.ha_id, 'corpus_id': label_meta.corpus_id,
             'score_threshold': label_meta.score_threshold,
             'cap': label_meta.cap, 'n_at_cap': label_meta.n_at_cap,
             'mean_n_kp': round(label_meta.mean_n_kp, 1),

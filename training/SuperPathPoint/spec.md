@@ -728,7 +728,7 @@ training/SuperPathPoint/
                                #   label，三個閾值同框，每個 num 一格
     make_ha_labels.py
     train_superpathpoint.py
-    prepare_chain_stack.py     # F/R/C 三軸各自的 pre-tile，一條龍抽取入口
+    prepare_chain_stack.py     # F/R/C 三軸各自的 corpus，讀一張 slide 的三個 draw
     survival_alpha_analysis.py # decoy_shift_* factory、畫圖、orchestration
     train_semantic_points.py
     inspect_ha_labels.py       # diagnostic：把產出的 label 畫回 tile 上
@@ -1526,7 +1526,7 @@ floors <= caps        逐元素
 `n_goal = min(supply_b / target_b)`：混合比例準，張數少。v1 用 `'ask'`。
 
 **這些值寫在程式碼的 `RichnessConfig` 預設裡，jobscript 只把它印出來當表頭。**
-`ExtractPreTiles.sh`/`extract_pretiles.py` 都沒有 `tissue_ratio` 這個參數；
+corpus 的 recipe（`common/Corpora.RECIPES`）沒有 `tissue_ratio` 這個參數；
 `TrainSuperPathPoint.sh` 的 `BALANCE=none` 帶著上一節第二張表當理由。
 
 `tissue_ratio` 這個名字在別處還活著，而那些是別的東西：
@@ -1619,27 +1619,28 @@ held out」）：
 它用同一批已抽好的 tile，不必重抽，是加法不是改建。列為具名的後續 arm，v1 不做。
 在那之前，任何關於「跨染色」的句子都不准出現在結論裡。
 
-#### tile 先落地，不在訓練時讀 WSI
+#### tile 不落地，用到時從 WSI 讀
 
-MRXS 在 DataLoader 的多個 worker 裡邊訓練邊讀是一件會咬人的事：`SafeSlide` 遇到
-破損會重開 handle，而重開 MIRAX 要重新解析它的索引（`log/TODO.log` 2026-08-22
-量到一次讀取 752 次 reopen）。
+**corpus 就是一個 draw**（`common/Corpora.Corpus`）：位置是 `TileSampler.cached`
+的 draw entry（`slide=/seg=/region=/plan=/draw/`，第一次讀時抽、之後讀回），像素在
+要用的那一刻從 slide 讀（`Corpus.read`，每個 process 每張 slide 一個 reader，fork
+之後才開，所以 handle 不跨 fork）。不寫 PNG。`KeypointLabelStore` 以
+`corpus_id = Corpus.key` 對上它，label 放在 draw 底下（`draw=<sampler>/labels/`）。
+位址的每一層都是決定內容的東西：遮罩（`seg_id`、`region_id`）、一起抽的 rung 與
+context 倍率（`plan`：chain 只在同一次抽的 rung 之間成立，倍率在 camera 裡）、抽樣
+（`sampler_id` 涵蓋三個取樣軸、tile 與 seed）。讀端從 recipe 名算出位址，不在根目錄
+底下搜尋長得像的東西。
 
-所以照 prov-gigapath 的作法：**離線切一次 tile 落地，訓練完全不碰 WSI**
-（`gigapath/preprocessing/` 與 `finetune/` 是分開的兩件事，訓練迴圈只讀
-預先算好的東西）。落地位置
-`result/cache/<job>_pretiles/<seg_id>/<slide>/<region_id>_<sampler_id>_<plan>/f<factor>/ds<d>/`
-（`utilities/Store.py` 的 `PreTileCorpus`），`KeypointLabelStore` 以
-`pretile_id = corpus key` 對上它。位址的每一層都是決定內容的東西：遮罩
-（`seg_id`、`region_id`）、抽樣（`sampler_id` 涵蓋三個取樣軸、tile 與 seed）、
-一起抽的 rung（`plan`：chain 只在同一次抽的 rung 之間成立）、context 倍率。
-讀端從自己的參數算出位址（`common/Corpora.py` 的 recipe 名或完整 key），
-不在根目錄底下搜尋長得像的東西。
+**待量：訓練時讀 WSI 的速度。** MRXS 在 DataLoader 的多個 worker 裡邊訓練邊讀可能
+會咬人：`SafeSlide` 遇到破損會重開 handle，而重開 MIRAX 要重新解析它的索引
+（`log/TODO.log` 2026-08-22 量到一次讀取 752 次 reopen）。先訓練一個 epoch 量時間；
+慢的話在 draw 底下加一個 `tiles` entry 落地 pre-tile（和 render 的 `photos_` 同一
+做法），下面的容量表就是那時的代價。
 
 #### 落地的是 pre-tile，所以是 9 倍，而這件事會決定 512/1024 做不做得起
 
-**存的是 pre-tile 不是 tile**（6.6）。`tile` 是訓練時從 pre-tile 中心裁出來的，
-不另外存——但 pre-tile 每邊 3 倍，面積就是 **9 倍**。這不是 6.6 的附帶成本，
+**讀的（落地的話就是存的）是 pre-tile 不是 tile**（6.6）。`tile` 是訓練時從
+pre-tile 中心裁出來的——但 pre-tile 每邊 3 倍，面積就是 **9 倍**。這不是 6.6 的附帶成本，
 它是 6.6 的**主要**成本，而先前這張表算的是 tile。
 
 上界（每格 500 張，探針還沒說哪幾格真的拿得到）：
@@ -1680,9 +1681,8 @@ store），但 1024 那一族單獨就 153 GB，不是零頭。
 | 降倍率 | 3 -> 2，面積 9 -> 4 倍 | 超出的 draw 有黑邊；6.6 那條斷言會逐張指出是哪些，於是「有多少張真的超出」變成量得到的 |
 | 不落地 | 512/1024 改成訓練時從 WSI 讀 | 撞上 6.5 開頭那個 MRXS reopen 的問題，正是這裡先落地的原因 |
 
-v1 不必現在決定——256 這條線走完之前 1024 一張都不會抽。**但它必須在
-`extract_pretiles.py` 支援 `--pre-tile-factor` 這件事上先留好位置**，而不是把 3
-寫死在抽取程式裡。`PreTileCorpus` 因此把倍率放進位址（`f<factor>`）：
+v1 不必現在決定——256 這條線走完之前 1024 一張都不會讀。倍率是 `--pre-tile-factor`，
+不寫死：它是 corpus camera（`pretile_spec`）的一部分，所以在 `plan` 的位址裡，
 倍率不同的兩批 tile 是兩個資料集，不是同一批的兩個版本。
 
 探針（12 節第 3b 步）跑完之後這些上界會往下修。
@@ -2100,7 +2100,7 @@ CLAUDE.md 的規則：在任何以小時或數十 GB 計的執行之前，先寫
 | `test_mpp_stack` | 同中心兩階 tile，細的降採樣後與粗的算正規化互相關 > 0.9，且贏過位移一 tile 的誘餌 | co-registration 的中心算錯。這是 `test_camera` 在 Stage B 的對應物，那個測試找到過真 bug |
 | `test_keypoint_label_store` | 存讀來回；`require=` 對不上時拒絕；`n_kp` 與 `kp_xy` 的 padding 一致 | 兩個設定的 label 互相覆蓋。照 `test_store` |
 | `test_ds_ladder` | 每個 rung 挑到的 level 的 ds ≤ 目標；在 4x 與 2x 兩種金字塔上各驗一次 | 挑到偏粗的一側 -> 靜靜地上採樣。這正是不能重用 `coarser_level` 的原因 |
-| `test_tile_sampler --only pretile`、`test_store` | 中心裁切取回植入的方塊，而偏 ±1 格的裁切取不回（誘餌）；PNG 來回逐位元相同（雜訊圖，連 RGB 順序一起驗）；遮罩、抽樣、plan、倍率各自改動都會換位址；沒寫完 index 的 rung 讀不到 | 裁切偏一格 -> 每張圖對每個 label 都偏一像素，訓練照樣收斂，模型只是「差一點」。這條是擋在 3c 那 32 GB 前面的秒級斷言 |
+| `test_tile_sampler --only pretile`、`test_corpora` | 中心裁切取回植入的方塊，而偏 ±1 格的裁切取不回（誘餌）；`Corpus.read` 的中心裁切就是 draw 位置上的那個 tile，贏過偏一格的讀取（`--wsi`，4x 與 2x 金字塔各一）；recipe、rung、tile、倍率各自改動都會換 key，job 不會 | 裁切偏一格 -> 每張圖對每個 label 都偏一像素，訓練照樣收斂，模型只是「差一點」 |
 
 再加一個不是單元測試但同等重要的：**第一輪 HA 的 label 產出來之後，先跑
 `cli/inspect_ha_labels.py` 把機率圖畫出來看**，再決定要不要進第二輪。第一輪的
@@ -2145,7 +2145,7 @@ teacher 是 COCO domain 的權重，H&E 是 out-of-domain，label 的品質是�
 | 2 | `DsLadder` + `test_ds_ladder` | 6 片各自的讀取計畫 | 幾分鐘。金字塔已量（6.5），這步是驗證解析器挑對了層 |
 | 3a | 把 `test_EoMT.py` 的 PCA 那一半包成 SegFunc，產出 6 片的遮罩 | 6 張 ds=14 的遮罩 + region | 後面兩步的輸入。**不是** EoMT 的頭，見 6.1 |
 | 3b | 取樣探針：`(片, tile_size, ds)` 各跑一次，記整個候選池 | **216 格**（12 片 x 3 tile x 6 ds），每格 `n_admissible` 與每桶的供給 / 取得 | **跑了兩次，答案相反。** 2026-08-26 的六片版量到的是拒絕預算不是候選池；2026-08-27 的十二片版才是。結論：`tissue_ratio` 退役、`BALANCE=none`，兩張表在 6.5 |
-| 3c | 離線切 **pre-tile**，只切 256 這一族 | 12 片 x 6 個 rung，每格要 100，實得 **6,388 張 / 4.4 GB**（3b 說的牆） | v1 只做 `model_256`。落地的是 pre-tile 不是 tile（6.6）——豐富度的桶判在 tile 的 footprint 上，pre-tile 只是 warp 的上下文 |
+| 3c | `stageA` corpus 的 draw，只做 256 這一族 | 12 片 x 6 個 rung，每格要 100，實得 **6,388 個位置**（3b 說的牆） | v1 只做 `model_256`。讀的是 pre-tile 不是 tile（6.6）——豐富度的桶判在 tile 的 footprint 上，pre-tile 只是 warp 的上下文。draw 在第一次讀時建立，不另跑抽取 |
 | 4 | 包上游權重成 teacher + HA + label store | 一片 slide、一個 rung 的 label | 第一個真實的未知數。同時量 HA 的 wall clock（§13） |
 | 5 | `inspect_ha_labels` 看圖 | 決定：繼續，還是換 teacher | **決策點。** COCO 權重在 H&E 上可能根本不work |
 | 6 | `KeypointNet` + loss + Trainer，VGG backbone | **`model_256_gray` 與 `model_256_rgb` 兩個 student** | 先把管線跑通，用最小的 backbone。兩個 student 共用同一批 HA label（座標不在乎通道數） |
@@ -2496,8 +2496,7 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 | 1 | `utilities/TissueMaskConfig.py`（`MaskMaker`）、`utilities/TissueMask.py`（`SlideMask`） | mask 的 recipe、快取與落地格式。遮罩之外還存 `components` |
 | 2 | `utilities/cli/build_cache/build_mask_store.py` | 對 6 片跑分割器、寫 store |
 | 3 | `utilities/cli/diagnostics/probe_tile_yield.py` | 3b 探針，`(片, ratio, tile, ds)` 216 格 |
-| 4 | `utilities/Store.py`（`PreTileCorpus`／`PreTileStore`）、`training/SuperPathPoint/common/Corpora.py` | pre-tile 的位址、落地格式與索引；三批具名 pre-tile 的 recipe |
-| 5 | `training/SuperPathPoint/cli/extract_pretiles.py` | 3c 抽取 |
+| 4 | `training/SuperPathPoint/common/Corpora.py`（`Corpus`） | corpus 的位址（一個 draw）、讀 pre-tile；三批具名 corpus 的 recipe |
 
 `SlideMask` 在 `utilities/TissueMask.py`，不在任何分割器裡：產品不 import 產生它的
 模組，所以存 hsv、hest 或 uni2_pca 的遮罩用同一個格式。
@@ -2567,7 +2566,7 @@ label，而且不會報錯。
 | 21 | `utilities/test_modules/TestSuperPathPoint/test_homographic_adaptation.py`（第 10 節那條誘餌檢查） |
 | 22 | `utilities/test_modules/TestSuperPathPoint/test_keypoint_label_store.py` |
 | 23 | `utilities/test_modules/TestSuperPathPoint/test_detector_decoder.py`（depth-to-space 來回） |
-| 23b | `jobscripts/ExtractPreTiles.sh`（第 12 節 3c） |
+| 23b | `utilities/test_modules/TestSuperPathPoint/test_corpora.py`（第 12 節 3c 的 corpus） |
 | 23c | `utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py`（第 11-19 支） |
 | 23d | `utilities/test_modules/TestSuperPathPoint/test_encoder_backbone.py`（`EncoderBackbone.py`） |
 | 24 | `jobscripts/MakeHaLabels.sh` |
@@ -2587,9 +2586,8 @@ label，而且不會報錯。
 
 | 檔 | 為什麼 |
 |---|---|
-| `utilities/test_modules/test_store.py`、`test_tile_sampler.py` 的 `pretile` 節 | CLAUDE.md 那條「在昂貴的執行之前放一條便宜的斷言」。3c 讀六片、寫約 32 GB、跑數小時，而它會壞的四種方式沒有一種會拋例外——中心裁切偏一格、pre-tile 存錯尺寸、兩批抽取撞同一個位址、換成有損編碼。四種都是秒級可釘，其中三種釘的是**誘餌**而不是容忍度 |
+| `test_tile_sampler.py` 的 `pretile` 節、`TestSuperPathPoint/test_corpora.py` | CLAUDE.md 那條「在昂貴的執行之前放一條便宜的斷言」。HA 與訓練讀幾千個 pre-tile、跑數小時，而它會壞的方式沒有一種會拋例外——中心裁切偏一格、讀的 pre-tile 不以 tile 為中心、兩個 corpus 撞同一個位址。都是秒級可釘，釘的是**誘餌**而不是容忍度 |
 | `common/HomographyConfig.py` | 13 個 sampler 選項被 `HaConfig` 與 `PairDatasetConfig` 各要一次。放不進 `common/Homography.py`：那支刻意不在 import 時碰 torch（`warp_image_torch` 自己 lazy import），而 `ConfigIdentity` 會拉 torch 進來，登入節點上跑得動的 demo 就跑不動了 |
-| `jobscripts/ExtractPreTiles.sh` | 3c 要在叢集上跑，而原本的清單沒有給它一支 |
 | `utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py` | 第 11-19 支**一支測試都沒有**。它刻意違反「測試以被測 module 命名」那條——被測的不是八個 module，是它們**之間的合約**：`space_to_depth` 對 `depth_to_space_prob`、`check_shapes` 對 backbone、dataset 的 warp 對 loss 的對應遮罩。拆成八個檔，每個檔只會拿到半句話 |
 | `SuperPoint/EncoderBackbone.py` | 原本規劃在 `Backbones.py`（第 12 支）裡。分出來的理由不是整潔：`import aiNNModel` 會執行 `os.environ.setdefault('HF_HOME', ...)`，而 huggingface_hub 是先到先得——把它放進 `Backbones.py` 等於把那個副作用放上 `KeypointNet.py` 的 import 路徑，也就是每一支 CPU 測試的 import 路徑。這支檔案頂層只 import `TileEncoderFunc`（沒有 HF），實作模組是在 `build()` 裡才 import 的 |
 | `utilities/test_modules/TestSuperPathPoint/test_encoder_backbone.py` | 上面那支的測試。假 trunk 而不是真權重，而且假的在這裡是**更強**的測試：這支檔案決定的全是數字，而假 trunk 可以被指使去謊報它們——宣告 stride 16 實際 stride 8——真的 ViT 做不到 |

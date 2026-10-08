@@ -21,7 +21,7 @@ vectors, with no GPU and no slide.
 # `from SurvivalAnalysis import Patterns` already works -- Python imports the
 # submodule -- so an `__init__` that re-exported the five would add nothing
 # except a cost: it would make importing `Patterns` also import `ChainStack` and
-# `SurvivalTable`, and with them safetensors, `PreTileStore` and `TileSampler`.
+# `SurvivalTable`, and with them safetensors, `SlideReader` and `TileSampler`.
 # The two pure modules would stop being cheap to import, which is the property
 # that lets their tests run on a login node in a second with no GPU and no
 # store. Re-exporting for tidiness would take that away silently.

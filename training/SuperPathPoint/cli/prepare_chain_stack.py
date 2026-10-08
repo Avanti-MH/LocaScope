@@ -6,9 +6,10 @@
     python training/SuperPathPoint/cli/prepare_chain_stack.py
         # no --wsi -- all 12 slides of the corpus (see _CORPUS_SLIDES)
 
-Decides which corpus each axis reads, makes sure it exists, then calls that
-axis's `from_own()` -- the enumeration and lazy read logic lives in
-`ChainStack.py` (`FStack`/`RStack`/`CStack.from_own`), not here.
+Decides which corpus each axis reads, then calls that axis's `from_own()` --
+the enumeration and lazy read logic lives in `ChainStack.py`
+(`FStack`/`RStack`/`CStack.from_own`), not here. A corpus whose draw of a slide
+is not in the cache yet is drawn by that call (`Corpora.Corpus.draw`).
 
 ONE JOB, 12 SLIDES -- `--wsi`/`--wsi-stem` OMITTED, NOT A FLAG.
 ================================================================================
@@ -22,8 +23,8 @@ which failed and why, and the process exits nonzero if any did. A single
 `--wsi` raises straight through -- that path is for ad hoc debugging, where a
 stack trace is more useful than a summary line.
 
-RESUMABLE: a slide whose own corpus already has finished rungs is not
-re-sampled, so a walltime kill costs only the slides not yet reached.
+RESUMABLE: a slide whose draws are cached is not re-sampled, so a walltime
+kill costs only the slides not yet reached.
 
 THREE CORPORA, THREE SHAPES (common/Corpora.py holds their knobs)
 ================================================================
@@ -31,24 +32,19 @@ THREE CORPORA, THREE SHAPES (common/Corpora.py holds their knobs)
     R  stageA        no chains, share=0, full ladder -- RStack.from_own
     C  stageB-cOwn   no chains, share=0, single rung -- CStack.from_own
 
-F's and C's own corpora are sampled HERE, in process, through the same
-`extract_pretiles._extract_slide` the stageA script uses -- no subprocess and
-no second copy of the knobs. R does not get its own extraction: stageA
-already IS a batch of independent, multi-rung real tiles, which is what R's
-own needs, and it is the human-run training corpus (ExtractPreTiles.sh). R
-reads it and never re-cuts it.
+R does not get a corpus of its own: stageA already IS a batch of independent,
+multi-rung real tiles, which is what R's own needs.
 
-THE CORPUS IS COMPUTED, NOT FOUND. Each axis's directory is
+THE CORPUS IS COMPUTED, NOT FOUND. Each axis's address is
 `Corpora.corpus_of(recipe, ...)` -- known before anything runs, from the same
-config the extraction samples with, so there is nothing to guess and nothing
-to drift: a reader that looked on disk for "the only sampler_id" would read
+config the draw samples with, so there is nothing to guess and nothing to
+drift: a reader that looked on disk for "the only sampler_id" would read
 stageA as F the moment stageA existed and F's own did not.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 import time
@@ -58,25 +54,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
-from cli import (add_chainstack_args, add_pretile_args,  # noqa: E402
-                 chainstack_root, corpus_from_args, job_result_dir)
-
-
-import torch                                                      # noqa: E402
+from cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
+                 chainstack_root, corpus_from_args)
 
 import AccessDatasets                                              # noqa: E402
-from Cache import job_name                                        # noqa: E402
 from SafeSlide import SafeSlide                                   # noqa: E402
-from Store import PreTileCorpus                                   # noqa: E402
 from SurvivalAnalysis import ChainStack                           # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker              # noqa: E402
-from common.Corpora import AXIS_RECIPE, recipe_config             # noqa: E402
-import extract_pretiles                                            # noqa: E402
+from common.Corpora import AXIS_RECIPE, Corpus                    # noqa: E402
 
 #: The 12-slide corpus (spec.md 13), by NAME -- `AccessDatasets.locate(name)`
 #: resolves the path. MUST STAY IN SYNC with `BuildMaskStore.sh`'s `SLIDES`
 #: array (bash, so it hardcodes paths). Each name is what the mask and
-#: pre-tile caches key the slide by.
+#: draw caches key the slide by.
 _CORPUS_SLIDE_NAMES = [
     'BRACS_1228', 'BRACS_1476', 'BRACS_1936', 'BRACS_1579', 'BRACS_1284',
     'S1104233,G7E,110208', 'S1104360,G7E,110208', 'S1151088,G7E,111220',
@@ -89,131 +78,34 @@ _CORPUS_SLIDES = [(name, AccessDatasets.locate(name).path)
 
 
 def add_axis_corpus_args(ap) -> None:
-    """`--r-rungs` and `--{f,r,c}-corpus`: what `axis_corpus` reads besides
-    `add_pretile_args`'s flags, `--rungs` and `--c-rungs`. Shared by every CLI
-    that reads the three axes, so they address the same directories."""
+    """`--r-rungs`: what `axis_corpus` reads besides `add_corpus_args`'s
+    flags, `--rungs` and `--c-rungs`. Shared by every CLI that reads the three
+    axes, so they address the same draws."""
     ap.add_argument('--r-rungs', type=float, nargs='+', default=None,
-                    help="the rungs stageA was cut over -- part of its "
-                         "address. Default: DsLadder's, which is what "
-                         'ExtractPreTiles.sh cuts')
-    for axis in ('f', 'r', 'c'):
-        ap.add_argument(f'--{axis}-corpus', default=None,
-                        help='a corpus key (printed by extract_pretiles) to '
-                             'read instead of the computed one')
+                    help="the rungs stageA is drawn over -- part of its "
+                         "address. Default: DsLadder's")
 
 
 def axis_rungs(axis: str, args):
-    """The rungs `axis`'s corpus is cut over -- part of its address. F is cut
-    over the rungs it must be complete over; C over its mother alone; R reads
-    stageA, which ExtractPreTiles.sh cuts over DsLadder's default (None)."""
+    """The rungs `axis`'s corpus is drawn over -- part of its address. F over
+    the rungs it must be complete over; C over its mother alone; R reads
+    stageA, over DsLadder's default (None)."""
     return {'F': list(args.rungs), 'R': args.r_rungs,
             'C': [max(args.c_rungs)]}[axis]
 
 
-def axis_corpus(axis: str, args) -> PreTileCorpus:
-    """`axis`'s own corpus: `--<axis>-corpus KEY` if given, else computed."""
-    key = getattr(args, f'{axis.lower()}_corpus')
-    if key:
-        from cli import pretile_root                               # noqa: PLC0415
-        return PreTileCorpus.from_key(pretile_root(args), key)
+def axis_corpus(axis: str, args) -> Corpus:
+    """`axis`'s own corpus, computed from its recipe (`AXIS_RECIPE`)."""
     return corpus_from_args(args, AXIS_RECIPE[axis], axis_rungs(axis, args))
 
 
-def _extract_own(axis: str, corpus: PreTileCorpus, wsi_path: str, args,
-                 masks: MaskMaker, rows: list = None) -> None:
-    """Sample `axis`'s own corpus for one slide, in process, with the recipe's
-    own config -- the object whose `identity_id()` is in `corpus`'s address,
-    not a reconstruction of it.
-
-    `rows`, if given, is EXTENDED with the rows `_extract_slide` returns: a
-    mutable accumulator the caller owns, as `failures` is. `main()`'s summary
-    CSV is the one reader.
-    """
-    cfg = recipe_config(AXIS_RECIPE[axis])
-    if cfg.identity_id() != corpus.sampler_id:
-        raise RuntimeError(
-            f'{axis}: --{axis.lower()}-corpus names sampler {corpus.sampler_id}, '
-            f'but the {AXIS_RECIPE[axis]} recipe is {cfg.identity_id()}. An '
-            f'explicit corpus is read, not extracted -- it has to exist')
-    print(f'[{AXIS_RECIPE[axis]}] no finished rung yet -- sampling directly '
-          f'into {corpus.key} ...', flush=True)
-    failures = []
-    with SafeSlide(wsi_path) as wsi:
-        new_rows = extract_pretiles._extract_slide(
-            wsi, masks, cfg, corpus, axis_rungs(axis, args), tile=args.tile,
-            n=cfg.n_per_rung, overwrite=False, failures=failures,
-            draw_job=args.draw_cache_job or job_name('PrepareChainStack'))
-    if rows is not None:
-        rows.extend(new_rows)
-    if failures:
-        raise RuntimeError(f'{AXIS_RECIPE[axis]} extraction failed: {failures}')
-
-
-def _other_corpora(corpus: PreTileCorpus, wsi_stem: str):
-    """Sibling corpora of this slide under the same mask, with finished rungs:
-    `{set directory name: [ds...]}`."""
-    from Cache import Address                                     # noqa: PLC0415
-    region = Address(corpus.root, slide=wsi_stem, seg=corpus.seg_id,
-                     region=corpus.region_id)
-    mine = corpus.address(wsi_stem)
-    found = {}
-    for plan in region.children('plan'):
-        for draw in region.at(plan=plan).children('draw'):
-            for pre in region.at(plan=plan, draw=draw).children('pretile'):
-                at = region.at(plan=plan, draw=draw, pretile=pre)
-                if at == mine:
-                    continue
-                rungs = sorted(float(d) for d in at.children('ds')
-                               if (at.at(ds=d).dir / 'tiles' / 'index.csv').exists())
-                if rungs:
-                    found[f'{plan}/{draw}/{pre}'] = rungs
-    return found
-
-
-def ensure_corpus(axis: str, corpus: PreTileCorpus, wsi_stem: str,
-                  wsi_path: str, args, masks: MaskMaker,
-                  rows: list = None) -> PreTileCorpus:
-    """`corpus`, extracting this slide's part of it first if it has no
-    finished rung yet.
-
-    R DOES NOT AUTO-EXTRACT. `stageA` is the separate, human-run training
-    corpus (ExtractPreTiles.sh). If it is missing for this slide, that is a
-    gap to fill with THAT script, not something to reproduce here as a side
-    effect of wanting R's own tiles. And if something multi-rung already sits
-    beside the computed address, the likelier story is that the stageA recipe
-    here drifted from the one that cut it -- which a fresh extraction would
-    paper over with a third corpus -- so that is named rather than guessed at.
-    """
-    if corpus.rung_dirs(wsi_stem):
-        return corpus
-    if axis == 'R':
-        wide = {k: v for k, v in _other_corpora(corpus, wsi_stem).items()
-                if len(v) > 1}
-        hint = (f' Multi-rung corpora that DO exist for it: {wide}. If one is '
-                f'stageA, the recipe in common/Corpora.py has drifted from '
-                f'the one that cut it -- fix the recipe, or pass --r-corpus '
-                f'with its key.' if wide else '')
-        raise RuntimeError(
-            f'stageA has no finished rung for {wsi_stem} at {corpus.key}. R '
-            f'reads stageA and does not extract it -- run ExtractPreTiles.sh '
-            f'for this slide first.{hint}')
-    _extract_own(axis, corpus, wsi_path, args, masks, rows)
-    if not corpus.rung_dirs(wsi_stem):
-        raise RuntimeError(
-            f'sampled {AXIS_RECIPE[axis]} for {wsi_stem} but no finished rung '
-            f'appeared at {corpus.set_dir(wsi_stem)} -- check the output above')
-    return corpus
-
-
-def _run_slide(wsi_path: str, wsi_stem: str, args, masks: MaskMaker,
-               rows: list = None) -> dict:
-    """Everything one slide needs: each requested axis's corpus (extracting
-    F's or C's own first if missing), then one `from_own()` read as a sanity
-    check. Returns `{axis: corpus key}` for the requested axes."""
+def _run_slide(wsi_path: str, wsi_stem: str, args) -> dict:
+    """Everything one slide needs: each requested axis's corpus (drawn on its
+    first read), then one `from_own()` read as a sanity check. Returns
+    `{axis: corpus key}` for the requested axes."""
     corpora = {}
     for axis in args.axes:
-        corpora[axis] = ensure_corpus(axis, axis_corpus(axis, args), wsi_stem,
-                                      wsi_path, args, masks, rows)
+        corpora[axis] = axis_corpus(axis, args)
         print(f'{axis}: {corpora[axis].key}', flush=True)
 
     if 'F' in args.axes:
@@ -272,10 +164,10 @@ def main():
                          'build the whole 12-slide corpus instead '
                          '(_CORPUS_SLIDES)')
     ap.add_argument('--wsi-stem', default=None)
-    add_pretile_args(ap)
+    add_corpus_args(ap, corpus=False)
     ap.add_argument('--rungs', type=float, nargs='+',
                     default=[1.0, 2.0, 4.0, 8.0, 16.0],
-                    help='F chain completeness, F own extraction + R output '
+                    help='F chain completeness, F own draw + R output '
                          'rungs')
     ap.add_argument('--c-rungs', type=float, nargs='+',
                     default=[1.0, 2.0, 4.0, 8.0, 16.0],
@@ -284,14 +176,6 @@ def main():
     ap.add_argument('--axes', nargs='+', default=['F', 'R', 'C'],
                     choices=['F', 'R', 'C'])
     add_chainstack_args(ap, 'PrepareChainStack', on=False)   # R/C's own tiles: off
-    ap.add_argument('--draw-cache-job', default=None,
-                    help="whose cache the own corpora's draws are read from "
-                         'and written to. Default: this job')
-    ap.add_argument('--out', default=None,
-                    help='directory for the summary CSV (default: '
-                         "job_result_dir('PrepareChainStack'), NOT "
-                         "ExtractPreTiles.sh's own directory -- this is a "
-                         'different job, same row shape')
     args = ap.parse_args()
 
     if args.wsi_name:
@@ -311,43 +195,16 @@ def main():
 
     batch = len(slides) > 1
     results = {}
-    rows = []
-    # The device matters: `build(None)` is CPU, which is ~250x slower for the
-    # uni2_pca segmenter (see extract_pretiles.main).
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    with MaskMaker(MASK_RECIPES[args.seg], args.mask_cache_job, device) as masks:
-        for wsi_stem, wsi_path in slides:
-            if batch:
-                print(f'\n---- {wsi_stem} ----', flush=True)
-            try:
-                results[wsi_stem] = _run_slide(wsi_path, wsi_stem, args,
-                                               masks, rows=rows)
-            except Exception as exc:
-                if not batch:
-                    raise
-                print(f'FAILED: {exc}', flush=True)
-                results[wsi_stem] = exc
-
-    # SAME ROW SHAPE AS `extract_pretiles.py`'s OWN SUMMARY, same filename,
-    # a DIFFERENT directory -- `job_result_dir` keys it off SLURM_JOB_NAME,
-    # and this script's own jobscript names the job differently, so the two
-    # never collide the way running ExtractPreTiles.sh twice under the same
-    # name does (see this file's own history of that exact mistake, module
-    # docstring). Only rows for extractions THIS run actually performed --
-    # a cache HIT contributes none, matching `extract_pretiles.py`'s own
-    # semantics of not recording rungs it skipped.
-    if rows:
-        out_dir = args.out or job_result_dir('PrepareChainStack')
-        os.makedirs(out_dir, exist_ok=True)
-        summary = os.path.join(out_dir, 'extract_pretiles.csv')
-        with open(summary, 'w', newline='') as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-            writer.writeheader()
-            writer.writerows(rows)
-        total = sum(r['n_got'] for r in rows)
-        gb = sum(r['bytes'] for r in rows) / 1e9
-        print(f'\nSaved {summary}   ({len(rows)} cells, {total} pre-tiles, '
-             f'{gb:.1f} GB on disk)')
+    for wsi_stem, wsi_path in slides:
+        if batch:
+            print(f'\n---- {wsi_stem} ----', flush=True)
+        try:
+            results[wsi_stem] = _run_slide(wsi_path, wsi_stem, args)
+        except Exception as exc:
+            if not batch:
+                raise
+            print(f'FAILED: {exc}', flush=True)
+            results[wsi_stem] = exc
 
     if not batch:
         return 0

@@ -202,7 +202,7 @@ class HomographicAdaptation(IdentifiedBuild):
         """Aggregate `cfg.num` views of one pre-tile into one label.
 
         Args:
-            pre_tile: HxWx3 (or HxW) as stored by `PreTileStore`. Its side must
+            pre_tile: HxWx3 (or HxW) as `Corpora.Corpus.read` returns it. Its side must
                 be `tile * factor`.
             tile: the frame everything is expressed in, and what the teacher
                 sees.

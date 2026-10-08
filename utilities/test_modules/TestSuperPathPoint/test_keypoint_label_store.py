@@ -62,13 +62,24 @@ setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 
+from types import SimpleNamespace                                # noqa: E402
+
 from common import KeypointLabelStore                             # noqa: E402
+from common.Corpora import Corpus, recipe_config                 # noqa: E402
 from common.KeypointLabelStore import (LabelMeta, LabelMismatch,   # noqa: E402
                                        batch_from_lists, cap_for,
                                        points_from_prob)
 
 _RESULTS = []
 TILE = 64
+
+#: Where every label set of these tests is filed: a corpus's draw of SLIDE_A.
+#: A real `Corpus` -- only its address and key are used, so the mask is a
+#: stand-in that answers the two ids.
+_CORPUS = Corpus('test', SimpleNamespace(seg_id=lambda: 'seg0',
+                                         region_id=lambda: 'reg0'),
+                 recipe_config('stageA'), (1.0, 2.0, 4.0), TILE, 3,
+                 'TestLabelsDraws', 'TestLabelsMasks')
 
 
 def check(name, fn):
@@ -270,7 +281,7 @@ def t_the_cap_is_the_configs_and_not_the_data_maximum():
 
 def _meta(**over) -> LabelMeta:
     base = dict(wsi_stem='SLIDE_A', ds=4.0, tile=TILE, ha_id='aaaa1111',
-                pretile_id='seg0/reg0_bbbb2222_ladder-1-2/f3', score_threshold=0.005,
+                corpus_id=_CORPUS.key, score_threshold=0.005,
                 points_per_megapixel=30000.0, nms_radius=4, border=4)
     base.update(over)
     return LabelMeta(**base)
@@ -279,7 +290,7 @@ def _meta(**over) -> LabelMeta:
 def t_every_identity_field_changes_the_filename():
     base = _meta()
     moved = {'wsi_stem': 'SLIDE_B', 'ds': 8.0, 'tile': 128,
-             'ha_id': 'cccc3333', 'pretile_id': 'dddd4444',
+             'ha_id': 'cccc3333', 'corpus_id': 'dddd4444',
              'score_threshold': 0.01, 'points_per_megapixel': 1000.0,
              'nms_radius': 3, 'border': 8}
     assert set(moved) == set(KeypointLabelStore._IDENTITY_FIELDS), (
@@ -312,9 +323,8 @@ def t_provenance_does_not_change_the_filename():
 #  4. store
 # ══════════════════════════════════════════════════════════════════════════════
 
-#: The rung every label set of these tests sits beside.
-_RUNG = dict(wsi_stem='SLIDE_A', ds=4.0,
-             pretile_id='seg0/reg0_bbbb2222_ladder-1-2/f3')
+#: The rung every label set of these tests is of.
+_RUNG = dict(wsi_stem='SLIDE_A', ds=4.0)
 
 
 @contextlib.contextmanager
@@ -341,8 +351,10 @@ def t_write_then_read_returns_the_same_arrays():
     with _tree() as root:
         batch = _batch()
         meta = _meta(n_tiles=len(batch), cap=batch.cap)
-        path = KeypointLabelStore.save(root, batch, meta)
+        path = KeypointLabelStore.save(root, _CORPUS, batch, meta)
         back, got = KeypointLabelStore.load(path)
+        assert path.parent.name == 'labels', path
+        assert path.parent.parent.name == f'draw={_CORPUS.sampler_id}', path
 
         for name in ('tile_x', 'tile_y', 'kp_xy', 'kp_score', 'kp_count', 'n_kp'):
             assert np.array_equal(getattr(back, name), getattr(batch, name)), name
@@ -360,7 +372,7 @@ def t_write_then_read_returns_the_same_arrays():
 def t_require_refuses_rather_than_falls_back():
     with _tree() as root:
         batch = _batch()
-        path = KeypointLabelStore.save(root, batch,
+        path = KeypointLabelStore.save(root, _CORPUS, batch,
                                        _meta(n_tiles=len(batch), cap=batch.cap))
         KeypointLabelStore.load(path, require={'wsi_stem': 'SLIDE_A'})
         try:
@@ -376,16 +388,22 @@ def t_find_one_refuses_two_rounds_and_takes_ha_id():
         batch = _batch()
         for ha_id in ('aaaa1111', 'eeee5555'):
             KeypointLabelStore.save(
-                root, batch, _meta(ha_id=ha_id, n_tiles=len(batch),
-                                   cap=batch.cap))
+                root, _CORPUS, batch, _meta(ha_id=ha_id, n_tiles=len(batch),
+                                            cap=batch.cap))
+        # the decoy: another rung of the same draw, the same ha_id. It sits in
+        # the same entry and must not be found for ds 4.
+        KeypointLabelStore.save(
+            root, _CORPUS, batch, _meta(ds=2.0, ha_id='eeee5555',
+                                        n_tiles=len(batch), cap=batch.cap))
         try:
-            KeypointLabelStore.find_one(root, **_RUNG)
+            KeypointLabelStore.find_one(root, _CORPUS, **_RUNG)
         except LabelMismatch as e:
             assert '2 label sets' in str(e), str(e)
         else:
             raise AssertionError('find_one picked one of two rounds')
-        assert KeypointLabelStore.find_one(root, ha_id='eeee5555', **_RUNG).exists()
-    return 'ambiguous refused, ha_id resolves it'
+        got = KeypointLabelStore.find_one(root, _CORPUS, ha_id='eeee5555', **_RUNG)
+        assert KeypointLabelStore.load_meta(got).ds == 4.0, got
+    return 'ambiguous refused, ha_id resolves it, the other rung is not found'
 
 
 def t_save_validates_the_meta_against_the_batch():
@@ -393,13 +411,15 @@ def t_save_validates_the_meta_against_the_batch():
         batch = _batch(n=3)
         for meta, why in ((_meta(n_tiles=99, cap=batch.cap), 'wrong n_tiles'),
                           (_meta(n_tiles=3, cap=batch.cap, ha_id=''),
-                           'empty ha_id')):
+                           'empty ha_id'),
+                          (_meta(n_tiles=3, cap=batch.cap, corpus_id='other'),
+                           'labels of another corpus')):
             try:
-                KeypointLabelStore.save(root, batch, meta)
+                KeypointLabelStore.save(root, _CORPUS, batch, meta)
             except ValueError:
                 continue
             raise AssertionError(f'{why} was accepted')
-    return 'n_tiles and ha_id both checked'
+    return 'n_tiles, ha_id and the corpus all checked'
 
 
 # ══════════════════════════════════════════════════════════════════════════════

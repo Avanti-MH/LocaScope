@@ -66,7 +66,7 @@ C_RUNGS="${C_RUNGS:-1.0 2.0 4.0 8.0 16.0}"
 # CHAINSTACK_CACHE_JOB: whose tile cache (result/cache/<job>/slide=<s>/chainstack/) to use
 # (default: this job's own). Was CACHE_ROOT, a bare path, until 2026-10-06.
 CHAINSTACK_CACHE_JOB="${CHAINSTACK_CACHE_JOB:-}"
-PRETILE_CACHE_JOB="${PRETILE_CACHE_JOB:-}"   # empty = ExtractPreTiles
+DRAW_CACHE_JOB="${DRAW_CACHE_JOB:-}"   # empty = SuperPathPointCorpus
 
 # ── chains_stack only ────────────────────────────────────────────────────
 RUNGS="${RUNGS:-1.0 2.0 4.0 8.0 16.0}"
@@ -146,7 +146,7 @@ python training/SuperPathPoint/cli/demo_survival_analysis.py \
   ${WSI_NAME:+--wsi-name "$WSI_NAME"} \
   --tile "$TILE" \
   --c-rungs $C_RUNGS \
-  ${PRETILE_CACHE_JOB:+--pretile-cache-job "$PRETILE_CACHE_JOB"} \
+  ${DRAW_CACHE_JOB:+--draw-cache-job "$DRAW_CACHE_JOB"} \
   ${CHAINSTACK_CACHE_JOB:+--chainstack-cache-job "$CHAINSTACK_CACHE_JOB"} \
   --rungs $RUNGS \
   --lineage-index "$LINEAGE_INDEX" \

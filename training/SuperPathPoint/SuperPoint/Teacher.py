@@ -226,7 +226,7 @@ class SuperPointTeacher(IdentifiedBuild):
     def _prepare(self, images) -> torch.Tensor:
         """Anything reasonable in, `[B, 1, H, W]` float in [0, 1] out.
 
-        Accepts a single HxWx3 uint8 array (what `PreTileStore.read_tile`
+        Accepts a single HxWx3 uint8 array (what `Corpora.Corpus.read`
         returns), a list of them, or a tensor already in NCHW. The conversion is
         upstream's luma, and the /255 is upstream's scale -- both are stated in
         the module docstring because both are silent when wrong.

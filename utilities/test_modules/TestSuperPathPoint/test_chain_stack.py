@@ -23,7 +23,7 @@ Sections:
   nearest    picked by centre distance, not by containment
   cache      the local tile cache round-trips
   own        from_tile/base_rung compounding, derive() refusing 'own', and
-             FStack/RStack/CStack.from_own against a fake PreTileStore
+             FStack/RStack/CStack.from_own against a fake corpus
 """
 
 from __future__ import annotations
@@ -46,9 +46,11 @@ from pathlib import Path                                      # noqa: E402
 
 import numpy as np                                           # noqa: E402
 
-from Store import (PreTileCorpus, PreTileMeta, PreTileRecord,  # noqa: E402
-                   PreTileStore)
-from TileSampler import PRE_TILE_FACTOR, pre_tile_px          # noqa: E402
+from dataclasses import dataclass                              # noqa: E402
+from types import SimpleNamespace                             # noqa: E402
+
+from TileSampler import PRE_TILE_FACTOR, SampleMeta, pre_tile_px  # noqa: E402
+from common.Corpora import Corpus, recipe_config              # noqa: E402
 from SlideReader import degrade_resolution                     # noqa: E402
 from PatchingLib import PatchInfo                             # noqa: E402
 from SurvivalAnalysis import ChainStack                    # noqa: E402
@@ -392,87 +394,91 @@ def _tree():
             Cache.RESULT_DIR = saved
 
 
-def _corpus(root, sampler_id):
-    """A corpus address in job `root`'s tree; only `sampler_id` varies
-    between tests."""
-    return PreTileCorpus(root, 'seg0', 'reg0', sampler_id, 'ladder-test', _FACTOR)
+@dataclass(frozen=True)
+class _Corpus(Corpus):
+    """A corpus whose draw is given and whose pixels are painted, so no slide
+    is opened: `table` is the draw's metas in order, and every pre-tile is a
+    uniform patch of its `colours` entry -- a round-trip through
+    `centre_crop`/`from_tile` is checkable by colour alone."""
+    table: tuple = ()
+    colours: tuple = ()
+
+    @staticmethod
+    def path_of(slide):
+        return str(slide)
+
+    def draw(self, slide):
+        return [SimpleNamespace(meta=m) for m in self.table if m.slide == slide]
+
+    def read(self, tile):
+        pre = pre_tile_px(self.tile, self.factor)
+        return np.full((pre, pre, 3), self.colours[tile.index], dtype=np.uint8)
 
 
-def _make_store(root, wsi_stem, ds, tile, sampler_id, records):
-    """A finished rung of `_corpus(root, sampler_id)` with `records` (list of
-    kwargs for `PreTileRecord`), each tile a uniform patch coloured by its own
-    index -- so a round-trip through `centre_crop`/`from_tile` is checkable by
-    colour alone, the same trick `test_store.py` uses.
-    """
-    corpus = _corpus(root, sampler_id)
-    meta = PreTileMeta(wsi_stem=wsi_stem, ds=float(ds), tile=int(tile),
-                      seg_id=corpus.seg_id, region_id=corpus.region_id,
-                      sampler_id=sampler_id, plan=corpus.plan, seed=0,
-                      segmenter_id='deadbeef',
-                      pre_tile_factor=_FACTOR, level=0, level_ds=float(ds),
-                      shrink=1.0, read_size=pre_tile_px(tile, _FACTOR))
-    folder = PreTileStore.create(corpus, meta)
-    out = []
-    pre = pre_tile_px(tile, _FACTOR)
-    for kwargs in records:
-        rec = PreTileRecord(**kwargs)
-        image = np.full((pre, pre, 3), rec.index, dtype=np.uint8)
-        PreTileStore.save_tile(folder, rec, image, meta)
-        out.append(rec)
-    PreTileStore.write_index(folder, out)
-    return folder, meta
+def _corpus(*rungs, slide='SLIDE_A', tile=_TILE):
+    """A fake corpus of `slide` whose draw holds `rungs`, each `(ds, [dict(
+    index, x, y[, inherit_id])])` -- `index` is the tile's colour."""
+    table, colours = [], []
+    for ds, records in rungs:
+        for r in records:
+            table.append(SampleMeta(
+                slide=slide, ds=float(ds), level=0, x=int(r['x']), y=int(r['y']),
+                tile_size=int(tile), read_size=int(tile),
+                footprint_l0=int(round(tile * ds)),
+                inherit_id=int(r.get('inherit_id', -1))))
+            colours.append(int(r['index']))
+    mask = SimpleNamespace(seg_id=lambda: 'seg0', region_id=lambda: 'reg0')
+    return _Corpus('test', mask, recipe_config('stageA'),
+                   tuple(sorted({float(ds) for ds, _ in rungs})), int(tile),
+                   _FACTOR, 'TestChainStack', 'TestChainStack',
+                   tuple(table), tuple(colours))
 
 
 def t_FStack_from_own_is_lazy_and_reads_a_chain_on_getitem():
     """`chains()` (metadata only) finds the chain; `x[inherit_id]` is where
     `FStack.read` -- a real pixel read -- actually happens."""
-    with _tree() as root:
-        _make_store(root, 'SLIDE_A', 1.0, _TILE, 'aaaa1111',
-                   [dict(index=0, x=1000, y=1000, inherit_id=7)])
-        _make_store(root, 'SLIDE_A', 2.0, _TILE, 'aaaa1111',
-                   [dict(index=0, x=900, y=900, inherit_id=7)])
-        own = FStack.from_own(_corpus(root, 'aaaa1111'), 'SLIDE_A', tile=_TILE, rungs=[1.0, 2.0])
+    with _tree():
+        corpus = _corpus((1.0, [dict(index=0, x=1000, y=1000, inherit_id=7)]),
+                         (2.0, [dict(index=0, x=900, y=900, inherit_id=7)]))
+        own = FStack.from_own(corpus, 'SLIDE_A', tile=_TILE, rungs=[1.0, 2.0])
         if len(own) != 1 or list(own) != [7]:
             raise AssertionError(f'expected one chain keyed 7, got {list(own)}')
         stack = own[7]
         if set(stack) != {1.0, 2.0}:
             raise AssertionError(f'expected rungs {{1.0, 2.0}}, got {set(stack)}')
         if stack[1.0][0, 0, 0] != 0 or stack[2.0][0, 0, 0] != 0:
-            raise AssertionError('pixels did not round-trip (both records are index 0)')
+            raise AssertionError('pixels did not round-trip (both tiles are colour 0)')
     return "1 chain found, x[7] reads both rungs"
 
 
 def t_RStack_from_own_scans_every_rung_not_just_one():
     """own's batch can span more than one base_rung in a single run -- both
-    must show up, not just whichever folder `find` happens to see first."""
-    with _tree() as root:
-        _make_store(root, 'SLIDE_A', 1.0, _TILE, 'bbbb2222',
-                   [dict(index=0, x=0, y=0), dict(index=1, x=200, y=200)])
-        _make_store(root, 'SLIDE_A', 4.0, _TILE, 'bbbb2222',
-                   [dict(index=0, x=1000, y=1000)])
-        own = RStack.from_own(_corpus(root, 'bbbb2222'), 'SLIDE_A', [1.0, 4.0], tile=_TILE)
+    must show up, not just whichever rung comes first."""
+    with _tree():
+        corpus = _corpus((1.0, [dict(index=0, x=0, y=0), dict(index=1, x=200, y=200)]),
+                         (4.0, [dict(index=0, x=1000, y=1000)]))
+        own = RStack.from_own(corpus, 'SLIDE_A', [1.0, 4.0], tile=_TILE)
         if len(own) != 3:
             raise AssertionError(f'expected 3 own tiles across both rungs, got {len(own)}')
         stacks = [own[i] for i in own]
         if not all(set(s) == {1.0, 4.0} for s in stacks):
             raise AssertionError('every own tile should produce both output rungs')
-    return "3 records across ds 1/ds 4, each -> a 2-rung stack"
+    return "3 tiles across ds 1/ds 4, each -> a 2-rung stack"
 
 
 def t_RStack_from_own_cache_off_by_default_on_when_asked():
     """`cache_root` defaults to `None` (unlike every other `cache_root` in
     this module) -- degrade is cheap, see `from_own`'s docstring. Passing one
     must make a second access hit the cache instead of recomputing."""
-    with _tree() as root:
+    with _tree():
         cache_root = 'TestChainStackTiles'
         tile_dir = ChainStack._cache_dir(cache_root, 'SLIDE_A')
-        _make_store(root, 'SLIDE_A', 1.0, _TILE, 'cccc3333',
-                   [dict(index=5, x=300, y=400)])
-        off = RStack.from_own(_corpus(root, 'cccc3333'), 'SLIDE_A', [1.0, 2.0], tile=_TILE)
+        corpus = _corpus((1.0, [dict(index=5, x=300, y=400)]))
+        off = RStack.from_own(corpus, 'SLIDE_A', [1.0, 2.0], tile=_TILE)
         off[0]
         if ChainStack._cache_get(tile_dir, 'SLIDE_A', 300, 400, 2.0, _TILE) is not None:
             raise AssertionError('a fresh cache_root must start empty')
-        on = RStack.from_own(_corpus(root, 'cccc3333'), 'SLIDE_A', [1.0, 2.0], tile=_TILE,
+        on = RStack.from_own(corpus, 'SLIDE_A', [1.0, 2.0], tile=_TILE,
                              cache_root=cache_root)
         on[0]
         if ChainStack._cache_get(tile_dir, 'SLIDE_A', 300, 400, 2.0, _TILE) is None:
@@ -485,16 +491,15 @@ def t_CStack_from_own_builds_forest_geometry_without_a_wsi():
     need a real `wsi` at all (only `__getitem__` does, for the descendants) --
     passing `None` and never touching it proves the split is real, not just
     documented."""
-    with _tree() as root:
-        _make_store(root, 'SLIDE_A', 16.0, _TILE, 'dddd4444',
-                   [dict(index=0, x=10_000, y=10_000)])
-        forest = CStack.from_own(_corpus(root, 'dddd4444'), 'SLIDE_A', [4.0, 8.0, 16.0], None,
+    with _tree():
+        corpus = _corpus((16.0, [dict(index=0, x=10_000, y=10_000)]))
+        forest = CStack.from_own(corpus, 'SLIDE_A', [4.0, 8.0, 16.0], None,
                                  tile=_TILE)
         if len(forest) != 1:
             raise AssertionError(f'expected 1 tree, got {len(forest)}')
-        _folder, _record, meta, mother, groups_by_ds = forest.items[0]
+        _tile, mother, groups_by_ds = forest.items[0]
         if mother.ds != 16.0:
-            raise AssertionError(f'mother ds {mother.ds} != the record\'s own 16.0')
+            raise AssertionError(f'mother ds {mother.ds} != the tile\'s own 16.0')
         want = CStack.pyramid(*mother_centre(mother), [4.0, 8.0, 16.0], tile=_TILE)
         if set(groups_by_ds) != set(want):
             raise AssertionError(f'{set(groups_by_ds)} != {set(want)}')

@@ -75,17 +75,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import _paths                                                     # noqa: E402
 _paths.setup_import_paths('SuperPathPoint')
 
-from cli import (RESULT_DIR, add_corpus_arg, add_labels_args,       # noqa: E402
-                 add_pretile_args, corpus_arg, job_result_dir, labels_root,
-                 pretile_root)
+from cli import (RESULT_DIR, add_corpus_args, add_labels_args,      # noqa: E402
+                 corpus_arg, corpus_from_args, job_result_dir, labels_root)
 
 
 import numpy as np                                                # noqa: E402
 import torch                                                      # noqa: E402
 
 from ConfigIdentity import config_from_json                       # noqa: E402
-
-from Store import PreTileCorpus                                   # noqa: E402
 
 from DsLadder import DEFAULT_RUNGS                                # noqa: E402
 from SuperPoint.Datasets import PairDatasetConfig                 # noqa: E402
@@ -220,7 +217,7 @@ def _check_val_size(val_set, history, arm):
             f'--val-slides explicitly')
 
 
-def _slides_from(recorded, corpus):
+def _slides_from(recorded):
     """The held-out stems a checkpoint recorded, in either of the two formats.
 
     The writer uses `json.dumps`, which needs no undoing. What follows is for
@@ -236,8 +233,8 @@ def _slides_from(recorded, corpus):
     is silently about half the held-out set. It does not error anywhere. The
     same comma cost an awk parse of the Ki67 CSV earlier in this project.
 
-    So the fragments are not trusted. The candidates are the stems that
-    the corpus actually has, and the reconstruction is VERIFIED:
+    So the fragments are not trusted. The candidates are the slide names
+    AccessDatasets knows, and the reconstruction is VERIFIED:
     the chosen stems joined back the way the writer joined them must reproduce
     the recorded string exactly. A substring match alone could pick a stem that
     is a prefix of another; the round trip is what makes that impossible.
@@ -249,28 +246,36 @@ def _slides_from(recorded, corpus):
     if isinstance(decoded, list) and all(isinstance(x, str) for x in decoded):
         return decoded
 
-    stems = corpus.slides()
-    picked = sorted(stem for stem in stems if stem in recorded)
+    from AccessDatasets import list_names                          # noqa: PLC0415
+    picked = sorted(stem for stem in list_names() if stem in recorded)
     if ','.join(picked) != recorded:
         raise SystemExit(
             f'cannot recover the held-out slides from {recorded!r}. Rebuilding '
-            f'it from the slides of {corpus.key} gave {picked}, which '
+            f'it from the registered slide names gave {picked}, which '
             f'joins back to {",".join(picked)!r}. A stem here contains commas, '
             f'so the recorded string is ambiguous -- pass --val-slides')
     return picked
 
 
 def _corpus_of(identity, args):
-    """The corpus the arm validated on: `--corpus` if given, else the key the
-    checkpoint recorded. Neither is refused -- a re-score against a corpus
-    guessed from the root is a second experiment wearing the first's name."""
+    """The corpus the arm validated on: `--corpus` if given, else the recipe
+    and rungs the checkpoint recorded, rebuilt under this run's mask and jobs
+    and checked against the key it recorded -- a re-score against a corpus
+    that only looks like it is a second experiment wearing the first's name."""
     if args.corpus is not None:
         return corpus_arg(args)
-    key = identity.get('corpus', '')
-    if not key:
+    recipe = identity.get('corpus_recipe', '')
+    if not recipe:
         raise SystemExit(
-            'this checkpoint does not record its corpus. Pass --corpus')
-    return PreTileCorpus.from_key(pretile_root(args), key)
+            'this checkpoint does not record its corpus recipe. Pass --corpus')
+    corpus = corpus_from_args(args, recipe,
+                              json.loads(identity.get('corpus_rungs', 'null')))
+    if corpus.key != identity.get('corpus', ''):
+        raise SystemExit(
+            f'rebuilt corpus {recipe} is {corpus.key}, but the checkpoint '
+            f'trained on {identity.get("corpus")}: the recipe, the mask or the '
+            f'tile differs. Pass --corpus and the flags that make it agree')
+    return corpus
 
 
 def val_set_of(identity, args, channels):
@@ -302,8 +307,8 @@ def val_set_of(identity, args, channels):
             raise SystemExit(
                 'this checkpoint does not record its held-out slides, so there '
                 'is no way to re-score it on the same ones. Pass --val-slides')
-        slides = _slides_from(recorded, corpus)
-    return cfg.build(corpus, args.labels_root, wsi_stems=slides,
+        slides = _slides_from(recorded)
+    return cfg.build(corpus, args.labels_root, slides=slides,
                      rungs=args.ds, ha_id=args.ha_id)
 
 
@@ -411,8 +416,7 @@ def main():
                          'quantity for every arm')
     ap.add_argument('--no-native', dest='native', action='store_false',
                     help="drop the trained threshold's row from the table")
-    add_pretile_args(ap, tile=False)
-    add_corpus_arg(ap, default=None)    # None: the checkpoint's own
+    add_corpus_args(ap, tile=False, corpus=None)   # None: the checkpoint's own
     add_labels_args(ap)
     ap.add_argument('--val-slides', nargs='+', default=None,
                     help='default: whichever the checkpoint says it held out')

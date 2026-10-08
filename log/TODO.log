@@ -3049,7 +3049,7 @@ front of whoever flips it.
        StagesTest 只有一張照片，時間大半是建 L0 特徵，量不到每張照片省下的部分；
        每張照片的時間還沒量（BenchLocaScope LIMIT + PROFILE）。
 
-[ ] 2026-10-06 | stage 1 bench 的照片改由 Render 拍（U3）
+[x] 2026-10-06 | stage 1 bench 的照片改由 Render 拍（U3）
     1. 舊的做法（bench_stage1_mpp 到 7f4398d）：只讀感測器大小的長方形
        （1440x1024，ReadSpec(sensor)），再交給 simulate_microscope_photo，domain gap
        是 DomainGapConfig() 的預設值（會轉 0/90/180/270 加 ±3 度、縮放 0.90-1.15）。
@@ -3077,6 +3077,9 @@ front of whoever flips it.
        讀它得到、和照片無關而仍成立的：convnext_v2+attn_mlp_deep 這個 checkpoint
        壞了（BRACS 413/445、Ki67 371/371 判成 32）；每跑完一個方法 GPU 記憶體多留
        2.8-4.6 GB，到約 23 GB 才掉回來（疑似循環參照等 GC，未驗證）。
+    4. 完成方式不是第 2 點的做法：cache 第 6 步（2026-10-08）重寫 bench_stage1_mpp，照片走
+       FovSupply.cached（Render 拍、存成 render entry），和 pipeline bench、window bench 同一批。
+       val / test 在新照片上的重跑還沒做。
 
 [x] 2026-10-06 | feature cache 在非整數 ds 的 level 永遠 miss（c562441 起）
     - LocaScopeStagesTest --check-sims（RUNG=4，BRACS_1952 L1）抓到：剛寫的
@@ -3429,7 +3432,7 @@ front of whoever flips it.
       不在地址裡。query 的定義變了：從 1440x1024 照片切出的 tile 變成直接拍一張 256 tile，
       數字不能和舊的比。
 
-[ ] 2026-10-07 | cache 目錄重新設計：一棵樹，由 Cache.py 維護
+[x] 2026-10-07 | cache 目錄重新設計：一棵樹，由 Cache.py 維護
     - 動機：pipeline 只負責跑；bench 那一側的支流把每個 stage 的結果存下來，結果本身就是 cache
       （可重用、可離線畫圖、可做 demo）。舊版每個模組各自組 <made_by>_<object>/ 底下的層，
       規則只寫在 CLAUDE.md，各模組照著寫一次。
@@ -3681,3 +3684,62 @@ front of whoever flips it.
     - prototype 的 support 特徵不 cache，每張 slide build 時重新 encode。
     - stage 2 的相似度圖不存。
     - routing head 的 n_per_rung：recipe 寫 500、jobscript 用 100，使用者自己調回 100。
+
+[x] 2026-10-08 | pre-tile 退役：SuperPathPoint 的 corpus 就是一個 draw，像素現讀
+    原本 extract_pretiles 先用 TileSampler.cached 抽 draw，再把每個位置的 pre-tile（tile x 3 的邊長）讀出來存成
+    PNG + index.csv + meta.json（Store.PreTileCorpus/Meta/Record/Store，約 330 行）。除了 PNG，存的全是 draw
+    的 index 已有的東西。
+    - common/Corpora.Corpus（取代 Store.PreTileCorpus）：recipe、mask、rungs、tile、factor，加上兩個「在哪」的
+      job（draw 與 mask，不進 key）。key = <seg_id>/<region_id>/<plan>/<sampler_id>；address(slide, job) 是
+      draw 的位址長到 draw=<sampler_id>；tiles(slide, rungs) -> {ds: [Tile]}（第一次讀時 TileSampler.cached
+      抽，之後讀回；slide 可給路徑或 AccessDatasets 名稱）；read(Tile) 用 SlideReader(area) 讀
+      pretile_spec(tile, factor)，每個 process 每張 slide 一個 reader（fork 之後才開）。
+    - 刪除：Store 的 pre-tile 整段、extract_pretiles.py、ExtractPreTiles.sh、Corpora.sampler_config、
+      Cache.TREE 的 pretile/ds 兩層與 ENTRIES 的 tiles、prepare_chain_stack 的 ensure_corpus/_extract_own/
+      _other_corpora 與 --{f,r,c}-corpus、cli 的 add_pretile_args/pretile_root/PRETILE_JOB 與 --pretile-cache-job、
+      corpus 的 key 字串回推位址（--corpus 只收 recipe 名）、PreTileCorpus.slides()（讀取方改用
+      --datasets/--n-wsi/--wsi 點名）、test_store 的 8 個 pre-tile 測試。
+    - labels：KeypointLabelStore 的 entry 改到 draw=<sampler>/labels/，pretile_id 改名 corpus_id
+      （= Corpus.key），save/find/find_one 收 corpus；SCHEMA_VERSION 1 -> 2。
+    - Datasets.HomographyPairDataset：build(corpus, labels_root, slides=...)，item 帶 Corpora.Tile，
+      __getitem__ 用 corpus.read。ChainStack：Chain.members 是 {ds: Tile}、Chain.corpus；OwnTiles/OwnForest
+      帶 corpus。make_ha_labels / inspect_ha_labels 用 --datasets/--wsi；demo_ha 的 --corpus 讀 --wsi 的
+      draw；train_superpathpoint 在 checkpoint 多記 corpus_recipe、corpus_rungs，reeval_density 用它們重建
+      corpus 並比對 key（舊 checkpoint 沒有就要給 --corpus）。
+    - draw 預設放在 SuperPathPointCorpus（cli.CORPUS_JOB），所有 SuperPathPoint CLI 共用；--draw-cache-job 換。
+    - 測試：test_corpora（新）：key 隨 recipe/rungs/tile/factor 變、不隨 job 變；address 就是 draw 的位址；
+      --wsi 時 Corpus.read 的中心裁切就是 draw 位置的 tile，贏過偏一格的誘餌（TestSuperPathPoint 的 store 與
+      ladder-wsi stage）。test_chain_stack / test_superpathpoint / test_keypoint_label_store 改用假 corpus
+      （draw 給定、像素用畫的），labels 測試加「同 draw 另一個 rung 不會被找到」的誘餌。
+    - 待量：訓練時從 WSI 讀的速度（MRXS reopen，spec.md 6.5）。慢的話在 draw 底下加 tiles entry 落地 PNG。
+      舊的 pre-tile 與 labels 已不在，stageA 的 labels 要重做（MakeHaLabels.sh，DATASETS 點名 slide）。
+
+[x] 2026-10-08 | cache 第 5 步對照：30 張全等，stage 3 座標差異是舊版 int() 截斷
+    - 基準：a80c958 的 CostLocaScope（result/CostLocaScope_ref_a80c958/metrics.csv），BRACS_1413 L0 30 張，
+      --seg none，TOPK 20 / SIFT_TOPK 5。重跑：BenchLocaScope.sh，job CostCompare，DATASETS=bracs/test
+      N_WSI=1 LIMIT=30 SEG=none ROUTE=stage1，EXTRA="--stage2-k 20 --stage3-n-verify 5
+      --sampler-overlap-step 1.0 --sampler-overlap-max-overlap-ratio 0 --sampler-overlap-overlapping-share 0
+      --max-ds 1000"（舊的 draw 用 class 預設、層數不設上限）。
+    - 對照：一支一次性的 diag 用 plot_locascope.join 讀 stage 表，FoV 以 level + level-0 中心配對（<= 1 px），
+      30 張全部配上。逐欄結果：
+
+        column                   differ
+        stage 1 level              0 / 30
+        stage 1 mpp                0 / 30
+        stage 2 rotation           0 / 30
+        stage 2 x0                 0 / 30
+        stage 2 y0                 0 / 30
+        stage 2 score              0 / 30      （float 逐位元相同）
+        stage 3 x0                12 / 30
+        stage 3 y0                12 / 30
+        stage 3 success            0 / 30
+        stage 3 inliers            0 / 30
+        stage 3 matches            0 / 30
+        stage 3 verified rank      0 / 30
+        stage 3 best inliers       0 / 30
+
+    - stage 3 x0/y0 的 12 張：舊 bench 寫 metrics.csv 時 m['refine_x0'] = int(rf.x0)（a80c958
+      bench_locascope.py:473-474），新表存浮點。12 張的新值 floor 後全部等於舊值（如 20092.91 -> 20092），
+      inliers / matches 同時相等，所以 H 沒變。另外 18 張 stage 3 失敗，座標退回 stage 2 視窗起點，本來就是整數。
+    - 結論：重構沒有改變任何 stage 的計算。stage 1 全等只說明這 30 張的 KNN 都投 L0，不證明參考庫抽到的 tile
+      和舊的相同（cached plan 會保留讀取範圍）。diag 用完即刪，沒有進 git。

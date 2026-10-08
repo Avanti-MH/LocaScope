@@ -40,7 +40,7 @@ WHO MADE IT
 CLI defaults to its own job name, and a reader that wants another job's cache
 names it explicitly (`--mask-cache-job`, `--draw-cache-job`, ...). Every cache
 is in this tree -- masks, draws, renders, splits, features, stage results,
-pre-tiles, keypoint labels, chain-stack tiles -- and this module is the only
+keypoint labels, chain-stack tiles -- and this module is the only
 one that spells a `<kind>=` path (test_config_identity's lint).
 
 WHAT IS HERE AND WHAT IS NOT
@@ -87,8 +87,6 @@ TREE: Dict[str, Optional[str]] = {
     'grid':    'region',
     'plan':    'region',
     'draw':    'plan',
-    'pretile': 'draw',
-    'ds':      'pretile',
     'render':  'draw',
     'stage1':  'render',
     'stage2':  'stage1',
@@ -104,8 +102,7 @@ ENTRIES: Dict[str, Tuple[str, ...]] = {
     'stage1':     ('render',),
     'stage2':     ('stage1',),
     'stage3':     ('stage2',),
-    'tiles':      ('ds',),
-    'labels':     ('ds',),
+    'labels':     ('draw',),
     'chainstack': ('slide',),
 }
 
