@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch                                                        # noqa: E402
 
@@ -185,8 +185,12 @@ def wandb_init(project: str, mode: str, name: str, config: Dict,
         print('wandb not installed; logging to stdout and the CSVs only',
               flush=True)
         return None
+    # 'create_new': `run_baseline2` keeps one run per encoder open at once
+    # (they share an epoch loop), and wandb's default reinit would finish the
+    # first run when the second starts.
     run = wandb.init(project=project, mode=mode, name=name or None,
-                     id=run_id, resume='allow' if run_id else None)
+                     id=run_id, resume='allow' if run_id else None,
+                     reinit='create_new')
     run.config.update(config, allow_val_change=True)
     return run
 
@@ -330,9 +334,41 @@ def rescore_by_rung(detail_rows: List[Dict]) -> Dict[float, Dict]:
 # ══════════════════════════════════════════════════════════════════════════
 
 @torch.no_grad()
+def _raw_to(raw, device):
+    '''`encode_raw`'s output on `device`: a tensor, or a `LayerTokens` whose
+    `last` is one of its own `layers` and stays the same tensor after the
+    move rather than becoming a second copy.'''
+    if isinstance(raw, torch.Tensor):
+        return raw.to(device)
+    moved = {b: t.to(device) for b, t in raw.layers.items()}
+    last = next(b for b, t in raw.layers.items() if t is raw.last)
+    return type(raw)(last=moved[last], layers=moved)
+
+
+def _eval_batches(rows, raw_of, cache: Optional[List], *, tile: int,
+                  wsi_group_size: int, batch_size: int, num_workers: int):
+    '''`(raw, batch)` per eval batch. `cache` None renders and encodes every
+    call; an empty list is filled with each batch's raw (on the host) as it
+    goes; a filled list is replayed without rendering or encoding anything.'''
+    if cache:
+        for raw, device, batch in cache:
+            yield _raw_to(raw, device), batch
+        return
+    for batch in iterate_epoch(rows, wsi_group_size=wsi_group_size,
+                               batch_size=batch_size, num_workers=num_workers,
+                               split='eval', cfg=RenderConfig(tile_size=tile),
+                               epoch_seed=0):
+        raw = raw_of(batch['patches'])
+        if cache is not None:
+            device = raw.device if isinstance(raw, torch.Tensor) else raw.last.device
+            cache.append((_raw_to(raw, 'cpu'), device,
+                          {k: batch[k] for k in ('rows', 'labels', 'native')}))
+        yield raw, batch
+
+
 def predict(rows, heads: Dict[str, Head], raw_of, num_prefix: int, *,
             tile: int, wsi_group_size: int, batch_size: int,
-            num_workers: int):
+            num_workers: int, cache: Optional[List] = None):
     '''`(scores, detail)`: `{head: score dict}` and `{head: [one dict per
     tile]}`.
 
@@ -348,10 +384,16 @@ def predict(rows, heads: Dict[str, Head], raw_of, num_prefix: int, *,
     The caller decides whether to write them -- the training loop discards its
     copy, `cli/evaluate.py` writes them out.
 
-    NOTHING IS CACHED. `split='eval'` makes `render_row` seed its rng from the
-    row's own identity, so the same position renders the same pixels on every
-    call -- which is what a val curve and a reported test number both need, and
-    it is a SEED rather than a stored corpus.
+    NO PIXELS ARE CACHED. `split='eval'` makes `render_row` seed its rng from
+    the row's own identity, so the same position renders the same pixels on
+    every call -- which is what a val curve and a reported test number both
+    need, and it is a SEED rather than a stored corpus.
+
+    `cache` is for a FROZEN encoder scored every epoch (baseline 2's val): the
+    same pixels through the same weights give the same raw, so the first call
+    fills the list and every later one replays it, rendering and encoding
+    nothing. Only that caller may pass one -- a fine-tuned trunk's raw changes
+    every epoch. The list lives in host memory, in `encode_raw`'s dtype.
 
     `epoch_seed=0` fixes the WSI grouping too, so two runs see the same
     positions in the same order.
@@ -365,11 +407,10 @@ def predict(rows, heads: Dict[str, Head], raw_of, num_prefix: int, *,
     preds = {name: [] for name in heads}
     meta: List = []
     labels, native = [], []
-    for batch in iterate_epoch(rows, wsi_group_size=wsi_group_size,
-                               batch_size=batch_size, num_workers=num_workers,
-                               split='eval', cfg=RenderConfig(tile_size=tile),
-                               epoch_seed=0):
-        raw = raw_of(batch['patches'])
+    for raw, batch in _eval_batches(rows, raw_of, cache, tile=tile,
+                                    wsi_group_size=wsi_group_size,
+                                    batch_size=batch_size,
+                                    num_workers=num_workers):
         meta += batch['rows']
         labels.append(batch['labels'])
         native.append(batch['native'])

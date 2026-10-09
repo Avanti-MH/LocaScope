@@ -63,7 +63,14 @@ still cost one forward pass between them.
 That sharing stops at the epoch boundary and cannot be extended past it: with
 per-epoch camera augmentation (spec.md, "Camera: train vs eval") the pixels
 differ every epoch, so the encoder genuinely has new input each time. Caching
-features across epochs would be caching the augmentation away.
+TRAINING features across epochs would be caching the augmentation away. Val is
+the other case: rendered deterministically and encoded by the same frozen
+weights, its raw is the same every epoch, so it is encoded once and replayed
+(`Runtime.predict`'s `cache`).
+
+The encoders of one run share the RENDER too: they train on the same rows, so
+each batch is rendered once and encoded by every encoder in turn
+(`run_baseline2`), each still its own model, resume file and wandb run.
 
 NOT `--arms`/`Arm`/`ARMS`. This file compares heads, but the underlying class (`common.Head.Head`) and its per-task registry
 (`Runtime.HEAD_CHOICES`) are also used by `stage1_estimation/
@@ -505,54 +512,210 @@ def _apply_warmup(opt, epoch: int, warmup_epochs: int, base_lrs: List[float]) ->
         group['lr'] = base_lr * scale
 
 
-def run_baseline2(args, encoder_name: str, caches, out_dir,
+class _Baseline2Model:
+    '''One frozen encoder and every head it feeds: what `run_baseline2` keeps
+    per encoder while the encoders share one epoch loop.'''
+
+    def __init__(self, args, encoder_name: str, caches, device):
+        from TileEncoderFunc import encoder_config               # noqa: PLC0415
+        self.name = encoder_name
+        names = heads_for(args.heads, 2)
+        # `--dtype` governs the FROZEN ENCODER's inference precision here --
+        # fp16 forward, no gradient, the same case `TileEncoderFunc` was built
+        # for (cos=0.99995 against fp32, log/TODO.log). It does NOT reach
+        # `head_cfg` below: see the comment there for why that is a different
+        # question with a fixed answer, not a knob.
+        #
+        # `dtype` is NOT a top-level field of `TileEncoderConfig` -- it lives on
+        # the nested `ModelConfig`, so `encoder_config(name, dtype=...)` fails
+        # with `TypeError: __init__() got an unexpected keyword argument
+        # 'dtype'` (`config_from` forwards `**over` straight into the
+        # dataclass's own `__init__`, which has no `dtype` field to catch).
+        # `variant(dtype=...)` does the nested-replace, but only on an
+        # already-BUILT `TileEncoder` instance -- here the config still needs
+        # building, so the replace has to happen on the CONFIG directly, the
+        # same pattern `run_baseline3` already uses for the trunk below.
+        base_cfg = encoder_config(encoder_name)
+        cfg = replace(base_cfg, model=replace(base_cfg.model, dtype=args.dtype))
+        self.encoder = encoder = cfg.build(device)
+        spec = encoder.model_spec
+        self.num_prefix = int(spec.num_prefix)
+        # ALWAYS fp32, never `args.dtype`. This head is trained by Adam with no
+        # GradScaler, and fp16 there is not a slower-but-safe choice, it is a
+        # guaranteed eventual NaN -- `HeadConfig.dtype`'s own docstring has the
+        # mechanism. `--dtype` defaults to 'fp16', so passing it through would
+        # override the dataclass default at every construction site.
+        # PER HEAD, not one shared `head_cfg` -- see `_head_cfg_for`'s own
+        # docstring: mlp/mlp_deep/mlp_wide/mlp_deep_wide each need their own
+        # depth/width, and a single shared config could only ever give them all
+        # the same one.
+        depth = encoder.depth if spec.kind == 'tokens' else 0
+        self.head_cfgs = {n: _head_cfg_for(n, int(spec.dim), args, depth)
+                          for n in names}
+        self.heads = {n: Head(self.head_cfgs[n], *HEAD_CHOICES[n][:2]).to(device)
+                      for n in names}
+        # Every block any head mixes, read in the one forward they share. Empty
+        # -- no mix_ head in the run -- keeps encode_raw's plain tensor.
+        self.mix_blocks = tuple(sorted({b for c in self.head_cfgs.values()
+                                        for b in c.encoder_layers}))
+        for n in names:
+            if self.head_cfgs[n].encoder_layers:
+                print(f'  {n}: mixes encoder blocks '
+                      f'{self.head_cfgs[n].encoder_layers} of {depth}', flush=True)
+        print(f'baseline 2  {encoder_name}  dim={spec.dim} kind={spec.kind} '
+              f'num_prefix={self.num_prefix}  (frozen)', flush=True)
+
+        # (best_n_weighted, best_unweighted) per head -- see save_tagged.
+        self.best = {n: (-1.0, -1.0) for n in names}
+        self.opts = {n: torch.optim.Adam(h.parameters(), lr=args.lr)
+                     for n, h in self.heads.items()}
+        # Captured BEFORE any warmup call or resume overwrites
+        # `param_group['lr']` -- see `_apply_warmup`'s own docstring for why.
+        self.base_lrs = {n: [g['lr'] for g in opt.param_groups]
+                         for n, opt in self.opts.items()}
+        self.out: List[Dict] = []
+        self.out_rung: List[Dict] = []
+
+        # RESUME: one file for the encoder and every head it feeds, since they
+        # share one forward and one epoch loop (Resume.py has the rule).
+        self.resume = ResumeFile.for_model(
+            args.resume_dir, _resume_name(2, encoder_name, args.loss,
+                                          read_tag=train_render_cfg(args).read_tag))
+        self.identity = _identity(args, baseline=2, encoder=encoder_name,
+                                  heads=list(names))
+        # Which blocks a mix_ head read is not in its NAME, so a registry edit
+        # that kept the name would otherwise resume onto weights for other
+        # blocks. Only heads that mix are listed, and the key only exists when
+        # one does.
+        mixed = {n: list(c.encoder_layers) for n, c in self.head_cfgs.items()
+                 if c.encoder_layers}
+        if mixed:
+            self.identity['encoder_layers'] = mixed
+        self.start_epoch = 0
+        state = self.resume.load(self.identity)
+        if state is not None:
+            ResumeFile.restore(state, modules=self.heads, optimizers=self.opts)
+            self.start_epoch = int(state['epoch'])
+            self.best = state['best']
+            self.out, self.out_rung = state['extra']
+            print(f'  [resume] {self.resume.path}: continuing after epoch '
+                  f'{self.start_epoch} of {args.epochs}', flush=True)
+        elif self.resume.enabled:
+            print(f'  [resume] no {self.resume.path.name} yet -- training from '
+                  f'scratch, writing it every epoch', flush=True)
+        self.raw_of = lambda p: encode_raw(encoder, p, args.encode_batch,  # noqa: E731
+                                           device, layers=self.mix_blocks)
+        self.layers_checked = False
+        # The val raw, encoded on this model's first val pass and replayed on
+        # every later one -- see `Runtime.predict`'s `cache`.
+        self.val_cache: List = []
+
+        # ONE run for this encoder, covering every head trained off it -- see
+        # `Runtime.wandb_init`'s docstring for why the boundary is per encoder
+        # here and per head in `run_baseline3`.
+        slurm_job_name = os.environ.get('SLURM_JOB_NAME', '')
+        prefix = args.run_name or slurm_job_name
+        run_name = f'{prefix}-b2-{encoder_name}' if prefix else f'b2-{encoder_name}'
+        read_cfg = train_render_cfg(args)
+        run_name += f'-{read_cfg.read_tag}' if read_cfg.read_tag else ''
+        # No epoch left: no run. It would log nothing, and an empty run is a
+        # row in every chart's legend with no line.
+        self.wb = None if self.start_epoch >= args.epochs else wandb_init(
+            args.wandb_project, args.wandb_mode, run_name, config=dict(
+            baseline=2, encoder=encoder_name, heads=names,
+            encoder_dtype=args.dtype, head_dtype='fp32',
+            class_weight=args.class_weight, loss=args.loss, seg=args.seg,
+            ordinal_weight=args.ordinal_weight, ordinal_sigma=args.ordinal_sigma,
+            lr=args.lr, epochs=args.epochs, n_per_rung=args.n_per_rung,
+            tile=args.tile, batch_size=args.batch_size, seed=args.seed,
+            train_dataset=args.train_dataset, eval_datasets=args.eval_datasets,
+            slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
+            slurm_job_name=slurm_job_name, read_level_label=read_cfg.read_label,
+            **cache_jobs(args, 'MppRoutingHead', caches)),
+            run_id=self.resume.wandb_run_id(state is not None))
+
+    def train_batch(self, args, batch, weights, device, totals) -> None:
+        '''ONE pass of this encoder, every head trained off it.'''
+        if self.mix_blocks and not self.layers_checked:
+            (same, decoy), ok = check_layer_tokens(self.encoder, batch['patches'])
+            print(f'  layer tokens [{self.name}]: last block vs tokens() min cos '
+                  f'{same:.6f}, block before it {decoy:.6f}  '
+                  f'{"OK" if ok else "FAIL"}', flush=True)
+            if not ok:
+                raise RuntimeError(
+                    'layer_tokens does not reproduce tokens() on its last '
+                    'block, so every mix_ head would train on something '
+                    'else than its name says')
+            self.layers_checked = True
+        raw = self.raw_of(batch['patches'])
+        target = batch['labels'].to(device)
+        for name, head in self.heads.items():
+            loss = _compute_loss(head(raw, self.num_prefix, target), target,
+                                 weights, args.loss, args.ordinal_weight,
+                                 args.ordinal_sigma)
+            self.opts[name].zero_grad()
+            loss.backward()
+            _clip_grad(self.opts[name], args.clip_grad_norm)
+            self.opts[name].step()
+            totals[name][0] += float(loss) * len(target)
+            totals[name][1] += len(target)
+
+    def end_epoch(self, args, vrows, out_dir, epoch: int, totals) -> None:
+        '''Val, checkpoints, the resume file and wandb, for one finished epoch.'''
+        end_epoch = args.epochs
+        print(f'  epoch {epoch}/{end_epoch}  {self.name}  loss  ' + '  '.join(
+            f'{n} {t[0] / max(t[1], 1):.4f}' for n, t in totals.items()),
+            flush=True)
+        # The per-tile detail is used for the per-dataset breakdown and then
+        # dropped; only the TEST split's rows are written out (evaluate.py),
+        # since ten epochs of val rows would be ten CSVs nobody opens.
+        val, detail = predict(vrows, self.heads, self.raw_of, self.num_prefix,
+                              tile=args.tile, wsi_group_size=args.wsi_group_size,
+                              batch_size=args.batch_size,
+                              num_workers=args.num_workers, cache=self.val_cache)
+        # PER HEAD, val_report then rung_report for the SAME head before
+        # moving to the next one -- see val_report's own docstring for why.
+        epoch_rows: List[Dict] = []
+        epoch_rung_rows: List[Dict] = []
+        for name in self.heads:
+            epoch_rows += val_report(
+                name, val[name], detail[name], args.eval_datasets, epoch,
+                end_epoch, totals[name][0] / max(totals[name][1], 1),
+                baseline=2, encoder=self.name, loss_kind=args.loss,
+                read_level=train_render_cfg(args).read_label, seg=args.seg)
+            epoch_rung_rows += rung_report(
+                name, detail[name], args.eval_datasets, epoch,
+                baseline=2, encoder=self.name, loss_kind=args.loss,
+                read_level=train_render_cfg(args).read_label, seg=args.seg)
+        self.out += epoch_rows
+        self.out_rung += epoch_rung_rows
+        for name, head in self.heads.items():
+            self.best[name] = save_tagged(
+                out_dir, head, self.encoder, self.name, True, name,
+                self.head_cfgs[name], args, epoch, val[name], self.best[name],
+                self.opts[name])
+        self.resume.save(self.identity, epoch=epoch, modules=self.heads,
+                         optimizers=self.opts, best=self.best,
+                         extra=(self.out, self.out_rung))
+        # Logged AFTER the resume file is written. Before it, a job killed
+        # between the two leaves wandb holding an epoch the resume file does
+        # not: the rerun trains that epoch again, wandb refuses its step as
+        # already logged, and the curve keeps the dead job's numbers.
+        wandb_log(self.wb, epoch, wandb_epoch_metrics(epoch_rows))
+
+
+def run_baseline2(args, encoder_names: List[str], caches, out_dir,
                   device) -> Tuple[List[Dict], List[Dict]]:
-    from TileEncoderFunc import encoder_config                   # noqa: PLC0415
-    names = heads_for(args.heads, 2)
-    if not names:
+    '''Every encoder in `encoder_names`, frozen, off ONE render per batch.
+
+    The encoders are independent models -- each its own heads, optimizers,
+    resume file and wandb run -- but they train on the same rows, so a batch
+    rendered once is encoded by each in turn rather than rendered once per
+    encoder. An encoder whose resume file is further along skips the epochs it
+    already has; the loop runs from the earliest.'''
+    if not heads_for(args.heads, 2):
         return [], []
-    # `--dtype` governs the FROZEN ENCODER's inference precision here --
-    # fp16 forward, no gradient, the same case `TileEncoderFunc` was built for
-    # (cos=0.99995 against fp32, log/TODO.log). It does NOT reach `head_cfg`
-    # below: see the comment there for why that is a different question with
-    # a fixed answer, not a knob.
-    #
-    # `dtype` is NOT a top-level field of `TileEncoderConfig` -- it lives on
-    # the nested `ModelConfig`, so `encoder_config(name, dtype=...)` fails with
-    # `TypeError: __init__() got an unexpected keyword argument 'dtype'`
-    # (`config_from` forwards `**over` straight into the dataclass's own
-    # `__init__`, which has no `dtype` field to catch). `variant(dtype=...)`
-    # does the nested-replace, but only on an already-BUILT `TileEncoder`
-    # instance -- here the config still needs building, so the replace has to
-    # happen on the CONFIG directly, the same pattern `run_baseline3` already
-    # uses for the trunk below.
-    base_cfg = encoder_config(encoder_name)
-    cfg = replace(base_cfg, model=replace(base_cfg.model, dtype=args.dtype))
-    encoder = cfg.build(device)
-    spec = encoder.model_spec
-    num_prefix = int(spec.num_prefix)
-    # ALWAYS fp32, never `args.dtype`. This head is trained by Adam with no
-    # GradScaler, and fp16 there is not a slower-but-safe choice, it is a
-    # guaranteed eventual NaN -- `HeadConfig.dtype`'s own docstring has the
-    # mechanism. `--dtype` defaults to 'fp16', so passing it through would
-    # override the dataclass default at every construction site.
-    # PER HEAD, not one shared `head_cfg` -- see `_head_cfg_for`'s own
-    # docstring: mlp/mlp_deep/mlp_wide/mlp_deep_wide each need their own
-    # depth/width, and a single shared config could only ever give them all
-    # the same one.
-    depth = encoder.depth if spec.kind == 'tokens' else 0
-    head_cfgs = {n: _head_cfg_for(n, int(spec.dim), args, depth) for n in names}
-    heads = {n: Head(head_cfgs[n], *HEAD_CHOICES[n][:2]).to(device) for n in names}
-    # Every block any head mixes, read in the one forward they share. Empty --
-    # no mix_ head in the run -- keeps encode_raw's plain tensor.
-    mix_blocks = tuple(sorted({b for c in head_cfgs.values()
-                               for b in c.encoder_layers}))
-    for n in names:
-        if head_cfgs[n].encoder_layers:
-            print(f'  {n}: mixes encoder blocks {head_cfgs[n].encoder_layers} '
-                  f'of {depth}', flush=True)
-    print(f'baseline 2  {encoder_name}  dim={spec.dim} kind={spec.kind} '
-          f'num_prefix={num_prefix}  (frozen)', flush=True)
+    models = [_Baseline2Model(args, name, caches, device) for name in encoder_names]
 
     rows = train_rows(args, caches, out_dir)
     vrows = val_rows(args, caches, out_dir)
@@ -562,153 +725,37 @@ def run_baseline2(args, encoder_name: str, caches, out_dir,
     weights = class_weights(rows, device) if args.class_weight == 'balanced' else None
     if weights is not None:
         print_class_weights(weights)
-    # (best_n_weighted, best_unweighted) per head -- see save_tagged.
-    best = {n: (-1.0, -1.0) for n in names}
-    opts = {n: torch.optim.Adam(h.parameters(), lr=args.lr)
-            for n, h in heads.items()}
-    # Captured BEFORE any warmup call or resume overwrites `param_group['lr']`
-    # -- see `_apply_warmup`'s own docstring for why.
-    base_lrs = {n: [g['lr'] for g in opt.param_groups] for n, opt in opts.items()}
-    out: List[Dict] = []
-    out_rung: List[Dict] = []
 
-    # RESUME: one file for the encoder and every head it feeds, since they
-    # share one forward and one epoch loop (Resume.py has the rule).
-    resume = ResumeFile.for_model(args.resume_dir,
-                                  _resume_name(2, encoder_name, args.loss,
-                                               read_tag=train_render_cfg(args).read_tag))
-    identity = _identity(args, baseline=2, encoder=encoder_name,
-                         heads=list(names))
-    # Which blocks a mix_ head read is not in its NAME, so a registry edit that
-    # kept the name would otherwise resume onto weights for other blocks. Only
-    # heads that mix are listed, and the key only exists when one does.
-    mixed = {n: list(c.encoder_layers) for n, c in head_cfgs.items()
-             if c.encoder_layers}
-    if mixed:
-        identity['encoder_layers'] = mixed
-    start_epoch = 0
-    state = resume.load(identity)
-    if state is not None:
-        ResumeFile.restore(state, modules=heads, optimizers=opts)
-        start_epoch = int(state['epoch'])
-        best = state['best']
-        out, out_rung = state['extra']
-        print(f'  [resume] {resume.path}: continuing after epoch {start_epoch} '
-              f'of {args.epochs}', flush=True)
-    elif resume.enabled:
-        print(f'  [resume] no {resume.path.name} yet -- training from scratch, '
-              f'writing it every epoch', flush=True)
     end_epoch = args.epochs
-    raw_of = lambda p: encode_raw(encoder, p, args.encode_batch, device,  # noqa: E731
-                                  layers=mix_blocks)
-    layers_checked = False
-
-    # ONE run for this encoder, covering every head trained off it -- see
-    # `Runtime.wandb_init`'s docstring for why the boundary is per encoder
-    # here and per head in `run_baseline3`.
-    slurm_job_name = os.environ.get('SLURM_JOB_NAME', '')
-    prefix = args.run_name or slurm_job_name
-    run_name = f'{prefix}-b2-{encoder_name}' if prefix else f'b2-{encoder_name}'
-    read_cfg = train_render_cfg(args)
-    run_name += f'-{read_cfg.read_tag}' if read_cfg.read_tag else ''
-    # No epoch left: no run. It would log nothing, and an empty run is a row in
-    # every chart's legend with no line.
-    wb = None if start_epoch >= end_epoch else wandb_init(
-        args.wandb_project, args.wandb_mode, run_name, config=dict(
-        baseline=2, encoder=encoder_name, heads=names,
-        encoder_dtype=args.dtype, head_dtype='fp32',
-        class_weight=args.class_weight, loss=args.loss, seg=args.seg,
-        ordinal_weight=args.ordinal_weight, ordinal_sigma=args.ordinal_sigma,
-        lr=args.lr, epochs=args.epochs, n_per_rung=args.n_per_rung,
-        tile=args.tile, batch_size=args.batch_size, seed=args.seed,
-        train_dataset=args.train_dataset, eval_datasets=args.eval_datasets,
-        slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
-        slurm_job_name=slurm_job_name, read_level_label=read_cfg.read_label,
-        **cache_jobs(args, 'MppRoutingHead', caches)),
-        run_id=resume.wandb_run_id(state is not None))
-
-    for epoch in range(start_epoch + 1, end_epoch + 1):
-        for n, opt in opts.items():
-            _apply_warmup(opt, epoch, args.warmup_epochs, base_lrs[n])
-        for head in heads.values():
-            head.train()
-        totals = {n: [0.0, 0] for n in heads}
+    for epoch in range(min(m.start_epoch for m in models) + 1, end_epoch + 1):
+        active = [m for m in models if epoch > m.start_epoch]
+        for m in active:
+            for n, opt in m.opts.items():
+                _apply_warmup(opt, epoch, args.warmup_epochs, m.base_lrs[n])
+            for head in m.heads.values():
+                head.train()
+        totals = {m.name: {n: [0.0, 0] for n in m.heads} for m in active}
         seen_class = torch.zeros(NUM_CLASSES, dtype=torch.int64)
         native_class = torch.zeros(NUM_CLASSES, dtype=torch.int64)
         for batch in iterate_epoch(
                 rows, wsi_group_size=args.wsi_group_size,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 cfg=train_render_cfg(args), epoch_seed=epoch):
-            # ONE pass, every head. Moved to the device once here rather than
-            # per head: the heads differ in how they reduce it, not in which
-            # copy of it they read.
-            if mix_blocks and not layers_checked:
-                (same, decoy), ok = check_layer_tokens(encoder, batch['patches'])
-                print(f'  layer tokens: last block vs tokens() min cos '
-                      f'{same:.6f}, block before it {decoy:.6f}  '
-                      f'{"OK" if ok else "FAIL"}', flush=True)
-                if not ok:
-                    raise RuntimeError(
-                        'layer_tokens does not reproduce tokens() on its last '
-                        'block, so every mix_ head would train on something '
-                        'else than its name says')
-                layers_checked = True
-            raw = raw_of(batch['patches'])
-            target = batch['labels'].to(device)
             seen_class += torch.bincount(batch['labels'], minlength=NUM_CLASSES)
             native_class += torch.bincount(batch['labels'][batch['native']],
                                            minlength=NUM_CLASSES)
-            for name, head in heads.items():
-                loss = _compute_loss(head(raw, num_prefix, target), target,
-                                     weights, args.loss, args.ordinal_weight,
-                                     args.ordinal_sigma)
-                opts[name].zero_grad()
-                loss.backward()
-                _clip_grad(opts[name], args.clip_grad_norm)
-                opts[name].step()
-                totals[name][0] += float(loss) * len(target)
-                totals[name][1] += len(target)
-
-        print(f'  epoch {epoch}/{end_epoch}  loss  ' + '  '.join(
-            f'{n} {t[0] / max(t[1], 1):.4f}' for n, t in totals.items()),
-            flush=True)
+            for m in active:
+                m.train_batch(args, batch, weights, device, totals[m.name])
         print_composition(rows, seen_class, native_class)
+        for m in active:
+            m.end_epoch(args, vrows, out_dir, epoch, totals[m.name])
 
-        # The per-tile detail is used for the per-dataset breakdown and then
-        # dropped; only the TEST split's rows are written out (evaluate.py),
-        # since ten epochs of val rows would be ten CSVs nobody opens.
-        val, detail = predict(vrows, heads, raw_of, num_prefix, tile=args.tile,
-                              wsi_group_size=args.wsi_group_size,
-                              batch_size=args.batch_size,
-                              num_workers=args.num_workers)
-        # PER HEAD, val_report then rung_report for the SAME head before
-        # moving to the next one -- see val_report's own docstring for why.
-        epoch_rows: List[Dict] = []
-        epoch_rung_rows: List[Dict] = []
-        for name in heads:
-            epoch_rows += val_report(
-                name, val[name], detail[name], args.eval_datasets, epoch,
-                end_epoch, totals[name][0] / max(totals[name][1], 1),
-                baseline=2, encoder=encoder_name, loss_kind=args.loss,
-                read_level=train_render_cfg(args).read_label, seg=args.seg)
-            epoch_rung_rows += rung_report(
-                name, detail[name], args.eval_datasets, epoch,
-                baseline=2, encoder=encoder_name, loss_kind=args.loss,
-                read_level=train_render_cfg(args).read_label, seg=args.seg)
-        out += epoch_rows
-        out_rung += epoch_rung_rows
-        for name, head in heads.items():
-            best[name] = save_tagged(out_dir, head, encoder, encoder_name, True,
-                                     name, head_cfgs[name], args, epoch, val[name],
-                                     best[name], opts[name])
-        resume.save(identity, epoch=epoch, modules=heads, optimizers=opts,
-                    best=best, extra=(out, out_rung))
-        # Logged AFTER the resume file is written. Before it, a job killed between
-        # the two leaves wandb holding an epoch the resume file does not: the rerun
-        # trains that epoch again, wandb refuses its step as already logged, and
-        # the curve keeps the dead job's numbers.
-        wandb_log(wb, epoch, wandb_epoch_metrics(epoch_rows))
-    wandb_finish(wb)
+    out: List[Dict] = []
+    out_rung: List[Dict] = []
+    for m in models:
+        wandb_finish(m.wb)
+        out += m.out
+        out_rung += m.out_rung
     return out, out_rung
 
 
@@ -998,7 +1045,7 @@ def main() -> int:
                     default=['bracs/test', 'ki67_with_photo'],
                     help='val is drawn from these; the rest is test, which '
                          'only cli/evaluate.py ever touches')
-    ap.add_argument('--val-n-per-rung', type=int, default=20)
+    ap.add_argument('--val-n-per-rung', type=int, default=50)
     ap.add_argument('--tile', type=int, default=256)
     ap.add_argument('--n-per-rung', type=int, default=100)
     ap.add_argument('--wsi-group-size', type=int, default=8,
@@ -1192,11 +1239,10 @@ def main() -> int:
     out_rows: List[Dict] = []
     out_rung_rows: List[Dict] = []
     if '2' in wanted:
-        for encoder_name in args.encoders:
-            rows, rung_rows = run_baseline2(args, encoder_name, caches,
-                                            out_dir, device)
-            out_rows += rows
-            out_rung_rows += rung_rows
+        rows, rung_rows = run_baseline2(args, args.encoders, caches,
+                                        out_dir, device)
+        out_rows += rows
+        out_rung_rows += rung_rows
     if '3' in wanted:
         rows, rung_rows = run_baseline3(args, caches, out_dir, device)
         out_rows += rows

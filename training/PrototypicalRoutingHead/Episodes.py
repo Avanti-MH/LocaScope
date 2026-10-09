@@ -38,10 +38,13 @@ only draws from what it built.
 '''
 from __future__ import annotations
 
+import queue
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -434,12 +437,23 @@ class RenderedDraw:
 
 def render_draw(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
                 deterministic: bool, support_native: bool = False,
-                rng: Optional[random.Random] = None) -> Optional[RenderedDraw]:
+                rng: Optional[random.Random] = None,
+                pool: Optional[ThreadPoolExecutor] = None) -> Optional[RenderedDraw]:
     """Every batch of `d`, through `render_row`. Training passes `rng` (the
     episode sampler's), and each capture gets its own generator seeded from
     it, so the photos are a function of the saved RNG state; evaluation
     passes `deterministic=True` and each row renders from its own identity.
-    None if any position fails to render -- the caller draws again."""
+    None if any position fails to render -- the caller draws again.
+
+    `pool` renders the positions in its threads, one SLIDE per task -- a
+    slide's handle is never read from two threads at once -- and gives the
+    same photos and leaves `rng` where the sequential path leaves it (see
+    `_render_draw_pooled`). None renders one position after another."""
+    if pool is not None:
+        return _render_draw_pooled(d, bank, cfg, deterministic=deterministic,
+                                   support_native=support_native, rng=rng,
+                                   pool=pool)
+
     def one(batch, native):
         out = {}
         for rung, rows in batch.items():
@@ -470,6 +484,114 @@ def render_draw(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
     return RenderedDraw(rungs=d.rungs, supports=tuple(supports), queries=tuple(queries))
 
 
+def _render_draw_pooled(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
+                        deterministic: bool, support_native: bool,
+                        rng: Optional[random.Random],
+                        pool: ThreadPoolExecutor) -> Optional[RenderedDraw]:
+    """`render_draw` with the positions rendered in `pool`.
+
+    Each capture's generator is seeded in the SEQUENTIAL order, before any
+    render starts, so a photo does not depend on which thread got to it first.
+    The sequential path stops drawing seeds at the first failed position; on
+    failure `rng` is rewound and advanced by exactly as many seeds, so the next
+    draw sees the state it would have seen without the pool."""
+    # (side, batch index, rung, native, row) in the order `render_draw` walks
+    order = ([('s', i, rung, support_native, row)
+              for i, batch in enumerate(d.supports)
+              for rung, rows in batch.items() for row in rows]
+             + [('q', i, rung, False, row)
+                for i, batch in enumerate(d.queries)
+                for rung, rows in batch.items() for row in rows])
+    seeded = not deterministic and rng is not None
+    before = rng.getstate() if seeded else None
+    seeds = [rng.getrandbits(64) if seeded else None for _ in order]
+
+    by_slide: Dict[Tuple[str, str], List[int]] = {}
+    for idx, (_s, _i, _r, _n, row) in enumerate(order):
+        by_slide.setdefault((row.dataset, row.wsi_name), []).append(idx)
+    for dataset_id, wsi_name in by_slide:
+        bank.reader_for(dataset_id, wsi_name)      # opened here, in one thread
+
+    def render_slide(indices):
+        out = []
+        for idx in indices:
+            _side, _i, _rung, native, row = order[idx]
+            cap_rng = None if seeds[idx] is None else random.Random(seeds[idx])
+            out.append((idx, render_row(bank, row, cfg, deterministic=deterministic,
+                                        native=native, rng=cap_rng)))
+        return out
+
+    results: List = [None] * len(order)
+    for part in pool.map(render_slide, by_slide.values()):
+        for idx, result in part:
+            results[idx] = result
+
+    failed = next((idx for idx, r in enumerate(results) if r is None), None)
+    if failed is not None:
+        if seeded:
+            rng.setstate(before)
+            for _ in range(failed + 1):
+                rng.getrandbits(64)
+        return None
+
+    supports = [{rung: [] for rung in batch} for batch in d.supports]
+    queries = [{rung: [] for rung in batch} for batch in d.queries]
+    for (side, i, rung, _native, _row), (patch, _label, native_pyramid) in zip(
+            order, results):
+        (supports if side == 's' else queries)[i][rung].append((patch, native_pyramid))
+    return RenderedDraw(rungs=d.rungs, supports=tuple(supports), queries=tuple(queries))
+
+
+def prefetched(produce: Iterator, depth: int) -> Iterator:
+    """`produce`'s items, made up to `depth` ahead in one background thread
+    while the caller works on the one before -- the render of the next draw
+    overlaps the encode and the steps of this one. Items come in order, and
+    an exception in `produce` is raised in the caller at the item it failed
+    on. The caller must exhaust it (or close it) before touching anything
+    `produce` touches, such as the camera bank or the episode rng.
+    `utilities/bench_modules/bench_window_retrieval.prefetched`, which does
+    the same for the window bench's reads."""
+    if depth <= 0:
+        yield from produce
+        return
+    box: queue.Queue = queue.Queue(maxsize=depth)
+    stop = threading.Event()
+    done = object()
+
+    def put(value) -> bool:
+        while not stop.is_set():
+            try:
+                box.put(value, timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def work():
+        try:
+            for item in produce:
+                if not put((None, item)):
+                    return
+        except BaseException as exc:                                  # noqa: BLE001
+            put((exc, None))
+            return
+        put((None, done))
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    try:
+        while True:
+            exc, item = box.get()
+            if exc is not None:
+                raise exc
+            if item is done:
+                return
+            yield item
+    finally:
+        stop.set()
+        thread.join()
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Rendering an Episode's positions into pixels.
 # ══════════════════════════════════════════════════════════════════════════
@@ -494,7 +616,8 @@ class RenderedEpisode:
 
 
 def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
-                   deterministic: bool, support_native: bool = False
+                   deterministic: bool, support_native: bool = False,
+                   pool: Optional[ThreadPoolExecutor] = None
                    ) -> Optional[RenderedEpisode]:
     '''Renders every position in `episode` through `render_row`
     (`MppRoutingHead.Datasets`'s own render path -- fresh augmentation when
@@ -516,7 +639,21 @@ def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
     near a region edge, same rare per-position case `MppRoutingHead` already
     lives with) -- the caller draws a fresh episode rather than scoring a
     partial one.
+
+    `pool` renders the positions in its threads, one slide per task, as
+    `render_draw`'s does; the photos are the same (each is seeded from its
+    own row when `deterministic`).
     '''
+    if pool is not None:
+        d = Draw(rungs=episode.rungs, supports=(episode.support,),
+                 queries=(episode.query,))
+        r = _render_draw_pooled(d, bank, cfg, deterministic=deterministic,
+                                support_native=support_native, rng=None,
+                                pool=pool)
+        return (None if r is None else
+                RenderedEpisode(rungs=r.rungs, support=r.supports[0],
+                                query=r.queries[0]))
+
     def render_group(rows_by_rung: Dict[float, List[ManifestRow]], *,
                      native: bool
                      ) -> Optional[Dict[float, List[Tuple[np.ndarray, bool]]]]:

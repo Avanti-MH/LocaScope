@@ -1,21 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=MppRoutingHead                  # Job name
-#SBATCH --partition=normal2                        # Partition
+#SBATCH --partition=8gpus                          # Partition
 #SBATCH --time=48:00:00                            # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560                        # Account
 #SBATCH --nodes=1                                  # Number of nodes
 #SBATCH --gpus-per-node=2                          # GPUs per node (不要設0)
-#SBATCH --cpus-per-task=12                         # DataLoader workers + main
+#SBATCH --cpus-per-task=24                         # DataLoader workers + main; 12 per GPU is the cap
 #SBATCH --ntasks-per-node=1                        # Tasks per node
 #SBATCH --mem=600G                                 # host RAM
 #SBATCH -o /work/u26130998/log/%x      # STDOUT
 #SBATCH -e /work/u26130998/log/%x      # STDERR
 
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
@@ -58,7 +58,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # ---------------- knobs ----------------
 SMOKE="${SMOKE:-0}"
-PARALLEL="${PARALLEL:-0}"
+PARALLEL="${PARALLEL:-1}"
 BASELINE="${BASELINE:-all}"
 ENCODERS="${ENCODERS:-gigapath uni2}"
 ARMS="${ARMS:-arcface attn_linear linear mlp mlp_deep mlp_deep_residual mlp_wide mlp_deep_wide mlp_narrow}"
@@ -71,7 +71,7 @@ SEG="${SEG:-hest}"         # tissue-mask recipe (TissueMaskConfig.MASK_RECIPES)
 N_PER_RUNG="${N_PER_RUNG:-100}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 WSI_GROUP="${WSI_GROUP:-8}"
-MAX_WSI="${MAX_WSI:-}"
+MAX_WSI="${MAX_WSI-121}"
 # Set below, once $OUT is known: default $OUT/resume. RESUME_DIR= (set but
 # empty) disables resume -- every model trains from scratch, nothing written.
 # 0 (default) = off for both. CLIP_GRAD_NORM caps every optimizer's L2
@@ -109,7 +109,7 @@ RUN_NAME_ARG=""
 # CPUS actually granted, not just what this file asks for -- SLURM sets
 # SLURM_CPUS_PER_TASK, and a resubmit with different --cpus-per-task should
 # not need this file edited to match.
-CPUS="${SLURM_CPUS_PER_TASK:-12}"
+CPUS="${SLURM_CPUS_PER_TASK:-24}"
 
 # Sequential: leave 2 cores for the main process + OS/CUDA overhead, same
 # ratio as before (8 cpus -> 6 workers). Parallel: TWO main processes now
@@ -420,12 +420,11 @@ exit $rc
 # =============================================================================
 #  ONE NODE, TWO GPUS -- what PARALLEL=1 buys and what it might not
 #
-#  Sequential (PARALLEL=0, the default): one process, one GPU, baseline 2 then
-#  baseline 3. The second GPU sits idle -- requested anyway (see below) as
-#  headroom against an OOM at hour six of a forty-eight hour allocation, not
-#  because the code uses it.
+#  Sequential (PARALLEL=0): one process, one GPU, baseline 2 then baseline 3.
+#  The second GPU sits idle.
 #
-#  Parallel (PARALLEL=1): baseline 2 and baseline 3 are independent -- neither
+#  Parallel (PARALLEL=1, the default): baseline 2 and baseline 3 are
+#  independent -- neither
 #  reads the other's output -- so running them as two processes on two GPUs is
 #  correct, not just fast. What it is NOT proven to help: the render (Camera
 #  capture, single-threaded openslide decode per worker) is done by CPU
@@ -433,15 +432,14 @@ exit $rc
 #  baseline gets ($NUM_WORKERS_PAR vs $NUM_WORKERS). If render time dominates
 #  wall-clock, as the smoke run's own timing suggested it might, two GPUs at
 #  half the render throughput each can land close to one GPU at full
-#  throughput -- a wash, not a 2x speedup. This is exactly why SMOKE forces
+#  throughput -- a wash, not a 2x speedup. The job asks for 24 cpus (12 per
+#  GPU, the H200 cap) so each side keeps the workers one side had at 12. This is exactly why SMOKE forces
 #  PARALLEL off: the answer needs a real run's numbers, not a guess, and the
 #  first full run's two log files (MppRoutingHead_b2.log / _b3.log) are where
 #  to look for it -- specifically how much of each epoch is the render loop
 #  vs the forward/backward.
 #
-#  A genuinely different way to use two GPUs -- one encoder per GPU for
-#  baseline 2's two encoders (gigapath, uni2), sharing ONE render pass between
-#  them instead of running it twice -- would actually cut render work rather
-#  than split it, but is a code change to `run_baseline2`, not a jobscript
-#  knob, and is not worth designing before a render-vs-forward number exists.
+#  baseline 2's encoders (gigapath, uni2) already share ONE render pass:
+#  `run_baseline2` renders each batch once and encodes it with every encoder
+#  in turn, on the one GPU baseline 2 runs on.
 # =============================================================================

@@ -63,7 +63,10 @@ import csv
 import os
 import random
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Sequence
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,8 +86,8 @@ from training.PrototypicalRoutingHead.Episodes import (              # noqa: E40
     render_episode, sample_val_episode)
 from Checkpoints import build_prototype_from_checkpoint              # noqa: E402
 # Reused, not reimplemented -- see this module's own docstring.
-from train import (episode_forward, val_episode_detail, combo_report,  # noqa: E402
-                   kxk_report, score_kxk, _auto_int)
+from train import (encode_group, pair_forward, val_episode_detail,  # noqa: E402
+                   combo_report, kxk_report, score_kxk, _auto_int)
 
 
 def test_manifests(args, caches, out_dir: Path):
@@ -198,9 +201,13 @@ def main() -> int:
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
-    # one process, no workers: torch gets every cpu of the job
+    # One process: it renders in `workers` threads of the job's cpus and
+    # keeps what is left for torch (train.py's split).
     from CpuBudget import CpuBudget                                 # noqa: PLC0415
-    print(f'  {CpuBudget.for_job(workers=0).apply().line()}', flush=True)
+    budget = CpuBudget.for_job().apply()
+    print(f'  {budget.line()}', flush=True)
+    render_pool = (ThreadPoolExecutor(max_workers=budget.workers)
+                   if budget.workers >= 2 else None)
 
     device = torch.device(args.device)
     caches = open_caches(args, 'PrototypicalRoutingHead', device)
@@ -251,7 +258,17 @@ def main() -> int:
     out_rung_rows: List[Dict] = []
     kxk_combo_rows: List[Dict] = []
     kxk_rung_rows: List[Dict] = []
+    # Every checkpoint is scored on the same episodes (the rng is reset to
+    # --seed for each, and the photos are deterministic), so a frozen encoder
+    # of the same name and dtype, rendering the support the same way, gives
+    # the same tokens for all of them: the first checkpoint renders and
+    # encodes, the rest replay. Keyed by (encoder, dtype, support_native).
+    #   episode_caches[key][dataset]  ([(rungs, s_raw, q_raw, q_native)], redraws)
+    #   kxk_caches[key]               score_kxk's cache
+    episode_caches: Dict = {}
+    kxk_caches: Dict = {}
     for i_ckpt, path in enumerate(weights, 1):
+        t_ckpt = time.time()
         (pooling, support_context, query_context, collapse, head,
         encoder, ckpt) = build_prototype_from_checkpoint(path, device)
 
@@ -325,35 +342,29 @@ def main() -> int:
               flush=True)
         print(f'{path.name}', flush=True)
 
+        cache_key = (ckpt['encoder'], str(run_args.get('dtype')), support_native)
+        episode_cache = episode_caches.setdefault(cache_key, {})
         rng = random.Random(args.seed)
         detail: Dict[str, List[Dict]] = {d: [] for d in args.eval_datasets}
         n_redraws = 0
         for dataset_id in args.eval_datasets:
-            manifest_by_wsi = test_by_dataset[dataset_id]
-            n_done = 0
-            while n_done < args.n_episodes:
-                episode = sample_val_episode(
-                    manifest_by_wsi, rng, p_same_wsi=args.p_same_wsi,
-                    n_support=args.n_support, n_query=args.n_query,
-                    combos=six_way)
-                if episode is None:
-                    n_redraws += 1
-                    continue
-                rendered = render_episode(episode, bank, render_cfg,
-                                          deterministic=True,
-                                          support_native=support_native)
-                if rendered is None:
-                    n_redraws += 1
-                    continue
+            if dataset_id not in episode_cache:
+                episode_cache[dataset_id] = _encode_episodes(
+                    test_by_dataset[dataset_id], rng, args, six_way, bank,
+                    render_cfg, support_native, render_pool, encoder, device)
+            encoded, redraws = episode_cache[dataset_id]
+            n_redraws += redraws
+            for rungs, s_raw, q_raw, q_native in encoded:
                 with torch.no_grad():
-                    logits, target, native = episode_forward(
-                        rendered, encoder=encoder, num_prefix=num_prefix,
-                        pooling=pooling, support_context=support_context,
+                    logits, target, native = pair_forward(
+                        rungs, _to(s_raw, device), _to(q_raw, device), q_native,
+                        num_prefix=num_prefix, pooling=pooling,
+                        support_context=support_context,
                         query_context=query_context, collapse=collapse,
-                        head=head, batch_size=args.encode_batch, device=device)
+                        head=head, device=device)
                 detail[dataset_id] += val_episode_detail(
-                    rendered, logits, target, native, dataset_id)
-                n_done += 1
+                    SimpleNamespace(rungs=rungs), logits, target, native,
+                    dataset_id)
         print(f'[A] random 6-way   ({n_redraws} redraws: episodes that could '
               f'not be drawn or rendered, drawn again)', flush=True)
 
@@ -372,18 +383,71 @@ def main() -> int:
             support_native=support_native, encoder=encoder, num_prefix=num_prefix,
             pooling=pooling, support_context=support_context,
             query_context=query_context, collapse=collapse, head=head,
-            batch_size=args.encode_batch, device=device)
+            batch_size=args.encode_batch, device=device,
+            cache=kxk_caches.setdefault(cache_key, {}), pool=render_pool)
         c_rows, r_rows, _summary = kxk_report(
             results, int(ckpt['epoch']), k=kxk_k, scope='test',
             weights=path.name, tag=tag, **identity)
         kxk_combo_rows += c_rows
         kxk_rung_rows += r_rows
+        # the first checkpoint of an encoder renders and encodes; the rest
+        # replay its cache, so this is the number that shows the cache working
+        print(f'  time {time.time() - t_ckpt:.1f}s  [{i_ckpt}/{len(weights)}]',
+              flush=True)
 
+    if render_pool is not None:
+        render_pool.shutdown()
     seg = '' if args.support_native == 'checkpoint' else f'_support-{args.support_native}'
     rc = write_csvs(out_dir, out_combo_rows, out_rung_rows, prefix=f'test_scores{seg}')
     rc_kxk = write_csvs(out_dir, kxk_combo_rows, kxk_rung_rows,
                         prefix=f'test_scores_kxk{seg}')
     return rc or rc_kxk
+
+
+def _to(raw_by_rung: Dict, device) -> Dict:
+    return {rung: t.to(device) for rung, t in raw_by_rung.items()}
+
+
+def _encode_episodes(manifest_by_wsi, rng, args, combos, bank, render_cfg,
+                     support_native: bool, pool, encoder, device):
+    '''`([(rungs, s_raw, q_raw, q_native)], redraws)`: `--n-episodes`
+    episodes of the original test table drawn from `rng`, rendered and
+    encoded -- the tokens on the host, so the cache holding them does not
+    grow on the card. The draws and their redraws are the ones the loop
+    made before it kept anything, in the same order.'''
+    encoded, redraws, in_a_row = [], 0, 0
+    while len(encoded) < args.n_episodes:
+        # A pool that cannot supply the episode at all (a query rung with
+        # fewer than --n-query positions on every slide) would redraw for
+        # ever; --feasibility-tries failures in a row end the dataset's
+        # draw with what it has, said out loud.
+        if in_a_row >= max(args.feasibility_tries, 1):
+            print(f'    ! {len(encoded)} of {args.n_episodes} episodes: '
+                  f'{in_a_row} draws in a row could not be drawn or rendered '
+                  f'(--feasibility-tries {args.feasibility_tries}) -- scoring '
+                  f'the episodes drawn so far', flush=True)
+            break
+        episode = sample_val_episode(
+            manifest_by_wsi, rng, p_same_wsi=args.p_same_wsi,
+            n_support=args.n_support, n_query=args.n_query, combos=combos)
+        if episode is None:
+            redraws += 1
+            in_a_row += 1
+            continue
+        rendered = render_episode(episode, bank, render_cfg, deterministic=True,
+                                  support_native=support_native, pool=pool)
+        if rendered is None:
+            redraws += 1
+            in_a_row += 1
+            continue
+        in_a_row = 0
+        s_raw, _s_native = encode_group(rendered.support, encoder,
+                                        args.encode_batch, device)
+        q_raw, q_native = encode_group(rendered.query, encoder,
+                                       args.encode_batch, device)
+        encoded.append((rendered.rungs, _to(s_raw, 'cpu'), _to(q_raw, 'cpu'),
+                        q_native))
+    return encoded, redraws
 
 
 def write_csvs(out_dir: Path, combo_rows: List[Dict], rung_rows: List[Dict],

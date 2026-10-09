@@ -1,21 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=PrototypicalRoutingHead        # Job name
-#SBATCH --partition=normal2                       # Partition
+#SBATCH --partition=8gpus                         # Partition
 #SBATCH --time=48:00:00                           # Runtime (hh:mm:ss) -- resubmit to continue, see RESUME
 #SBATCH --account=MST114560                       # Account
 #SBATCH --nodes=1                                 # Number of nodes
-#SBATCH --gpus-per-node=1                         # GPUs per node (不要設0)
-#SBATCH --cpus-per-task=8                         # encode_batch + main
+#SBATCH --gpus-per-node=4                         # one per PARALLEL queue (不要設0)
+#SBATCH --cpus-per-task=48                        # 12 per GPU, the H200 cap: render threads + main
 #SBATCH --ntasks-per-node=1                       # Tasks per node
-#SBATCH --mem=200G                                # host RAM
+#SBATCH --mem=800G                                # host RAM, 200G per GPU, the H200 cap
 #SBATCH -o /work/u26130998/log/%x   # STDOUT
 #SBATCH -e /work/u26130998/log/%x   # STDERR
 
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
@@ -45,21 +45,23 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  the same config and the same files, so both packages train on the same
 #  positions rather than on two draws that should agree.
 #
-#  TWO CARDS. PARALLEL=2 deals the 11 runs out to two queues, one per card,
-#  running at once; each gets half the job's cpus (CpuBudget). Training is
-#  one process per run, so no run is split across cards -- two runs are
-#  simply in flight together. evaluate.py then runs once, after both queues.
+#  FOUR CARDS. PARALLEL=4 (the default) deals the 11 runs out to four queues,
+#  one per card, running at once; each gets a quarter of the job's cpus
+#  (CpuBudget) and renders in that many threads. Training is one process per
+#  run, so no run is split across cards -- four runs are simply in flight
+#  together. evaluate.py then runs once, after every queue. Fewer cards:
 #
-#      PARALLEL=2 sbatch --gpus-per-node=2 --cpus-per-task=16 <this script>
+#      PARALLEL=2 sbatch --gpus-per-node=2 --cpus-per-task=24 --mem=400G <this script>
+#      PARALLEL=1 sbatch --gpus-per-node=1 --cpus-per-task=12 --mem=200G <this script>
 # =============================================================================
 
 # ---------------- knobs ----------------
 SMOKE="${SMOKE:-0}"
-PARALLEL="${PARALLEL:-1}"       # N: run the runs in N queues at once, one card each (see the run loop)
+PARALLEL="${PARALLEL:-4}"       # N: run the runs in N queues at once, one card each (see the run loop)
 SUPPLY_ONLY="${SUPPLY_ONLY:-0}"
 TRAIN_DATASET="${TRAIN_DATASET:-ki67_pure}"
 ENCODER="${ENCODER:-uni2}"
-DTYPE="${DTYPE:-fp16}"
+DTYPE="${DTYPE:-fp32}"
 POOLING="${POOLING:-cls}"
 TILE="${TILE:-256}"
 N_PER_RUNG="${N_PER_RUNG:-100}"
@@ -84,7 +86,7 @@ LR_FACTOR="${LR_FACTOR:-0.5}"
 LOSS="${LOSS:-bal}"
 ORDINAL_WEIGHT="${ORDINAL_WEIGHT:-1.0}"
 ORDINAL_SIGMA="${ORDINAL_SIGMA:-1.0}"
-ENCODE_BATCH="${ENCODE_BATCH:-64}"
+ENCODE_BATCH="${ENCODE_BATCH:-256}"
 SEED="${SEED:-42}"
 # Cap on the WSIs each training manifest draws from (--max-wsi): N chosen at
 # random with --seed, the same N every time. 121 is ki67_pure's whole size, so
@@ -282,7 +284,7 @@ else
     # and written under a lock (train.py). Ask for the cards and the cpus on
     # the command line:
     #
-    #     PARALLEL=2 sbatch --gpus-per-node=2 --cpus-per-task=16 <this script>
+    #     PARALLEL=2 sbatch --gpus-per-node=2 --cpus-per-task=24 --mem=400G <this script>
     #
     # Queue i logs to <log>.p<i>; this file gets the summary.
     CARDS=$(nvidia-smi -L | wc -l)
@@ -292,6 +294,22 @@ else
         exit 2
     fi
     LOG="/work/u26130998/log/${SLURM_JOB_NAME:-PrototypicalRoutingHead}"
+    # Warm the caches before the queues start, split N ways: shard i
+    # (--cache-shard i/N, card i) segments and draws every N-th slide of the
+    # train, cross-domain and val lists, then exits. Without it the N queues
+    # start together and each segments the SAME uncached slides on its own
+    # card. A slide already cached is a quick hit. Shard i logs to <log>.w<i>.
+    echo "======== cache warm-up: $PARALLEL shards, one per card ========"
+    wpids=()
+    for ((i = 0; i < PARALLEL; i++)); do
+        CUDA_VISIBLE_DEVICES=$i run_one none "$CROSS_DOMAIN_DATASET" "${MODELS[0]}" \
+            --cache-shard "$i/$PARALLEL" > "$LOG.w$i" 2>&1 &
+        wpids+=($!)
+    done
+    WARM_RC=0
+    for pid in "${wpids[@]}"; do wait "$pid" || WARM_RC=1; done
+    [ "$WARM_RC" -ne 0 ] && { echo "cache warm-up failed: see $LOG.w*"; exit 1; }
+    RUN_I=0
     rm -rf "$FAIL_DIR"; mkdir -p "$FAIL_DIR"
     pids=()
     for ((i = 0; i < PARALLEL; i++)); do

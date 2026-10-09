@@ -60,8 +60,9 @@ import os
 import random
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities'))
@@ -75,12 +76,13 @@ from training.MppRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, build_manifest, cache_jobs, CameraBank, data_record,
     open_caches,
     RenderConfig, RUNGS)
-from AccessDatasets import list_names                                # noqa: E402
+from AccessDatasets import list_names, pick_wsi_names                # noqa: E402
 from WsiSplit import native_bracs_rung_wsi_names                     # noqa: E402
 from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
     HELD_OUT_COMBOS, REUSE_MODES, batch_shape, draw, epoch_schedule,
     episodes_per_epoch,
-    group_by_wsi_name, max_feasible_k, pool_by_rung, render_draw, reuse_pairs,
+    group_by_wsi_name, max_feasible_k, pool_by_rung, prefetched, render_draw,
+    reuse_pairs,
     training_combos, training_pools)
 from WsiSplit import BRACS_RUNGS                                       # noqa: E402
 from training.PrototypicalRoutingHead.Losses import compute_loss     # noqa: E402
@@ -318,7 +320,8 @@ def score_kxk(pools_by_dataset, combos, *, k: int, n_support: int, n_query: int,
               max_overlap: float, seed: int, tries: int, bank, render_cfg,
               support_native: bool, encoder, num_prefix: int, pooling,
               support_context, query_context, collapse, head, batch_size: int,
-              device) -> Dict[str, Dict[str, Dict]]:
+              device, cache: Optional[Dict] = None,
+              pool: Optional[ThreadPoolExecutor] = None) -> Dict[str, Dict[str, Dict]]:
     """`{dataset: {combo label: result}}` for every dataset and combination:
     K support batches x K query batches drawn once (fixed `seed`, so the same
     questions every call), every pair scored.
@@ -326,13 +329,31 @@ def score_kxk(pools_by_dataset, combos, *, k: int, n_support: int, n_query: int,
     `result`: `acc_by_pair_rung` -- `[K*K][rung]` accuracy of that rung's
     queries in that pair -- plus `n_resampled` (queries rendered off a finer
     level) and `ok` (False when the draw or render failed `tries` times, which
-    `max_feasible_k` is there to make impossible, so it is printed loudly)."""
+    `max_feasible_k` is there to make impossible, so it is printed loudly).
+
+    `cache`, for a caller that scores the same pools every epoch through the
+    same frozen encoder: the draws (a fixed seed), the photos (deterministic)
+    and so the encoder's tokens are the same on every call, so they are kept
+    in it -- `{(dataset, combo label): (rungs, s_enc, q_enc)}`, or None for a
+    combination that could not be drawn -- and only the trained modules run
+    again. `pool` renders as `render_draw`'s."""
     out: Dict[str, Dict[str, Dict]] = {}
-    for dataset_id, pool in pools_by_dataset.items():
+    for dataset_id, pool_rows in pools_by_dataset.items():
         rng = random.Random(seed)
         per_combo: Dict[str, Dict] = {}
         for combo in combos:
             label = _combo_label(combo)
+            if cache is not None and (dataset_id, label) in cache:
+                hit = cache[dataset_id, label]
+                per_combo[label] = (dict(ok=False, rungs=combo, acc_by_pair_rung=[],
+                                         n_resampled=0) if hit is None else
+                                    _score_pairs(*hit, k=k, num_prefix=num_prefix,
+                                                 pooling=pooling,
+                                                 support_context=support_context,
+                                                 query_context=query_context,
+                                                 collapse=collapse, head=head,
+                                                 device=device))
+                continue
             # rendered = None
             # for _ in range(tries):
             #     d = draw_until(pool, pool, rng, combo, tries=tries,
@@ -358,7 +379,7 @@ def score_kxk(pools_by_dataset, combos, *, k: int, n_support: int, n_query: int,
 
             for _ in range(tries):
                 d = draw_until(
-                    pool, pool, rng, combo, tries=tries,
+                    pool_rows, pool_rows, rng, combo, tries=tries,
                     n_support=n_support, n_query=n_query,
                     ks=k, kq=k, max_overlap=max_overlap,
                 )
@@ -370,7 +391,7 @@ def score_kxk(pools_by_dataset, combos, *, k: int, n_support: int, n_query: int,
                 n_drawn += 1
                 rendered = render_draw(
                     d, bank, render_cfg, deterministic=True,
-                    support_native=support_native,
+                    support_native=support_native, pool=pool,
                 )
 
                 if rendered is not None:
@@ -407,29 +428,43 @@ def score_kxk(pools_by_dataset, combos, *, k: int, n_support: int, n_query: int,
                     acc_by_pair_rung=[],
                     n_resampled=0,
                 )
+                if cache is not None:
+                    cache[dataset_id, label] = None
                 continue
             # ////////////////////////////////////////////////////////////////// end add by me
             s_enc = [encode_group(g, encoder, batch_size, device) for g in rendered.supports]
             q_enc = [encode_group(g, encoder, batch_size, device) for g in rendered.queries]
-            accs, n_resampled = [], 0
-            for si, qj in reuse_pairs(k, k):
-                with torch.no_grad():
-                    logits, target, native = pair_forward(
-                        rendered.rungs, s_enc[si][0], q_enc[qj][0], q_enc[qj][1],
-                        num_prefix=num_prefix, pooling=pooling,
-                        support_context=support_context,
-                        query_context=query_context, collapse=collapse,
-                        head=head, device=device)
-                correct = (logits.argmax(-1) == target).cpu()
-                target_c = target.cpu()
-                accs.append({rung: float(correct[target_c == i].double().mean())
-                             for i, rung in enumerate(rendered.rungs)})
-                n_resampled += int((~native).sum())
-            per_combo[label] = dict(ok=True, rungs=rendered.rungs,
-                                    acc_by_pair_rung=accs,
-                                    n_resampled=n_resampled)
+            if cache is not None:
+                cache[dataset_id, label] = (rendered.rungs, s_enc, q_enc)
+            per_combo[label] = _score_pairs(
+                rendered.rungs, s_enc, q_enc, k=k, num_prefix=num_prefix,
+                pooling=pooling, support_context=support_context,
+                query_context=query_context, collapse=collapse, head=head,
+                device=device)
         out[dataset_id] = per_combo
     return out
+
+
+def _score_pairs(rungs, s_enc, q_enc, *, k: int, num_prefix: int, pooling,
+                 support_context, query_context, collapse, head, device) -> Dict:
+    """Every (support, query) pair of one encoded K x K draw through the
+    trained modules: `score_kxk`'s result for one combination."""
+    accs, n_resampled = [], 0
+    for si, qj in reuse_pairs(k, k):
+        with torch.no_grad():
+            logits, target, native = pair_forward(
+                rungs, s_enc[si][0], q_enc[qj][0], q_enc[qj][1],
+                num_prefix=num_prefix, pooling=pooling,
+                support_context=support_context,
+                query_context=query_context, collapse=collapse,
+                head=head, device=device)
+        correct = (logits.argmax(-1) == target).cpu()
+        target_c = target.cpu()
+        accs.append({rung: float(correct[target_c == i].double().mean())
+                     for i, rung in enumerate(rungs)})
+        n_resampled += int((~native).sum())
+    return dict(ok=True, rungs=rungs, acc_by_pair_rung=accs,
+                n_resampled=n_resampled)
 
 
 def _nanmean(values) -> float:
@@ -710,8 +745,47 @@ def rung_header(left: str = '') -> str:
 #: the run is in total, or how it is logged -- not what is being trained.
 _NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
                  'wandb_mode', 'run_name', 'merge', 'encode_batch', 'supply_only',
+                 'cache_shard',
                  'mask_cache_job', 'draw_cache_job', 'split_cache_job',
                  'feasibility_tries', 'cpu_processes')
+
+
+def warm_cache_shard(args, caches, reports: Path) -> int:
+    """`--cache-shard I/N`: every slide the train, cross-domain and val
+    manifests would draw from, in one list, and slice I::N of it built one
+    slide at a time. `build_manifest` caches per slide (the mask and the draw),
+    so a slide warmed here is a hit for the full manifest later -- same
+    dataset, n_per_rung, seed and plan. N processes with I = 0..N-1 segment
+    disjoint slides instead of all of them segmenting the same ones."""
+    i, n = (int(v) for v in args.cache_shard.split('/'))
+    if not 0 <= i < n:
+        raise SystemExit(f'--cache-shard {args.cache_shard}: need 0 <= I < N')
+    jobs = []      # (dataset, name, n_per_rung, report_dir)
+    names = pick_wsi_names(list_names(dataset=args.train_dataset),
+                           args.max_wsi, args.seed)
+    rd = reports / f'{args.train_dataset.replace("/", "_")}_train'
+    jobs += [(args.train_dataset, nm, args.n_per_rung, rd) for nm in names]
+    if args.cross_domain_dataset:
+        cd = args.cross_domain_dataset
+        names = (native_bracs_rung_wsi_names(cd) if cd.startswith('bracs')
+                 else list_names(dataset=cd))
+        names = pick_wsi_names(names, args.max_wsi, args.seed)
+        rd = reports / f'{cd.replace("/", "_")}_cross_domain'
+        jobs += [(cd, nm, args.n_per_rung, rd) for nm in names]
+    for dataset_id in args.eval_datasets:
+        names = list_names(dataset=f'{dataset_id}#val', split_job=caches.split_job)
+        rd = reports / f'{dataset_id.replace("/", "_")}_val'
+        jobs += [(dataset_id, nm, args.val_n_per_rung, rd) for nm in names]
+    mine = jobs[i::n]
+    print(f'cache shard {i}/{n}: {len(mine)} of {len(jobs)} slides', flush=True)
+    for k, (dataset_id, name, n_per_rung, rd) in enumerate(mine, 1):
+        print(f'  [{k}/{len(mine)}] {dataset_id} {name}', flush=True)
+        build_manifest(dataset_id, masks=caches.masks, draw_job=caches.draw_job,
+                       report_dir=rd, tile_size=args.tile,
+                       n_per_rung=n_per_rung, seed=args.seed, wsi_names=[name])
+    caches.masks.close()
+    print(f'cache shard {i}/{n}: done', flush=True)
+    return 0
 
 
 def resolve_episodes(args, train_pool, cross_pool, val_pools):
@@ -791,7 +865,7 @@ def main() -> int:
                          "string disables it")
     ap.add_argument('--encoder', default='uni2',
                     choices=('gigapath', 'uni2', 'conch_vit'))
-    ap.add_argument('--dtype', choices=('fp16', 'fp32'), default='fp16',
+    ap.add_argument('--dtype', choices=('fp16', 'fp32'), default='fp32',
                     help='frozen encoder inference precision; everything '
                          'that trains is fp32')
     ap.add_argument('--pooling',
@@ -876,6 +950,11 @@ def main() -> int:
     ap.add_argument('--supply-only', action='store_true',
                     help='build the manifests, print supply and what auto '
                          'resolves to, and exit')
+    ap.add_argument('--cache-shard', default='', metavar='I/N',
+                    help='fill the mask and draw caches for slice I of N of '
+                         'every slide this run would draw from (train, cross-'
+                         'domain, val), then exit. N processes, I = 0..N-1, '
+                         'segment disjoint slides side by side')
     ap.add_argument('--max-wsi', type=int, default=None,
                     help='cap on the WSIs each training manifest (--train-'
                          'dataset AND --cross-domain-dataset) draws from: N '
@@ -892,14 +971,18 @@ def main() -> int:
         ap.error("--pooling passthrough gives Collapse an unpooled grid, not one "
                  "vector per tile -- pick cls/avg/max/attn")
 
-    # This process renders its own batches (no DataLoader workers), so torch
-    # may use its whole share of the job's cpus: all of them alone, a half
-    # each beside a second process. Left at torch's default, two processes
-    # each ran every cpu's worth of threads and slowed each other (CpuBudget's
-    # docstring has the measurements).
+    # This process renders its own batches (no DataLoader), in `workers`
+    # threads of its own share of the job's cpus -- all of them alone, a half
+    # each beside a second process -- and keeps what is left for torch. Left
+    # at torch's default, two processes each ran every cpu's worth of threads
+    # and slowed each other (CpuBudget's docstring has the measurements).
     from CpuBudget import CpuBudget                                 # noqa: PLC0415
-    print(f'  {CpuBudget.for_job(processes=args.cpu_processes, workers=0).apply().line()}',
-          flush=True)
+    budget = CpuBudget.for_job(processes=args.cpu_processes).apply()
+    print(f'  {budget.line()}', flush=True)
+    # One slide per task (Episodes.render_draw); none below two workers, where
+    # a pool would only add a thread hop to the sequential render.
+    render_pool = (ThreadPoolExecutor(max_workers=budget.workers)
+                   if budget.workers >= 2 else None)
 
     device = torch.device(args.device)
     out_dir = Path(args.out or job_result_dir('PrototypicalRoutingHead'))
@@ -908,6 +991,9 @@ def main() -> int:
 
     caches = open_caches(args, 'PrototypicalRoutingHead', device)
     reports = out_dir / 'sampler_reports'
+
+    if args.cache_shard:
+        return warm_cache_shard(args, caches, reports)
 
     print(f'building manifest ({args.train_dataset})...', flush=True)
     rows = build_manifest(
@@ -1068,6 +1154,9 @@ def main() -> int:
         train_dataset=args.train_dataset, loss=args.loss,
         support_native=args.support_native, seg=args.seg,
         episode_reuse=args.episode_reuse, reuse_k=k)
+    # The val draws, rendered and encoded on the first val pass and replayed
+    # on every later one -- see `score_kxk`'s `cache`.
+    val_cache: Dict = {}
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
         for m in trainable.values():
@@ -1080,26 +1169,36 @@ def main() -> int:
         # runs K rounds so its step count matches the held modes'.
         schedule = epoch_schedule(combos, run['episodes_per_epoch'], rng)
 
-        for combo in schedule:
-            rendered = None
-            for _attempt in range(max(args.feasibility_tries, 1) * 4):
-                sp, qp = training_pools(train_pool, cross_pool, rng, combo)
-                d = draw(sp, qp, rng, combo, n_support=args.n_support,
-                         n_query=args.n_query, ks=ks, kq=kq,
-                         max_overlap=args.max_overlap)
-                if d is not None:
-                    rendered = render_draw(d, bank, render_cfg, deterministic=False,
-                                           support_native=args.support_native,
-                                           rng=rng)
-                if rendered is not None:
-                    break
-                n_redraws += 1
-            if rendered is None:
-                raise RuntimeError(
-                    f'combination {_combo_label(combo)} could not be drawn and '
-                    f'rendered in {max(args.feasibility_tries, 1) * 4} attempts at '
-                    f'K={k}, although K was measured drawable -- the render is '
-                    f'failing, not the pool')
+        def drawn():
+            '''`(rendered draw, redraws it took)` per scheduled combination.
+            Everything that reads `rng` or `bank` in the epoch is here, so it
+            runs in `prefetched`'s thread in the same order it ran inline.'''
+            for combo in schedule:
+                rendered, redraws = None, 0
+                for _attempt in range(max(args.feasibility_tries, 1) * 4):
+                    sp, qp = training_pools(train_pool, cross_pool, rng, combo)
+                    d = draw(sp, qp, rng, combo, n_support=args.n_support,
+                             n_query=args.n_query, ks=ks, kq=kq,
+                             max_overlap=args.max_overlap)
+                    if d is not None:
+                        rendered = render_draw(d, bank, render_cfg,
+                                               deterministic=False,
+                                               support_native=args.support_native,
+                                               rng=rng, pool=render_pool)
+                    if rendered is not None:
+                        break
+                    redraws += 1
+                if rendered is None:
+                    raise RuntimeError(
+                        f'combination {_combo_label(combo)} could not be drawn and '
+                        f'rendered in {max(args.feasibility_tries, 1) * 4} attempts at '
+                        f'K={k}, although K was measured drawable -- the render is '
+                        f'failing, not the pool')
+                yield rendered, redraws
+
+        # The next draw renders while this one encodes and trains.
+        for rendered, redraws in prefetched(drawn(), depth=2):
+            n_redraws += redraws
             n_draws += 1
             s_enc = [encode_group(g, encoder, args.encode_batch, device)
                      for g in rendered.supports]
@@ -1145,7 +1244,7 @@ def main() -> int:
             tries=args.feasibility_tries, bank=bank, render_cfg=render_cfg,
             support_native=args.support_native, encoder=encoder,
             num_prefix=num_prefix, batch_size=args.encode_batch, device=device,
-            **trainable)
+            cache=val_cache, pool=render_pool, **trainable)
         epoch_combo_rows, epoch_rung_rows, summary = kxk_report(
             results, epoch, k=val_k, header=False, **identity_cols)
         out_rung_rows += epoch_rung_rows
@@ -1184,6 +1283,8 @@ def main() -> int:
         wandb_log(wb, epoch, metrics)
 
     wandb_finish(wb)
+    if render_pool is not None:
+        render_pool.shutdown()
 
     if not out_combo_rows:
         print('no val rows (no epoch ran) -- nothing to write', flush=True)

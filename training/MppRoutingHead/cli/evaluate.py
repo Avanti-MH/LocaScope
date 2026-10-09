@@ -44,6 +44,7 @@ import csv
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -153,7 +154,10 @@ def main() -> int:
     caches.masks.close()
     out_rows: List[Dict] = []
     tile_rows: List[Dict] = []
+    # {((encoder, dtype, blocks), dataset): Runtime.predict's cache}
+    raw_caches: Dict = {}
     for path in weights:
+        t_ckpt = time.time()
         head, encoder, ckpt = build_from_checkpoint(path, device)
         frozen = bool(ckpt['frozen'])
         # num_prefix is 0 for the fine-tuned route because its spatial exit has
@@ -191,11 +195,20 @@ def main() -> int:
                 f'score it with the code and environment it was trained under')
 
         head_name = ckpt['head_name']
+        # A frozen encoder of the same name, dtype and blocks gives every
+        # checkpoint the same raw for the same (deterministic) test tiles, so
+        # the first such checkpoint encodes them and the rest replay it. A
+        # fine-tuned trunk is its own encoder: scored fresh.
+        raw_key = ((ckpt['encoder'], str(ckpt.get('args', {}).get('dtype')),
+                    tuple(head.layers or ())) if frozen else None)
         for dataset_id, drows in rows.items():
+            cache = (raw_caches.setdefault((raw_key, dataset_id), [])
+                     if raw_key is not None else None)
             scores, detail = predict(
                 drows, {head_name: head}, raw_of, num_prefix, tile=tile,
                 wsi_group_size=args.wsi_group_size,
-                batch_size=args.batch_size, num_workers=args.num_workers)
+                batch_size=args.batch_size, num_workers=args.num_workers,
+                cache=cache)
             result = scores[head_name]
             # `level_accuracy` OVERWRITTEN with the mean of the six rungs'
             # own accuracies, NOT the pooled per-tile value `scores[...]`
@@ -241,6 +254,9 @@ def main() -> int:
                 **result,
             ))
             tile_rows += [dict(**identity, **d) for d in detail[head_name]]
+        # a frozen encoder's first checkpoint renders and encodes; the rest
+        # replay its cache, so this is the number that shows the cache working
+        print(f'  time {time.time() - t_ckpt:.1f}s  {path.name}', flush=True)
 
     status = write_csvs(out_dir, args.tag, out_rows, tile_rows)
     print_and_plot(out_dir, args.tag, tile_rows)
