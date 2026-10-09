@@ -415,7 +415,7 @@ def _groups(df, by):
     return [(f'{by}={k}', g) for k, g in df.groupby(by)]
 
 
-def plot_stats(df: pd.DataFrame, specs, by, out: Path) -> None:
+def plot_stats(df: pd.DataFrame, specs, by, out: Path, dpi: int) -> None:
     for spec in specs:
         kind, _, arg = spec.partition(':')
         fig, ax = plt.subplots(figsize=(7, 5))
@@ -463,7 +463,7 @@ def plot_stats(df: pd.DataFrame, specs, by, out: Path) -> None:
         name = spec.replace(':', '_').replace(',', '-')
         p = out / f'{name}{"_by-" + by if by else ""}.png'
         fig.tight_layout()
-        fig.savefig(p, dpi=120)
+        fig.savefig(p, dpi=dpi)
         plt.close(fig)
         print(f'  [plot] {p}', flush=True)
 
@@ -652,7 +652,7 @@ def draw_windows(run: SlideRun, row: pd.Series, args, out: Path) -> Optional[Pat
                  f'cosine to the query tile', fontsize=11)
     fig.tight_layout()
     p = out / f'{run.name}_{route}_{i}_windows.png'
-    fig.savefig(p, dpi=100)
+    fig.savefig(p, dpi=args.dpi)
     plt.close(fig)
     return p
 
@@ -696,13 +696,60 @@ def _checker(crop: np.ndarray, query: np.ndarray, H: np.ndarray, n: int = 8) -> 
     return out
 
 
+#: The most pixels `located` reads for the footprint: past this it takes a coarser level.
+_LOCATED_MAX_PX: int = 16_000_000
+
+
+def _located_view(run: SlideRun, r: pd.Series, H: np.ndarray, quad: np.ndarray,
+                  ds_s: float, photo_shape) -> Tuple[np.ndarray, np.ndarray]:
+    """`(image, H')`: the slide around the query's footprint, read at the query's OWN
+    resolution, and the homography onto it.
+
+    Stage 3 matches on a crop read at the level stage 2 searched, which can be much
+    coarser than the photo, so the footprint there is a few hundred px and neither
+    the outline nor the checkerboard can show whether fine detail lines up. Here the
+    footprint plus a margin is read again at the finest level not finer than the
+    photo (one query px = `s` crop px = `s * ds_s` level-0 px, `s` from the
+    footprint's area), and `H` is carried over: crop px -> new px is a scale
+    `k = ds_s / ds_new` and the shift of the new origin."""
+    h, w = photo_shape[:2]
+    area: float = 0.5 * abs(float(np.dot(quad[:, 0], np.roll(quad[:, 1], -1))
+                                  - np.dot(quad[:, 1], np.roll(quad[:, 0], -1))))
+    ds_photo: float = math.sqrt(max(area, 1e-9) / (w * h)) * ds_s
+    lds: List[float] = [float(d) for d in run.wsi.level_downsamples]
+    level: int = max([i for i, d in enumerate(lds) if d <= ds_photo * 1.01] or [0])
+
+    crop_w: float = float(r['crop_w0']) / ds_s
+    crop_h: float = float(r['crop_h0']) / ds_s
+    pad: float = 0.12 * max(float(np.ptp(quad[:, 0])), float(np.ptp(quad[:, 1])))
+    x0c: float = max(0.0, float(quad[:, 0].min()) - pad)
+    x1c: float = min(crop_w, float(quad[:, 0].max()) + pad)
+    y0c: float = max(0.0, float(quad[:, 1].min()) - pad)
+    y1c: float = min(crop_h, float(quad[:, 1].max()) + pad)
+    bw0: float = (x1c - x0c) * ds_s
+    bh0: float = (y1c - y0c) * ds_s
+    while level < len(lds) - 1 and (bw0 / lds[level]) * (bh0 / lds[level]) > _LOCATED_MAX_PX:
+        level += 1
+    ds_new: float = lds[level]
+    ox: int = int(float(r['crop_x0']) + x0c * ds_s)
+    oy: int = int(float(r['crop_y0']) + y0c * ds_s)
+    img: np.ndarray = _read_box(run, ox, oy, bw0, bh0, level)
+    k: float = ds_s / ds_new
+    shift: np.ndarray = np.array([[k, 0.0, (float(r['crop_x0']) - ox) / ds_new],
+                                  [0.0, k, (float(r['crop_y0']) - oy) / ds_new],
+                                  [0.0, 0.0, 1.0]])
+    return img, shift @ H
+
+
 def _draw_located(fig, gs, col: int, run: SlideRun, row: pd.Series, ranks, photo: np.ndarray,
                   args) -> None:
-    """The `located` panel: three axes in one column. Top, the query. Middle,
-    the slide where stage 3 put it -- the crop cut to the footprint and a
-    margin, the footprint outlined. Bottom, that crop against the query warped
-    onto it, as a checkerboard."""
-    axes = [fig.add_subplot(gs[k, col]) for k in range(3)]
+    """The `located` panel, 2.5 times as wide as the others and in three columns: the
+    query (narrow), the place stage 3 put it with the footprint outlined, and that place
+    against the query warped onto it, as a checkerboard -- each of the last two the full
+    height of the figure. The place is read at the query's own resolution
+    (`_located_view`), not at the level stage 2 searched."""
+    sub = gs[:, col].subgridspec(1, 3, width_ratios=[0.6, 1.0, 1.0], wspace=0.04)
+    axes = [fig.add_subplot(sub[0, k]) for k in range(3)]
     axes[0].imshow(photo)
     axes[0].set_title('located: the query', fontsize=9)
     r = None
@@ -718,22 +765,19 @@ def _draw_located(fig, gs, col: int, run: SlideRun, row: pd.Series, ranks, photo
         for ax in axes:
             ax.axis('off')
         return
-    level = int(row['s2_routed_level'])
-    crop = _read_box(run, r['crop_x0'], r['crop_y0'], r['crop_w0'], r['crop_h0'], level)
-    quad = _footprint(photo.shape, H)
-    board = _checker(crop, photo, H)
-    pad = 0.12 * max(np.ptp(quad[:, 0]), np.ptp(quad[:, 1]))
-    x0 = int(max(0, quad[:, 0].min() - pad))
-    x1 = int(min(crop.shape[1], quad[:, 0].max() + pad))
-    y0 = int(max(0, quad[:, 1].min() - pad))
-    y1 = int(min(crop.shape[0], quad[:, 1].max() + pad))
-    axes[1].imshow(crop[y0:y1, x0:x1])
-    axes[1].add_patch(Polygon(quad - [x0, y0], closed=True, fill=False, edgecolor='magenta', lw=2))
+    ds_s: float = float(row['s2_ds'])
+    quad0: np.ndarray = _footprint(photo.shape, H)
+    view, H2 = _located_view(run, r, H, quad0, ds_s, photo.shape)
+    quad: np.ndarray = _footprint(photo.shape, H2)
+    board: np.ndarray = _checker(view, photo, H2)
+    axes[1].imshow(view)
+    axes[1].add_patch(Polygon(quad, closed=True, fill=False, edgecolor='magenta', lw=2))
     axes[1].set_title(f'found location  rank {args.rank}  inliers {int(r["n_inliers"])}  '
                       f'conf {float(r.get("confidence", float("nan"))):.2f}\n'
                       'magenta outline = the query\'s footprint (by H)', fontsize=9)
-    axes[2].imshow(board[y0:y1, x0:x1])
-    axes[2].set_title('checkerboard: crop / query warped onto it', fontsize=9)
+    axes[2].imshow(board)
+    axes[2].set_title('checkerboard: slide / query warped onto it\nat the query\'s resolution',
+                      fontsize=9)
     for ax in axes:
         ax.axis('off')
 
@@ -743,8 +787,9 @@ def draw_fov(run: SlideRun, row: pd.Series, panels, args, out: Path) -> Path:
     real: bool = run.real
     got = run.tables.get(route, {})
     panels = [p for p in panels if p != 'windows' and not (real and p == 'gt')]
-    fig = plt.figure(figsize=(5.5 * len(panels), 5.5))
-    gs = fig.add_gridspec(3, len(panels))
+    ratios: List[float] = [2.5 if p == 'located' else 1.0 for p in panels]
+    fig = plt.figure(figsize=(5.5 * sum(ratios), 5.5))
+    gs = fig.add_gridspec(3, len(panels), width_ratios=ratios)
     photo = None
     cands = ranks = None
     if 2 in got and got[2]['output'] is not None:
@@ -888,7 +933,7 @@ def draw_fov(run: SlideRun, row: pd.Series, panels, args, out: Path) -> Path:
                  f'{run.name}  #{i}  route {route}', fontsize=12)
     fig.tight_layout()
     p = out / f'{run.name}_{route}_{i}.png'
-    fig.savefig(p, dpi=100, bbox_inches='tight')
+    fig.savefig(p, dpi=args.dpi, bbox_inches='tight')
     plt.close(fig)
     return p
 
@@ -1059,6 +1104,9 @@ def main():
                     help='which route the demo page shows')
     ap.add_argument('--demo-scale', type=float, default=0.25,
                     help='demo images, relative to level px')
+    ap.add_argument('--dpi', type=int, default=200,
+                    help='resolution of every figure written (the FoV panels, `windows` and --plot); '
+                         'a FoV panel is 5.5 in square, so 200 gives 1100 px')
     ap.add_argument('--columns', action='store_true', help='list the columns and stop')
     ap.add_argument('--out', default=None)
     args = parse_run_args(ap)
@@ -1101,7 +1149,7 @@ def main():
     elif args.plot:
         fig_dir = out / 'figures' / 'stats'
         fig_dir.mkdir(parents=True, exist_ok=True)
-        plot_stats(sel, args.plot, args.by or None, fig_dir)
+        plot_stats(sel, args.plot, args.by or None, fig_dir, args.dpi)
     by_slide = {r.name: r for r in runs}
     args.tile_size = stages[1].cfg.tile_size
     if panels:

@@ -55,6 +55,8 @@ source jobscripts/_env.sh
 #     PLOT     recall cdf:s3_rank1_err_um confusion scatter:x,y ("" = none)
 #     BY       group the statistics by this column
 #     EXPORT   demo: the demo page in <out>/demo/ (open index.html)
+#     DPI      resolution of every figure (default 200: a FoV panel is 5.5 in, 1100 px;
+#              the `located` panel is 2.5 times as wide); lower it (100) for a quick look
 #
 #   anything else
 #     EXTRA    flags passed to plot_locascope.py as they are, e.g. the output
@@ -86,6 +88,7 @@ PANELS="${PANELS:-photo,candidates,matches,located,result,windows}"
 if [ -n "$REAL" ]; then PLOT=""; else PLOT="${PLOT:-recall cdf:s3_rank1_err_um cdf:s1_mpp_err_rel confusion}"; fi
 BY="${BY:-level}"
 EXPORT="${EXPORT:-}"
+DPI="${DPI:-200}"
 
 EXTRA="${EXTRA:-}"
 
@@ -98,6 +101,7 @@ python utilities/cli/plot/plot_locascope.py \
   --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" --route "$ROUTE" \
   --seg "$SEG" --limit "$LIMIT" --stage-cache-job "$STAGE_JOB" \
   --select "$SELECT" --sample "$SAMPLE" --panels "$PANELS" --by "$BY" \
+  --dpi "$DPI" \
   $([ -n "$PLOT" ] && echo --plot $PLOT) \
   $([ -n "$EXPORT" ] && echo --export $EXPORT) \
   $([ -n "$REAL" ] && echo --real) \
