@@ -1,642 +1,258 @@
 #!/usr/bin/env python3
-"""Locate real microscope photos in their WSI -- one photo, or a whole folder.
+"""Locate real microscope photos in their own slide: the mainstream run, with
+no ground truth. The stage tables of every photo land in the cache, as the
+bench's do for synthetic FoVs (utilities/bench_modules/bench_locascope.py).
 
-There is no recorded (x, y) for these photos. The sidecar .json files next to
-them hold Ki-67 nucleus polygons in PHOTO pixel coordinates, not slide
-positions, so nothing here can be scored against a ground truth. Correctness is
-judged two ways instead:
-
-  1. SIFT+RANSAC inlier count. A correct match on tissue yields hundreds to
-     thousands of geometrically consistent keypoints; a wrong one yields single
-     digits.
-  2. Visual: the homography is inverted to warp the WSI back into the photo's
-     own frame. If the localisation is right the two images overlap
-     pixel-for-pixel, which the blend and checkerboard panels make obvious.
-
-Why a folder mode exists
-------------------------
-LocaScopePipeline.build() segments the whole slide and encodes a KNN reference
-bank, and the first shot routed to a pyramid level makes that level's retriever
-encode every tile of the slide. All of it is per-WSI, none of it is per-photo.
-Running one process per photo therefore repeats the entire expensive part once
-per photo -- with 170 to 478 photos per slide that is roughly two orders of
-magnitude of wasted work. Folder mode builds the pipeline once and loops.
-
-Outputs, per invocation
------------------------
-    <out>/predictions.csv      one row per photo -- the actual deliverable
-    <out>/_overview.png        every prediction on the slide, coloured by inliers
-    <out>/success/             per-photo figures for the photos SIFT located
-    <out>/fail/                per-photo figures for the ones it did not
-        <stem>_locate.png      5-panel per-photo figure  (see --figures)
-        <stem>_on_slide.png    that photo's predicted point on the slide
-
-The success/fail split is by the SIFT verdict, not by the confidence label, so
-the failure folder is browsable on its own -- which is the point, since there is
-no ground truth for these photos and the figures are the only way to see why a
-photo failed.
-
-Usage:
-    # one photo
     python utilities/cli/driver/locate_photo.py \\
-        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/1.bmp \\
-        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs
+        --stage1 knn:gigapath --stage2 slidewin:gigapath --stage3 sift:default
 
-    # every photo of one slide
-    python utilities/cli/driver/locate_photo.py \\
-        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67 \\
-        /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs \\
-        --out result/RealTest/S1104360_ki67
+    --slide-index N     only the Nth slide of ki67_with_photo (a Slurm array task)
+    --slides NAME ...   only these
+    --limit N           only the first N photos of each slide (a smoke run)
+
+SLIDES: every slide of ki67_with_photo -- all of them are real cases, there is
+no val / test split here. A slide's photos are the folder `entry.related
+['photos']` names.
+
+STAGES: each one is `<method>:<recipe>` from its package's table, and every
+recipe field is a `--stageN-<field>` flag, as in the bench. The stages are the
+pipeline's (utilities/LocaScopePipeline.py), so a method that honours its
+stage's interface runs here without a change.
+
+CACHE: a slide's photos are one `photos=<id>` level of the job's tree (the id
+hashes the folder's file names and sizes), under the slide, the mask recipe
+and its region prep:
+
+    <job>/slide=/seg=/region=/photos=<id>/
+        shots/                      index -> file name, bytes, width, height
+        stage1/                     stage1=<s1>/stage2/   stage2=<s2>/stage3/
+
+Each stage's tables for a slide are ONE entry, written when the slide is done,
+so a killed job redoes that slide (there is no resume inside one). A rerun
+reads the entries that hit and loads no model for them. The tables are the
+bench's, without the truth tables a real photo has no ground for:
+
+    stage 1   output  neighbours  probs  votes  prototypes_index
+    stage 2   output  tile_sims          (what the retriever offers is written)
+    stage 3   output  matches  answer
+
+`answer` is one row per photo: the verified candidate with the largest
+`confidence` -- its centre, level-0 and fractional. Where every confidence is
+0.0 that is the first candidate's own position, the retrieval's
+(stage3_localization/StageInterface.py). Confidence is printed and written as
+it is; it is not graded into labels, for the grades' thresholds are not
+calibrated (log/TODO.log, 2026-08-08).
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import os
 import re
 import sys
 import time
-import traceback
-from dataclasses import replace
 from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
-import openslide
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
-import _paths                                                       # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # utilities/
+import _paths                                                        # noqa: E402
 _paths.setup_import_paths()
-from _paths import encoder_tag, job_result_dir                      # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bench_modules'))
 
-from dump_function._sift_plot import (match_img, query_quad,        # noqa: E402
-                                      warp_query_into,
-                                      blend_in_footprint,
-                                      checker_in_footprint)
-from LocaScopePipeline import LocaScopePipeline                      # noqa: E402
-from CpuBudget import CpuBudget                                       # noqa: E402
-from stage1_estimation.KnnEstMpp import KNN_RECIPES, KnnEstMpp     # noqa: E402
-from stage2_retrieval.SlidingWinSimRot import (               # noqa: E402
-    SlidingWinSimRot, SLIDEWIN_RECIPES)
-from stage3_localization.SIFT_RANSAC import SIFT_RECIPES, SiftRansacLocalizer  # noqa: E402
-from TileEncoderFunc   import encoder_config, encoder_names                # noqa: E402
+import Cache                                                         # noqa: E402
+from AccessDatasets import list_names, locate                          # noqa: E402
+from ConfigIdentity import short_id                                    # noqa: E402
+from CpuBudget import CpuBudget                                        # noqa: E402
+from TissueMaskConfig import MaskMaker, add_mask_args                  # noqa: E402
+from stage2_retrieval.StageInterface import CandidateSet               # noqa: E402
+from stage3_localization.StageInterface import LocalizationResultSet   # noqa: E402
+from BenchCommon import (ROLES, RunClock, Shot, Stage, fmt_each, fmt_rate,  # noqa: E402
+                         fmt_time, parse_run_args, require_gpu_if_allocated, run_from_args, run_slide_stages, status,
+                         write_rows)
 
+DATASET: str = 'ki67_with_photo'
+PHOTO_SUFFIXES: Tuple[str, ...] = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
 
-PHOTO_EXTS = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
-
-
-# ── result schema ─────────────────────────────────────────────────────────────
-#
-# One row per photo. Column order is the reading order: what it is, then the
-# answer, then each stage's evidence for that answer, then run bookkeeping.
-#
-# The raw `inliers` / `matches` columns are kept even though
-# `confidence` summarises them, because the confidence thresholds below are a
-# guess -- with no ground truth they cannot be calibrated yet. Keeping the raw
-# numbers means reclassifying later is a pandas one-liner, not a 2296-photo
-# rerun.
-FIELDS = [
-    # identity
-    'slide', 'photo', 'photo_w', 'photo_h',
-    # the answer
-    'status', 'confidence', 'pred_source',
-    'pred_x0', 'pred_y0', 'pred_um_x', 'pred_um_y',
-    # stage 1 -- mpp estimation and level routing
-    'est_mpp', 'routed_level', 'level_mpp', 'ds', 'unusable_level',
-    # stage 2 -- coarse retrieval
-    'retr_x0', 'retr_y0', 'retr_cx0', 'retr_cy0',
-    'retr_score', 'retr_rot', 'retr_region', 'retr_from_overlap',
-    'score_rot0', 'score_rot90', 'score_rot180', 'score_rot270',
-    # stage 3 -- SIFT+RANSAC
-    'sift_x0', 'sift_y0', 'sift_cx0', 'sift_cy0',
-    'sift_success', 'inliers', 'matches', 'inlier_ratio',
-    # bookkeeping
-    't_total_s', 'retriever_built', 'reopens', 'error',
-]
+#: The tables of each stage's entry: the bench's, without `truth` and
+#: `truth_sim`, and stage 3's with the answer.
+ROLES_REAL: Dict[int, Tuple[str, ...]] = {
+    1: ROLES[1], 2: ('output', 'tile_sims'), 3: ('output', 'matches', 'answer')}
 
 
-def classify(sift_success: bool, inliers: int) -> str:
-    """Self-assessed quality, in the absence of any ground truth.
+# ── a slide's photos ─────────────────────────────────────────────────────────
 
-    Thresholds are provisional. They come from the observed split between a
-    correct match (hundreds of inliers) and a wrong one (single digits), not
-    from a calibration run -- see the note on FIELDS.
-    """
-    if not sift_success:
-        return 'failed'
-    if inliers >= 100:
-        return 'high'
-    if inliers >= 30:
-        return 'medium'
-    return 'low'
-
-
-def _natural_key(p: Path):
-    """Sort 2.bmp before 10.bmp, and keep prefixed names grouped."""
-    return [int(t) if t.isdigit() else t.lower()
-            for t in re.split(r'(\d+)', p.name)]
+def photo_files(folder: str) -> List[Tuple[int, Path]]:
+    """`(index, path)` of every image in `folder`, by index. The index is the
+    number the file name ends in (`S1103520_ki67_100.bmp` -> 100), so it does
+    not move when a photo is added; a folder whose names do not give one
+    distinct number each is numbered in name order instead."""
+    files: List[Path] = sorted(p for p in Path(folder).iterdir()
+                               if p.is_file() and p.suffix.lower() in PHOTO_SUFFIXES)
+    numbers: List[Optional[re.Match]] = [re.search(r'(\d+)$', p.stem) for p in files]
+    if files and all(numbers) and len({m.group(1) for m in numbers if m}) == len(files):
+        return sorted(((int(m.group(1)), p) for m, p in zip(numbers, files) if m),
+                      key=lambda item: item[0])
+    return list(enumerate(files))
 
 
-def collect_photos(target: Path, limit: int, stride: int) -> list[Path]:
-    """One file, or every image in a folder."""
-    if target.is_file():
-        return [target]
-    if not target.is_dir():
-        raise SystemExit(f'no such photo or folder: {target}')
-    photos = sorted(
-        (p for p in target.iterdir()
-         if p.is_file() and p.suffix.lower() in PHOTO_EXTS),
-        key=_natural_key,
-    )
-    if stride > 1:
-        photos = photos[::stride]
-    if limit > 0:
-        photos = photos[:limit]
-    return photos
+def photo_set_id(files: Sequence[Tuple[int, Path]]) -> str:
+    """One id for a folder of photos: each file as `name:bytes`, sorted by name,
+    hashed. A photo added, removed, renamed or resized is another set; the
+    folder moved to another path is the same."""
+    parts: List[str] = sorted(f'{p.name}:{p.stat().st_size}' for _, p in files)
+    return short_id(parts)
 
 
-# ── the per-photo row ─────────────────────────────────────────────────────────
-
-def build_row(slide_tag, photo_path, img, res, base_mpp, tile_size,
-              t_total, retriever_built, reopens, level_mpp):
-    """Flatten a LocaScopeQueryResult into one CSV row."""
-    row = {k: '' for k in FIELDS}
-    row.update(
-        slide=slide_tag, photo=photo_path.name,
-        photo_w=img.shape[1], photo_h=img.shape[0],
-        status='error' if res.error else 'ok',
-        error=res.error or '',
-        est_mpp=res.est_mpp, routed_level=res.routed_level,
-        level_mpp=level_mpp, unusable_level=int(bool(res.unusable_level)),
-        t_total_s=round(t_total, 2),
-        retriever_built=int(bool(retriever_built)),
-        reopens=reopens,
-        confidence='failed', pred_source='none',
-    )
-
-    pred_x0 = pred_y0 = None
-
-    cs = res.retrieval
-    if cs is not None:
-        # The best candidate's window: its read origin and centre at level-0,
-        # through the CandidateSet's own formulas (the window is the query's
-        # tile grid, transposed at 90/270 because the query was turned first).
-        best = cs.best
-        retr_x0, retr_y0 = cs.origin_l0(best)
-        retr_cx0, retr_cy0 = (int(round(v)) for v in cs.centre_l0(best, res.query_qc))
-
-        row.update(
-            ds=cs.ds,
-            retr_x0=retr_x0, retr_y0=retr_y0,
-            retr_cx0=retr_cx0, retr_cy0=retr_cy0,
-            retr_score=round(float(best.score), 6),
-            retr_rot=best.rotation,
-            retr_region=best.region_index,
-            retr_from_overlap=int(best.lattice == 'offset'),
-            score_rot0=round(float(sc.get(0, float('nan'))), 6),
-            score_rot90=round(float(sc.get(90, float('nan'))), 6),
-            score_rot180=round(float(sc.get(180, float('nan'))), 6),
-            score_rot270=round(float(sc.get(270, float('nan'))), 6),
-        )
-        pred_x0, pred_y0 = retr_cx0, retr_cy0
-        row['pred_source'] = 'retrieval'
-
-    s = res.refine
-    if s is not None:
-        row.update(
-            sift_x0=s.x0, sift_y0=s.y0,
-            sift_cx0=s.center_x0, sift_cy0=s.center_y0,
-            sift_success=int(bool(s.success)),
-            inliers=s.inlier_count, matches=s.match_count,
-            inlier_ratio=(round(s.inlier_count / s.match_count, 4)
-                          if s.match_count else 0.0),
-        )
-        row['confidence'] = classify(s.success, s.inlier_count)
-        if s.success:
-            # The CENTRE, not the top-left. The query is rotated about its own
-            # centre, so the centre is the only anchor that stays comparable
-            # across the 4 orientations -- a corner is a different corner of
-            # the same footprint once rotated.
-            pred_x0, pred_y0 = s.center_x0, s.center_y0
-            row['pred_source'] = 'sift'
-
-    if pred_x0 is not None:
-        row.update(
-            pred_x0=int(pred_x0), pred_y0=int(pred_y0),
-            pred_um_x=round(pred_x0 * base_mpp, 2),
-            pred_um_y=round(pred_y0 * base_mpp, 2),
-        )
-    return row
+def write_shots(addr: Cache.Address, files: Sequence[Tuple[int, Path]]) -> None:
+    """`shots/`: which file each index is, written once for the set."""
+    entry = addr.entry('shots')
+    rec: Dict[str, Any] = {'id': 'files', 'parts': [f'n={len(files)}'],
+                           'upstream': {}, 'versions': {}, 'env': {}}
+    if status(entry, 'files', rec, ('index',)) == 'hit':
+        return
+    rows: List[Dict[str, Any]] = []
+    index: int
+    path: Path
+    for index, path in files:
+        with Image.open(path) as im:
+            width: int
+            height: int
+            width, height = im.size
+        rows.append(dict(index=index, photo=path.name, bytes=path.stat().st_size,
+                         width=width, height=height))
+    with entry.writing('files', rec) as put:
+        write_rows(put('index', '.csv'), rows)
 
 
-# ── figures ───────────────────────────────────────────────────────────────────
-
-def save_shot_figure(img, res, stem, wsi_tag, out_dir) -> str | None:
-    """5 panels drawn in the WSI's frame: photo, footprint, blend, checker, matches.
-
-    Panels 2-4 warp the QUERY into the WSI crop rather than the crop into the
-    query, because the question this figure exists to answer is where the photo
-    is on the slide -- so the slide holds still and the photo moves into it, and
-    the footprint is read against its own surroundings. That direction also uses
-    H as estimated (query px -> crop px) instead of its inverse.
-
-    They are gated on `success`, not merely on `H is not None`, which is what
-    every other consumer of refine.H already does (`_sift_plot`, `bench_locascope`,
-    `test_sift_ransac`). A rejected H carries no located footprint to draw.
-    """
-    if res.refine is None or res.retrieval is None or res.localizer is None:
-        return None
-    loc = res.localizer
-    s = res.refine
-    crop = loc.wsi_crop
-
-    fig, axes = plt.subplots(1, 5, figsize=(30, 6.5))
-
-    axes[0].imshow(img)
-    axes[0].set_title(f'Photo\n{stem}  {img.shape[1]}x{img.shape[0]}')
-
-    if crop is not None and s.success and s.H is not None:
-        warped, cover = warp_query_into(img, crop.shape, s.H)
-        quad = query_quad(img.shape, s.H)
-        poly = np.vstack([quad, quad[0]])
-
-        axes[1].imshow(crop)
-        axes[1].plot(poly[:, 0], poly[:, 1], color='dodgerblue', lw=2.0)
-        # Lock the view to the crop. A bad H can put the quad far outside it,
-        # and matplotlib would autoscale to include it, squashing the image.
-        axes[1].set_xlim(0, crop.shape[1])
-        axes[1].set_ylim(crop.shape[0], 0)
-        axes[1].set_title('Photo footprint in the WSI crop\n'
-                          f'centre @level-0 = ({s.center_x0:.1f}, {s.center_y0:.1f})')
-
-        axes[2].imshow(blend_in_footprint(crop, warped, cover))
-        axes[2].set_title('Blend 50/50 inside the footprint\n'
-                          '(ghosting = misalignment)')
-
-        axes[3].imshow(checker_in_footprint(crop, warped, cover))
-        axes[3].set_title('Checkerboard inside the footprint\n'
-                          '(discontinuities = misalignment)')
-    elif crop is not None:
-        # Still worth drawing: this is where retrieval sent us. With panel 1 and
-        # the matches in panel 5 it separates "retrieval went to the wrong place"
-        # from "right place, SIFT could not hold on".
-        axes[1].imshow(crop)
-        axes[1].set_title('WSI crop retrieval chose\n(no located footprint)')
-        axes[2].set_title(f'not localised  ({s.inlier_count} inliers)')
-        axes[3].set_title('')
-    else:
-        for i, t in ((1, 'no WSI crop'), (2, ''), (3, '')):
-            axes[i].set_title(t)
-
-    if crop is not None and loc.good_matches:
-        axes[4].imshow(match_img(img, loc.query_kps, crop,
-                                 loc.crop_kps, loc.good_matches))
-        axes[4].set_title(f'SIFT matches\n{s.match_count} good  '
-                          f'{s.inlier_count} inliers')
-
-    for ax in axes:
-        ax.axis('off')
-
-    fig.suptitle(
-        f'{stem}  ->  {wsi_tag}    '
-        f'est_mpp={res.est_mpp:.4f} (L{res.routed_level})   '
-        f'retr score={res.retrieval.best.score:.4f} '
-        f'rot={res.retrieval.best.rotation}deg   '
-        f'SIFT {s.inlier_count}/{s.match_count} inliers   '
-        f'predicted centre @ level-0 = ({s.center_x0:.1f}, {s.center_y0:.1f})',
-        fontsize=12,
-    )
-    fig.tight_layout()
-    path = os.path.join(out_dir, f'{stem}_locate.png')
-    fig.savefig(path, dpi=130, bbox_inches='tight')
-    plt.close(fig)
-    return path
+def answer_row(rs: LocalizationResultSet) -> Dict[str, Any]:
+    """The photo's answer: the verified candidate with the largest confidence,
+    its centre. `retrieval_only` is 1 where no candidate was localized (every
+    confidence 0.0) and the position is the retrieval's."""
+    if not len(rs):
+        return dict(error='no candidate verified')
+    best = rs.best
+    return dict(rank=best.rank + 1, confidence=best.confidence,
+                x0=best.center_x0, y0=best.center_y0, level=best.level,
+                ds=best.ds, retrieval_only=int(best.confidence == 0.0))
 
 
-def save_on_slide_figure(pl, backdrop, res, stem, wsi_tag, out_dir) -> str | None:
-    """One photo's predicted point on the slide."""
-    if res.refine is None:
-        return None
-    s = res.refine
-    Ht, Wt = pl.mask.main_mask.shape
-    fig, ax = plt.subplots(figsize=(7, 7 * Ht / max(Wt, 1)))
-    ax.imshow(backdrop)
-    for r in pl.mask.tissue_regions:
-        mx, my, mw, mh = pl.mask.region_box(r)
-        ax.add_patch(mpatches.Rectangle((mx, my), mw, mh, fill=False,
-                                        edgecolor='red', lw=0.6, alpha=0.5))
-    cx, cy = pl.mask.to_mask_xy(s.center_x0, s.center_y0)
-    ax.plot(cx, cy, '*', color='lime', ms=20, mec='black', mew=1.0)
-    ax.set_title(f'{wsi_tag}\npredicted location of {stem}')
-    ax.axis('off')
-    fig.tight_layout()
-    path = os.path.join(out_dir, f'{stem}_on_slide.png')
-    fig.savefig(path, dpi=130, bbox_inches='tight')
-    plt.close(fig)
-    return path
+# ── one slide ────────────────────────────────────────────────────────────────
 
+def run_slide(name: str, args: argparse.Namespace,
+              stages: Tuple[Stage, Stage, Stage], masks: MaskMaker,
+              mask_cfg: Any, own: str, run_clock: RunClock) -> None:
+    entry = locate(name, dataset=DATASET)
+    folder: Optional[str] = entry.related.get('photos')
+    if not folder or not Path(folder).is_dir():
+        print(f'== {name}: no photos folder -- skipped', flush=True)
+        return
+    every: List[Tuple[int, Path]] = photo_files(folder)
+    files: List[Tuple[int, Path]] = every[:args.limit] if args.limit else every
+    path: str = str(entry.path)
+    base: Cache.Address = Cache.Address(
+        own, slide=Cache.wsi_stem_of(path), seg=mask_cfg.seg_id(),
+        region=mask_cfg.region_id(), photos=photo_set_id(every))
+    print(f'== {name}   {len(files)} of {len(every)} photos   {folder}', flush=True)
 
-def save_overview(pl, backdrop, rows, wsi_tag, out_dir) -> str:
-    """Every prediction on one slide -- the 'did this slide work at all' view.
+    def photos() -> Iterator[Shot]:
+        index: int
+        photo: Path
+        for index, photo in files:
+            yield Shot(index=index, img=np.array(Image.open(photo).convert('RGB')),
+                       label=photo.name)
 
-    Points are coloured by inlier count, so a slide that localised well shows a
-    scatter of bright points sitting on tissue, and a slide that did not shows
-    dark points piled on whatever the retriever's favourite region was.
-    """
-    Ht, Wt = pl.mask.main_mask.shape
-    fig, ax = plt.subplots(figsize=(9, 9 * Ht / max(Wt, 1)))
-    ax.imshow(backdrop)
-    for r in pl.mask.tissue_regions:
-        mx, my, mw, mh = pl.mask.region_box(r)
-        ax.add_patch(mpatches.Rectangle((mx, my), mw, mh, fill=False,
-                                        edgecolor='red', lw=0.6, alpha=0.4))
-
-    good_x, good_y, good_c = [], [], []
-    bad_x, bad_y = [], []
-    for row in rows:
-        if row['pred_x0'] == '' or row['pred_x0'] is None:
-            continue
-        mx, my = pl.mask.to_mask_xy(int(row['pred_x0']), int(row['pred_y0']))
-        if row['pred_source'] == 'sift':
-            good_x.append(mx)
-            good_y.append(my)
-            good_c.append(int(row['inliers'] or 0))
+    def add_answer(shot: Shot, route: str, cs: Optional[CandidateSet],
+                   rs: Optional[LocalizationResultSet], tables: Any) -> None:
+        """The photo's `answer` row beside stage 3's tables."""
+        if cs is None or not len(cs):
+            tables.add('answer', shot.index, [dict(error='no candidates')])
         else:
-            bad_x.append(mx)
-            bad_y.append(my)
+            tables.add('answer', shot.index,
+                       [answer_row(rs)] if rs is not None
+                       else [dict(error='stage 3 failed')])
 
-    if bad_x:
-        ax.scatter(bad_x, bad_y, marker='x', c='crimson', s=28, linewidths=1.0,
-                   label=f'SIFT failed, retrieval only ({len(bad_x)})')
-    if good_x:
-        sc = ax.scatter(good_x, good_y, c=good_c, cmap='viridis', s=26,
-                        edgecolors='black', linewidths=0.3,
-                        label=f'SIFT located ({len(good_x)})')
-        fig.colorbar(sc, ax=ax, fraction=0.035, pad=0.02, label='inliers')
+    def describe(shot: Shot, route: str, cs: CandidateSet,
+                 rs: Optional[LocalizationResultSet]) -> str:
+        if rs is None or not len(rs):
+            return ''
+        best = rs.best
+        return (f'  conf={best.confidence:.3f}'
+                f'  at=({best.center_x0:.0f}, {best.center_y0:.0f})')
 
-    n = len(rows)
-    n_ok = len(good_x)
-    ax.set_title(f'{wsi_tag}\n{n_ok}/{n} photos localised by SIFT')
-    ax.legend(loc='lower right', fontsize=8, framealpha=0.85)
-    ax.axis('off')
-    fig.tight_layout()
-    path = os.path.join(out_dir, '_overview.png')
-    fig.savefig(path, dpi=130, bbox_inches='tight')
-    plt.close(fig)
-    return path
+    started: float = time.perf_counter()
+    ran: bool = run_slide_stages(
+        path, photos(), stages, ['stage1'], masks, base, ROLES_REAL, own,
+        limit=args.limit, truth=False, before=lambda: write_shots(base, every),
+        after_stage3=add_answer, describe=describe, run_clock=run_clock)
+    if ran:
+        took: float = time.perf_counter() - started
+        print(f'  whole slide, models loaded and cache written too: {len(files)} photo '
+              f'in {fmt_time(took)} = {fmt_rate(len(files), took, "photo")} = '
+              f'{fmt_each(len(files), took, "photo")}', flush=True)
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ── main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('photo', help='A photo file, or a folder of photos')
-    ap.add_argument('wsi',   help='The WSI the photos were taken from')
-    ap.add_argument('--out',        default='',
-                    help='output directory, used verbatim. Empty means '
-                         'result/<SLURM_JOB_NAME or LocatePhoto>/<encoder>/, '
-                         'via _paths.job_result_dir -- results live outside '
-                         'the checkout. The encoder level is added only to '
-                         'that derived path; give --out and you get exactly '
-                         'what you named, so put the encoder in it yourself.')
-    ap.add_argument('--csv',        default='predictions.csv')
-    ap.add_argument('--encoder', default='gigapath', choices=encoder_names())
-    ap.add_argument(
-    '--head', default='',
-    help="which exit of the model, empty for its own default. Only CONCH "
-         "has two: the attentional pooler it ships with, 512-d, which is "
-         "the default; and 'trunk', the bare ViT at 768-d, the same shape "
-         "GigaPath and UNI2 have. BOTH run here -- this pipeline wants one "
-         "vector per tile and either exit is that -- so the choice is "
-         "between two embeddings, not a prerequisite. The head is part of "
-         "identity_id, so the two never compare equal.")
-    ap.add_argument('--precision',  choices=['fp16', 'fp32'], default='fp16')
-    ap.add_argument('--batch-size', type=int, default=1024)
-    ap.add_argument('--device',     default='auto')
-    ap.add_argument('--limit',  type=int, default=0,
-                    help='max photos from a folder (0 = all)')
-    ap.add_argument('--stride', type=int, default=1,
-                    help='take every Nth photo')
-    ap.add_argument('--figures', choices=['none', 'fail', 'sample', 'all'],
-                    default='sample',
-                    help='sample = first --figure-limit photos plus every '
-                         'failure; all = one pair of figures per photo. '
-                         'Figures land in <out>/success/ or <out>/fail/ by the '
-                         'SIFT verdict. Budget ~2.3 MB per photo -- "all" over '
-                         'the whole Ki67 set is roughly 5 GB')
-    ap.add_argument('--figure-limit', type=int, default=5)
-    ap.add_argument('--no-resume', action='store_true',
-                    help='rewrite the CSV instead of skipping photos already in it')
-    args = ap.parse_args()
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False)
+    ap.add_argument('--stage1', default='knn:gigapath', help='<method>:<recipe>')
+    ap.add_argument('--stage2', default='slidewin:gigapath', help='<method>:<recipe>')
+    ap.add_argument('--stage3', default='sift:default', help='<method>:<recipe>')
+    ap.set_defaults(route='stage1')     # a real photo has no placed level: no oracle
+    add_mask_args(ap)
+    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+                    help="whose mask cache the --seg mask is read from and "
+                         'written to')
+    ap.add_argument('--slides', nargs='*', default=[],
+                    help=f'slide names; default every slide of {DATASET}')
+    ap.add_argument('--slide-index', type=int, default=None,
+                    help='only the Nth slide of the list (a Slurm array task)')
+    ap.add_argument('--limit', type=int, default=0,
+                    help='only the first N photos of each slide (a smoke run); '
+                         'recorded in the entries, so a full run does not hit them')
+    ap.add_argument('--batch-size', type=int, default=None,
+                    help="stage 2 encoder's batch (not identity)")
+    ap.add_argument('--multi-gpu', action='store_true')
+    ap.add_argument('--device', default='auto')
+    args: argparse.Namespace = parse_run_args(ap)
 
-    # job_result_dir honours SLURM_JOB_NAME, so a job's output lands under
-    # result/<job>/ without the jobscript spelling the path twice.
-    #
-    # The makedirs is NOT redundant with the one inside job_result_dir: `or`
-    # short-circuits, so an explicit --out never reaches it and nothing would
-    # create that directory. That cost a run -- --out pointed at a fresh
-    # result/RealTest/<tag>/ and the FileNotFoundError landed on the first CSV
-    # write, after GigaPath had loaded and the mask + MPP bank were built.
-    # The encoder names a level of its own, because a run with a different one
-    # writes different predictions into the same predictions.csv.
-    #
-    # Only on the derived path. An explicit --out is used verbatim: the caller
-    # named a directory, and realtest.sh:56 already composes the tag itself --
-    # appending a second one would give RealTest/<slide>/<tag>/ where the
-    # convention wants RealTest/<tag>/<slide>/.
-    enc_tag = encoder_tag(args.encoder, args.head)
-    args.out = args.out or job_result_dir('LocatePhoto', encoder=enc_tag)
-    os.makedirs(args.out, exist_ok=True)
-    csv_path = os.path.join(args.out, args.csv)
-    wsi_tag = os.path.splitext(os.path.basename(args.wsi))[0]
+    names: List[str] = list(args.slides) or list_names(dataset=DATASET)
+    if args.slide_index is not None:
+        if not 0 <= args.slide_index < len(names):
+            print(f'[skip] --slide-index {args.slide_index} but {len(names)} slides')
+            return 0
+        names = [names[args.slide_index]]
 
-    photos = collect_photos(Path(args.photo), args.limit, args.stride)
-    if not photos:
-        print(f'[skip] no images under {args.photo}')
-        return 0
-
-    # Resume: a full folder is hours of GPU time, and a requeue should not
-    # start over. Rows already written are trusted and skipped.
-    done: set[str] = set()
-    if not args.no_resume and os.path.exists(csv_path):
-        with open(csv_path, newline='') as f:
-            done = {r['photo'] for r in csv.DictReader(f) if r.get('photo')}
-    todo = [p for p in photos if p.name not in done]
-
-    print(f'wsi    : {args.wsi}')
-    print(f'photos : {len(photos)} found, {len(done)} already done, '
-          f'{len(todo)} to run')
-    print(f'out    : {args.out}')
-    if not todo:
-        print('nothing to do')
-        return 0
-
-    import torch
-    device = (torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-              if args.device == 'auto' else torch.device(args.device))
-    dtype = (torch.float16
-             if args.precision == 'fp16' and device.type == 'cuda'
-             else torch.float32)
-    print(f'device : {device}  precision={str(dtype).replace("torch.", "")}')
-
-    print(f'\nLoading {enc_tag} ...', flush=True)
-    # From the resolved dtype, not args.precision: the rule above already
-    # demoted fp16 to fp32 on CPU.
-    over = {'head': args.head} if args.head else {}
-    cfg = encoder_config(args.encoder, batch_size=args.batch_size, **over)\
-        .with_model(dtype='fp16' if dtype is torch.float16 else 'fp32')
-    from TissueMaskConfig import MASK_RECIPES, MaskMaker
-    mask_cfg = MASK_RECIPES['hest']
-    # one slide, one run: no mask cache, so the mask is segmented here
-    masks = MaskMaker(mask_cfg, device=device)
-
-    # Built ONCE for the whole folder -- see the module docstring.
-    print('Building pipeline (mask + mpp reference bank) ...', flush=True)
-    t0 = time.perf_counter()
-    # Each stage from its own config; stage 1 and stage 2 build their own
-    # encoders (stage 1 from the registry name, stage 2 from `cfg` above).
-    recipe = KNN_RECIPES[args.encoder]
-    estimator = KnnEstMpp(replace(
-        recipe, mask_cfg=mask_cfg,
-        sampler_cfg=replace(recipe.sampler_cfg, n_per_rung=100)), device=device)
+    import torch                                                     # noqa: PLC0415
+    device: torch.device = torch.device(
+        ('cuda' if torch.cuda.is_available() else 'cpu')
+        if args.device == 'auto' else args.device)
+    require_gpu_if_allocated(device, args.device)
     budget = CpuBudget.for_job(processes=1).apply()
-    print(f'  {budget.line()}', flush=True)
-    retriever = SlidingWinSimRot(
-        replace(SLIDEWIN_RECIPES['gigapath'], encoder=cfg), device,
+    print(f'device     : {device}   {budget.line()}', flush=True)
+
+    stages, routes, mask_cfg = run_from_args(
+        args, device, batch_size=args.batch_size, multi_gpu=args.multi_gpu,
         read_workers=budget.workers)
-    localizer = SiftRansacLocalizer(SIFT_RECIPES['default'])
-    pl = LocaScopePipeline(args.wsi, estimator, retriever, localizer, masks).build()
-    masks.close()                       # the segmenter is not needed again
-    print(f'  base_mpp={pl.base_mpp:.4f}  levels={pl.wsi.level_count}  '
-          f'mask_regions={len(pl.mask.tissue_regions)}  '
-          f'({time.perf_counter() - t0:.1f}s)', flush=True)
+    for s in stages:
+        print(f'stage {s.n}    : {s.id}', flush=True)
+    own: str = Cache.job_name('LocatePhoto')
+    masks: MaskMaker = MaskMaker(mask_cfg, args.mask_cache_job, device)
+    print(f'slides     : {len(names)} of {DATASET}   mask {args.seg} '
+          f'{mask_cfg.seg_id()}/{mask_cfg.region_id()}   cache job {own}', flush=True)
 
-    # One backdrop read for every figure of this slide.
-    backdrop = pl.mask.read_matching_rgb(pl.wsi)
-
-    # Existence is not the same question as "has a header". writeheader() only
-    # buffers, and the first flush happens after photo 1 -- which can take
-    # minutes because it builds that level's retriever. A run killed inside that
-    # window leaves a file that exists and is empty; the next run then appended
-    # headerless rows, and csv.DictReader read data row 1 as the field names.
-    # Test the size, and flush the header immediately so the window closes.
-    write_header = (args.no_resume
-                    or not os.path.exists(csv_path)
-                    or os.path.getsize(csv_path) == 0)
-    mode = 'w' if args.no_resume else 'a'
-    fh = open(csv_path, mode, newline='')
-    writer = csv.DictWriter(fh, fieldnames=FIELDS, extrasaction='ignore')
-    if write_header:
-        writer.writeheader()
-        fh.flush()
-
-    rows: list[dict] = []
-    seen_levels: set[int] = set()
-    prev_reopens = getattr(pl.wsi, 'reopens', 0)
-    t_start = time.perf_counter()
-
-    for i, photo_path in enumerate(todo, 1):
-        stem = photo_path.stem
-        try:
-            img = np.array(Image.open(photo_path).convert('RGB'))
-        except Exception as e:
-            print(f'[{i}/{len(todo)}] {photo_path.name}: unreadable: {e}',
-                  flush=True)
-            continue
-
-        t_shot = time.perf_counter()
-        try:
-            # keep_objects is always on: the heavy object it retains is the
-            # retriever, which is the pipeline's own cached one, and the rest is
-            # a few MB that goes away when `res` is dropped at the end of the
-            # loop. Deciding it up front would mean knowing whether this photo
-            # is going to fail, which is exactly what --figures fail needs.
-            res = pl.run(img, keep_objects=True)
-        except Exception as e:
-            # One unlucky photo must not take the other 477 with it.
-            traceback.print_exc()
-            row = {k: '' for k in FIELDS}
-            row.update(slide=wsi_tag, photo=photo_path.name,
-                       photo_w=img.shape[1], photo_h=img.shape[0],
-                       status='crash', confidence='failed', pred_source='none',
-                       error=f'{type(e).__name__}: {e}',
-                       t_total_s=round(time.perf_counter() - t_shot, 2))
-            writer.writerow(row)
-            fh.flush()
-            rows.append(row)
-            continue
-        t_total = time.perf_counter() - t_shot
-
-        built = res.routed_level is not None and res.routed_level not in seen_levels
-        if res.routed_level is not None:
-            seen_levels.add(res.routed_level)
-        level_mpp = ('' if res.routed_level is None else
-                     round(pl.base_mpp * pl.wsi.level_downsamples[res.routed_level], 4))
-        reopens = getattr(pl.wsi, 'reopens', 0)
-        d_reopens, prev_reopens = reopens - prev_reopens, reopens
-
-        row = build_row(wsi_tag, photo_path, img, res, pl.base_mpp, pl.tile_size,
-                        t_total, built, d_reopens, level_mpp)
-        writer.writerow(row)
-        fh.flush()          # a killed job keeps every row it finished
-        rows.append(row)
-
-        print(f'[{i}/{len(todo)}] {photo_path.name:24s} '
-              f'L{row["routed_level"]} '
-              f'conf={row["confidence"]:7s} '
-              f'inliers={row["inliers"] or "-":>5} '
-              f'pred=({row["pred_x0"] or "-"}, {row["pred_y0"] or "-"}) '
-              f'{t_total:.1f}s'
-              + (f'  ERR {row["error"]}' if row['status'] != 'ok' else ''),
-              flush=True)
-
-        failed = row['status'] != 'ok' or not row['sift_success']
-        want = (args.figures == 'all'
-                or (args.figures == 'fail' and failed)
-                or (args.figures == 'sample'
-                    and (i <= args.figure_limit or failed)))
-        if want:
-            # Split by the SIFT verdict rather than by the confidence label. The
-            # inlier count is near-binary on this corpus -- a correct match runs
-            # to hundreds, a wrong one to single digits -- so these two folders
-            # really are "located" and "did not", and the failure folder can be
-            # flipped through on its own looking for what the failures share.
-            fig_dir = os.path.join(args.out, 'fail' if failed else 'success')
-            os.makedirs(fig_dir, exist_ok=True)
-            save_shot_figure(img, res, stem, wsi_tag, fig_dir)
-            save_on_slide_figure(pl, backdrop, res, stem, wsi_tag, fig_dir)
-
-        del res
-
-    fh.close()
-
-    # The overview wants every row for this slide, including ones a previous
-    # run wrote, so read the CSV back rather than using only this run's rows.
-    with open(csv_path, newline='') as f:
-        all_rows = list(csv.DictReader(f))
-    if all_rows:
-        print(f'\nSaved -> {save_overview(pl, backdrop, all_rows, wsi_tag, args.out)}')
-
-    # ── summary ──────────────────────────────────────────────────────────────
-    elapsed = time.perf_counter() - t_start
-    tally = {}
-    for r in all_rows:
-        tally[r['confidence']] = tally.get(r['confidence'], 0) + 1
-    print(f'\n--- {wsi_tag} ---')
-    print(f'photos     : {len(all_rows)}')
-    for k in ('high', 'medium', 'low', 'failed'):
-        if k in tally:
-            print(f'  {k:8s} : {tally[k]:4d}  ({100 * tally[k] / len(all_rows):.1f}%)')
-    print(f'time       : {elapsed / 60:.1f} min for {len(todo)} photos '
-          f'({elapsed / max(len(todo), 1):.1f} s/photo)')
-    if getattr(pl.wsi, 'holes', None):
-        print(f'slide holes: {pl.wsi.hole_summary()}')
-    print(f'csv        : {csv_path}')
+    t_start: float = time.time()
+    run_clock: RunClock = RunClock()
+    name: str
+    for name in names:
+        run_slide(name, args, stages, masks, mask_cfg, own, run_clock)
+    if run_clock.slides:
+        print('\n' + run_clock.report(['stage1']), flush=True)
+    print(f'\nTotal wall time: {fmt_time(time.time() - t_start)}', flush=True)
     return 0
 
 

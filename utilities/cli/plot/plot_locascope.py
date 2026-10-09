@@ -5,7 +5,7 @@ everything is read from the cache it wrote, nothing runs a stage.
     python utilities/cli/plot/plot_locascope.py <bench_locascope's run flags> \\
         [--stage-cache-job BenchLocaScope] \\
         [--select "level == 0 and s2_hit_rank > 1"] [--sample 20 --seed 0] \\
-        [--panels photo,gt,candidates,crop,matches,result] \\
+        [--panels photo,gt,candidates,crop,matches,located,result] \\
         [--plot recall cdf:s3_rank1_err_um confusion scatter:s1_mpp_err_rel,s3_rank1_err_um] \\
         [--by level] [--export demo] [--columns]
 
@@ -36,11 +36,28 @@ computed from them:
 `--select` is a pandas query on it, `--columns` lists the columns. The table
 is written whole (`joined.csv`) and as selected (`selected.csv`).
 
+REAL PHOTOS (--real): the cache of a locate_photo run (job RealTest) instead of
+a bench's. A real photo has no truth, so everything that needs one is left out:
+the `gt` panel, the truth footprint and "GT = #n" on the others, `windows`'s
+truth window, the statistics (--plot) and the demo export. What is shown is
+stage 1's neighbours, stage 2's candidates, stage 3's matches and location, and
+the ANSWER (the verified candidate with the largest confidence) marked on
+`result`. `crop`, `matches` and `located` show the answer's rank unless --rank
+names one. The joined table's columns are s1_*, s2_*, s3_* and answer_*, so
+--select reads e.g. "answer_confidence < 0.2" or "answer_retrieval_only == 1".
+
+    python utilities/cli/plot/plot_locascope.py --real --stage-cache-job RealTest \\
+        --stage3-topk 100 --sample 20 --panels photo,candidates,matches,located,result
+
 PANELS, one row of them per selected FoV: photo, gt (the truth's footprint),
 candidates (the first --k-boxes windows and the truth), result (stage 3's
 centres) -- these three on one overview read from the slide around the truth
 and the boxes -- stage1 (the KNN neighbours' levels), crop (stage 3's crop at
---rank), matches (its point pairs; inliers green).
+--rank), matches (its point pairs; inliers green, outliers red), located (a
+column of three: the query, the place stage 3 found for it -- the crop around
+its footprint, outlined -- and a checkerboard of that crop against the query
+warped onto it by the homography; where the two agree the board is seamless).
+Every coloured mark has a legend.
 
 `windows` is a figure of its own, the demo page's comparison: the truth
 window and the first --k-windows candidates, each read from the slide at the
@@ -62,10 +79,12 @@ import shutil
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # utilities/
 import _paths                                                       # noqa: E402
@@ -75,15 +94,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bench_modules'))
 import matplotlib                                                   # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                     # noqa: E402
-from matplotlib.patches import Polygon, Rectangle                   # noqa: E402
+from matplotlib.lines import Line2D                                 # noqa: E402
+from matplotlib.patches import Patch, Polygon, Rectangle            # noqa: E402
 
+import Cache                                                        # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
-from bench_locascope import (ORACLE, matching_rotation, add_run_args, parse_run_args,  # noqa: E402
+from AccessDatasets import list_names, locate                       # noqa: E402
+from BenchCommon import (ORACLE, matching_rotation, add_run_args, parse_run_args,  # noqa: E402
                              run_from_args, slide_supplies, stage_entries)
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                # noqa: E402
 
-PANELS = ('photo', 'gt', 'candidates', 'stage1', 'crop', 'matches', 'result', 'windows')
+PANELS = ('photo', 'gt', 'candidates', 'stage1', 'crop', 'matches', 'located', 'result',
+          'windows')
 
 
 # ── the join table ───────────────────────────────────────────────────────────
@@ -96,7 +119,33 @@ def _read(entry, role: str, sid: str) -> Optional[pd.DataFrame]:
     return df if len(df.columns) else None
 
 
-class SlideRun:
+_ROLES_READ: Tuple[str, ...] = ('output', 'neighbours', 'tile_sims', 'truth', 'truth_sim',
+                                'matches', 'answer')
+
+
+class _Slide:
+    """What a slide's runs share: the slide, opened when first read, and its
+    thumbnail."""
+    path: str
+    real: bool = False
+    _wsi: Optional[SafeSlide] = None
+    _thumb: Optional[Tuple[np.ndarray, float]] = None
+
+    @property
+    def wsi(self) -> SafeSlide:
+        if self._wsi is None:
+            self._wsi = SafeSlide(self.path)
+        return self._wsi
+
+    def thumb(self, side: int = 1600):
+        if self._thumb is None:
+            img = self.wsi.get_thumbnail((side, side))
+            self._thumb = (np.asarray(img.convert('RGB')),
+                           img.size[0] / self.wsi.dimensions[0])
+        return self._thumb
+
+
+class SlideRun(_Slide):
     """One slide's render rows and stage tables for every route."""
 
     def __init__(self, dataset, name, path, supply, stages, routes, mask_cfg,
@@ -113,20 +162,12 @@ class SlideRun:
                     print(f'  {name} {route} stage {n}: {state} '
                           f'{"; ".join(diff)}', flush=True)
                     continue
-                got[n] = {role: _read(entry, role, sid) for role in (
-                    'output', 'neighbours', 'tile_sims', 'truth', 'truth_sim',
-                    'matches')}
+                got[n] = {role: _read(entry, role, sid) for role in _ROLES_READ}
             self.tables[route] = got
         self.rid = supply.microscope.cfg.identity_id()
         self.metas = [s.meta for s in supply.sampler]
         self._wsi = None
         self._thumb = None
-
-    @property
-    def wsi(self) -> SafeSlide:
-        if self._wsi is None:
-            self._wsi = SafeSlide(self.path)
-        return self._wsi
 
     def render_rows(self, indices) -> pd.DataFrame:
         """The render row of each index: the render CSV when the run wrote one
@@ -149,12 +190,117 @@ class SlideRun:
             return np.asarray(Image.open(p).convert('RGB'))
         return self.supply.photo(self.metas[index])[0]
 
-    def thumb(self, side: int = 1600):
-        if self._thumb is None:
-            img = self.wsi.get_thumbnail((side, side))
-            self._thumb = (np.asarray(img.convert('RGB')),
-                           img.size[0] / self.wsi.dimensions[0])
-        return self._thumb
+
+#: The dataset a real run (locate_photo) locates the photos of.
+DATASET_REAL: str = 'ki67_with_photo'
+
+
+class RealRun(_Slide):
+    """One slide's real photos: the stage tables a locate_photo run wrote under
+    `photos=<id>`, and the photo files `shots` names. No truth, no render."""
+    real: bool = True
+
+    def __init__(self, name: str, entry: Any, addr: Cache.Address, stages, mask_cfg,
+                 limit: int) -> None:
+        self.dataset: str = DATASET_REAL
+        self.name: str = name
+        self.path: str = str(entry.path)
+        self.folder: str = entry.related['photos']
+        shots: Optional[pd.DataFrame] = _read(addr.entry('shots'), 'index', 'files')
+        self.shots: pd.DataFrame = shots if shots is not None else pd.DataFrame(
+            columns=['index', 'photo', 'bytes', 'width', 'height'])
+        got: Dict[int, Dict[str, Optional[pd.DataFrame]]] = {}
+        for n, (stage_entry, sid, rec) in stage_entries(
+                addr, stages, 'stage1', mask_cfg, limit, truth=False).items():
+            state, diff = stage_entry.status(sid, rec)
+            if state != 'hit':
+                print(f'  {name} stage {n}: {state} {"; ".join(diff)}', flush=True)
+                continue
+            got[n] = {role: _read(stage_entry, role, sid) for role in _ROLES_READ}
+        self.tables: Dict[str, Dict[int, Dict[str, Optional[pd.DataFrame]]]] = {'stage1': got}
+
+    def photo(self, index: int) -> np.ndarray:
+        name: str = str(self.shots[self.shots['index'] == index].iloc[0]['photo'])
+        return np.asarray(Image.open(Path(self.folder) / name).convert('RGB'))
+
+
+def real_runs(args, stages, mask_cfg, job: str) -> List[RealRun]:
+    """The slides of `DATASET_REAL` (or `--slides`) that have a locate_photo run
+    in `job`'s cache. The photo set is whichever `photos=` the slide's region
+    holds -- the newest, when a folder has changed and left two."""
+    runs: List[RealRun] = []
+    for name in list(args.slides) or list_names(dataset=DATASET_REAL):
+        entry = locate(name, dataset=DATASET_REAL)
+        if not entry.related.get('photos'):
+            continue
+        base: Cache.Address = Cache.Address(
+            job, slide=Cache.wsi_stem_of(str(entry.path)), seg=mask_cfg.seg_id(),
+            region=mask_cfg.region_id())
+        ids: List[str] = base.children('photos')
+        if not ids:
+            print(f'  {name}: nothing in {job}\'s cache', flush=True)
+            continue
+        if len(ids) > 1:
+            print(f'  {name}: {len(ids)} photo sets, using {ids[-1]}', flush=True)
+        run: RealRun = RealRun(name, entry, base.at(photos=ids[-1]), stages, mask_cfg,
+                               args.limit)
+        if len(run.shots) and 3 in run.tables['stage1']:
+            runs.append(run)
+        else:
+            print(f'  {name}: no finished run (shots or stage 3 missing)', flush=True)
+    return runs
+
+
+def join_real(runs: List[RealRun]) -> pd.DataFrame:
+    """One row per photo: `s1_*` (stage 1's estimate), `s2_*` (stage 2's first
+    candidate), `s3_*` (how many candidates stage 3 verified, how many fitted)
+    and `answer_*` (the answer row of stage 3's entry). No truth columns."""
+    out: List[Dict[str, Any]] = []
+    for run in runs:
+        got: Dict[int, Dict[str, Optional[pd.DataFrame]]] = run.tables['stage1']
+        per: Dict[int, Dict[str, Optional[Dict[int, pd.DataFrame]]]] = {
+            n: {role: (None if df is None else {int(i): g for i, g in df.groupby('index')})
+                for role, df in t.items()} for n, t in got.items()}
+        for _, shot in run.shots.iterrows():
+            i: int = int(shot['index'])
+            row: Dict[str, Any] = dict(dataset=run.dataset, slide=run.name, route='stage1',
+                                       index=i, photo=shot['photo'], width=shot['width'],
+                                       height=shot['height'])
+            if 1 in per and per[1]['output'] and i in per[1]['output']:
+                row.update({f's1_{k}': v for k, v in per[1]['output'][i].iloc[0].items()
+                            if k != 'index'})
+            if 2 in per and per[2]['output'] and i in per[2]['output']:
+                cands: pd.DataFrame = per[2]['output'][i]
+                if 'rank' in cands:
+                    cands = cands.sort_values('rank', na_position='last')
+                first = cands.iloc[0]
+                row.update({f's2_{k}': v for k, v in first.items() if k != 'index'})
+                row['s2_routed_level'] = first.get('level')
+            if 3 in per and per[3]['output'] and i in per[3]['output']:
+                ranks: pd.DataFrame = _ranked(per[3]['output'][i])
+                row['s3_verified'] = len(ranks)
+                row['s3_fitted'] = (int(ranks['success'].isin([True, 'True']).sum())
+                                    if 'success' in ranks else 0)
+            if 3 in per and per[3]['answer'] and i in per[3]['answer']:
+                row.update({f'answer_{k}': v for k, v in per[3]['answer'][i].iloc[0].items()
+                            if k != 'index'})
+            out.append(row)
+    return pd.DataFrame(out)
+
+
+def real_summary(df: pd.DataFrame) -> str:
+    """Per slide: how many photos, the confidence's median and how many reach
+    0.5, and how many have none (the position is the retrieval's)."""
+    lines: List[str] = []
+    for slide, g in df.groupby('slide'):
+        if 'answer_confidence' not in g:
+            lines.append(f'{slide:<26} n={len(g):<5} no answers')
+            continue
+        conf: pd.Series = pd.to_numeric(g['answer_confidence'], errors='coerce')
+        lines.append(f'{slide:<26} n={len(g):<5} conf median {conf.median():.2f}'
+                     f'  >= 0.5 {(conf >= 0.5).mean():6.1%}'
+                     f'  retrieval only {(conf == 0).mean():6.1%}')
+    return '\n'.join(lines)
 
 
 def _first_rank(df: Optional[pd.DataFrame], cx, cy, tol, xcol='x0', ycol='y0',
@@ -484,6 +630,7 @@ def draw_windows(run: SlideRun, row: pd.Series, args, out: Path) -> Optional[Pat
     tile = args.tile_size
     level = int(row['s2_routed_level'])
     photo = run.photo(i)
+    true_level: str = f'  true L{int(row["level"])}' if pd.notna(row.get('level')) else ''
     fig, axes = plt.subplots(2, len(wins), figsize=(3.6 * len(wins), 6.4), squeeze=False)
     for col, (label, box, rot, lvl, cos, truth) in enumerate(wins):
         q = np.rot90(photo, k=rot // 90)
@@ -501,7 +648,7 @@ def draw_windows(run: SlideRun, row: pd.Series, args, out: Path) -> Optional[Pat
             ax.add_patch(Rectangle((1, 1), win.shape[1] - 2, win.shape[0] - 2,
                                    fill=False, edgecolor='#1f9e5a', lw=3, ls='--'))
         ax.axis('off')
-    fig.suptitle(f'{run.name}  #{i}  route {route}  searched L{level}  true L{int(row["level"])}  darker tile = lower '
+    fig.suptitle(f'{run.name}  #{i}  route {route}  searched L{level}{true_level}  darker tile = lower '
                  f'cosine to the query tile', fontsize=11)
     fig.tight_layout()
     p = out / f'{run.name}_{route}_{i}_windows.png'
@@ -510,13 +657,94 @@ def draw_windows(run: SlideRun, row: pd.Series, args, out: Path) -> Optional[Pat
     return p
 
 
+#: A legend under its axes, outside the image, so it never covers the picture.
+_BELOW: Dict[str, Any] = dict(loc='upper center', bbox_to_anchor=(0.5, -0.01),
+                              fontsize=7, framealpha=0.85)
+
+
+def _homography(r: pd.Series) -> Optional[np.ndarray]:
+    """The 3x3 H of a stage-3 `output` row (query px -> crop px), None when the
+    row has none (the fit failed: stage 3 fell back to the candidate window)."""
+    vals = [r.get(f'h{a}{b}') for a in range(3) for b in range(3)]
+    if any(v is None or pd.isna(v) for v in vals):
+        return None
+    return np.array(vals, dtype=np.float64).reshape(3, 3)
+
+
+def _footprint(shape, H: np.ndarray) -> np.ndarray:
+    """Where the query's four corners land in the crop: `[4, 2]` px."""
+    h, w = shape[:2]
+    corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2)
+    return cv2.perspectiveTransform(corners, H).reshape(4, 2)
+
+
+def _checker(crop: np.ndarray, query: np.ndarray, H: np.ndarray, n: int = 8) -> np.ndarray:
+    """The crop with the query warped onto it (by H) shown in alternate squares
+    of a board `n` across the footprint -- one image, the two sources taking
+    turns, so a misfit shows as a break at every square's edge."""
+    h, w = crop.shape[:2]
+    warped = cv2.warpPerspective(query, H, (w, h))
+    cover = cv2.warpPerspective(np.full(query.shape[:2], 255, np.uint8), H, (w, h)) > 0
+    ys, xs = np.nonzero(cover)
+    if not len(xs):
+        return crop
+    side = max(8, int(round(max(xs.max() - xs.min(), ys.max() - ys.min()) / n)))
+    yy, xx = np.indices(cover.shape)
+    board = ((yy // side) + (xx // side)) % 2 == 0
+    out = crop.copy()
+    out[cover & board] = warped[cover & board]
+    return out
+
+
+def _draw_located(fig, gs, col: int, run: SlideRun, row: pd.Series, ranks, photo: np.ndarray,
+                  args) -> None:
+    """The `located` panel: three axes in one column. Top, the query. Middle,
+    the slide where stage 3 put it -- the crop cut to the footprint and a
+    margin, the footprint outlined. Bottom, that crop against the query warped
+    onto it, as a checkerboard."""
+    axes = [fig.add_subplot(gs[k, col]) for k in range(3)]
+    axes[0].imshow(photo)
+    axes[0].set_title('located: the query', fontsize=9)
+    r = None
+    if ranks is not None and len(ranks):
+        hit = ranks[ranks['rank'] == args.rank]
+        r = hit.iloc[0] if len(hit) else None
+    H = None if r is None or pd.isna(r.get('crop_x0')) else _homography(r)
+    if H is None:
+        for ax in axes[1:]:
+            ax.text(0.5, 0.5, f'rank {args.rank}: stage 3 found no fit,\nso there is no\n'
+                    'location to show', ha='center', va='center', fontsize=9,
+                    transform=ax.transAxes)
+        for ax in axes:
+            ax.axis('off')
+        return
+    level = int(row['s2_routed_level'])
+    crop = _read_box(run, r['crop_x0'], r['crop_y0'], r['crop_w0'], r['crop_h0'], level)
+    quad = _footprint(photo.shape, H)
+    board = _checker(crop, photo, H)
+    pad = 0.12 * max(np.ptp(quad[:, 0]), np.ptp(quad[:, 1]))
+    x0 = int(max(0, quad[:, 0].min() - pad))
+    x1 = int(min(crop.shape[1], quad[:, 0].max() + pad))
+    y0 = int(max(0, quad[:, 1].min() - pad))
+    y1 = int(min(crop.shape[0], quad[:, 1].max() + pad))
+    axes[1].imshow(crop[y0:y1, x0:x1])
+    axes[1].add_patch(Polygon(quad - [x0, y0], closed=True, fill=False, edgecolor='magenta', lw=2))
+    axes[1].set_title(f'found location  rank {args.rank}  inliers {int(r["n_inliers"])}  '
+                      f'conf {float(r.get("confidence", float("nan"))):.2f}\n'
+                      'magenta outline = the query\'s footprint (by H)', fontsize=9)
+    axes[2].imshow(board[y0:y1, x0:x1])
+    axes[2].set_title('checkerboard: crop / query warped onto it', fontsize=9)
+    for ax in axes:
+        ax.axis('off')
+
+
 def draw_fov(run: SlideRun, row: pd.Series, panels, args, out: Path) -> Path:
     i, route = int(row['index']), row['route']
+    real: bool = run.real
     got = run.tables.get(route, {})
-    panels = [p for p in panels if p != 'windows']
-    fig, axes = plt.subplots(1, len(panels), figsize=(5.5 * len(panels), 5.5))
-    axes = np.atleast_1d(axes)
-    cx, cy = float(row['center_x0']), float(row['center_y0'])
+    panels = [p for p in panels if p != 'windows' and not (real and p == 'gt')]
+    fig = plt.figure(figsize=(5.5 * len(panels), 5.5))
+    gs = fig.add_gridspec(3, len(panels))
     photo = None
     cands = ranks = None
     if 2 in got and got[2]['output'] is not None:
@@ -524,25 +752,55 @@ def draw_fov(run: SlideRun, row: pd.Series, panels, args, out: Path) -> Path:
         cands = cands.sort_values('rank').head(args.k_boxes)
     if 3 in got and got[3]['output'] is not None:
         ranks = _ranked(got[3]['output'][got[3]['output']['index'] == i])
-    # one overview for the slide panels: the truth and every box drawn on it
-    fov_box = (cx - row['w0'] / 2, cy - row['h0'] / 2, row['w0'], row['h0'])
-    boxes = [fov_box] + ([tuple(c) for c in cands[['x0', 'y0', 'w0', 'h0']].values]
-                         if cands is not None else [])
+    # a real photo's answer: the verified candidate with the largest confidence
+    answer: Optional[pd.Series] = None
+    if real:
+        table = got.get(3, {}).get('answer')
+        table = None if table is None else table[table['index'] == i]
+        if table is not None and len(table) and pd.notna(table.iloc[0].get('x0')):
+            answer = table.iloc[0]
+    rank: int = args.rank or (int(answer['rank']) if answer is not None else 1)
+    args = argparse.Namespace(**{**vars(args), 'rank': rank})
+    # one overview for the slide panels: every box drawn on it, and the truth
+    # when there is one (a real photo has none; its answer is in the view)
+    cands_l0 = ([tuple(c) for c in cands[['x0', 'y0', 'w0', 'h0']].values]
+                if cands is not None else [])
+    if real:
+        cx = cy = 0.0
+        boxes = list(cands_l0)
+        if answer is not None and cands_l0:
+            w, h = cands_l0[0][2], cands_l0[0][3]
+            boxes.append((float(answer['x0']) - w / 2, float(answer['y0']) - h / 2, w, h))
+    else:
+        cx, cy = float(row['center_x0']), float(row['center_y0'])
+        boxes = [(cx - row['w0'] / 2, cy - row['h0'] / 2, row['w0'], row['h0'])] + cands_l0
     view = None
-    for ax, panel in zip(axes, panels):
-        ax.set_title(panel)
-        if panel in ('photo', 'matches'):
+    for col, panel in enumerate(panels):
+        if panel in ('photo', 'matches', 'located'):
             photo = run.photo(i) if photo is None else photo
+        if panel == 'located':
+            _draw_located(fig, gs, col, run, row, ranks, photo, args)
+            continue
+        ax = fig.add_subplot(gs[:, col])
+        ax.set_title(panel)
         if panel == 'photo':
             ax.imshow(photo)
-            ax.set_title(f'photo  L{int(row["level"])} rot {int(row["rot_deg"])}')
+            ax.set_title(f'photo  {row["photo"]}  {int(row["width"])}x{int(row["height"])}'
+                         if real else
+                         f'photo  L{int(row["level"])} rot {int(row["rot_deg"])}')
         elif panel in ('gt', 'candidates', 'result'):
+            if not boxes:
+                ax.text(0.5, 0.5, 'stage 2 gave no candidates', ha='center', va='center',
+                        transform=ax.transAxes)
+                ax.axis('off')
+                continue
             if view is None:
                 view = _overview(run, boxes)
             img, ox, oy, sc = view
             ax.imshow(img)
-            _quad(ax, cx, cy, row['w0'], row['h0'], row['rot_deg'] + row['angle_jitter'],
-                  sc, off=(ox, oy), edgecolor='lime', lw=2)
+            if not real:
+                _quad(ax, cx, cy, row['w0'], row['h0'], row['rot_deg'] + row['angle_jitter'],
+                      sc, off=(ox, oy), edgecolor='lime', lw=2)
             if panel == 'gt':
                 ax.set_title('truth')
             if panel == 'candidates' and cands is not None:
@@ -553,22 +811,49 @@ def draw_fov(run: SlideRun, row: pd.Series, panels, args, out: Path) -> Path:
                                            edgecolor=cmap(c['rank'] / max(args.k_boxes, 1))))
                     ax.text((c['x0'] - ox) * sc, (c['y0'] - oy) * sc, str(int(c['rank'])),
                             color='yellow', fontsize=7, va='bottom')
-                ax.set_title(f'candidates top {len(cands)}  GT = '
-                             f'{_place(row)}')
+                ax.set_title(f'candidates top {len(cands)}' if real else
+                             f'candidates top {len(cands)}  GT = {_place(row)}')
+                cmap = plt.get_cmap('autumn')
+                ax.legend(handles=([] if real else [
+                    Line2D([0], [0], color='lime', lw=2, label='truth: the FoV\'s true footprint')]) + [
+                    Patch(fill=False, edgecolor=cmap(1 / max(args.k_boxes, 1)),
+                          label='stage 2 candidate #1 (best)'),
+                    Patch(fill=False, edgecolor=cmap(min(len(cands), args.k_boxes) / max(args.k_boxes, 1)),
+                          label=f'stage 2 candidate #{len(cands)} (number = rank)')],
+                    **_BELOW)
             if panel == 'result' and ranks is not None:
-                for _, r in ranks.iterrows():
+                shown: pd.DataFrame = ranks[ranks['rank'] <= args.k_boxes] if real else ranks
+                for _, r in shown.iterrows():
                     if pd.notna(r['center_x0']):
                         ax.plot((r['center_x0'] - ox) * sc, (r['center_y0'] - oy) * sc,
                                 'o' if r['success'] else 'x', ms=6,
                                 color='cyan' if r['success'] else 'red')
-                ax.set_title(f'stage 3  err {row.get("s3_rank1_err_um", float("nan")):.1f} um')
+                if answer is not None:
+                    ax.plot((float(answer['x0']) - ox) * sc, (float(answer['y0']) - oy) * sc,
+                            '*', ms=16, color='gold', mec='black')
+                if real:
+                    ax.set_title(f'stage 3 answer  rank {rank}  conf '
+                                 f'{float(answer["confidence"]):.2f}' if answer is not None
+                                 else 'stage 3: no answer')
+                else:
+                    ax.set_title(f'stage 3  err {row.get("s3_rank1_err_um", float("nan")):.1f} um')
+                handles: List[Line2D] = [] if real else [
+                    Line2D([0], [0], color='lime', lw=2, label='truth: the FoV\'s true footprint')]
+                handles += [
+                    Line2D([0], [0], marker='o', color='cyan', lw=0, label='stage 3 located it (a fit)'),
+                    Line2D([0], [0], marker='x', color='red', lw=0,
+                           label='no fit: the candidate window\'s own centre')]
+                if real:
+                    handles.append(Line2D([0], [0], marker='*', color='gold', mec='black', lw=0,
+                                          ms=12, label='answer (largest confidence)'))
+                ax.legend(handles=handles, **_BELOW)
         elif panel == 'stage1':
             nb = got.get(1, {}).get('neighbours') if 1 in got else None
             if nb is not None:
                 v = nb[nb['index'] == i]['ref_level'].value_counts().sort_index()
                 ax.bar(v.index.astype(str), v.values)
-                ax.set_title(f'neighbour levels  chose L{row.get("s1_chosen_level")} '
-                             f'true L{int(row["level"])}')
+                ax.set_title(f'neighbour levels  chose L{row.get("s1_chosen_level")}' +
+                             ('' if real else f' true L{int(row["level"])}'))
         elif panel in ('crop', 'matches') and ranks is not None and len(ranks):
             r = ranks[ranks['rank'] == args.rank]
             if not len(r) or pd.isna(r.iloc[0]['crop_x0']):
@@ -594,11 +879,16 @@ def draw_fov(run: SlideRun, row: pd.Series, panels, args, out: Path) -> Path:
                     ax.plot([p['qx'], u], [p['qy'], v], lw=0.5,
                             color='lime' if p['inlier'] else 'red', alpha=0.7)
                 ax.set_title(f'rank {args.rank} matches  {int(m["inlier"].sum())}/{len(m)}')
+                ax.legend(handles=[
+                    Line2D([0], [0], color='lime', lw=2, label='inlier (kept by RANSAC)'),
+                    Line2D([0], [0], color='red', lw=2, label='outlier (rejected)')],
+                    ncol=2, **_BELOW)
         ax.axis('off')
-    fig.suptitle(f'{run.name}  #{i}  route {route}', fontsize=12)
+    fig.suptitle(f'{run.name}  {row["photo"]}  #{i}' if real else
+                 f'{run.name}  #{i}  route {route}', fontsize=12)
     fig.tight_layout()
     p = out / f'{run.name}_{route}_{i}.png'
-    fig.savefig(p, dpi=100)
+    fig.savefig(p, dpi=100, bbox_inches='tight')
     plt.close(fig)
     return p
 
@@ -677,6 +967,13 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
             return None if cos is None else [_num(v) for v in cos.reshape(-1)]
 
         t = got['truth'][got['truth']['index'] == i].iloc[0]
+        # the truth's exact rank and the pools it is ranked in, when the entry has
+        # them (`truth_rank_main`, `pool_main`, `truth_rank_main_in_all`: an entry
+        # written before they were kept has none, and the page then shows `-`)
+        rank_main = _num(t.get('truth_rank_main'))
+        rank_all = _num(t.get('truth_rank_main_in_all'))
+        if not part['pool'] and _num(t.get('pool_main')):
+            part['pool'] = int(_num(t['pool_main']))
         truth = _window_key(t['truth_region'], t['truth_lattice'], t['truth_row'],
                             t['truth_col'], t['truth_rotation'])
         tt = got.get('truth_sim')
@@ -707,9 +1004,10 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
             d_main=_num(t['truth_main_dist_l0']) / ds if pd.notna(t.get('truth_main_dist_l0')) else 0.0,
             d_overlap=_num(t['truth_dist_l0']) / ds,
             truth=truth,
-            arms={arm: dict(rank=_num(row.get('s2_hit_rank')), s=s, top1=top1,
+            arms={arm: dict(rank=rank_main if rank_main is not None else _num(row.get('s2_hit_rank')),
+                            s=s, top1=top1,
                             margin=None if s is None or best_other is None else s - best_other,
-                            rank_all=None, topk=topk)},
+                            rank_all=rank_all, topk=topk)},
             cos=cos))
     if not parts:
         raise SystemExit(f'no FoV of route {args.demo_route} with stage 2 truth in the selection')
@@ -730,8 +1028,14 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
 def main():
     ap = argparse.ArgumentParser(allow_abbrev=False)
     add_run_args(ap)
-    ap.add_argument('--stage-cache-job', default='BenchLocaScope',
-                    help='the bench job whose stage entries are read')
+    ap.add_argument('--stage-cache-job', default=None,
+                    help='the job whose stage entries are read. Default: '
+                         'BenchLocaScope, or RealTest with --real')
+    ap.add_argument('--real', action='store_true',
+                    help='the real photos of a locate_photo run (no truth: the '
+                         'panels and statistics that need one are left out)')
+    ap.add_argument('--slides', nargs='*', default=[],
+                    help=f'--real: slide names; default every slide of {DATASET_REAL}')
     ap.add_argument('--select', default='all', help='pandas query on the join table')
     ap.add_argument('--sample', type=int, default=0)
     ap.add_argument('--seed', type=int, default=0)
@@ -740,7 +1044,8 @@ def main():
                     help='cdf:<col> recall[:<col>] confusion scatter:<x>,<y>')
     ap.add_argument('--by', default='', help='group statistics by this column')
     ap.add_argument('--tol-um', type=float, default=100.0)
-    ap.add_argument('--rank', type=int, default=1, help='the rank crop/matches show')
+    ap.add_argument('--rank', type=int, default=0,
+                    help="the rank crop/matches/located show; 0 = the answer's (--real) or 1")
     ap.add_argument('--k-boxes', type=int, default=10,
                     help='candidate boxes on the overview')
     ap.add_argument('--k-windows', type=int, default=5,
@@ -766,18 +1071,24 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     stages, routes, mask_cfg = run_from_args(args)
-    job = args.stage_cache_job
-    fov_masks = MaskMaker(MASK_RECIPES['hest'], args.fov_mask_cache_job, 'cpu')
-    runs = [SlideRun(ds, name, path, supply, stages, routes, mask_cfg, job, args.limit)
-            for ds, name, path, supply in slide_supplies(args, fov_masks, job)]
-    df = join(runs, stages, args.tol_um)
+    job = args.stage_cache_job or ('RealTest' if args.real else 'BenchLocaScope')
+    if args.real:
+        if args.export:
+            raise SystemExit('--export needs a truth window: not for --real')
+        runs = real_runs(args, stages, mask_cfg, job)
+        df = join_real(runs)
+    else:
+        fov_masks = MaskMaker(MASK_RECIPES['hest'], args.fov_mask_cache_job, 'cpu')
+        runs = [SlideRun(ds, name, path, supply, stages, routes, mask_cfg, job, args.limit)
+                for ds, name, path, supply in slide_supplies(args, fov_masks, job)]
+        df = join(runs, stages, args.tol_um)
     if df.empty:
         raise SystemExit('nothing in the cache for these flags')
     if args.columns:
         print('\n'.join(df.columns))
         return
     df.to_csv(out / 'joined.csv', index=False)
-    print(summary(df, args.by or None))
+    print(real_summary(df) if args.real else summary(df, args.by or None))
 
     sel = df if args.select == 'all' else df.query(args.select)
     if args.sample and len(sel) > args.sample:
@@ -785,7 +1096,9 @@ def main():
     sel.to_csv(out / 'selected.csv', index=False)
     print(f'selected {len(sel)} of {len(df)} rows -> {out / "selected.csv"}')
 
-    if args.plot:
+    if args.plot and args.real:
+        print('  [plot] --plot needs truth: skipped for --real', flush=True)
+    elif args.plot:
         fig_dir = out / 'figures' / 'stats'
         fig_dir.mkdir(parents=True, exist_ok=True)
         plot_stats(sel, args.plot, args.by or None, fig_dir)

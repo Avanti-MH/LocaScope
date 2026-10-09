@@ -1,13 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=RealTest              # Job name
+#SBATCH --job-name=RealTest              # Job name -> log/<name>_<task> and result/cache/<name>/
 #SBATCH --partition=8gpus                # Partition
 #SBATCH --time=24:00:00                  # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560              # Account
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --gpus-per-node=1                # GPUs per node (不要設0)
-#SBATCH --cpus-per-task=2                # CPU cores per task
+#SBATCH --cpus-per-task=12               # CPU cores per task (the H200 cap per GPU)
+#SBATCH --mem=200G                       # host RAM (the H200 cap per GPU)
 #SBATCH --ntasks-per-node=1              # Tasks per node
-#SBATCH --array=0-9                      # One task per slide (10 slides)
+#SBATCH --array=0-15                     # One task per slide (16 slides of ki67_with_photo)
 #SBATCH -o /work/u26130998/log/%x_%a             # STDOUT
 #SBATCH -e /work/u26130998/log/%x_%a             # STDERR
 
@@ -20,104 +21,88 @@ ml load cuda/12.6
 conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
-
-# Runs write outside the checkout; see utilities/_paths.py
-RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
-
-# ---------------- Locate real microscope photos in their own WSI ----------------
-# No ground-truth position exists for these photos -- the sidecar .json files
-# hold Ki-67 nucleus polygons in photo coordinates, not slide positions. Each
-# photo is judged on
-#   1. SIFT+RANSAC inlier count  (hundreds = correct, single digits = wrong)
-#   2. the warped / blend / checkerboard panels, which overlap the WSI back
-#      onto the photo and make a few px of misalignment visible
+# ---------------- Real photos through the three stages ----------------
 #
-# ONE ARRAY TASK PER SLIDE, not per photo. LocaScopePipeline.build() segments
-# the whole slide and encodes a KNN reference bank, and the first shot routed to
-# a level makes that level's retriever encode every tile of the slide. All of it
-# is per-WSI. locate_photo.py therefore takes the whole photo FOLDER and loops
-# inside one process, so that work happens once instead of 170-478 times.
+# The mainstream run: every real microscope photo of ki67_with_photo (all 16
+# slides, no val / test split), no ground truth. Each stage's tables for a
+# slide are one cache entry, as the bench's are:
+#   result/cache/<job>/slide=/seg=/region=/photos=<id>/
+#       shots/  stage1/  stage1=<s1>/stage2/  .../stage2=<s2>/stage3/
+# and `answer` in stage 3's entry is the position of each photo. See the
+# docstring of utilities/cli/driver/locate_photo.py.
 #
-# Layout: photos live in <slide-stem>_ki67/ next to the matching .mrxs, e.g.
-#   S1104360_ki67/1.bmp   <->   S1104360,G7E,110208.mrxs
-# The pairing is derived from the folder name, so adding a slide to the dataset
-# needs no edit here beyond widening --array.
+# ONE ARRAY TASK PER SLIDE. The pipeline segments the slide (or reads its mask
+# cache) and the retriever encodes the whole level a photo is routed to; all of
+# it is per slide, none per photo, so a task loops over its slide's photos.
+# A slide whose entries all hit loads no model. A task killed mid-slide redoes
+# that slide: there is no resume inside one.
 #
-# To run one slide only:   sbatch --array=5 realtest.sh
-# To list the mapping:     ls -d /work/u26130998/datasets/Ki67_with_photo/*_mrxs/*_ki67 | sort | cat -n
-
-DATA=/work/u26130998/datasets/Ki67_with_photo
-
-# One encoder per run, and the output directory carries it. predictions.csv has
-# no encoder column and resume skips on photo name alone (locate_photo.py:472),
-# so two encoders sharing a directory would make the second run print
-# "nothing to do" and exit 0 -- no error, no rows.
+# VARIABLES, by what they belong to (a value left empty is the recipe's own):
 #
-# The tag is composed HERE, above the slide, and locate_photo takes --out
-# verbatim. It adds the encoder level only to the directory it derives itself,
-# so letting it append would give RealTest/<slide>/<encoder>/ where the
-# convention wants RealTest/<encoder>/<slide>/.
-ENCODER="${ENCODER:-gigapath}"
-HEAD="${HEAD:-}"
-TAG="$ENCODER${HEAD:+_$HEAD}"
-ENC_FLAG="--encoder $ENCODER${HEAD:+ --head $HEAD}"
+#   which photos
+#     LIMIT              first N photos of each slide (a smoke run); 0 = all
+#
+#   which stages (<method>:<recipe>)
+#     STAGE1  STAGE2  STAGE3      any other recipe field is a --stageN-<field>
+#                                 flag in EXTRA, e.g. EXTRA="--stage2-min-sep-tiles 2"
+#     SEG                         the mask stages 1 and 2 search (MASK_RECIPES)
+#
+#   stage 2 (retrieval)
+#     STAGE2_K           how many candidates stage 2 KEEPS per photo (--stage2-k;
+#                        the recipe's is 100). Part of stage 2's identity.
+#     STAGE2_BATCH       the encoder's batch for the whole-level encode
+#                        (--batch-size). Not identity: no cache entry changes.
+#
+#   stage 3 (localization)
+#     STAGE3_TOPK        how many of stage 2's candidates stage 3 VERIFIES, the
+#                        first N by stage 2's rank (--stage3-topk; the
+#                        recipe's is 100). Part of stage 3's identity: another N
+#                        is another stage-3 entry, and stages 1 and 2 are read
+#                        back. It is at most STAGE2_K. There is no reranker in
+#                        this run, so no other top-k exists.
+#
+#   anything else
+#     EXTRA              flags passed to locate_photo.py as they are
+#
+# To run one slide only:  sbatch --array=5 realtest.sh
+# A smoke run:            LIMIT=3 sbatch --array=4 realtest.sh
+# Bad nodes:              sbatch --exclude=25a-hgpn001,25a-hgpn003,25a-hgpn006 ...
 
-OUT="$RESULT_ROOT"/RealTest
+# which photos
+LIMIT="${LIMIT:-0}"
 
-# Photos per slide vary 71..478; every task fits well inside the 24h limit.
-# 'all' draws both figures for every photo, sorted into <out>/success/ and
-# <out>/fail/ by the SIFT verdict. Measured at ~2.3 MB per photo, so the whole
-# 2296-photo set is roughly 5 GB. FIGURE_LIMIT applies to 'sample' only.
-FIGURES=all           # none | fail | sample | all
-FIGURE_LIMIT=5
-LIMIT=0               # 0 = every photo in the folder
-STRIDE=1
+# which stages
+STAGE1="${STAGE1:-knn:gigapath}"
+STAGE2="${STAGE2:-slidewin:gigapath}"
+STAGE3="${STAGE3:-sift:default}"
+SEG="${SEG:-hest}"
 
-# Figures need the per-photo pipeline result, which only exists while the photo
-# is being run -- they cannot be reconstructed from predictions.csv. So a run
-# whose point is the figures has to redo every photo, and resume (which skips
-# anything already in the CSV) would make it a no-op.
-# COST: this also disables restart-where-it-stopped. A task killed at photo 400
-# of 478 starts again at 1. Set to 0 once the figures exist.
-NO_RESUME=1
-RESUME_FLAG=""
-[ "$NO_RESUME" = "1" ] && RESUME_FLAG="--no-resume"
+# stage 2
+STAGE2_K="${STAGE2_K:-}"
+STAGE2_BATCH="${STAGE2_BATCH:-1024}"
 
-mapfile -t DIRS < <(ls -d "$DATA"/*_mrxs/*_ki67 | sort)
+# stage 3
+STAGE3_TOPK="${STAGE3_TOPK:-100}"
 
-IDX=${SLURM_ARRAY_TASK_ID:-0}
-if [ "$IDX" -ge "${#DIRS[@]}" ]; then
-  echo "[skip] array index $IDX >= ${#DIRS[@]} slides"
-  exit 0
-fi
+EXTRA="${EXTRA:-}"
 
-PHOTO_DIR=${DIRS[$IDX]}
-STEM=$(basename "$PHOTO_DIR")
-STEM=${STEM%_ki67}
+SLIDE_ARG=""
+[ -n "$SLURM_ARRAY_TASK_ID" ] && SLIDE_ARG="--slide-index $SLURM_ARRAY_TASK_ID"
+STAGE2_K_ARG=""
+[ -n "$STAGE2_K" ] && STAGE2_K_ARG="--stage2-k $STAGE2_K"
 
-# The .mrxs carries scanner suffixes the photo folder does not, e.g.
-# S1103037_ki67 -> "S1103037,G7E,110122.mrxs", so match on the stem prefix.
-WSI=$(ls "$DATA/${STEM}_mrxs/$STEM",*.mrxs 2>/dev/null | head -1)
-if [ -z "$WSI" ]; then
-  echo "[skip] no .mrxs matching $STEM in $DATA"
-  exit 0
-fi
-
-echo "======== [$IDX] $(basename "$PHOTO_DIR")  ->  $(basename "$WSI")  enc=$TAG ========"
-echo "photos: $(ls "$PHOTO_DIR"/*.bmp 2>/dev/null | wc -l)"
+echo "======== real photos  task=${SLURM_ARRAY_TASK_ID:-all}  limit=$LIMIT ========"
+echo "stages $STAGE1 | $STAGE2 | $STAGE3   seg $SEG"
+echo "stage 2: k=${STAGE2_K:-recipe}  batch=$STAGE2_BATCH   stage 3: topk=$STAGE3_TOPK"
 
 python utilities/cli/driver/locate_photo.py \
-  "$PHOTO_DIR" \
-  "$WSI" \
-  --out "$OUT/$TAG/$(basename "$PHOTO_DIR")" \
-  --figures $FIGURES --figure-limit $FIGURE_LIMIT \
-  --limit $LIMIT --stride $STRIDE $RESUME_FLAG \
-  $ENC_FLAG \
-  --precision fp16 --batch-size 1024
+  $SLIDE_ARG \
+  --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" \
+  --seg "$SEG" --limit "$LIMIT" \
+  $STAGE2_K_ARG --batch-size "$STAGE2_BATCH" \
+  --stage3-topk "$STAGE3_TOPK" \
+  $EXTRA || exit $?
 
 echo ""
-echo "======== done -> $OUT/$TAG/$(basename "$PHOTO_DIR") ========"
-
-# Merge every slide's CSV afterwards (run once, after the array finishes):
-#   awk 'FNR==1 && NR!=1 {next} {print}' result/RealTest/<encoder>/*/predictions.csv \
-#       > result/RealTest/<encoder>/all_predictions.csv
+echo "======== done -> result/cache/${SLURM_JOB_NAME:-LocatePhoto}/ ========"
+echo "to plot it: REAL=1 STAGE3_TOPK=$STAGE3_TOPK STAGE2_K=${STAGE2_K} sbatch jobscripts/PlotLocaScope.sh"
