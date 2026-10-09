@@ -910,7 +910,7 @@ SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
         richness=RichnessConfig(
             scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
             floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
-            caps=(0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+            caps=(0.50, 0.50, 0.50, 0.20, 0.0, 0.0, 0.0),
             bucket_frame='per_rung', floor_frame='ask'),
         overlap=OverlapConfig(
             step=1.0, max_overlap_ratio=0.0, overlapping_share=0.0,
@@ -919,12 +919,12 @@ SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
             jitter_cap=0.0),
         inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
                               on_incomplete='drop'),
-        candidates='lattice', max_tries_per_tile=5),
+        candidates='lattice', max_tries_per_tile=10),
     'reference-bank': SamplerConfig(
         n_per_rung=100, seed=0,
         richness=RichnessConfig(
             scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
-            floors=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            floors=(0.3, 0.3, 0.3, 0.0, 0.0, 0.0, 0.0),
             caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0),
             bucket_frame='per_rung', floor_frame='ask'),
         overlap=OverlapConfig(
@@ -934,7 +934,7 @@ SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
             jitter_cap=0.0),
         inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
                               on_incomplete='drop'),
-        candidates='lattice', max_tries_per_tile=5),
+        candidates='lattice', max_tries_per_tile=10),
 }
 
 

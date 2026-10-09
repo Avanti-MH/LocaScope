@@ -169,22 +169,7 @@ FOV_RECIPES: Dict[str, FovRecipe] = {
             vignette_p=0.5, distortion_p=0.5, defocus_radius=2,
             chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
             photometric=True, geometric=True),
-        sampler=SamplerConfig(
-            n_per_rung=500, seed=0,
-            richness=RichnessConfig(
-                scorer='background',
-                edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
-                floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
-                caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0),
-                bucket_frame='per_rung', floor_frame='ask'),
-            overlap=OverlapConfig(
-                step=0.5, max_overlap_ratio=0.5, overlapping_share=1.0,
-                jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
-                                (1.0, 0.75), (1.25, 1.25)),
-                jitter_cap=0.25),
-            inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
-                                  on_incomplete='drop'),
-            candidates='lattice', max_tries_per_tile=5),
+        sampler=SAMPLER_RECIPES['lattice'],
         rungs=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0), max_ds=None),
     'routing-support-native': FovRecipe(
         sensor=(256, 256),
@@ -198,22 +183,7 @@ FOV_RECIPES: Dict[str, FovRecipe] = {
             vignette_p=0.0, distortion_p=0.0, defocus_radius=0,
             chromatic_shift=0, noise_sigma=0.0, jpeg_quality=100,
             photometric=False, geometric=True),
-        sampler=SamplerConfig(
-            n_per_rung=500, seed=0,
-            richness=RichnessConfig(
-                scorer='background',
-                edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
-                floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
-                caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0),
-                bucket_frame='per_rung', floor_frame='ask'),
-            overlap=OverlapConfig(
-                step=0.5, max_overlap_ratio=0.5, overlapping_share=1.0,
-                jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
-                                (1.0, 0.75), (1.25, 1.25)),
-                jitter_cap=0.25),
-            inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
-                                  on_incomplete='drop'),
-            candidates='lattice', max_tries_per_tile=5),
+        sampler=SAMPLER_RECIPES['reference-bank'],
         rungs=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0), max_ds=None),
 }
 
