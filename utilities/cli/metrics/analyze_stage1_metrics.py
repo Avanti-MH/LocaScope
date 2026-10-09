@@ -210,7 +210,7 @@ def rows_from_cache(args) -> list:
     flags address, joined with where the FoV was placed."""
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     '..', '..', 'bench_modules'))
-    from bench_locascope import (by_index, read_rows, slide_supplies,  # noqa: PLC0415
+    from BenchCommon import (by_index, read_rows, slide_supplies,  # noqa: PLC0415
                                  stage1_record)
     from bench_stage1_mpp import stages_of                        # noqa: PLC0415
     from DsLadder import DEFAULT_RUNGS                            # noqa: PLC0415

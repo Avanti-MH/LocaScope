@@ -16,7 +16,9 @@ result/BenchLocaScope).
 
     pooling   cls  cls_avg  cls_std  rings3  grid2x2      (aiNNModel pooling_kinds)
     score     mean  geomean  min                          (how R_q x C_q cosines
-                                                           become one number)
+                                                           become one number; mean and
+                                                           geomean are SlidingWinSimRot's,
+                                                           min is this bench's alone)
 
 Five by three is fifteen arms; `cls` + `mean` IS production and is the
 baseline every other arm is measured against.
@@ -31,25 +33,33 @@ three levels, 100 FoVs each and top-left answers; this section is what runs:
 
   slides     the first `--n-wsi` of each `--datasets` id's recorded `--split`
              (MakeSplit; the split is shuffled when made), as every bench takes
-             them (`bench_locascope.run_slides`). `--shard I/N` takes every N-th
+             them (`BenchCommon.run_slides`). `--shard I/N` takes every N-th
              of the slides, for N processes on N cards.
   levels     each slide's own pyramid levels up to `--max-ds` (the FoV recipe's
              `max_ds` by default; `--fov`, FovSupply.FOV_RECIPES).
   FoVs       `--n-fov` (the recipe's `n_per_rung`) per (slide, level), all of a
              slide's levels in ONE draw on the hest masks of --fov-mask-cache-job,
-             photographed through `FovSupply.cached` (`bench_locascope.supply_for`):
+             photographed through `FovSupply.cached` (`BenchCommon.supply_for`):
              the draw and the photos' record are cache entries, and the same
              flags give the pipeline bench's and the stage-1 bench's photos. A
              level too coarse for the tissue holds no FoV and is skipped.
-  answer     the window the query's TILE GRID covers, located by
-             `Render.output_to_level0` at the rotation and scale the shot was
-             taken at -- not the FoV's top-left. At rotation 0 and scale 1 the two
-             are the same point, which the bench checks on every FoV.
-  rotation   `--rotation` / `--scale-min` / `--scale-max` replace the recipe's
-             (every quarter turn, scale 0.90-1.15 under 'bench'). A rotated shot
-             is still scored against an UPRIGHT reference
-             window (`SlidingWindowSimilarity` uses the MAIN kernel only), so
-             recall falls for a reason that has nothing to do with pooling.
+  answer     the window the query's TILE GRID covers once the shot is turned
+             upright, as the pipeline bench places it (`query_grid_centre`, the
+             same function): the shot is turned by `matching_rotation`, whole
+             tiles are cut from the TURNED photo's top-left, and the centre of
+             that grid goes back to the slide through `Render.output_to_level0`
+             at the angle and scale the shot was taken at. The window is the one
+             of the turned shot's size (the sides swap at 90 / 270). At rotation 0,
+             scale 1 and no jitter this is the FoV's top-left, which the bench
+             checks on every such FoV.
+  rotation   as the stage searches: every shot is scored at all four quarter
+             turns (`SlidingWinSimRot.ROTATIONS`), the reference tiles encoded
+             once and shared by the four. The truth is the window at the shot's
+             `matching_rotation`; a rank counts the windows of ALL four
+             rotations that score above it, as `nearest_window` does.
+             `--rotation` / `--scale-min` / `--scale-max` still replace the
+             recipe's gap (every quarter turn, scale 0.90-1.15 under 'bench') to
+             restrict the FoVs; they are not needed to isolate the pooling.
   arms       `--arms cls cls_avg-M rings3`: each pooling says which reference
              grid it lives on -- no suffix is main + the offset grid, `-M` is
              main tiles only (capital M; `-m` is refused). A run with only `-M`
@@ -221,6 +231,14 @@ med Q3, one column per K_FRACTIONS entry) is IDENTICAL in all four.
  THE GATES, WHICH RUN BEFORE ANY GPU HOUR IS SPENT
 ═══════════════════════════════════════════════════════════════════════════════
 
+STAGE 2 TABLES. Beside the CSV, every arm writes the stage 2 entry the pipeline bench
+writes, in this job's cache, under `stage1=oracle` (the bench
+scores a FoV at the level it was placed at): `output` (the first 100 windows,
+picked by the stage's own `candidate_set`), `truth` (with its rank and the pools),
+`tile_sims` (10 windows) and `truth_sim`. See "The stage 2 tables an arm writes".
+Every arm writes them, `min` and the `-M` arms too (their entries have ids of
+their own, the stage having no setting for them).
+
 Nothing here fails loudly. A broken coordinate mapping produces "no pooling
 improves retrieval", which reads as a finding. So three checks run first, each
 taking seconds, each able to pass only if the machinery means something:
@@ -255,10 +273,10 @@ And one gate on the run itself: `decoy`, the percentile of a uniformly random
 window, which must sit at 0.50. If the coordinate mapping is wrong the truth
 window is effectively random, and this is what says so.
 
-Rotation defaults to 0. `SlidingWindowSimilarity` scores both grids against the
-MAIN query kernel only (SlidingWinSimRot.SlidingWindowSimilarity); a rotated FoV fails for
-reasons that have nothing to do with pooling, and rotation has its own test in
-test_gigapath_slide_win_sim.py step 5.
+Rotated FoVs are scored as the stage scores them: the query turned to each of
+four rotations, the truth at the shot's matching rotation (see "rotation" above),
+so a rotated shot no longer fails for a reason that has nothing to do with
+pooling. A fifth check, `truth centre`, pins that placement to the pipeline's.
 """
 
 from __future__ import annotations
@@ -266,9 +284,12 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
+from typing import Optional
 import json
 import math
+import contextlib
 import os
+import types
 import queue
 import resource
 import sys
@@ -303,17 +324,25 @@ from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E40
                              encoder_cfg_from_args, encoder_config,
                              encoder_names, pooling_kinds)
 from FovSupply import FOV_RECIPES, FovSupply, add_fov_args       # noqa: E402
-from ReadGeometry import ReadRect, levels_up_to                  # noqa: E402
+from ReadGeometry import ReadRect, ReadSpec, levels_up_to         # noqa: E402
 from ConfigArgs import config_from_args, describe                # noqa: E402
-from ConfigIdentity import enc, short_id                         # noqa: E402
+from ConfigIdentity import enc, environment, short_id             # noqa: E402
 from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
                                            attach_baseline, frac_label, grid_table,
                                            group_by, group_levels, k_at, pct,
                                            print_level_heading, report, truth_rank)
-from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity     # noqa: E402
+from stage2_retrieval.SlidingWinSimRot import (GEOMEAN_FLOOR, ROTATIONS,      # noqa: E402
+                                               SlidingWinSimRot,
+                                               SlidingWinSimRotConfig,
+                                               WINDOW_SCORES, SlidingWindowSimilarity,
+                                               window_score)
+from stage2_retrieval.StageInterface import Candidate, CandidateSet  # noqa: E402
 from camera import Render                                        # noqa: E402
 from _paths import encoder_tag, job_result_dir                   # noqa: E402
-from bench_locascope import run_slides, supply_for                 # noqa: E402
+from BenchCommon import (ORACLE, ROLES, TRUTH_VERSION, Stage, Tables,  # noqa: E402
+                         fmt_each, fmt_rate, fmt_time, matching_rotation,
+                         query_grid_centre, require_gpu_if_allocated, run_slides,
+                         status, supply_for)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -375,11 +404,14 @@ RAW = 'raw'
 #: Production. Every other arm is measured against this one, per query.
 BASELINE = 'cls+mean'
 
-#: Cosines of L2-normalised features live in [-1, 1] and log is undefined at or
-#: below zero. Raising this floor pulls geomean towards the arithmetic mean,
-#: because it stops the worst tile from dominating -- it is a parameter, not a
-#: guard. Same value as bench_offgrid_score, so the two benches agree.
-GEOMEAN_FLOOR = 1e-3
+#: Scores only this bench measures: the stage has `mean` and `geomean`
+#: (SlidingWinSimRot.WINDOW_SCORES, imported above with GEOMEAN_FLOOR, so the
+#: bench and the stage score a window one way) and no `min`.
+BENCH_ONLY_SCORES = {
+    'min': lambda per_tile: per_tile.float().amin(dim=(-2, -1)),
+}
+assert set(SCORES) <= set(WINDOW_SCORES) | set(BENCH_ONLY_SCORES), \
+    'SCORES names a score neither the stage nor this bench has'
 
 #: K_FIXED and K_FRACTIONS are imported from RetrievalReport, which owns them
 #: along with every statistic computed from them. What the pools look like HERE,
@@ -493,23 +525,20 @@ def pooled_descriptors(patches, encoder, poolings) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def combine(per_tile: torch.Tensor) -> dict:
-    """[..., R_q, C_q] per-tile cosines -> one score per window, three ways.
+    """[..., R_q, C_q] per-tile cosines -> one score per window, once per score
+    in `SCORES`.
 
-    mean     arithmetic, what production ships. Strong tiles carry a window
-             even when the rest disagree -- an OR over the query's tiles.
-    geomean  exp(mean(log(x))). Multiplicative, so one tile near zero drags the
-             window down however good the others are -- an AND. "Use AND
-             instead of OR" and "multiply instead of add" are the same change;
-             a linear combiner cannot be an AND.
-    min      the hardest AND: one tile can veto the window.
+    mean     the stage's own (`SlidingWinSimRot.window_score`), what production
+             ships. Strong tiles carry a window even when the rest disagree --
+             an OR over the query's tiles.
+    geomean  the stage's own: exp(mean(log(x))). Multiplicative, so one tile
+             near zero drags the window down however good the others are -- an
+             AND. "Use AND instead of OR" and "multiply instead of add" are the
+             same change; a linear combiner cannot be an AND.
+    min      this bench's alone, the hardest AND: one tile can veto the window.
     """
-    values = per_tile.float()
-    floored = values.clamp_min(GEOMEAN_FLOOR)
-    return {
-        'mean': values.mean(dim=(-2, -1)),
-        'geomean': torch.exp(torch.log(floored).mean(dim=(-2, -1))),
-        'min': values.amin(dim=(-2, -1)),
-    }
+    return {name: (window_score(per_tile, name) if name in WINDOW_SCORES
+                   else BENCH_ONLY_SCORES[name](per_tile)) for name in SCORES}
 
 
 def grid_answers(x: int, y: int) -> dict:
@@ -644,20 +673,110 @@ def gate_grid_geometry(seed: int = 0, n: int = 10000) -> tuple:
 def gate_recall_ranks() -> tuple:
     """`recall_ranks` on a hand-made map whose answers are known by construction.
 
-    One region: main windows 3x3, offset windows 2x2, scores chosen so that the
-    main answer (1, 1) has 2 main windows above it and the offset answer (0, 1)
-    has 1 offset window above it. In the mixed pool the counts add up, so the
-    expected ranks are written down, not computed by the code under test."""
+    One region, two rotations. At rotation 0: main windows 3x3, offset windows
+    2x2, the answers at main (1, 1) and offset (0, 1). At rotation 90: main 2x2
+    and offset 1x1, whose windows are the other rotation's candidates and count
+    in every pool but are not the answer. The expected ranks are written down,
+    not computed by the code under test:
+      main 0.6    above it: main 0.9, 0.8 | 0.99, 0.7 (rot 90) ; offset 0.95, 0.7,
+                  0.65 (rot 0) and 0.65 (rot 90)
+      offset 0.7  above it: offset 0.95 ; main 0.9, 0.8 | 0.99 (0.7 is not above)
+    Run with the answers at rotation 0, and again at 90 with the maps swapped so
+    the answer must be read from the rotation `found` names."""
     main = torch.tensor([[0.9, 0.5, 0.1], [0.2, 0.6, 0.3], [0.8, 0.4, 0.0]])
     ovlp = torch.tensor([[0.95, 0.7], [0.65, 0.05]])
-    found = {'main_rc': (1, 1), 'ovlp_rc': (0, 1)}
-    got = recall_ranks(([main], [ovlp]), 0, found)
-    # main 0.6: above it in main -> 0.9, 0.8 = 2; in offset -> 0.95, 0.7, 0.65 = 3
-    # offset 0.7: above it in offset -> 0.95 = 1; in main -> 0.9, 0.8 = 2
-    want = {'rank_main_in_main': 3, 'pool': 9, 'rank_offset_in_offset': 2,
-            'pool_offset': 4, 'rank_main_in_all': 6, 'rank_offset_in_all': 4,
-            'pool_all': 13}
-    return got, got == want
+    main90 = torch.tensor([[0.99, 0.1], [0.7, 0.2]])
+    ovlp90 = torch.tensor([[0.65]])
+    found = {'main_rc': (1, 1), 'ovlp_rc': (0, 1), 'rot': 0}
+    got = recall_ranks({0: ([main], [ovlp]), 90: ([main90], [ovlp90])}, 0, found)
+    want = {'rank_main_in_main': 5, 'pool': 13, 'rank_offset_in_offset': 2,
+            'pool_offset': 5, 'rank_main_in_all': 9, 'rank_offset_in_all': 5,
+            'pool_all': 18}
+    swapped = recall_ranks({0: ([main90], [ovlp90]), 90: ([main], [ovlp])}, 0,
+                           dict(found, rot=90))
+    return got, got == want and swapped == want
+
+
+def gate_truth_centre() -> tuple:
+    """`answers_for` against an index image, for the four rotations.
+
+    A shot of 1024 x 1440 px is turned with `np.rot90` the way the stage turns
+    it, cut into whole tiles from the turned photo's top-left, and the original
+    pixel under the centre of that grid is read off an image of its own
+    coordinates -- nothing derived. The camera here is the identity map, so the
+    window `answers_for` places must stand centred on that pixel. The decoy is
+    the centre of the grid cut from the UNTURNED photo, which is what this bench
+    used before: it has to be far from the truth at 180 and 270, or the gate
+    could not tell the two apart. Returns ((worst |diff|, decoy), ok)."""
+    class Identity:
+        def output_to_level0(self, x0, y0, u, v, rot_deg=0.0, scale=1.0):
+            return u, v
+    height, width = 1024, 1440
+    ys, xs = np.indices((height, width))
+    region = types.SimpleNamespace(x=0, y=0)
+    worst, decoy = 0.0, 0.0
+    for rot_deg in (0, 90, 180, 270):
+        k = matching_rotation(rot_deg) // 90
+        turned_x, turned_y = np.rot90(xs, k), np.rot90(ys, k)
+        grid_h = (turned_x.shape[0] // TILE) * TILE
+        grid_w = (turned_x.shape[1] // TILE) * TILE
+        cy, cx = grid_h // 2, grid_w // 2
+        centre = [(turned_x[r, c], turned_y[r, c])
+                  for r in (cy - 1, cy) for c in (cx - 1, cx)]
+        want = (float(np.mean([p[0] for p in centre])) + 0.5,
+                float(np.mean([p[1] for p in centre])) + 0.5)
+        found = answers_for(Identity(), 0, 0, {'rot_deg': rot_deg, 'angle_jitter': 0.0,
+                                               'scale': 1.0}, region, 1.0,
+                            (height, width, 3))
+        got = (found['x_n'] + found['cols_t'] * HALF_TILE,
+               found['y_n'] + found['rows_t'] * HALF_TILE)
+        worst = max(worst, abs(got[0] - want[0]), abs(got[1] - want[1]))
+        decoy = max(decoy, abs((width // TILE) * TILE / 2.0 - want[0]),
+                    abs((height // TILE) * TILE / 2.0 - want[1]))
+    return (worst, decoy), worst < 1e-6 and decoy >= HALF_TILE
+
+
+def gate_scored_windows(seed: int = 0) -> tuple:
+    """`ScoredWindows` picks the windows the stage picks. Made-up per-tile maps
+    for two regions (12 x 10 and 9 x 9 tiles), four rotations, both lattices:
+    the real `SlidingWinSimRot` reduces them with its score and picks; a
+    `ScoredWindows` is handed the reduced scores and picks. The two lists --
+    window, rank, score -- must be the same, for `mean` and for `geomean`.
+    Returns (windows compared, ok)."""
+    import types
+    from PatchingLib import region_grids
+    generator = torch.Generator().manual_seed(seed)
+    regions = [types.SimpleNamespace(x=1000, y=2000, w=12 * TILE, h=10 * TILE),
+               types.SimpleNamespace(x=40000, y=9000, w=9 * TILE, h=9 * TILE)]
+    grids = region_grids(regions, ds=1.0, level=0, tile_size=TILE, overlap=True)
+    compared, same = 0, True
+    for score in ('mean', 'geomean'):
+        sims = {}
+        for rot, (r_q, c_q) in ((0, (4, 5)), (90, (5, 4)), (180, (4, 5)), (270, (5, 4))):
+            per_region = []
+            for grid in grids:
+                rows, cols = grid.lattice_dims('main')
+                o_rows, o_cols = grid.lattice_dims('offset')
+                per_region.append((
+                    torch.rand(rows - r_q + 1, cols - c_q + 1, r_q, c_q, generator=generator),
+                    torch.rand(o_rows - r_q + 1, o_cols - c_q + 1, r_q, c_q,
+                               generator=generator)))
+            sims[rot] = per_region
+        cfg = SlidingWinSimRotConfig(
+            encoder=encoder_config('gigapath'), tile_size=TILE, overlap=True, k=15,
+            min_sep_tiles=1.0, score=score)
+        real = SlidingWinSimRot(cfg, 'cpu')
+        real.grids, real.level, real.ds, real.sim_maps_by_rot = list(grids), 0, 1.0, sims
+        scored = ScoredWindows(cfg, 'cpu')
+        scored.grids, scored.level, scored.ds = list(grids), 0, 1.0
+        scored.sim_maps_by_rot = {
+            rot: [(window_score(a, score), window_score(b, score)) for a, b in per_region]
+            for rot, per_region in sims.items()}
+        want = [(c.key(), round(c.score, 6)) for c in real.candidate_set(15).candidates]
+        got = [(c.key(), round(c.score, 6)) for c in scored.candidate_set(15).candidates]
+        compared += len(want)
+        same = same and want == got and len(want) == 15
+    return compared, same
 
 
 def gate_raw_descriptor(seed: int = 0) -> tuple:
@@ -746,6 +865,118 @@ LATTICES = ('main', 'offset')
 #  whose top-left is (y - i, x - j), which is what `_sim_tensors` writes as a
 #  shifted slice; `gate_window_stream` checks the two agree.
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Where the time goes
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: The phases of one (slide, level), in the order they run. A phase's name is a
+#: key; what it is called in the report, and what is counted in it, is `STAGES`
+#: and `STREAM_SPLIT` below.
+PLACE, QUERY, STREAM, RANK = 'place', 'query', 'stream', 'rank'
+TABLES = 'tables'
+READ, ENCODE, COSINE, ACCUM = 'read', 'encode', 'cosine', 'accumulate'
+
+#: `(label, phase, what its speed counts)` of the four stages of a level, and of
+#: the parts stage 3 divides into when `--timing` is on. `photo` is a FoV; `tile`
+#: is a tile of the query or of the reference; '' is a part with no count worth
+#: a speed.
+STAGES = (
+    ('place the photos on the grid', PLACE, 'photo'),
+    ('encode the query tiles, every rotation', QUERY, 'tile'),
+    ('stream the reference level', STREAM, 'tile'),
+    ('rank the photos', RANK, 'photo'),
+    ('write the stage 2 tables', TABLES, 'photo'),
+)
+STREAM_SPLIT = (
+    ('wait for the reader', READ, 'tile'),
+    ('encode the reference tiles', ENCODE, 'tile'),
+    ('cosines', COSINE, ''),
+    ('add to the window scores', ACCUM, ''),
+)
+
+
+class PhaseTimer:
+    """Wall-clock seconds spent in the named phases of ONE (slide, level), and
+    how many things each phase handled, so a time reads as seconds per item.
+
+    A GPU call returns before the GPU has finished, so a clock around one would
+    time only the launch. A phase therefore waits for the GPU at both ends. The
+    four stages do (a few waits per level). The split of stage 3 -- one phase
+    per tile row, thousands of them -- does only when `fine` is set
+    (`--timing`): those waits make the run a little slower, which is what it
+    costs to see where the time is. Without `fine`, the split is not measured
+    and the report says so."""
+
+    def __init__(self, fine: bool = False) -> None:
+        self.fine: bool = fine
+        self.seconds: dict[str, float] = {}
+        self.items: dict[str, int] = {}
+        self._open: dict[str, float] = {}
+
+    @staticmethod
+    def _now() -> float:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return time.perf_counter()
+
+    def start(self, name: str, fine: bool = False) -> None:
+        if fine and not self.fine:
+            return
+        self._open[name] = self._now()
+
+    def stop(self, name: str, items: int = 0) -> None:
+        if name not in self._open:
+            return
+        began: float = self._open.pop(name)
+        self.seconds[name] = self.seconds.get(name, 0.0) + (self._now() - began)
+        self.items[name] = self.items.get(name, 0) + items
+
+    @contextlib.contextmanager
+    def phase(self, name: str, items: int = 0, fine: bool = False):
+        self.start(name, fine)
+        try:
+            yield
+        finally:
+            self.stop(name, items)
+
+    def report(self, level: int, n_photos: int) -> str:
+        """The level's time, step by step: how long it took, how fast it went
+        (photos, or tiles, a second or a minute) and how long one photo took in
+        it, then the whole level the same way. With `fine`, the reference
+        stream is split into its parts, indented under it. The whole level is
+        encoded once however many photos stand on it, so the more photos, the
+        less each one costs; the report says so because the figures under
+        'one photo' are the level's time divided by this level's photos."""
+        total: float = sum(self.seconds.get(k, 0.0) for _, k, _ in STAGES)
+
+        def line(label: str, key: str, unit: str, indent: int = 0) -> str:
+            sec: float = self.seconds.get(key, 0.0)
+            count: float = n_photos if unit == 'photo' else self.items.get(key, 0)
+            speed: str = fmt_rate(count, sec, unit) if unit else ''
+            return (f'  {" " * indent}{label:<{42 - indent}}{fmt_time(sec):>10}'
+                    f'{speed:>18}{fmt_each(n_photos, sec, "photo"):>16}')
+
+        lines: list[str] = [
+            f'  L{level}  {n_photos} photo through this level in {fmt_time(total)}'
+            f'  (the level is encoded once; each photo added costs less)',
+            f'  {"":<42}{"time":>10}{"speed":>18}{"one photo":>16}']
+        for label, key, unit in STAGES:
+            lines.append(line(label, key, unit))
+            if key == STREAM and self.fine:
+                parts: float = 0.0
+                for sub_label, sub_key, sub_unit in STREAM_SPLIT:
+                    lines.append(line(sub_label, sub_key, sub_unit, indent=3))
+                    parts += self.seconds.get(sub_key, 0.0)
+                self.seconds['other'] = max(0.0, self.seconds.get(STREAM, 0.0) - parts)
+                lines.append(line('other (Python, host)', 'other', '', indent=3))
+        if not self.fine:
+            lines.append('     (run with --timing to split the reference stream)')
+        lines.append(f'  {"whole level":<42}{fmt_time(total):>10}'
+                     f'{fmt_rate(n_photos, total, "photo"):>18}'
+                     f'{fmt_each(n_photos, total, "photo"):>16}')
+        return '\n'.join(lines)
+
 
 class WindowAccumulator:
     """Window scores of ONE lattice of ONE region for `n_shots` queries at once,
@@ -850,9 +1081,14 @@ def prefetched(fn, items, depth: int):
 
 
 def stream_windows(slide, regions, grids, ds: float, level: int, arm_specs,
-                   qgf: dict, n_shots: int, rows_q: int, cols_q: int, encoder,
-                   device, workers: int = 0, block_rows: int = BLOCK_ROWS) -> tuple:
-    """`({arm name: {lattice: [WindowAccumulator per region]}}, n_tiles)`.
+                   qgf: dict, n_shots: int, dims: dict, encoder,
+                   device, workers: int = 0, block_rows: int = BLOCK_ROWS,
+                   timer: PhaseTimer | None = None) -> tuple:
+    """`({rotation: {arm name: {lattice: [WindowAccumulator per region]}}},
+    n_tiles)`. `timer` (`--timing`) splits the time into reading, encoding,
+    cosines and accumulating. `qgf` is `{rotation: {pooling: [S, R_q, C_q, D]}}` and `dims`
+    `{rotation: (R_q, C_q)}`: the query turned to each rotation is its own
+    kernel, but a reference tile is encoded once for all of them.
 
     The reference is read by `SlideReader.read_grid`: `block_rows` main rows of a region
     per read, with the offset rows inside them -- read only when some arm is on
@@ -861,45 +1097,59 @@ def stream_windows(slide, regions, grids, ds: float, level: int, arm_specs,
     that reads that lattice; the descriptors stay on the device, are scored a
     row at a time and dropped. An accumulator sums its rows, so the order the
     blocks arrive in changes no number."""
+    timer = timer if timer is not None else PhaseTimer()
     need_offset = any(g == 'all' for _, g in arm_specs)
     lattices = ('main', 'offset') if need_offset else ('main',)
-    acc = {token_name(b, g): {} for b, g in arm_specs}
+    acc = {rot: {token_name(b, g): {} for b, g in arm_specs} for rot in dims}
     users = {lat: [(b, g) for b, g in arm_specs if lat == 'main' or g == 'all']
              for lat in lattices}
     for region, grid in zip(regions, grids):
         for lattice in lattices:
             rows, cols = grid.lattice_dims(lattice)
             for b, g in users[lattice]:
-                acc[token_name(b, g)].setdefault(lattice, []).append(
-                    WindowAccumulator(rows, cols, n_shots, rows_q, cols_q, device))
+                for rot, (rows_q, cols_q) in dims.items():
+                    acc[rot][token_name(b, g)].setdefault(lattice, []).append(
+                        WindowAccumulator(rows, cols, n_shots, rows_q, cols_q, device))
     reader = SlideReader(slide, workers=workers).read_grid(
         regions, grids, ds, tile=TILE, offset=need_offset,
         block_rows=block_rows, level=level)
     n_tiles = 0
-    for block in reader:
+    blocks = iter(reader)
+    while True:
+        with timer.phase(READ, fine=True):          # the reader's workers read ahead:
+            block = next(blocks, None)              # this is only the wait for one
+        if block is None:
+            break
         for lattice, tiles, n_rows, cols in (
                 ('main', block.main, block.main_rows, block.cols),
                 ('offset', block.offset, block.offset_rows, block.cols - 1)):
             if lattice not in lattices or n_rows == 0 or cols <= 0:
                 continue
             row_bases = list(dict.fromkeys(b for b, _ in users[lattice]))
-            pooled = pooled_descriptors(tiles, encoder, row_bases)
+            with timer.phase(ENCODE, len(tiles), fine=True):
+                pooled = pooled_descriptors(tiles, encoder, row_bases)
+            timer.items[READ] = timer.items.get(READ, 0) + len(tiles)
             n_tiles += len(tiles)
             for b in row_bases:
                 per_row = pooled[b].to(device).reshape(n_rows, cols, -1)
                 for i in range(n_rows):
-                    cos = row_cosines(per_row[i], qgf[b])
-                    for base, g in users[lattice]:
-                        if base == b:
-                            acc[token_name(base, g)][lattice][block.region].add_row(
-                                block.row0 + i, cos)
+                    for rot in dims:
+                        with timer.phase(COSINE, 1, fine=True):
+                            cos = row_cosines(per_row[i], qgf[rot][b])
+                        with timer.phase(ACCUM, 1, fine=True):
+                            for base, g in users[lattice]:
+                                if base == b:
+                                    acc[rot][token_name(base, g)][lattice][
+                                        block.region].add_row(block.row0 + i, cos)
     return acc, n_tiles
 
 
 def finalize_windows(acc: dict) -> dict:
-    """`{arm name: {lattice: [scores dict or None per region]}}`."""
-    return {name: {lat: [a.scores() for a in accs] for lat, accs in by_lat.items()}
-            for name, by_lat in acc.items()}
+    """`{rotation: {arm name: {lattice: [scores dict or None per region]}}}`."""
+    return {rot: {name: {lat: [a.scores() for a in accs]
+                         for lat, accs in by_lat.items()}
+                  for name, by_lat in by_arm.items()}
+            for rot, by_arm in acc.items()}
 
 
 def shot_maps(final_arm: dict, score: str, shot: int, n_regions: int) -> tuple:
@@ -917,13 +1167,14 @@ def shot_maps(final_arm: dict, score: str, shot: int, n_regions: int) -> tuple:
     return per_region('main'), per_region('offset')
 
 
-def gate_window_stream(seed: int = 0) -> tuple:
+def gate_window_stream(seed: int = 0, rows_q: int = 4, cols_q: int = 5) -> tuple:
     """The row-by-row windows against `SlidingWindowSimilarity` on a made-up
-    region (9 x 11 main tiles, 8 x 10 offset ones, a 4 x 5 query, 3 shots), and
+    region (9 x 11 main tiles, 8 x 10 offset ones, a `rows_q` x `cols_q` query,
+    4 x 5 by default and 5 x 4 for the query turned a quarter, 3 shots), and
     against a decoy: the same rows added one column off. The decoy has to be far
     from the truth or agreement would say nothing. Returns
     ((worst |diff|, decoy |diff|), ok)."""
-    rows, cols, rows_q, cols_q, n_shots, dim = 9, 11, 4, 5, 3, 64
+    rows, cols, n_shots, dim = 9, 11, 3, 64
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     gen = torch.Generator().manual_seed(seed)
     unit = lambda *shape: F.normalize(torch.randn(*shape, generator=gen), dim=-1)  # noqa: E731
@@ -1106,6 +1357,16 @@ def run_gates(patches, encoder, poolings, path: str = '', mask=None) -> bool:
     got, ok_recall = gate_recall_ranks()
     print(f'{"OK" if ok_recall else f"FAIL  got {got}"}')
 
+    print('[gate] truth centre == the turned query\'s grid', end='  ', flush=True)
+    (delta_truth, decoy_truth), ok_truth = gate_truth_centre()
+    print(f'max|Δ| {delta_truth:.2e} px  unturned grid is {decoy_truth:.0f} px off  '
+          f'{"OK" if ok_truth else "FAIL"}')
+
+    print('[gate] stage 2 tables pick the stage\'s windows', end='  ', flush=True)
+    n_picked, ok_picked = gate_scored_windows()
+    print(f'{n_picked} windows, `ScoredWindows` and `SlidingWinSimRot` pick the same  '
+          f'{"OK" if ok_picked else "FAIL"}')
+
     print('[gate] raw descriptor', end='  ', flush=True)
     (delta, leak), ok_raw = gate_raw_descriptor()
     print(f'cosine == mean per-position cosine, max|Δ|={delta:.2e}  '
@@ -1113,7 +1374,10 @@ def run_gates(patches, encoder, poolings, path: str = '', mask=None) -> bool:
 
     print('[gate] window stream == SlidingWindowSimilarity', end='  ', flush=True)
     (exact, decoy), ok_stream = gate_window_stream()
+    (exact_t, decoy_t), ok_turned = gate_window_stream(rows_q=5, cols_q=4)
+    ok_stream = ok_stream and ok_turned
     print(f'max|Δ| {exact:.2e}  decoy (one column off) {decoy:.2e}  '
+          f'turned query 5x4: {exact_t:.2e} / {decoy_t:.2e}  '
           f'{"OK" if ok_stream else "FAIL"}')
 
     print('[gate] lattice geometry', end='  ', flush=True)
@@ -1133,7 +1397,7 @@ def run_gates(patches, encoder, poolings, path: str = '', mask=None) -> bool:
         print(f'         strip at least {ROW_READ_RATIO}x closer than the decoy on '
               f'{len(levels)} level(s)  {"OK" if ok_rows else "FAIL"}')
     return (ok_base and ok_reduce and ok_concat and ok_grid and ok_recall
-            and ok_raw and ok_stream and ok_lattice and ok_rows)
+            and ok_truth and ok_picked and ok_raw and ok_stream and ok_lattice and ok_rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1152,29 +1416,33 @@ def region_of(regions, x0: int, y0: int, w: int, h: int):
 
 
 def answers_for(camera, x: int, y: int, params: dict, region, ds: float,
-                rows_q: int, cols_q: int) -> dict:
-    """The two grid points nearest the window the query's tile grid covers.
+                shape) -> dict:
+    """The two grid points nearest the window the TURNED query's tile grid
+    covers, at the rotation that turns the shot upright.
 
-    The query is cut into `rows_q x cols_q` tiles from the top-left of the shot,
-    so the window it stands for is the centre of THAT grid, mapped back to the
-    slide by `Render.output_to_level0` with the rotation and scale the shot was
-    actually taken at. At rotation 0 and scale 1 this is the FoV's top-left
-    exactly, which the caller checks.
+    Stage 2 turns the shot by `matching_rotation` and cuts whole tiles from the
+    turned photo's top-left, so the window it stands for is the centre of THAT
+    grid -- `BenchCommon.query_grid_centre`, the function the pipeline bench's
+    truth uses -- and the window's sides are the turned shot's (`rows_t x
+    cols_t`, swapped at 90 / 270). `found` carries them, with the rotation:
+    `rot`, `rows_t`, `cols_t`. At rotation 0 and scale 1 this is the FoV's
+    top-left exactly, which the caller checks.
 
-    `output_to_level0` is exact for rotations of 0/90/180/270; angle jitter,
-    lens distortion and the stage shift are not inverted (see its docstring),
-    and the defaults here switch all three off.
+    `query_grid_centre` inverts the shot's full angle, jitter included; lens
+    distortion and the stage shift are not inverted (`output_to_level0`).
     """
-    rot = float(params['rot_deg'])
-    scale = float(params['scale'])
-    cx0, cy0 = camera.output_to_level0(
-        x, y, cols_q * TILE / 2.0, rows_q * TILE / 2.0,
-        rot_deg=rot, scale=scale)
+    rot = matching_rotation(params['rot_deg'])
+    height, width = shape[:2]
+    rows_t, cols_t = ((height, width) if (rot // 90) % 2 == 0
+                      else (width, height))
+    rows_t, cols_t = rows_t // TILE, cols_t // TILE
+    cx0, cy0 = query_grid_centre(camera, x, y, params, shape, TILE)
     cx_n = (cx0 - region.x) / ds
     cy_n = (cy0 - region.y) / ds
-    x_tl, y_tl = cx_n - cols_q * HALF_TILE, cy_n - rows_q * HALF_TILE
+    x_tl, y_tl = cx_n - cols_t * HALF_TILE, cy_n - rows_t * HALF_TILE
     found = grid_answers(x_tl, y_tl)
     found['x_n'], found['y_n'] = x_tl, y_tl
+    found['rot'], found['rows_t'], found['cols_t'] = rot, rows_t, cols_t
     return found
 
 
@@ -1219,25 +1487,36 @@ def token_name(base: str, grid: str) -> str:
     return base + (MAIN_SUFFIX if grid == 'main' else '')
 
 
-def recall_ranks(maps: tuple, region: int, found: dict) -> dict:
+def _pools(maps_by_rot: dict) -> tuple:
+    """`(main pools, offset pools)`: every region's windows of every rotation, one
+    flat tensor each -- the candidates the stage ranks together."""
+    main_pools, ovlp_pools = [], []
+    for main_maps, ovlp_maps in maps_by_rot.values():
+        main_pools += [m.flatten() for m in main_maps if m.numel()]
+        ovlp_pools += [m.flatten() for m in ovlp_maps if m.numel()]
+    return main_pools, ovlp_pools
+
+
+def recall_ranks(maps_by_rot: dict, region: int, found: dict) -> dict:
     """The two answers of one query, ranked in the pools they can be judged in.
 
     Only meaningful for a full-grid arm, whose maps hold main AND offset windows.
-    `rank_main_in_main` is what `rank_in_main` returns; the other three are what
-    the offset grid adds:
+    `maps_by_rot` is `{rotation: (main maps, offset maps)}`: the two answers are
+    the windows at `found['rot']`, and every pool holds the windows of all the
+    rotations, as the stage ranks them. `rank_main_in_main` is what
+    `rank_in_main` returns; the other three are what the offset grid adds:
 
         main answer   in the main windows      rank_main_in_main    pool
         offset answer in the offset windows    rank_offset_in_offset pool_offset
         both          in main + offset         rank_main_in_all
                                                rank_offset_in_all   pool_all
     """
-    main_maps, ovlp_maps = maps
+    main_maps, ovlp_maps = maps_by_rot[found['rot']]
     mr, mc = found['main_rc']
     orow, ocol = found['ovlp_rc']
     main_answer = float(main_maps[region][mr, mc])
     ovlp_answer = float(ovlp_maps[region][orow, ocol])
-    main_pools = [m.flatten() for m in main_maps if m.numel()]
-    ovlp_pools = [m.flatten() for m in ovlp_maps if m.numel()]
+    main_pools, ovlp_pools = _pools(maps_by_rot)
     both = main_pools + ovlp_pools
     count = lambda pools: int(sum(int(m.numel()) for m in pools))     # noqa: E731
     return {'rank_main_in_main': rank_of(main_answer, main_pools),
@@ -1249,21 +1528,256 @@ def recall_ranks(maps: tuple, region: int, found: dict) -> dict:
             'pool_all': count(both)}
 
 
-def rank_in_main(maps: tuple, region: int, found: dict) -> tuple:
-    """`(rank, pool)` of the nearest MAIN window among the main windows only.
+def rank_in_main(maps_by_rot: dict, region: int, found: dict) -> tuple:
+    """`(rank, pool)` of the nearest MAIN window (at `found['rot']`) among the
+    main windows of every rotation.
 
     This is what an arm on a main-only grid can be scored on, so it is what every
     arm is scored on: an `all` arm's offset windows are left out of the pool, and
     the two kinds of arm meet on the same candidates and the same truth."""
-    main_maps, _ = maps
+    main_maps, _ = maps_by_rot[found['rot']]
     mr, mc = found['main_rc']
     answer = float(main_maps[region][mr, mc])
-    pools = [m.flatten() for m in main_maps if m.numel()]
+    pools, _ = _pools(maps_by_rot)
     return rank_of(answer, pools), int(sum(int(m.numel()) for m in pools))
 
 
+def truth_score(maps_by_rot: dict, region: int, found: dict, grid: str) -> float:
+    """The score of the truth window under one arm: the main window nearest the
+    shot for a main-only arm, the nearer of the main and offset windows for a
+    full-grid arm -- the rule `nearest_window` applies. The number the pipeline
+    bench's stage-2 `truth_score` is, for the same FoV and recipe."""
+    main_maps, ovlp_maps = maps_by_rot[found['rot']]
+    if grid == 'main' or found['truth'] == 'main':
+        mr, mc = found['main_rc']
+        return float(main_maps[region][mr, mc])
+    orow, ocol = found['ovlp_rc']
+    return float(ovlp_maps[region][orow, ocol])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  The stage 2 tables an arm writes
+#
+#  An arm on the full grid whose score the stage has (`mean`, `geomean`) IS a
+#  `SlidingWinSimRot`: a pooling, a score, the same windows. So it gets the stage 2
+#  entry the pipeline bench writes -- the same tables, the same place in the tree
+#  (`.../render=/stage1=oracle/stage2/`, this job's) -- and the demo page, stage 3
+#  and the plots read a window bench's arm as they read a pipeline run's:
+#
+#    output     the first STAGE2_K windows of the FoV, every rotation, lattice
+#               and region together, picked by the stage's own `candidate_set`
+#    truth      the window the FoV stands for, its score, and where it ranks
+#               among all the windows and among the main ones (+ the pools)
+#    tile_sims  the first STAGE2_TILE_SIMS windows' per-tile cosines
+#    truth_sim  the truth window's
+#
+#  The window bench scores a FoV at the level it was placed at, so the entry is
+#  under `stage1=oracle`. EVERY arm the run has is written, whatever it is: an arm
+#  the stage can be set to is the pipeline's own entry (its id is the config's),
+#  any other -- `min`, a `-M` arm, a pooling only this bench computes -- an entry
+#  of its own, with an id made from what it is. A new arm needs nothing added.
+# ══════════════════════════════════════════════════════════════════════════════
+
+STAGE2_K: int = 100            # windows kept per FoV: the stage's recipe `k`
+STAGE2_TILE_SIMS: int = 10     # windows, besides the truth one, with their per-tile cosines
+
+
+class ScoredWindows(SlidingWinSimRot):
+    """A `SlidingWinSimRot` whose window scores were computed before it was given
+    them: the bench streams the reference and keeps one score per window, not
+    the per-tile similarity maps the retriever reduces. Its `sim_maps_by_rot`
+    holds those scores (`[rows, cols]` per rotation, region and lattice) and
+    `_window_scores` yields them as they are, so `candidate_set` -- the stage's
+    own picking, its per-grid top k and its `min_sep_tiles` -- runs unchanged on
+    them. The stage's code is not copied and not touched."""
+
+    def _window_scores(self, sim_maps):
+        for ri, (main, offset) in enumerate(sim_maps):
+            for lattice, scores in (('main', main), ('offset', offset)):
+                if scores.numel():
+                    yield ri, lattice, scores
+
+
+class Stage2Arm:
+    """One arm on its way to a stage 2 entry. `entry_id` names the entry and `rec`
+    is its record. An arm the stage can be set to (the full grid, a pooling the
+    encoder names, `mean` or `geomean`) is the pipeline's own `slidewin` entry,
+    its id the config's. Any other arm -- `min`, a `-M` arm, a pooling only this
+    bench computes -- has an id made from what it is (encoder, pooling, lattices,
+    score, mask): its own entry, in the same tables, that no pipeline run asks
+    for. `tables` is what to fill; None when the entry is already there."""
+
+    def __init__(self, base: str, grid: str, score: str, entry_id: str,
+                 rec: dict, cfg: SlidingWinSimRotConfig) -> None:
+        self.base: str = base
+        self.grid: str = grid
+        self.score: str = score
+        self.name: str = token_name(base, grid)
+        self.entry_id: str = entry_id
+        self.rec: dict = rec
+        self.cfg: SlidingWinSimRotConfig = cfg
+        self.tables: Optional[Tables] = None
+
+
+def stage2_arms(args, arm_specs) -> list[Stage2Arm]:
+    """Every arm of the run as a stage 2 entry to write (`Stage2Arm`)."""
+    seg: str = args.mask_cfg.seg_id()
+    region: str = args.mask_cfg.region_id()
+    out: list[Stage2Arm] = []
+    base: str
+    grid: str
+    for base, grid in arm_specs:
+        score: str
+        for score in SCORES:
+            placeholder = SlidingWinSimRotConfig(
+                encoder=args.encoder_cfg, tile_size=TILE, overlap=True, k=STAGE2_K,
+                min_sep_tiles=1.0, score='mean')
+            cfg = None
+            if grid == 'all' and base != RAW and score in WINDOW_SCORES:
+                try:
+                    cfg = SlidingWinSimRotConfig(
+                        encoder=dataclasses.replace(args.encoder_cfg, pooling=base),
+                        tile_size=TILE, overlap=True, k=STAGE2_K, min_sep_tiles=1.0,
+                        score=score)
+                except ValueError:                   # the encoder has no such pooling
+                    cfg = None
+            if cfg is not None:
+                stage = Stage(2, 'slidewin', f'{args.encoder}-{base.replace("_", "-")}-{score}',
+                              cfg, SlidingWinSimRot, {}, also_id=(seg, region))
+                rec = dict(stage.record(stage1=ORACLE, seg=seg, region=region),
+                           truth=TRUTH_VERSION, limit=0)
+                out.append(Stage2Arm(base, grid, score, stage.id, rec, cfg))
+                continue
+            hexid: str = short_id([args.encoder_cfg.identity_id(), base, grid, score,
+                                   seg, region, 'window-arm'])
+            label: str = f'window-{args.encoder}-{token_name(base, grid).replace("_", "-")}-{score}-{hexid}'
+            rec = dict(id=hexid, parts=[f'pooling={base}', f'grid={grid}', f'score={score}'],
+                       versions={'window_arm': ROW_VERSION},
+                       upstream={'stage1': ORACLE, 'seg': seg, 'region': region},
+                       env=environment(), label=label, truth=TRUTH_VERSION, limit=0)
+            out.append(Stage2Arm(base, grid, score, label, rec, placeholder))
+    return out
+
+
+def stage2_tables(slide, lv: int, ds: float, grids, valid, final, qgf, dims,
+                  arm_specs, args, encoder, device, base_addr,
+                  seconds_each: float) -> None:
+    """Write the stage 2 entry of every arm that has none yet, for one (slide,
+    level). `valid` are the FoVs `run_slide_level` scored, `final` their window
+    scores (`finalize_windows`), `qgf` their query descriptors per rotation."""
+    arms: list[Stage2Arm] = stage2_arms(args, arm_specs)
+    entry = base_addr.at(stage1=ORACLE).entry('stage2')
+    todo: list[Stage2Arm] = []
+    for arm in arms:
+        if status(entry, arm.entry_id, arm.rec, ROLES[2]) != 'hit':
+            arm.tables = Tables(entry, arm.entry_id, arm.rec, ROLES[2])
+            todo.append(arm)
+    if not todo:
+        print(f'  L{lv}  stage 2 tables: all {len(arms)} arms are already there', flush=True)
+        return
+    n_regions: int = len(grids)
+    frame: dict = dict(level=lv, ds=ds, irretrievable_lvl='', alter_lvl='')
+    #: what the per-tile cosines are asked of: (arm, FoV, rank or None for the truth, window)
+    wanted: list[tuple] = []
+    queries: dict = {}
+
+    for s_idx, (fov_id, shot, ri, found) in enumerate(valid):
+        qc = QueryPatchContainer(shot[1])
+        qc.extract_all(TILE, overlap=True)
+        queries[s_idx] = qc
+        for arm in todo:
+            maps = {rot: shot_maps(final[rot][arm.name], arm.score, s_idx, n_regions)
+                    for rot in dims}
+            ret = ScoredWindows(arm.cfg, 'cpu')
+            ret.grids, ret.level, ret.ds = list(grids), lv, ds
+            ret.sim_maps_by_rot = {rot: list(zip(*m)) for rot, m in maps.items()}
+            cs = ret.candidate_set(STAGE2_K)
+            if not len(cs):
+                arm.tables.add('output', fov_id, [dict(frame, error='no window', t_s=0.0)])
+                continue
+            arm.tables.add('output', fov_id, [dict(r, **frame, error='', t_s=round(seconds_each, 3))
+                                              for r in cs.rows(qc)])
+            # the window the FoV stands for: the nearer of its two grid answers --
+            # on a main-only arm the main one, the only lattice it scored
+            if arm.grid == 'all':
+                ranks = recall_ranks(maps, ri, found)
+            else:
+                rank_m, pool_m = rank_in_main(maps, ri, found)
+                ranks = {'rank_main_in_main': rank_m, 'pool': pool_m,
+                         'rank_main_in_all': rank_m, 'rank_offset_in_all': rank_m,
+                         'pool_all': pool_m}
+            lattice, (row, col) = (('main', found['main_rc'])
+                                   if arm.grid != 'all' or found['truth'] == 'main'
+                                   else ('offset', found['ovlp_rc']))
+            rot = found['rot']
+            truth_score = float((maps[rot][0] if lattice == 'main' else maps[rot][1])[ri][row, col])
+            window = Candidate(ri, lattice, row, col, rot, truth_score)
+            box = CandidateSet(candidates=(window,), level=lv, ds=ds, grids=tuple(grids),
+                               irretrievable_lvl=(), alter_lvl=()).rows(qc)[0]
+            arm.tables.add('truth', fov_id, [dict(
+                truth_region=ri, truth_lattice=lattice, truth_row=row, truth_col=col,
+                truth_rotation=rot, truth_score=truth_score,
+                truth_dist_l0=found['d_main' if lattice == 'main' else 'd_overlap'] * ds,
+                truth_main_dist_l0=found['d_main'] * ds,
+                truth_x0=box['x0'], truth_y0=box['y0'], truth_w0=box['w0'], truth_h0=box['h0'],
+                truth_level=lv,
+                truth_rank_all=(ranks['rank_main_in_all'] if lattice == 'main'
+                                else ranks['rank_offset_in_all']),
+                truth_rank_main_in_all=ranks['rank_main_in_all'],
+                pool_all=ranks['pool_all'], pool_main=ranks['pool'],
+                truth_rank_main=ranks['rank_main_in_main'])])
+            wanted.append((arm, s_idx, fov_id, None, window))
+            wanted += [(arm, s_idx, fov_id, rank, c)
+                       for rank, c in enumerate(cs.candidates[:STAGE2_TILE_SIMS], 1)]
+
+    # the tiles under those windows, read and encoded once each, for every arm
+    keys: dict = {}
+    for arm, s_idx, _, _, c in wanted:
+        if arm.base == RAW:
+            continue
+        rows_w, cols_w = dims[c.rotation]
+        for i in range(rows_w):
+            for j in range(cols_w):
+                keys.setdefault((c.region_index, c.lattice, c.row + i, c.col + j), len(keys))
+    bases: list[str] = list(dict.fromkeys(arm.base for arm in todo if arm.base != RAW))
+    table: dict = {}
+    if keys:
+        points = [grids[ri].tile_origin_l0(lat, r, c) for (ri, lat, r, c) in keys]
+        reader = SlideReader(slide, workers=args.budget.workers)
+        for batch, index in reader.read_points(points, ReadSpec(TILE, TILE), ds, level=lv,
+                                               batch=256):
+            got = pooled_descriptors(batch, encoder, bases)
+            for b in bases:
+                if b not in table:
+                    table[b] = torch.empty(len(keys), got[b].shape[1], device=device)
+                table[b][index.to(device)] = got[b].float().to(device)
+
+    worst: float = 0.0
+    for arm, s_idx, fov_id, rank, c in wanted:
+        if arm.base == RAW:
+            continue                      # 393,216 numbers a tile: its tile tables are left empty
+        rows_w, cols_w = dims[c.rotation]
+        idx = torch.tensor([[keys[(c.region_index, c.lattice, c.row + i, c.col + j)]
+                             for j in range(cols_w)] for i in range(rows_w)], device=device)
+        cos = (table[arm.base][idx] * qgf[c.rotation][arm.base][s_idx]).sum(-1).cpu().numpy()
+        rows = [dict(q_row=i, q_col=j, ref_row=c.row + i, ref_col=c.col + j,
+                     cosine=float(cos[i, j]))
+                for i in range(rows_w) for j in range(cols_w)]
+        if rank is None:
+            arm.tables.add('truth_sim', fov_id, rows)
+        else:
+            arm.tables.add('tile_sims', fov_id, [dict(rank=rank, **r) for r in rows])
+            if arm.score == 'mean':               # the window's score is the mean of these
+                worst = max(worst, abs(float(cos.mean()) - c.score))
+    for arm in todo:
+        arm.tables.write()
+    print(f'  L{lv}  stage 2 tables: {len(todo)} arms x {len(valid)} FoV -> {entry.dir}  '
+          f'(re-scored from the tile cosines: largest |diff| to the streamed score {worst:.1e})',
+          flush=True)
+
+
 def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
-                    bases, device, supply, shots) -> list:
+                    bases, device, supply, shots, job: str) -> list:
     """Every FoV of one (slide, level), scored by every arm. `shots` are this
     level's `(index, meta, image, params)` out of the slide's one draw
     (`supply`, the draw every bench takes its FoVs from); `index` is the FoV's
@@ -1274,13 +1788,19 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
         # small tissue section. Not an error: say so.
         print(f'  L{level} (ds {ds:g}): no FoV position -- skipped', flush=True)
         return []
+    timer = PhaseTimer(fine=bool(getattr(args, 'timing', False)))
     camera = supply.camera_for(shots[0][1].ds)
     bank = {index: (meta, image, params) for index, meta, image, params in shots}
     rows_q = camera.output_h // TILE
     cols_q = camera.output_w // TILE
+    # the query's tile grid at each rotation the stage searches: the sides swap
+    # at 90 / 270
+    dims = {rot: ((rows_q, cols_q) if (rot // 90) % 2 == 0 else (cols_q, rows_q))
+            for rot in ROTATIONS}
 
     # The regions and their grids come from geometry alone. Which FoVs have an
     # answer window is decided here, before any tile is encoded.
+    timer.start(PLACE)
     lv, ds = SlideReader(slide).native_scale(ds=ds)
     regions = mask.patchable(TILE * ds).tissue_regions
     grids = region_grids(regions, ds=ds, level=lv, tile_size=TILE, overlap=True)
@@ -1293,14 +1813,15 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
         if i is None:
             n_no_region += 1
             continue
-        found = answers_for(camera, gx, gy, params, regions[i], ds, rows_q, cols_q)
-        if not window_exists(grids[i], found, rows_q, cols_q):
+        found = answers_for(camera, gx, gy, params, regions[i], ds, shot[1].shape)
+        if not window_exists(grids[i], found, found['rows_t'], found['cols_t']):
             n_no_window += 1
             continue
-        if float(params['rot_deg']) % 360 == 0 and float(params['scale']) == 1.0:
+        if (float(params['rot_deg']) % 360 == 0 and float(params['scale']) == 1.0
+                and float(params.get('angle_jitter', 0.0)) == 0.0):
             # The one place this arithmetic can be checked against something
-            # else: an upright, unscaled shot has its window at the FoV's own
-            # top-left. If the centre mapping is wrong it is wrong here first.
+            # else: an upright, unscaled, unjittered shot has its window at the
+            # FoV's own top-left. If the centre mapping is wrong it is wrong here first.
             want_x = (gx - regions[i].x) / ds
             want_y = (gy - regions[i].y) / ds
             if abs(found['x_n'] - want_x) > 1.5 or abs(found['y_n'] - want_y) > 1.5:
@@ -1309,43 +1830,53 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
                     f'({found["x_n"]:.1f}, {found["y_n"]:.1f}) but an upright '
                     f'shot starts at ({want_x:.1f}, {want_y:.1f})')
         valid.append((fov_id, shot, i, found))
+    timer.stop(PLACE, len(bank))
     if not valid:
         print(f'  L{level}  0/{len(bank)} FoV with an answer window -- skipped',
               flush=True)
         return []
 
-    # QGF: the query's tile features, once per shot and pooling.
-    per_base = {b: [] for b in bases}
+    timer.start(QUERY)
+    # QGF: the query's tile features, once per shot, pooling and rotation. The
+    # shot is turned the way the stage turns it (`np.rot90`, counter-clockwise)
+    # and cut into whole tiles from the turned photo's top-left.
+    per_base = {rot: {b: [] for b in bases} for rot in dims}
     for _, shot, _, _ in valid:
-        container = QueryPatchContainer(shot[1])
-        container.extract_all(TILE, overlap=False)   # only the main kernel is
-        if (container.grid.grid_rows, container.grid.grid_cols) != (rows_q, cols_q):
-            raise AssertionError(
-                f'{stem} L{level}: a query cuts into {container.grid.grid_rows}x'
-                f'{container.grid.grid_cols} tiles, the camera says {rows_q}x{cols_q}')
-        pooled = pooled_descriptors(list(container), encoder, bases)  # ever used
-        for b in bases:
-            per_base[b].append(
-                FeaturesMap(container.grid, pooled[b]).main_feature_grid())
-    qgf = {b: torch.stack(v).to(device) for b, v in per_base.items()}
+        for rot, (want_rows, want_cols) in dims.items():
+            turned = shot[1] if rot == 0 else np.rot90(shot[1], k=rot // 90)
+            container = QueryPatchContainer(turned)
+            container.extract_all(TILE, overlap=False)   # only the main kernel is
+            if (container.grid.grid_rows, container.grid.grid_cols) != (want_rows, want_cols):
+                raise AssertionError(
+                    f'{stem} L{level}: a query turned {rot} cuts into '
+                    f'{container.grid.grid_rows}x{container.grid.grid_cols} tiles, '
+                    f'the camera says {want_rows}x{want_cols}')
+            pooled = pooled_descriptors(list(container), encoder, bases)  # ever used
+            for b in bases:
+                per_base[rot][b].append(
+                    FeaturesMap(container.grid, pooled[b]).main_feature_grid())
+    qgf = {rot: {b: torch.stack(v).to(device) for b, v in by_base.items()}
+           for rot, by_base in per_base.items()}
+    timer.stop(QUERY, len(valid) * sum(r * c for r, c in dims.values()))
 
     # RGF: streamed one tile row at a time, scored as it goes.
-    started = time.time()
+    timer.start(STREAM)
     acc, n_tiles = stream_windows(slide, regions, grids, ds, level, arms, qgf,
-                                  len(valid), rows_q, cols_q, encoder, device,
+                                  len(valid), dims, encoder, device,
                                   workers=args.budget.workers,
-                                  block_rows=args.block_rows)
+                                  block_rows=args.block_rows, timer=timer)
+    timer.stop(STREAM, n_tiles)
+    timer.start(RANK)
     final = finalize_windows(acc)
-    del acc, qgf
-    print(f'  L{level}  reference streamed  {n_tiles:,} tiles  '
-          f'{time.time() - started:.0f}s', flush=True)
+    del acc
 
     rows = []
     for s_idx, (fov_id, shot, i, found) in enumerate(valid):
         for base, grid in arms:
             name = token_name(base, grid)
             for score in SCORES:
-                maps = shot_maps(final[name], score, s_idx, len(regions))
+                maps = {rot: shot_maps(final[rot][name], score, s_idx, len(regions))
+                        for rot in dims}
                 if grid == 'all':
                     ranks = recall_ranks(maps, i, found)
                     rank_main, pool = ranks['rank_main_in_main'], ranks['pool']
@@ -1372,8 +1903,14 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
                     # nearer one and `rank_overlap` otherwise, and here both are
                     # the main-only rank, so every table below is on main only.
                     'rank_main': rank_main, 'rank_overlap': rank_main,
+                    # where the truth window is (the rotation that turns the shot
+                    # upright) and what it scores: the number the pipeline bench's
+                    # stage-2 `truth` row holds for the same FoV and recipe
+                    'truth_rot': found['rot'],
+                    'truth_score': round(truth_score(maps, i, found, grid), 6),
                     **extra})
 
+    timer.stop(RANK, len(rows))
     base = [r for r in rows if r['arm'] == BASELINE]
     truths = sorted(truth_rank(r) for r in base)
     # The truth's mean percentile. A uniformly random window sits at 0.500, so
@@ -1387,6 +1924,13 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     print(f'  L{level}  {len(base)}/{len(bank)} FoV   baseline rank_truth med '
           f'{truths[len(truths) // 2] if truths else 0:,}   truth_pctile '
           f'{truth_pct:.4f} (random=0.5000){skipped}', flush=True)
+    timer.start(TABLES)
+    stage2_tables(slide, lv, ds, grids, valid, final, qgf, dims, arms, args, encoder,
+                  device, supply.render_address.on(job),
+                  timer.seconds.get(STREAM, 0.0) / max(1, len(valid)))
+    del qgf
+    timer.stop(TABLES, len(valid))
+    print(timer.report(level, len(valid)), flush=True)
     return rows
 
 
@@ -1414,9 +1958,10 @@ def write_csv(rows: list, path: Path) -> None:
 
 
 def read_rows(paths, quiet: bool = False) -> list:
-    integers = {'level', 'fov_id', 'pool', 'rank_main', 'rank_overlap',
+    integers = {'level', 'fov_id', 'pool', 'rank_main', 'rank_overlap', 'truth_rot',
                 *RECALL_COLUMNS}
-    floats = {'d_main', 'd_overlap', 'white_frac', 'ds', 'rot_deg', 'scale'}
+    floats = {'d_main', 'd_overlap', 'white_frac', 'ds', 'rot_deg', 'scale',
+              'truth_score'}
     rows = []
     for path in paths:
         with open(path, newline='') as handle:
@@ -1437,7 +1982,7 @@ def read_rows(paths, quiet: bool = False) -> list:
 
 #: The code that turns configs into a row (ConfigIdentity rule 3); bump it when
 #: the same configs would produce other numbers, and say why in TODO.log.
-ROW_VERSION = 0
+ROW_VERSION = 2      # 2: also the stage 2 tables (1: every rotation searched, the truth at the turned query's grid)
 
 
 def config_id(args, arm_specs, configs: dict) -> str:
@@ -1609,7 +2154,7 @@ def main() -> int:
                              'list or the grouping never costs a GPU hour.')
 
     # ── which slides ──────────────────────────────────────────────────────────
-    # The slides and their FoVs are every bench's (bench_locascope.run_slides,
+    # The slides and their FoVs are every bench's (BenchCommon.run_slides,
     # supply_for): the first --n-wsi of each dataset's recorded --split, one
     # draw per slide across its levels, so a FoV here is the same photo the
     # pipeline bench and the stage-1 bench score under the same flags.
@@ -1637,9 +2182,8 @@ def main() -> int:
                              "cannot give them says how many it did")
     parser.add_argument('--rotation', type=int, choices=(0, 90, 180, 270),
                         default=None, help='= --camera-rotation-choices with one '
-                        'value: the shots are rotated by this. Scored against an '
-                        'UPRIGHT reference, so recall falls for a reason unrelated '
-                        'to pooling')
+                        'value: only shots taken at this rotation. Every shot is '
+                        'searched at all four rotations either way')
     parser.add_argument('--scale-min', type=float, default=None,
                         help='= the low end of --camera-scale-range')
     parser.add_argument('--scale-max', type=float, default=None,
@@ -1681,6 +2225,10 @@ def main() -> int:
                              'of the encoder. Default: CpuBudget -- this process\'s '
                              'share of the cpus (cpus / shards) minus one, the rest '
                              'being torch threads. Changes no number')
+    parser.add_argument('--timing', action='store_true',
+                        help='split the reference stream\'s time into reading, '
+                             'encoding, cosines and accumulating (the GPU is waited '
+                             'for around each, so the run is a little slower)')
     parser.add_argument('--block-rows', type=int, default=BLOCK_ROWS,
                         help=f'(CONFIG {BLOCK_ROWS}): main tile rows per read. '
                              f'Changes no number')
@@ -1774,6 +2322,7 @@ def main() -> int:
         return 0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    require_gpu_if_allocated(device)
     # The run's configs, each resolved once: what the recipes hold, then the
     # flag that names one field, then the field's own flag. A bad value is
     # refused here by the config's own checks, before anything is built.
@@ -1809,6 +2358,7 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
     cfg = encoder_cfg
+    args.encoder_cfg, args.mask_cfg = encoder_cfg, mask_cfg   # what the stage 2 tables' ids are made of
 
     # Which arms this encoder can actually run. POOLINGS above is what the bench
     # WANTS compared; the patch grid decides what is possible, and the two are
@@ -1959,7 +2509,7 @@ def main() -> int:
                     part = part_path(parts_dir, stem, level)
                     rows = run_slide_level(
                         slide, dataset, stem, level, mask, args, encoder,
-                        arm_specs, bases, device, supply, by_level.get(level, []))
+                        arm_specs, bases, device, supply, by_level.get(level, []), job)
                     write_part(rows, part)
                     print(f'  L{level}  {len(rows)} rows -> {part.name}   '
                           f'{peak_memory_line()}', flush=True)

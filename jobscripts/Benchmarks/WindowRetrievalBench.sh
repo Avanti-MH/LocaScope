@@ -6,7 +6,7 @@
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --gpus-per-node=1                 # one card: encode + HEST segmentation
 #SBATCH --cpus-per-task=8                 # openslide reads + the CPU transform
-#SBATCH --mem=600G                        # this partition's ceiling; the reference streams a tile row at a time
+#SBATCH --mem=200G                        # the H200 cap per GPU (1 GPU here); the reference streams a tile row at a time
 #SBATCH --ntasks-per-node=1               # Tasks per node
 #SBATCH -o /work/u26130998/log/%x          # STDOUT, named by --job-name
 #SBATCH -e /work/u26130998/log/%x          # STDERR
@@ -125,9 +125,10 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # their draws instead of drawing again (the same draw either way).
 #
 # ROTATION / SCALE_MIN / SCALE_MAX replace the recipe's gap, which rotates by
-# every quarter turn and scales 0.90-1.15. Anything but 0 and 1 is scored against
-# an UPRIGHT reference window, so recall falls for a reason unrelated to pooling;
-# ROTATION=0 SCALE_MIN=1 SCALE_MAX=1 isolates the pooling.
+# every quarter turn and scales 0.90-1.15. They only restrict which FoVs are
+# photographed: every shot is searched at all four rotations, as the stage does
+# (the truth is the window at the rotation that turns the shot upright), so a
+# rotated shot is scored fairly and none of them is needed to isolate the pooling.
 
 # ---------------- which arms, and where the masks come from -----------------
 #
@@ -158,6 +159,9 @@ COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
 # minus one -- CpuBudget). BLOCK_ROWS: tile rows per read (default 8).
 [ -n "${READ_WORKERS:-}" ] && COMMON="$COMMON --read-workers $READ_WORKERS"
 [ -n "${BLOCK_ROWS:-}" ] && COMMON="$COMMON --block-rows $BLOCK_ROWS"
+# TIMING=1: split the reference stream's time into reading, encoding, cosines and
+# accumulating (the GPU is waited for around each, so the run is a little slower).
+[ -n "${TIMING:-}" ] && COMMON="$COMMON --timing"
 [ "${GATES_ONLY:-0}" = "1" ] && COMMON="$COMMON --gates-only"   # the seconds-long checks, then stop
 [ -n "${ARMS:-}" ] && COMMON="$COMMON --arms $ARMS"
 [ -n "${SEG:-}" ] && COMMON="$COMMON --seg $SEG"
