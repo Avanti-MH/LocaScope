@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=TileRetrievalBench    # Job name -> log/<name> and result/<name>/
-#SBATCH --partition=normal2              # Partition
+#SBATCH --partition=8gpus                # Partition
 #SBATCH --time=08:00:00                  # ~50 min expected; slack for MRXS masks
 #SBATCH --account=MST114560              # Account
 #SBATCH --nodes=1                        # Number of nodes
@@ -13,11 +13,11 @@
 
 # ---------------- Load modules ----------------
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # ---------------- Tile-level retrieval: which pooling finds the tile ---------

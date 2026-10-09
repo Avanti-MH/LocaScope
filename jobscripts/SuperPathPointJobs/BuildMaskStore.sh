@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=BuildMaskStore         # -> log/%x, result/%x/
-#SBATCH --partition=normal2               # Partition
+#SBATCH --partition=8gpus                 # Partition
 #SBATCH --time=06:00:00                   # 6 slides x 3.5-6 min measured, x2 margin
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
@@ -12,11 +12,11 @@
 
 # ---------------- Load modules ----------------
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 

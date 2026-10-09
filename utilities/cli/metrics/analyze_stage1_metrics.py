@@ -1198,7 +1198,7 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
         print(f'  [skip] matplotlib not available in this python -- no PNG '
              f'for {dataset} (the text tables above are unaffected; run '
              f'this under an env that has it, e.g. `conda activate '
-             f'gigapath`, for the plot)')
+             f'locascope`, for the plot)')
         return
 
     rows = [r for r in view2_rows if r['dataset'] == dataset]

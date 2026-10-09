@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=PrepareChainStack      # -> log/%x, result/%x/
-#SBATCH --partition=normal                # Partition
+#SBATCH --partition=8gpus                 # Partition
 #SBATCH --time=24:00:00                   # 12 slides in one job now (2026-09-06);
                                           # resumable -- a timeout only costs the
                                           # slides not yet reached, re-submit to
@@ -14,10 +14,10 @@
 #SBATCH -e /work/u26130998/log/%x         # STDERR
 
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh
 
 # =============================================================================

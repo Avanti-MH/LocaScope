@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=MakeHaLabels           # -> log/%x, result/%x/
-#SBATCH --partition=normal2               # Partition
+#SBATCH --partition=8gpus                 # Partition
 #SBATCH --time=24:00:00                   # UNKNOWN until STAGE=measure has run
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
@@ -12,11 +12,11 @@
 
 # ---------------- Load modules ----------------
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 

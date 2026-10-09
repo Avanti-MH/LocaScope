@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=SurvivalAlphaAnalysis   # -> log/%x, result/%x/
-#SBATCH --partition=normal                 # Partition
+#SBATCH --partition=8gpus                  # Partition
 #SBATCH --time=04:00:00                    # detector forward pass per tile, no training
 #SBATCH --account=MST114560                # Account
 #SBATCH --nodes=1                          # Number of nodes
@@ -11,10 +11,10 @@
 #SBATCH -e /work/u26130998/log/%x          # STDERR
 
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh
 
 # =============================================================================

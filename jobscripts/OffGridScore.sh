@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=OffGridScore           # Job name -> log/<name>, result/<name>
-#SBATCH --partition=normal                # Partition
+#SBATCH --partition=8gpus                 # Partition
 #SBATCH --time=24:00:00                   # step 4 is 1089 captures per point
 #SBATCH --array=0-9                       # ONE SLIDE PER TASK: N_WSI per dataset
 #SBATCH --account=MST114560               # Account
@@ -14,11 +14,11 @@
 
 # ---------------- Load modules ----------------
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 

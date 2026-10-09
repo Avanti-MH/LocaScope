@@ -12,10 +12,10 @@
 #SBATCH -e /work/u26130998/log/%x      # STDERR
 
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================

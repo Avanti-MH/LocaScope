@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=SurvivalAlphaAnalysisSweep   # -> log/%x_%a, result/%x/...
-#SBATCH --partition=normal                      # Partition
+#SBATCH --partition=8gpus                       # Partition
 #SBATCH --time=48:00:00                         # per task -- same budget as a single run
 #SBATCH --account=MST114560                     # Account
 #SBATCH --nodes=1                               # Number of nodes
@@ -12,10 +12,10 @@
 #SBATCH -e /work/u26130998/log/%x_%a            # STDERR
 
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh
 
 # =============================================================================

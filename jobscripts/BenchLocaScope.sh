@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=BenchLocaScope        # Job name -> log/<name> and result/cache/<name>/
-#SBATCH --partition=normal2              # Partition
-#SBATCH --time=48:00:00                  # partition normal caps at 2 days
+#SBATCH --partition=8gpus                # Partition
+#SBATCH --time=48:00:00                  # partition 8gpus caps at 2 days
 #SBATCH --account=MST114560              # Account
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --gpus-per-node=4                # >1 so --multi-gpu has cards to use
@@ -13,11 +13,11 @@
 
 # ---------------- Load modules ----------------
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # ---------------- End-to-end bench: every stage's results into the cache ----

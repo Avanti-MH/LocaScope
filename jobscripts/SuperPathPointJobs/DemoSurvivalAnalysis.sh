@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=DemoSurvivalAnalysis    # -> log/%x, result/%x/
-#SBATCH --partition=normal                 # Partition
+#SBATCH --partition=8gpus                  # Partition
 #SBATCH --time=00:30:00                    # both parts: no training, chains_
                                             # stack reads a whole real tree
                                             # (~425 tiles), merge_grid is
@@ -15,10 +15,10 @@
 #SBATCH -e /work/u26130998/log/%x          # STDERR
 
 ml purge
-ml load miniconda3/24.11.1
+ml load miniconda3/26.1.1
 ml load cuda/12.6
 
-conda activate gigapath
+conda activate locascope
 source jobscripts/_env.sh
 
 # =============================================================================
