@@ -288,15 +288,41 @@ def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
     return ok
 
 
-def run_stage3(wsi, query_qc, cs, args):
-    """Stage 3 on stage 2's output."""
+def run_stage3(wsi, query_qc, cs, args, device=None):
+    """Stage 3 on stage 2's output, matched on `device` (a CUDA device matches
+    on the GPU, None or a CPU with OpenCV)."""
     localizer = SiftRansacLocalizer(replace(
         SIFT_RECIPES['default'], min_inliers=args.min_inliers,
-        padding=args.padding)).build(wsi)
-    result = localizer.localize(query_qc, cs)
+        padding=args.padding), device).build(wsi)
+    result = localizer.localize_one(query_qc, cs)
     print(f'  success={result.success}  matches={result.match_count}  '
          f'inliers={result.inlier_count}')
     return result
+
+
+def check_stage3_matcher(wsi, query_qc, cs, args, device, gpu_result) -> bool:
+    """The GPU matcher is OpenCV's matcher, on this very candidate and not only
+    on made-up descriptors: the same query and crop matched both ways must give
+    the same number of matches, the same inliers and the same place. Skipped on
+    a machine with no CUDA. The made-up descriptors, 7 cases, are
+    `test_sift_matcher.py`'s, run first."""
+    import test_sift_matcher                                         # noqa: PLC0415
+    ok: bool = test_sift_matcher.main() == 0
+    if device.type != 'cuda':
+        print('  (no cuda: the real candidate is matched with OpenCV only)')
+        return ok
+    cv_result = run_stage3(wsi, query_qc, cs, args, None)
+    same: bool = (cv_result.match_count == gpu_result.match_count
+                  and cv_result.inlier_count == gpu_result.inlier_count
+                  and cv_result.success == gpu_result.success
+                  and abs(cv_result.center_x0 - gpu_result.center_x0) < 1e-3
+                  and abs(cv_result.center_y0 - gpu_result.center_y0) < 1e-3)
+    print(f'  OpenCV  matches={cv_result.match_count}  inliers={cv_result.inlier_count}  '
+          f'centre=({cv_result.center_x0:.2f}, {cv_result.center_y0:.2f})')
+    print(f'  GPU     matches={gpu_result.match_count}  inliers={gpu_result.inlier_count}  '
+          f'centre=({gpu_result.center_x0:.2f}, {gpu_result.center_y0:.2f})')
+    print(f'  [{"ok" if same else "FAIL"}] the GPU matcher and OpenCV agree on this candidate')
+    return ok and same
 
 
 def dist_um(x, y, args, base_mpp) -> float:
@@ -421,8 +447,13 @@ def main() -> int:
     if 3 in args.stages:
         print('\n[3] SIFT + RANSAC...')
         t0 = time.perf_counter()
-        sift_result = run_stage3(wsi, query_qc, retrieval_result, args)
+        sift_result = run_stage3(wsi, query_qc, retrieval_result, args, device)
         timings['3. sift ransac'] = time.perf_counter() - t0
+        print('\n[3b] the GPU matcher against OpenCV...')
+        t0 = time.perf_counter()
+        ok &= check_stage3_matcher(wsi, query_qc, retrieval_result, args, device,
+                                   sift_result)
+        timings['3b. matcher check'] = time.perf_counter() - t0
         if sift_result.success:
             sift_err = dist_um(sift_result.x0, sift_result.y0, args, base_mpp)
             improvement = ret_err - sift_err
