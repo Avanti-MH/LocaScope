@@ -104,7 +104,7 @@ def _rec(id_, **parts):
 
 
 def t_every_entry_level_is_a_level_and_every_parent_a_kind():
-    assert all(p is None or p in Cache.TREE for p in Cache.TREE.values())
+    assert all(p in Cache.TREE for k in Cache.TREE for p in Cache._parents(k))
     assert all(lv in Cache.TREE for lvs in Cache.ENTRIES.values() for lv in lvs)
     return f'{len(Cache.TREE)} levels, {len(Cache.ENTRIES)} entry kinds'
 
@@ -130,6 +130,48 @@ def t_address_refuses_what_the_tree_does_not_have():
         _refused(Cache.Address('J', slide='s').at, slide='t'),         # twice
     ]
     assert 'seg' in msgs[0], msgs[0]
+    return f'{len(msgs)} refused'
+
+
+def t_photos_is_the_second_parent_of_stage1():
+    with _UnderTemp() as res:
+        photos = Cache.Address('J', slide='s', seg='g', region='r', photos='p1')
+        assert photos.dir == (res / 'cache' / 'J' / 'slide=s' / 'seg=g'
+                              / 'region=r' / 'photos=p1'), photos.dir
+        assert photos.leaf == 'photos'
+        assert photos.entry('shots').dir == photos.dir / 'shots'
+        assert photos.entry('stage1').dir == photos.dir / 'stage1'
+        s2 = photos.at(stage1='knn-1').entry('stage2')
+        assert s2.dir == photos.dir / 'stage1=knn-1' / 'stage2', s2.dir
+        s3 = photos.at(stage1='knn-1').at(stage2='sw-1').entry('stage3')
+        assert s3.dir == photos.dir / 'stage1=knn-1' / 'stage2=sw-1' / 'stage3', s3.dir
+        # the synthetic chain is what it was
+        synth = Cache.Address('J', slide='s', seg='g', region='r', plan='p',
+                              draw='d', render='g1')
+        assert synth.entry('stage1').dir == synth.dir / 'stage1'
+        assert synth.at(stage1='knn-1').entry('stage2').dir.name == 'stage2'
+        # children() finds the levels of either chain
+        region = Cache.Address('J', slide='s', seg='g', region='r')
+        (region.dir / 'photos=aa').mkdir(parents=True)
+        (photos.dir / 'stage1=k1').mkdir(parents=True)
+        assert region.children('photos') == ['aa', 'p1']      # p1 holds stage1=k1
+        assert photos.children('stage1') == ['k1']
+    return 'photos holds shots and stage1; the render chain unchanged'
+
+
+def t_photos_and_render_never_meet():
+    msgs = [
+        _refused(Cache.Address, 'J', slide='s', seg='g', region='r', plan='p',
+                 draw='d', render='g1', photos='p1'),                  # two chains
+        _refused(Cache.Address, 'J', slide='s', seg='g', region='r',
+                 photos='p1', plan='p'),                                # two branches
+        _refused(Cache.Address, 'J', slide='s', seg='g', region='r',
+                 stage1='x'),                                           # no parent
+        _refused(Cache.Address, 'J', slide='s', seg='g', photos='p1'),  # no region
+        _refused(Cache.Address('J', slide='s', seg='g', region='r').entry,
+                 'shots'),                                              # shots at photos
+    ]
+    assert 'stage1' in msgs[2] and 'photos' in msgs[2], msgs[2]
     return f'{len(msgs)} refused'
 
 

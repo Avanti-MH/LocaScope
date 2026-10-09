@@ -18,6 +18,11 @@ THE TREE
 of the level each entry kind sits in. An `Address` can only grow along `TREE`:
 a level without its parent, two branches at once or an unknown kind is refused
 when the address is made, so no caller can spell a path the tree does not have.
+
+A level may nest under one of several parents (`stage1` under `render`, the
+synthetic photos' chain, or under `photos`, a folder of real ones): TREE then
+holds a tuple, and the address takes the parent it has. Both at once is refused
+like any two branches.
 A `<kind>=<id>/` directory is one chosen input; a `<kind>/` directory holds the
 sibling variants computed from that same input, one `record_<id>.json` per
 variant and every file of the variant named `<role>_<id>.<ext>`.
@@ -64,7 +69,7 @@ import shutil
 import sys
 import uuid
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 from _paths import RESULT_DIR, job_name                          # noqa: F401
 from ConfigIdentity import record_diff                           # noqa: E402
@@ -78,17 +83,19 @@ class CacheMismatch(RuntimeError):
 
 # ── the tree ──────────────────────────────────────────────────────────────────
 
-#: Each level kind and the level it nests under; None is the job's root.
-TREE: Dict[str, Optional[str]] = {
+#: Each level kind and the level it nests under; None is the job's root. A
+#: tuple names the levels it may nest under, one of which the address has.
+TREE: Dict[str, Union[None, str, Tuple[str, ...]]] = {
     'dataset': None,
     'slide':   None,
     'seg':     'slide',
     'region':  'seg',
     'grid':    'region',
     'plan':    'region',
+    'photos':  'region',
     'draw':    'plan',
     'render':  'draw',
-    'stage1':  'render',
+    'stage1':  ('render', 'photos'),
     'stage2':  'stage1',
 }
 
@@ -99,7 +106,8 @@ ENTRIES: Dict[str, Tuple[str, ...]] = {
     'features':   ('grid', 'draw', 'render'),
     'draw':       ('plan',),
     'render':     ('draw',),
-    'stage1':     ('render',),
+    'shots':      ('photos',),
+    'stage1':     ('render', 'photos'),
     'stage2':     ('stage1',),
     'stage3':     ('stage2',),
     'labels':     ('draw',),
@@ -128,12 +136,35 @@ def dataset_key(dataset_id: str) -> str:
     return _name('dataset id', dataset_id.replace('/', '_'))
 
 
-def _chain(kind: str) -> Tuple[str, ...]:
-    """The kinds from the root down to `kind`, inclusive."""
-    out = []
-    while kind is not None:
-        out.append(kind)
-        kind = TREE[kind]
+def _parents(kind: str) -> Tuple[str, ...]:
+    """The levels `kind` may nest directly under; empty for a root level."""
+    parent: Union[None, str, Tuple[str, ...]] = TREE[kind]
+    if parent is None:
+        return ()
+    return (parent,) if isinstance(parent, str) else tuple(parent)
+
+
+def _chain(kind: str, present: Optional[Iterable[str]] = None) -> Tuple[str, ...]:
+    """The kinds from the root down to `kind`, inclusive. A kind with several
+    possible parents takes the one in `present` (the levels of the address
+    being made); none or more than one of them is refused."""
+    have: set = set(present) if present is not None else set()
+    out: List[str] = []
+    current: Optional[str] = kind
+    while current is not None:
+        out.append(current)
+        options: Tuple[str, ...] = _parents(current)
+        if not options:
+            current = None
+        elif len(options) == 1:
+            current = options[0]
+        else:
+            chosen: List[str] = [p for p in options if p in have]
+            if len(chosen) != 1:
+                raise ValueError(
+                    f'{current!r} nests under exactly one of {list(options)}, '
+                    f'the address has {chosen or "none of them"}')
+            current = chosen[0]
     return tuple(reversed(out))
 
 
@@ -155,7 +186,7 @@ class Address:
             _name('made_by', made_by)
         chain: Tuple[str, ...] = ()
         if levels:
-            chain = max((_chain(k) for k in levels), key=len)
+            chain = max((_chain(k, levels) for k in levels), key=len)
             if set(levels) != set(chain):
                 raise ValueError(
                     f'levels {sorted(levels)} are not one chain of the cache '
@@ -200,7 +231,9 @@ class Address:
         address, sorted: what one known level holds, one level down -- the
         rungs of one slide's corpus, say. Not a search: nothing below that
         level is looked at."""
-        if TREE.get(kind) != self.leaf:
+        expected: Tuple[Optional[str], ...] = (
+            (_parents(kind) if kind in TREE else ()) or (None,))
+        if self.leaf not in expected:
             raise ValueError(f'{kind!r} does not nest under {self.leaf!r} in the '
                              f'cache tree')
         if not self.dir.is_dir():

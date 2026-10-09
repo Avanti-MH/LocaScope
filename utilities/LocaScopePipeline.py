@@ -1,113 +1,125 @@
 """LocaScope end-to-end 3-stage pipeline glue.
 
-Wraps the three stage primitives into one WSI-scoped object:
+Strings the stages together over one WSI. It knows each stage only by its
+interface, so any method of a stage drops in and no concrete class is named
+here:
 
-    Stage 1 — mpp estimation    via the estimator handed in
-    Stage 2 — retrieval         via SlidingWinSimRot (cached per level)
-    Stage 3 — SIFT+RANSAC       via SiftRansacLocalizer
+    Stage 1 -- mpp estimation   MppEstimator   stage1_estimation/StageInterface.py
+                estimate(query)                      -> EstMppResult
+    Stage 2 -- retrieval        Retriever, then zero or more Rerankers
+                                               stage2_retrieval/StageInterface.py
+                retrieve(query, EstMppResult)        -> CandidateSet
+                rerank(query, CandidateSet)          -> CandidateSet
+    Stage 3 -- localization     Localizer      stage3_localization/StageInterface.py
+                localize(query, CandidateSet, topk)  -> LocalizationResultSet
 
-Design:
+Each stage is handed the query image and the previous stage's output.
 
-* build() does the WSI-wide one-time work (mask + the estimator's build).
-* The mask comes from `masks`, a `TissueMaskConfig.MaskMaker`: its recipe (a
-  `MASK_RECIPES` entry) and, when it has one, its cache -- so a slide whose
-  mask is cached is never segmented again. The recipe's segmenter reads the
-  level tile by tile -- a heavy method such as HEST DeepLabV3 OOMs on a whole
-  MRXS level otherwise: at mask_ds=16 one slide's level image is ~313 MP, and a
-  single ResNet layer1 activation on that is 18.6 GiB. The chunk budgets are
-  fields of the recipe's segmenter config.
-* A retriever is built lazily on first use for each pyramid level; the
-  routed level is the estimator's own `chosen_level` --
-  `StageInterface.routed_level` over `ReadGeometry.coarser_level`, the
-  measured, coarse-biased routing rule (91.1% recovered by stage 3 at one
-  level coarse against 15.7% at one level fine, 1398 shots). It is read
-  off the Result, never recomputed here.
-* If a level's retriever build fails (e.g. `patchable` emptied the mask
-  because tiles are too big at that level), the shot is marked
-  `unusable_level` and its stage 2 / 3 metrics are None.
-* Errors in any stage produce a LocaScopeQueryResult with `.error` set;
-  earlier stages' results are preserved.
+What this class does, and the only things it does:
 
-The three stages come in BUILT, each from its own config, and not yet bound
-to a slide: `estimator` (any stage-1 method -- KnnEstMpp, ClassifierEstMpp,
-PrototypeEstMpp), `retriever` (SlidingWinSimRot) and `localizer`
-(SiftRansacLocalizer). This class builds the mask, binds all three to the
-slide, and runs a shot through them; it does not choose a method or a
-parameter of any of them. Each stage builds its own encoder, so stage 1 and
-stage 2 never share one: a ClassifierEstMpp checkpoint may carry a fine-tuned
-trunk, and stage 2 has to score with the encoder its feature cache was written
-by. A second copy of the weights in GPU memory is the price. The stages are
-reusable across slides: a loop over slides builds them once and a pipeline per
-slide.
+* build(): the mask, from `masks` (a `TissueMaskConfig.MaskMaker`: its recipe
+  and, when it has one, its cache -- a slide whose mask is cached is never
+  segmented again), then binds every stage to the slide and that ONE mask, so
+  stage 1's reference bank and stage 2's windows agree on what tissue is.
+* run(): the three stages in a row, each timed, each error kept with the
+  results of the stages before it.
+
+What it does NOT do: choose a method or a parameter of one, build a pyramid
+level, or read a stage's internals. Which level stage 2 searches, and what it
+does when the routed one cannot hold the query, is the retriever's own business
+(`CandidateSet.level`, `irretrievable_lvl`, `alter_lvl`); a set with no
+candidates means no level could be searched, and stage 3 is then not run.
+
+A STAGE comes as a spec, or already built:
+
+* "method:recipe" -- a recipe of that stage's package (`stage1_estimation.
+  recipe`, ...), built here on `build()`;
+* `(config, class)` -- the same, with the config already resolved (a recipe
+  with flags applied);
+* an object -- a stage already built, used as it is. A loop over slides builds
+  its stages once, passes them to a pipeline per slide, and no model is loaded
+  twice; a stage not needed (its results are cached) is None.
+
+The runtime arguments of a build (`device`, `multi_gpu`, `read_workers`) are
+given to a stage only if its constructor takes them. Rerankers have no recipe
+table yet: they come as `(config, class)` or built.
 
 Usage:
 
     masks = MaskMaker(MASK_RECIPES['hest'], job, device)   # job's mask cache
-    est = KnnEstMpp(KNN_RECIPES['gigapath'], device)
-    ret = SlidingWinSimRot(SLIDEWIN_RECIPES['gigapath'], device)
-    loc = SiftRansacLocalizer(SIFT_RECIPES['default'])
-    pl  = LocaScopePipeline(wsi, est, ret, loc, masks).build()
-    result = pl.run(shot_img)
-    # result.est_mpp, result.routed_level, result.retrieval, result.refine, result.ranks
+    pl = LocaScopePipeline(wsi, masks, stage1='knn:gigapath',
+                           stage2='slidewin:gigapath', stage3='sift:default',
+                           device=device).build()
+    result = pl.run(shot_img)       # result.stage1, .stage2, .stage3
 
-    r1 = pl.stage1(shot_img)                  # or each stage alone, for a caller
-    qc, cs = pl.stage2(shot_img, r1.chosen_level)   # that keeps what each made
-    ranks = pl.stage3(qc, cs)
+    r1 = pl.stage1(shot_img)        # or each stage alone, for a caller that
+    cs = pl.stage2(shot_img, r1)    # keeps what each made
+    rs = pl.stage3(shot_img, cs)
 """
 
 from __future__ import annotations
 
-import sys
+import inspect
 import time
-import traceback
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import openslide
 import torch
 
-from PatchingLib            import QueryPatchContainer                                # noqa: E402
-from SafeSlide               import SafeSlide                                          # noqa: E402
-from TissueMask      import TissueMask                                 # noqa: E402
-from stage2_retrieval.SlidingWinSimRot import SlidingWinSimRot     # noqa: E402
-from stage2_retrieval.StageInterface import CandidateSet                        # noqa: E402
-from stage3_localization.SIFT_RANSAC             import SiftRansacLocalizer, SiftRansacResult              # noqa: E402
+import stage1_estimation
+import stage2_retrieval
+import stage3_localization
+from SafeSlide                          import SafeSlide                      # noqa: E402
+from TissueMask                         import TissueMask                     # noqa: E402
+from stage1_estimation.StageInterface   import EstMppResult, MppEstimator     # noqa: E402
+from stage2_retrieval.StageInterface    import CandidateSet, Reranker, Retriever  # noqa: E402
+from stage3_localization.StageInterface import Localizer, LocalizationResultSet   # noqa: E402
+
+if TYPE_CHECKING:       # annotations only
+    from TissueMaskConfig import MaskMaker, TissueMaskConfig
+
+__all__ = ['LocaScopePipeline', 'LocaScopeQueryResult', 'StageSpec',
+           'construct_stage']
+
+#: "method:recipe", a resolved `(config, class)`, or a stage already built.
+StageSpec = Union[str, Tuple[Any, type], object]
+
+#: The package that holds each stage's recipe tables.
+_PACKAGES: Dict[int, Any] = {1: stage1_estimation, 2: stage2_retrieval,
+                             3: stage3_localization}
+
+
+def construct_stage(cls: type, cfg: Any, runtime: Dict[str, Any]) -> Any:
+    """A stage built from its class and config. `runtime` is how it is built
+    (`device`, `multi_gpu`, `read_workers`), not what it is; a constructor takes
+    the ones it declares and no others, so a stage that needs no device (stage
+    3's SIFT) is not handed one. The one place a stage is built: the pipeline
+    builds its string and `(config, class)` specs here, and the bench's `Stage`
+    builds its own the same way."""
+    accepted: Dict[str, Any] = {
+        k: v for k, v in runtime.items()
+        if k in inspect.signature(cls.__init__).parameters}
+    return cls(cfg, **accepted)
 
 
 @dataclass
 class LocaScopeQueryResult:
-    """Per-shot pipeline output.
+    """Per-shot pipeline output: each stage's own result, as its interface
+    defines it, and what went wrong.
 
-    Metrics that couldn't be computed are None; `error` carries the reason
-    when a stage errored. `unusable_level` is True when the routed pyramid
-    level has no retriever available (mask filter yielded 0 regions).
+    A stage that did not run is None. `stage2` with no candidates means no
+    level could be searched; `stage3` is then None. `error` names the stage
+    that raised and why, the earlier stages' results kept.
     """
-    est_mpp:        Optional[float]
-    routed_level:   Optional[int]
-    unusable_level: bool
-    retrieval:      Optional[CandidateSet]
-    refine:         Optional[SiftRansacResult]
-    error:          Optional[str]
-    # Wall seconds per stage of THIS shot. `t_level_s` is the routed level's
-    # one-time build (features encoded or read from the cache) when this shot
-    # is the first to need it, else ~0; `t_stage2_s` is the search alone.
-    # None for a stage that did not run.
-    t_stage1_s:     Optional[float] = None
-    t_level_s:      Optional[float] = None
-    t_stage2_s:     Optional[float] = None
-    t_stage3_s:     Optional[float] = None
-    # Heavyweight refs kept only for diagnostics/plotting (not for bulk storage).
-    # Populated when run(..., keep_objects=True).
-    retriever: object = None      # SlidingWinSimRot
-    localizer: object = None      # SiftRansacLocalizer
-    query_qc:  object = None      # QueryPatchContainer at the winning rotation
-    # Every stage's own output: the EstMppResult, and one SiftRansacResult per
-    # verified candidate (`refine` is the first of them).
-    stage1:    object = None
-    ranks:     Optional[list] = None
-
+    stage1:     Optional[EstMppResult]
+    stage2:     Optional[CandidateSet]
+    stage3:     Optional[LocalizationResultSet]
+    error:      Optional[str]
+    # Wall seconds per stage of THIS shot; None for a stage that did not run.
+    t_stage1_s: Optional[float]
+    t_stage2_s: Optional[float]
+    t_stage3_s: Optional[float]
 
 
 class LocaScopePipeline:
@@ -115,123 +127,93 @@ class LocaScopePipeline:
 
     def __init__(
         self,
-        wsi:                 Union[openslide.OpenSlide, str],
-        estimator,                    # stage 1, built, not yet bound; None: not run here
-        retriever:           Optional[SlidingWinSimRot],
-        localizer:           Optional[SiftRansacLocalizer],
-        masks:               'MaskMaker',
-        feature_cache_job:   Optional[str] = None,
-        feature_store_mode:  str = 'rw',
-        bank_cache_job:      Optional[str] = None,
-    ):
+        wsi:            Union[str, SafeSlide],
+        masks:          MaskMaker,
+        stage1:         Optional[StageSpec] = None,   # None: not run here
+        stage2:         Optional[StageSpec] = None,
+        stage3:         Optional[StageSpec] = None,
+        rerankers:      Sequence[StageSpec] = (),
+        topk:           int = 10,                      # candidates stage 3 verifies
+        bank_cache_job: Optional[str] = None,          # stage 1's bank; None: in memory
+        device:         Optional[torch.device] = None,
+        multi_gpu:      bool = False,
+        read_workers:   int = 0,
+    ) -> None:
         # SafeSlide, not OpenSlide: a MIRAX read that lands on a cell the
         # scanner never wrote raises, and that raise latches on the handle, so
         # every later call fails -- metadata included. Since this one object is
-        # handed to TissueMask, TileSampler and SlidingWinSimRot,
-        # the recovery has to live inside it; healing swaps the native handle in
-        # place and every holder keeps working.
+        # handed to every stage, the recovery has to live inside it; healing
+        # swaps the native handle in place and every holder keeps working.
         if isinstance(wsi, str):
             wsi = SafeSlide(wsi)
-        self.wsi                 = wsi
-        # Where the mask comes from; its recipe is how the mask was built,
-        # which is what a cache has to ask before trusting a stored feature map.
-        self.masks               = masks
-        self.mask_cfg            = masks.cfg
-        self.feature_cache_job   = feature_cache_job
-        self.feature_store_mode  = feature_store_mode
-        # Whose cache stage 1 keeps its reference bank in (the draw and its
-        # features); None: made in memory every build.
-        self.bank_cache_job      = bank_cache_job
-
+        self.wsi: SafeSlide = wsi
+        # Where the mask comes from; its recipe is how the mask was built.
+        self.masks: MaskMaker = masks
+        self.mask_cfg: TissueMaskConfig = masks.cfg
+        self.topk: int = topk
+        self.bank_cache_job: Optional[str] = bank_cache_job
         # SafeSlide.base_mpp: the one definition of the slide's scale.
-        self.base_mpp = wsi.base_mpp   # raises if the slide carries no mpp
+        self.base_mpp: float = wsi.base_mpp   # raises if the slide carries no mpp
 
-        self.mask:      Optional[TissueMask] = None
-        self.estimator           = estimator
-        self._built = False
-        # None value == "tried, unusable"; missing key == "not tried yet"
-        # One retriever and one localizer for the slide: the retriever keeps
-        # every level it has built (per ds), so there is no per-level object.
-        self.retriever           = retriever
-        self.localizer           = localizer
-        # The tile the query is cut at is the retriever's, which compares it
-        # against tiles of that size.
-        self.tile_size           = None if retriever is None else retriever.tile_size
-        self._level_reason: Dict[int, Optional[str]] = {}   # None = usable
+        self.mask: Optional[TissueMask] = None
+        self._specs: Dict[int, Optional[StageSpec]] = {1: stage1, 2: stage2, 3: stage3}
+        self._rerank_specs: Tuple[StageSpec, ...] = tuple(rerankers)
+        self._runtime: Dict[str, Any] = dict(device=device, multi_gpu=multi_gpu,
+                                             read_workers=read_workers)
+        # Built by build(), each from its spec; None where no spec was given.
+        self.estimator: Optional[MppEstimator] = None
+        self.retriever: Optional[Retriever] = None
+        self.rerankers: Tuple[Reranker, ...] = ()
+        self.localizer: Optional[Localizer] = None
+        self._built: bool = False
 
     # ── One-time setup ────────────────────────────────────────────────────────
+    def _make(self, n: int, spec: Optional[StageSpec]) -> Optional[Any]:
+        """The stage object of `spec` (see the module docstring). `n` is the
+        stage whose recipe table a "method:recipe" string is looked up in; 0
+        for a reranker, which has none."""
+        if spec is None:
+            return None
+        cfg: Any
+        cls: type
+        if isinstance(spec, str):
+            if n not in _PACKAGES:
+                raise ValueError(f'a reranker has no recipe table: {spec!r}; '
+                                 f'give (config, class) or a built one')
+            cfg, cls = _PACKAGES[n].recipe(spec)[2:]
+        elif isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], type):
+            cfg, cls = spec
+        else:
+            return spec
+        return construct_stage(cls, cfg, self._runtime)
+
     def build(self) -> 'LocaScopePipeline':
-        """Build the mask, then bind the estimator and stages 2-3 to this slide
-        (per-WSI one-time)."""
+        """Build the mask, then build and bind every stage to this slide and
+        that mask (per-WSI one-time). No pyramid level is touched here."""
         # Segment (or read the cached raw mask), filter and merge in one place
-        # and in one order: `MaskMaker.mask`. merge is incomplete without filter
-        # having run first -- it skips nested boxes on the assumption they are
-        # already gone.
+        # and in one order: `MaskMaker.mask`.
         self.mask, _ = self.masks.mask(self.wsi)
 
-        # The same mask to stage 1, so its reference bank and stage 2's
-        # retriever agree on which regions are tissue (a method that samples
-        # nothing ignores it -- StageInterface.MppEstimator).
+        self.estimator = self._make(1, self._specs[1])
+        self.retriever = self._make(2, self._specs[2])
+        self.rerankers = tuple(self._make(0, s) for s in self._rerank_specs)
+        self.localizer = self._make(3, self._specs[3])
+
+        # The same mask to every stage that takes one, so stage 1's reference
+        # bank and stage 2's windows agree on which regions are tissue (a method
+        # that samples nothing ignores it -- StageInterface.MppEstimator).
         if self.estimator is not None:
             self.estimator.build(self.wsi, mask=self.mask, masks=self.masks,
                                  cache_job=self.bank_cache_job)
-        # Stage 2 and 3 bound to the same slide and mask. No level is built
-        # here: the retriever builds the one stage 1 routes a shot to, once.
         if self.retriever is not None:
-            self.retriever.build(self.wsi, self.mask,
-                                 feature_store=self._feature_store())
+            self.retriever.build(self.wsi, self.mask)
+        reranker: Reranker
+        for reranker in self.rerankers:
+            reranker.build(self.wsi, self.mask)
         if self.localizer is not None:
             self.localizer.build(self.wsi)
-        self._level_reason = {}
         self._built = True
         return self
-
-    # ── Lazy per-level retriever cache ────────────────────────────────────────
-    #
-    # The retriever narrows the mask itself (`build_wsi_features` takes a
-    # `mask.patchable(...)` view), at the ds it builds at -- which this class
-    # does not know.
-
-    def _feature_store(self):
-        '''The feature-map cache for this slide, or None when no root was given.
-
-        `feature_cache_job` is whose cache the grid features are read from and
-        written to. Built here because the address needs the whole mask recipe
-        -- the segmentation and the region prep -- and this is the only object
-        that holds it.
-        '''
-        if not self.feature_cache_job:
-            return None
-        from Store import FeatureMapCache
-        return FeatureMapCache(
-            self.feature_cache_job, getattr(self.wsi, '_filename', ''),
-            self.retriever.encoder, self.mask_cfg, mode=self.feature_store_mode)
-
-    def _level_ready(self, level: int) -> Optional[str]:
-        """Build the retriever's features for `level` if not yet, and say why
-        the level is unusable (None when it is usable). Remembered per level:
-        a level that failed once is not rebuilt for every shot routed to it."""
-        if level in self._level_reason:
-            return self._level_reason[level]
-        print(f'  [retriever L{level}] mpp='
-              f'{self.base_mpp * self.wsi.level_downsamples[level]:.4f}', flush=True)
-        reason = None
-        try:
-            self.retriever.build_wsi_features(level=level)
-            print(f'  [retriever L{level}] regions '
-                  f'{len(self.retriever.regions)}/{len(self.mask.tissue_regions)} '
-                  f'patchable at ds={self.retriever.ds:g}', flush=True)
-            if not self.retriever.wsi_features:
-                reason = 'build_wsi_features produced no feature maps'
-        except Exception as e:
-            # Never swallow this silently -- a failed level turns every shot
-            # routed to it into a bare `unusable_level` with no reason.
-            reason = f'build failed: {type(e).__name__}: {e}'
-            traceback.print_exc()
-        if reason:
-            print(f'  [retriever L{level}] UNUSABLE: {reason}', flush=True)
-        self._level_reason[level] = reason
-        return reason
 
     # ── One stage at a time ───────────────────────────────────────────────────
     #
@@ -239,105 +221,65 @@ class LocaScopePipeline:
     # a stage it already has is read back instead, and the next one is handed
     # what was read. `run` is the three in a row.
 
-    def stage1(self, img_np: np.ndarray):
-        """Stage 1: the estimator's EstMppResult -- the mpp and the routed level."""
-        return self.estimator.estimate(img_np)
+    def stage1(self, img: np.ndarray) -> EstMppResult:
+        """Stage 1: the mpp and the level it routes to."""
+        if self.estimator is None:
+            raise RuntimeError('stage 1 was not given to this pipeline')
+        return self.estimator.estimate(img)
 
-    def stage2(self, img_np: np.ndarray, level: int
-               ) -> Tuple[QueryPatchContainer, CandidateSet]:
-        """Stage 2 at `level`: the query cut at the retriever's tile, and the
-        candidate windows. Raises `UnusableLevel` when the level has no
-        feature map. The retriever's similarity maps stay on it until the next
-        query, for whatever the caller reads off them."""
-        reason = self._level_ready(level)
-        if reason:
-            raise UnusableLevel(reason)
-        self.retriever.build_wsi_features(level=level)
-        qc = QueryPatchContainer(img_np)
-        qc.extract_all(self.tile_size, overlap=self.retriever.overlap)
-        self.retriever.build_query_features(qc)
-        self.retriever.compute_sim_maps()
-        return qc, self.retriever.candidate_set()
+    def stage2(self, img: np.ndarray, r1: EstMppResult) -> CandidateSet:
+        """Stage 2 on stage 1's output: the retriever, then every reranker in
+        order. No candidates means no level could be searched."""
+        if self.retriever is None:
+            raise RuntimeError('stage 2 was not given to this pipeline')
+        cs: CandidateSet = self.retriever.retrieve(img, r1)
+        reranker: Reranker
+        for reranker in self.rerankers:
+            cs = reranker.rerank(img, cs)
+        return cs
 
-    def candidates_at(self, level: int, candidates) -> CandidateSet:
-        """A CandidateSet of `candidates` (stage 2's, read back) in `level`'s
-        frame -- what stage 3 takes. The level's grids come from its feature
-        map, read from the cache when it is there."""
-        reason = self._level_ready(level)
-        if reason:
-            raise UnusableLevel(reason)
-        self.retriever.build_wsi_features(level=level)
-        return CandidateSet(candidates=tuple(candidates), level=self.retriever.level,
-                            ds=self.retriever.ds, grids=tuple(self.retriever.grids))
-
-    def stage3(self, qc: QueryPatchContainer, cs: CandidateSet
-               ) -> List[SiftRansacResult]:
-        """Stage 3: one SiftRansacResult per verified candidate, in rank order."""
-        return self.localizer.localize_top(qc, cs)
+    def stage3(self, img: np.ndarray, cs: CandidateSet) -> LocalizationResultSet:
+        """Stage 3 on stage 2's output: the first `topk` candidates verified."""
+        if self.localizer is None:
+            raise RuntimeError('stage 3 was not given to this pipeline')
+        return self.localizer.localize(img, cs, self.topk)
 
     # ── Per-shot end-to-end ───────────────────────────────────────────────────
-    def run(self, img_np: np.ndarray, keep_objects: bool = False) -> LocaScopeQueryResult:
+    def run(self, img: np.ndarray) -> LocaScopeQueryResult:
         """Run all 3 stages on one shot image, each on the previous one's
-        output: EstMppResult -> CandidateSet -> SiftRansacResult per verified
-        candidate.
-
-        `keep_objects=True` attaches the retriever / localizer / query container
-        to the result so diagnostics can plot keypoints, matches and homography.
-        Leave False for bulk runs — those objects hold large tensors.
-        """
+        output: EstMppResult -> CandidateSet -> LocalizationResultSet."""
         if not self._built:
             raise RuntimeError('LocaScopePipeline not built; call .build() first.')
 
-        # Each stage ends in host values (an mpp, topk lists, a homography), so
+        # Each stage ends in host values (an mpp, topk lists, a position), so
         # the GPU has finished by the time a clock is read.
-        t = {}
+        t0: float = time.perf_counter()
+        try:
+            r1: EstMppResult = self.stage1(img)
+        except Exception as e:                                       # noqa: BLE001
+            return LocaScopeQueryResult(
+                None, None, None, f'stage1 failed: {type(e).__name__}: {e}',
+                None, None, None)
+        t1: float = time.perf_counter() - t0
+
         t0 = time.perf_counter()
         try:
-            r1 = self.stage1(img_np)
-            est_mpp = float(r1.estimated_mpp)
-            level = r1.chosen_level
-        except Exception as e:
+            cs: CandidateSet = self.stage2(img, r1)
+        except Exception as e:                                       # noqa: BLE001
             return LocaScopeQueryResult(
-                None, None, False, None, None,
-                f'stage1 failed: {type(e).__name__}: {e}')
-        t['t_stage1_s'] = time.perf_counter() - t0
+                r1, None, None, f'stage2 failed: {type(e).__name__}: {e}',
+                t1, None, None)
+        t2: float = time.perf_counter() - t0
+        if not len(cs):
+            return LocaScopeQueryResult(r1, cs, None, None, t1, t2, None)
 
-        # Stage 2 — candidate windows at the routed level; the level's build
-        # (first shot to need it) timed apart from the search
-        t0 = time.perf_counter()
-        reason = self._level_ready(level)
-        t['t_level_s'] = time.perf_counter() - t0
-        if reason:
-            return LocaScopeQueryResult(est_mpp, level, True, None, None, reason,
-                                        stage1=r1, **t)
         t0 = time.perf_counter()
         try:
-            qc, retrieval = self.stage2(img_np, level)
-        except Exception as e:
+            rs: LocalizationResultSet = self.stage3(img, cs)
+        except Exception as e:                                       # noqa: BLE001
             return LocaScopeQueryResult(
-                est_mpp, level, False, None, None,
-                f'stage2 failed: {type(e).__name__}: {e}', stage1=r1, **t)
-        t['t_stage2_s'] = time.perf_counter() - t0
+                r1, cs, None, f'stage3 failed: {type(e).__name__}: {e}',
+                t1, t2, None)
+        t3: float = time.perf_counter() - t0
 
-        # Stage 3 — SIFT+RANSAC inside the first n_verify candidates
-        t0 = time.perf_counter()
-        try:
-            ranks = self.stage3(qc, retrieval)
-        except Exception as e:
-            return LocaScopeQueryResult(
-                est_mpp, level, False, retrieval, None,
-                f'stage3 failed: {type(e).__name__}: {e}', stage1=r1, **t)
-        t['t_stage3_s'] = time.perf_counter() - t0
-
-        return LocaScopeQueryResult(
-            est_mpp, level, False, retrieval, ranks[0] if ranks else None, None,
-            stage1=r1, ranks=ranks, **t,
-            retriever = self.retriever if keep_objects else None,
-            localizer = self.localizer if keep_objects else None,
-            query_qc  = qc             if keep_objects else None,
-        )
-
-
-class UnusableLevel(RuntimeError):
-    """The routed level has no feature map to search (the mask left no region
-    that holds a tile there, or its build failed)."""
+        return LocaScopeQueryResult(r1, cs, rs, None, t1, t2, t3)
