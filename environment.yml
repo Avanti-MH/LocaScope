@@ -6,6 +6,7 @@
 #   huggingface_hub            timm hf_hub 與 hf_hub_download
 #   safetensors                Store / TissueMask / KeypointLabelStore
 #   numpy, scipy, scikit-learn, matplotlib, pillow, opencv-python
+#   pandas                     utilities/cli/plot/plot_locascope.py 的 join table
 #   openslide + openslide-python   WSI 讀取
 #   python-dotenv              aiNNModel/*Func.py 讀 HF token
 #   wandb                      training/*/Runtime.py、SuperPoint/Trainer.py
@@ -14,7 +15,7 @@
 # 移除：CUDA toolkit / ffmpeg / X11 等 conda 系統套件（torch wheel 自帶 CUDA runtime，
 # job script 另外 `ml load cuda/12.6`）、flash-attn、xformers、tome、fairscale、monai、
 # torchio、torch-geometric、lifelines、scikit-survival、gradio、fastapi、transformers、
-# tensorboard、pandas、webdataset 等程式碼沒有 import 的套件。
+# tensorboard、webdataset 等程式碼沒有 import 的套件。
 #
 # 版本沿用舊 env；numpy 改為 1.26.4（torch 2.3 以 numpy 1.x 編譯），opencv 隨之用 4.10。
 name: locascope
@@ -33,6 +34,7 @@ dependencies:
       - huggingface-hub==0.20.2
       - safetensors==0.7.0
       - numpy==1.26.4
+      - pandas==2.3.3
       - scipy==1.13.1
       - scikit-learn==1.5.2
       - matplotlib==3.9.4

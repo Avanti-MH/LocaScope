@@ -369,7 +369,7 @@ config 的值只寫在一個地方：基礎模組裡的 RECIPES 表。每個 ent
 | `PROTOTYPE_RECIPES` | `stage1_estimation/PrototypeEstMpp.py` | 範本 `uni2-mean-cosine-tau` |
 | `CLASSIC_RECIPES` | `stage1_estimation/estimate_mpp_classic.py` | `default` |
 | `SLIDEWIN_RECIPES` | `stage2_retrieval/SlidingWinSimRot.py` | `gigapath`（`--stage2 slidewin:<名>`，k=100） |
-| `SIFT_RECIPES` | `stage3_localization/SIFT_RANSAC.py` | `default`（`--stage3 sift:<名>`，n_verify=10） |
+| `SIFT_RECIPES` | `stage3_localization/SIFT_RANSAC.py` | `default`（`--stage3 sift:<名>`，topk=100） |
 
 stage 的 recipe 一個方法一張表，放在方法自己的模組；每個 stage package 的 `__init__.py` 有一張 `METHODS`
 表（方法名 → 模組、表、class），`recipe('<方法>:<recipe>')` 用到才 import。一個 stage 結果的 id 是
