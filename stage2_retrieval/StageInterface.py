@@ -6,7 +6,8 @@ Each stage eats the previous stage's output:
 
     stage 1   est.estimate(query)            -> EstMppResult
     stage 2   ret.retrieve(query, EstMppResult) -> CandidateSet
-    stage 3   loc.localize(query, CandidateSet) -> a position
+    stage 3   loc.localize(query, CandidateSet, topk) -> LocalizationResultSet
+              (stage3_localization/StageInterface.py)
 
 A `Candidate` holds only what retrieval found -- which window, at which
 rotation, how strongly. Everything derivable (pixel position, window size,
@@ -25,7 +26,16 @@ the window starts at, `PatchGrid.tile_origin_l0`; nothing here truncates.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Tuple, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, Tuple, Union, runtime_checkable
+
+import numpy as np
+
+if TYPE_CHECKING:       # annotations only: nothing here is imported at run time
+    from PatchingLib import PatchGrid
+    from SafeSlide import SafeSlide
+    from TileEncoderFunc import TileEncoder
+    from TissueMask import TissueMask
+    from stage1_estimation.StageInterface import EstMppResult
 
 
 #: The rotations a retriever tries, in degrees; the query is turned by these
@@ -61,11 +71,22 @@ class CandidateSet:
     knows its level-0 origin). Nothing the next stage can get from its own
     input is here: the tile size is each grid's own, and a window's size is
     the query's tile grid, which travels beside the set as the query itself
-    -- the methods that need it take the UNROTATED QueryPatchContainer.'''
+    -- the methods that need it take the UNROTATED QueryPatchContainer.
+
+    `level` and `ds` are the level the candidates were found at. It is the
+    level stage 1 routed to unless that level could not hold the query: the
+    retriever then goes finer, one level at a time. `irretrievable_lvl` are the
+    levels it found unsearchable (the routed one included, and every coarser
+    level that fit-monotonicity rules out with it) and `alter_lvl` the other
+    levels it tried, in order; the last of them is `level`. Comparing `level`
+    with stage 1's `chosen_level` tells whether it moved. A set with no
+    candidates means no level could be searched.'''
     candidates: Tuple[Candidate, ...]
     level: int
     ds: float
-    grids: tuple
+    grids: Tuple[PatchGrid, ...]
+    irretrievable_lvl: Tuple[int, ...]
+    alter_lvl: Tuple[int, ...]
 
     def __len__(self) -> int:
         return len(self.candidates)
@@ -132,10 +153,31 @@ class CandidateSet:
         return out
 
 
-@runtime_checkable
 class Retriever(Protocol):
-    def build(self, wsi, mask) -> 'Retriever': ...
-    def retrieve(self, query, estimate) -> CandidateSet: ...
+    '''First phase (spec.md): the whole slide -> top-K windows. Every method
+    that replaces `SlidingWinSimRot` honours this and nothing else is assumed
+    of it: the pipeline, the bench and locate_photo see no concrete class.
+
+    `tile_size` and `overlap` are how the method cuts a query, which a caller
+    needs to turn a window into its level-0 box (`CandidateSet.rows`).
+    `encoder` is None for a method with no tile encoder. Not
+    `runtime_checkable`: an isinstance check would read `encoder`, which may
+    build a model.
+
+    A method may offer more, and a caller asks for it with `getattr` and does
+    without when it is absent: `tile_sim_rows(candidates)` (a table of the
+    per-tile cosines), `rotations_searched()`, `last_level_seconds`,
+    `nearest_window(...)` (needs ground truth, the synthetic bench only) and
+    `frame(level)` (an empty CandidateSet in that level's frame, to put stored
+    candidates in).'''
+    encoder: Optional[TileEncoder]
+    tile_size: int
+    overlap: bool
+
+    def build(self, wsi: Union[str, SafeSlide], mask: Optional[TissueMask],
+              feature_store: Optional[Any] = None) -> 'Retriever': ...
+
+    def retrieve(self, query: np.ndarray, estimate: EstMppResult) -> CandidateSet: ...
 
 
 @runtime_checkable
