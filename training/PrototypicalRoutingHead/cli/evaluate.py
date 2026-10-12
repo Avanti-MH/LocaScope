@@ -307,7 +307,10 @@ def main() -> int:
         # checkpoint, to score them all against one kind of support -- the
         # `support_native` column below still says how each one TRAINED,
         # `eval_support` how this run rendered.
-        trained_native = bool(run_args.get('support_native', False))
+        # what it trained under: False/True in a checkpoint from before --support-native took a
+        # probability, that probability after. Native support whenever it trained on any.
+        trained_share = run_args.get('support_native', False)
+        trained_native = float(trained_share) > 0.0
         support_native = (trained_native if args.support_native == 'checkpoint'
                           else args.support_native == 'on')
         # support_context/query_context/collapse/routing_head are top-
@@ -328,7 +331,7 @@ def main() -> int:
             # registry name needing a lookup).
             train_dataset=run_args.get('train_dataset', ''),
             loss=run_args.get('loss', ''),
-            support_native=trained_native,
+            support_native=trained_share,
             eval_support='native' if support_native else 'full',
             seg=run_args['seg'],
             episode_reuse=extra.get('episode_reuse', ''),

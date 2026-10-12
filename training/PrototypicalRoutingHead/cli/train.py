@@ -683,6 +683,23 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
     return best
 
 
+def _share(text: str) -> float:
+    """`--support-native`'s value: a probability in [0, 1]."""
+    value: float = float(text)
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(f'{text!r} is not a probability in [0, 1]')
+    return value
+
+
+def val_support_native(share: float) -> bool:
+    """The support the val questions are rendered with. Val cannot flip a coin (its questions are
+    fixed, epoch to epoch, so only the model changes), so it takes the deployment's: native
+    support whenever the run trains on it at all (`--support-native` above 0), query-style
+    support (the run before the share existed) at 0. The other kind is scored afterwards by
+    `evaluate.py --support-native on|off`."""
+    return float(share) > 0.0
+
+
 def improves_everywhere(now: Dict[str, float], best: Dict[str, float]) -> bool:
     """Is this epoch a new `_best`? True when no dataset scores below the
     saved epoch's number and at least one scores above it. A dataset with no
@@ -890,9 +907,12 @@ def main() -> int:
                     help='support positions per rung per batch')
     ap.add_argument('--n-query', type=int, default=10,
                     help='query positions per rung per batch')
-    ap.add_argument('--support-native', action='store_true',
-                    help='render support with routing-support-native (rotation '
-                         'only); query always renders routing-query')
+    ap.add_argument('--support-native', type=_share, nargs='?', const=1.0, default=0.0,
+                    help='the probability, per episode, that the SUPPORT is rendered with '
+                         'routing-support-native (rotation only) rather than routing-query: '
+                         '0 (the default) never, 1 (also a bare --support-native) always, '
+                         'between them one coin per support batch. The query always renders '
+                         'routing-query. Val uses native support whenever this is above 0')
     ap.add_argument('--n-choices', type=int, nargs='+', default=[3, 4, 5],
                     help='way counts whose rung combinations train (minus '
                          'Episodes.HELD_OUT_COMBOS)')
@@ -1242,7 +1262,7 @@ def main() -> int:
             val_pools, HELD_OUT_COMBOS, k=val_k, n_support=args.n_support,
             n_query=args.n_query, max_overlap=args.max_overlap, seed=args.seed,
             tries=args.feasibility_tries, bank=bank, render_cfg=render_cfg,
-            support_native=args.support_native, encoder=encoder,
+            support_native=val_support_native(args.support_native), encoder=encoder,
             num_prefix=num_prefix, batch_size=args.encode_batch, device=device,
             cache=val_cache, pool=render_pool, **trainable)
         epoch_combo_rows, epoch_rung_rows, summary = kxk_report(

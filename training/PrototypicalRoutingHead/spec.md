@@ -264,6 +264,15 @@ the total. Checkpoints: `_best.pt` on the total, `_6rung.pt` on the full
 6-way combination (mean over datasets), `_native.pt` on the mean over the
 combinations whose every query rendered natively.
 
+**Support rendering** (`--support-native p`, `Episodes.support_native_flags`). The query is
+always a simulated photograph (`routing-query`). The support is, per episode, either rendered the
+same way (p = 0, the default: both sides carry the same degradation, so it cancels) or read as
+stage 1 reads a reference tile, rotation only (`routing-support-native`); between 0 and 1 each
+support batch is a coin with probability p. 0 and 1 draw nothing from the sampler's rng, so a run
+at either is the run it was before. Val takes the deployment's support (native) whenever p > 0
+and cannot flip a coin; `evaluate.py --support-native on|off` scores a checkpoint against either
+kind.
+
 **Test** (`cli/evaluate.py`) writes two tables: the ORIGINAL one (random full
 6-way episodes, accuracy pooled per combination -- unchanged, comparable with
 earlier runs and tile by tile with `MppRoutingHead`) and the K x K one above

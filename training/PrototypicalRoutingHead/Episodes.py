@@ -44,7 +44,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -427,6 +427,31 @@ def max_feasible_k(pool_pairs, combos, shapes, *, n_support: int, n_query: int,
     return lo
 
 
+def support_native_flags(share: Union[bool, float], n: int, *, deterministic: bool,
+                         rng: Optional[random.Random]) -> List[bool]:
+    """Whether each of `n` support batches is rendered native (`routing-support-native`,
+    rotation only) rather than as a query is (`routing-query`).
+
+    `share` is the probability a batch is native: 0 (or False) none, 1 (or True) all -- what
+    `--support-native` always meant -- and between them one coin per batch, so an episode (one
+    support batch against one query batch) gets one kind of support or the other.
+
+    0 and 1 draw nothing from `rng`, so a run at either is the run it was before the share
+    existed. A share strictly between them is a training-time coin: it needs the episode
+    sampler's `rng` and refuses `deterministic` rendering, where which support a question gets
+    must not depend on a coin -- evaluation passes True or False."""
+    p: float = float(share)
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f'support_native is a probability in [0, 1], got {share!r}')
+    if p == 0.0 or p == 1.0:
+        return [p == 1.0] * n
+    if deterministic or rng is None:
+        raise ValueError(f'support_native={share!r} is a per-episode coin: it needs the training '
+                         f"sampler's rng and is not available when rendering deterministically "
+                         f'(evaluation passes True or False)')
+    return [rng.random() < p for _ in range(n)]
+
+
 @dataclass(frozen=True)
 class RenderedDraw:
     """A `Draw` rendered: each batch `{rung: [(patch, native), ...]}`."""
@@ -436,7 +461,7 @@ class RenderedDraw:
 
 
 def render_draw(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
-                deterministic: bool, support_native: bool = False,
+                deterministic: bool, support_native: Union[bool, float] = False,
                 rng: Optional[random.Random] = None,
                 pool: Optional[ThreadPoolExecutor] = None) -> Optional[RenderedDraw]:
     """Every batch of `d`, through `render_row`. Training passes `rng` (the
@@ -444,6 +469,11 @@ def render_draw(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
     it, so the photos are a function of the saved RNG state; evaluation
     passes `deterministic=True` and each row renders from its own identity.
     None if any position fails to render -- the caller draws again.
+
+    `support_native` is the probability a SUPPORT batch is rendered native
+    (`support_native_flags`): True / 1 all of them, False / 0 none, between them
+    one coin per support batch from `rng` (training only). The query always
+    renders as a query.
 
     `pool` renders the positions in its threads, one SLIDE per task -- a
     slide's handle is never read from two threads at once -- and gives the
@@ -470,9 +500,11 @@ def render_draw(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
             out[rung] = got
         return out
 
+    flags: List[bool] = support_native_flags(support_native, len(d.supports),
+                                             deterministic=deterministic, rng=rng)
     supports, queries = [], []
-    for batch in d.supports:
-        r = one(batch, support_native)
+    for batch, native in zip(d.supports, flags):
+        r = one(batch, native)
         if r is None:
             return None
         supports.append(r)
@@ -485,7 +517,7 @@ def render_draw(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
 
 
 def _render_draw_pooled(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
-                        deterministic: bool, support_native: bool,
+                        deterministic: bool, support_native: Union[bool, float],
                         rng: Optional[random.Random],
                         pool: ThreadPoolExecutor) -> Optional[RenderedDraw]:
     """`render_draw` with the positions rendered in `pool`.
@@ -495,15 +527,18 @@ def _render_draw_pooled(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
     The sequential path stops drawing seeds at the first failed position; on
     failure `rng` is rewound and advanced by exactly as many seeds, so the next
     draw sees the state it would have seen without the pool."""
+    seeded = not deterministic and rng is not None
+    before = rng.getstate() if seeded else None
+    # the support coins come first, before any seed, as in `render_draw`
+    flags: List[bool] = support_native_flags(support_native, len(d.supports),
+                                             deterministic=deterministic, rng=rng)
     # (side, batch index, rung, native, row) in the order `render_draw` walks
-    order = ([('s', i, rung, support_native, row)
+    order = ([('s', i, rung, flags[i], row)
               for i, batch in enumerate(d.supports)
               for rung, rows in batch.items() for row in rows]
              + [('q', i, rung, False, row)
                 for i, batch in enumerate(d.queries)
                 for rung, rows in batch.items() for row in rows])
-    seeded = not deterministic and rng is not None
-    before = rng.getstate() if seeded else None
     seeds = [rng.getrandbits(64) if seeded else None for _ in order]
 
     by_slide: Dict[Tuple[str, str], List[int]] = {}
@@ -530,6 +565,8 @@ def _render_draw_pooled(d: Draw, bank: CameraBank, cfg: RenderConfig, *,
     if failed is not None:
         if seeded:
             rng.setstate(before)
+            support_native_flags(support_native, len(d.supports),
+                                 deterministic=deterministic, rng=rng)   # the same coins again
             for _ in range(failed + 1):
                 rng.getrandbits(64)
         return None
@@ -616,7 +653,7 @@ class RenderedEpisode:
 
 
 def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
-                   deterministic: bool, support_native: bool = False,
+                   deterministic: bool, support_native: Union[bool, float] = False,
                    pool: Optional[ThreadPoolExecutor] = None
                    ) -> Optional[RenderedEpisode]:
     '''Renders every position in `episode` through `render_row`
@@ -670,7 +707,9 @@ def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
             out[rung] = rendered
         return out
 
-    support = render_group(episode.support, native=support_native)
+    native: bool = support_native_flags(support_native, 1, deterministic=deterministic,
+                                        rng=None)[0]
+    support = render_group(episode.support, native=native)
     if support is None:
         return None
     query = render_group(episode.query, native=False)
