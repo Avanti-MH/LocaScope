@@ -243,6 +243,9 @@ SLIDEWIN_RECIPES: Dict[str, SlidingWinSimRotConfig] = {
     'gigapath': SlidingWinSimRotConfig(
         encoder=encoder_config('gigapath').with_model(dtype='fp16'),
         tile_size=256, overlap=True, k=100, min_sep_tiles=1.0, score='mean'),
+    'uni2': SlidingWinSimRotConfig(
+        encoder=encoder_config('uni2').with_model(dtype='fp16'),
+        tile_size=256, overlap=True, k=100, min_sep_tiles=1.0, score='mean'),
 }
 
 
