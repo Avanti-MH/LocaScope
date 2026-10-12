@@ -231,9 +231,11 @@ def t_routing_data_record_moves_with_what_makes_the_tiles():
     package's DATA_VERSION moves."""
     import training.MppRoutingHead.Datasets as D
     a = D.data_record(256, 'hest')
-    # what every routing-head checkpoint trained at 256 on hest carries; a
-    # move of its configs into FOV_RECIPES must not change it
-    assert a['id'] == 'e1b6e602ac441e1b', a['id']
+    # what every routing-head checkpoint trained at 256 on hest carries (a prototype and a
+    # classifier checkpoint were checked for it); a move of its configs into FOV_RECIPES must
+    # not change it. It was e1b6e602ac441e1b until commit f7a0774 gave the routing recipes
+    # their own samplers (SAMPLER_RECIPES['lattice'] and ['reference-bank']) on purpose.
+    assert a['id'] == 'd245d3e5e6b1e773', a['id']
     assert CI.record_diff(a, D.data_record(256, 'hest')) == []
     assert any(d.startswith('id:') for d in CI.record_diff(a, D.data_record(224, 'hest')))
     saved = D.DATA_VERSION
@@ -794,7 +796,9 @@ def t_cache_paths_are_spelt_in_cache_only():
 def t_recipes_equal_the_configs_they_replace():
     """Frozen copies of the expressions each moved recipe replaced: written out
     in full, a recipe must still be the same config -- the same ids, so every
-    cache and checkpoint made under the old spelling stays valid."""
+    cache and checkpoint made under the old spelling stays valid. The exceptions are the
+    two samplers commit f7a0774 changed on purpose (lattice, reference-bank), frozen here as
+    they now are."""
     from HestSegFunc import HestSegConfig
     from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig
     from TissueSegFunc import PlaneSegConfig
@@ -820,15 +824,41 @@ def t_recipes_equal_the_configs_they_replace():
         assert (MASK_RECIPES[k].seg_id(), MASK_RECIPES[k].region_id()) == (
             old.seg_id(), old.region_id()), k
 
-    # the class defaults the diagnostics built from scratch
-    same('lattice', SAMPLER_RECIPES['lattice'], SamplerConfig())
+    # the two draws the plain FoV recipe and the routing heads sample with, written out in
+    # full. Commit f7a0774 moved them off the class defaults on purpose (lattice caps
+    # (0.50, 0.50, 0.50, 0.20), reference-bank floors 0.3 on the first three buckets,
+    # max_tries_per_tile 10 for both), so they are frozen here as they now are; a checkpoint
+    # trained before that commit carries the other data record (see
+    # t_routing_data_record_moves_with_what_makes_the_tiles)
+    overlap_disjoint = OverlapConfig(
+        step=1.0, max_overlap_ratio=0.0, overlapping_share=0.0,
+        jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0), (1.0, 0.75), (1.25, 1.25)),
+        jitter_cap=0.0)
+    inherit_off = InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                                on_incomplete='drop')
+    lattice = SamplerConfig(
+        n_per_rung=100, seed=0,
+        richness=RichnessConfig(
+            scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+            floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+            caps=(0.50, 0.50, 0.50, 0.20, 0.0, 0.0, 0.0),
+            bucket_frame='per_rung', floor_frame='ask'),
+        overlap=overlap_disjoint, inherit=inherit_off,
+        candidates='lattice', max_tries_per_tile=10)
+    reference_bank = SamplerConfig(
+        n_per_rung=100, seed=0,
+        richness=RichnessConfig(
+            scorer='background', edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+            floors=(0.3, 0.3, 0.3, 0.0, 0.0, 0.0, 0.0),
+            caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+            bucket_frame='per_rung', floor_frame='ask'),
+        overlap=overlap_disjoint, inherit=inherit_off,
+        candidates='lattice', max_tries_per_tile=10)
+    same('lattice', SAMPLER_RECIPES['lattice'], lattice)
+    same('reference-bank', SAMPLER_RECIPES['reference-bank'], reference_bank)
+    # the class defaults the diagnostics built from scratch: the gap
     same('plain gap', FOV_RECIPES['plain'].gap, DomainGapConfig())
-    assert FOV_RECIPES['plain'].sampler == SamplerConfig()
-
-    bank_richness = RichnessConfig(floors=(0.0,) * 7,
-                                   caps=(1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0))
-    same('reference-bank', SAMPLER_RECIPES['reference-bank'],
-         SamplerConfig(richness=bank_richness, overlap=OverlapConfig()))
+    assert FOV_RECIPES['plain'].sampler == lattice
 
     def frozen_sampler_config(*, n, step, max_overlap, overlapping_share,
                               bucket_frame, inherit_share, inherit_source_rung):
@@ -872,15 +902,11 @@ def t_recipes_equal_the_configs_they_replace():
         distortion_k1_range=(0.0, 0.0), distortion_k2=0.0,
         defocus_radius=0, chromatic_shift=0, noise_sigma=0.0, jpeg_quality=100,
         photometric=False, geometric=True, stage_shift_max=0)
-    routing_sampler = SamplerConfig(
-        richness=RichnessConfig(caps=(0.15, 0.25, 0.60, 0.0, 0.0, 0.0, 0.0)),
-        overlap=OverlapConfig(step=0.5, max_overlap_ratio=0.5,
-                              overlapping_share=1.0, jitter_cap=0.25))
-    for k, gap in (('routing-query', camera_full),
-                   ('routing-support-native', camera_native)):
+    for k, gap, sampler in (('routing-query', camera_full, lattice),
+                            ('routing-support-native', camera_native, reference_bank)):
         r = FOV_RECIPES[k]
         same(f'{k} gap', r.gap, gap)
-        same(f'{k} sampler', r.sampler, routing_sampler)
+        same(f'{k} sampler', r.sampler, sampler)
         assert r.rungs == (1.0, 2.0, 4.0, 8.0, 16.0, 32.0) and r.sensor == (256, 256), k
     return (f'{len(old_masks)} masks, reference-bank, {len(old_corpora)} '
             f'corpora, 2 routing recipes: same configs, same ids')

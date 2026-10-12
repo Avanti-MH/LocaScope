@@ -83,7 +83,7 @@ JOB_NAME = 'Stage1MppBench'
 DEFAULT_METHODS = ('knn:gigapath', 'knn:uni2', 'classic:default')
 
 #: `--stage1 none`: no recipe method, only what --checkpoints names.
-NO_RECIPES = 'none'
+NO_RECIPE_METHODS = 'none'
 
 
 def add_args(ap) -> None:
@@ -96,7 +96,7 @@ def add_args(ap) -> None:
                          'looked at: run val first')
     ap.add_argument('--n-wsi', type=int, default=5, help='slides per dataset')
     ap.add_argument('--stage1', nargs='+', default=list(DEFAULT_METHODS),
-                    help=f'<method>:<recipe>, one or more; `{NO_RECIPES}` for none')
+                    help=f'<method>:<recipe>, one or more; `{NO_RECIPE_METHODS}` for none')
     ap.add_argument('--checkpoints', nargs='*', default=[],
                     help='trained checkpoints, each run as its own method built from '
                          'what the file records: a directory (its *.pt), a glob or a '
@@ -158,7 +158,7 @@ def stages_of(args, device=None) -> list:
     built."""
     mask_cfg = mask_cfg_from_args(args)
     stages: list = [stage1_of(*stage1_estimation.recipe(spec), mask_cfg, args.seg, device)
-                    for spec in args.stage1 if spec != NO_RECIPES]
+                    for spec in args.stage1 if spec != NO_RECIPE_METHODS]
     for weights in checkpoint_files(args.checkpoints):
         stages.append(stage1_of(*checkpoint_method(weights), mask_cfg, args.seg, device))
     return stages

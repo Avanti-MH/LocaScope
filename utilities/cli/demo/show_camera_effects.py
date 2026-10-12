@@ -48,6 +48,7 @@ import numpy as np                                                   # noqa: E40
 from PIL import Image, ImageDraw                                     # noqa: E402
 
 from config import DomainGapConfig                                   # noqa: E402
+from FovSupply import FOV_RECIPES                                    # noqa: E402
 from pipeline import _apply_params, _sample_params                   # noqa: E402
 
 Params = Dict[str, float]
@@ -204,7 +205,7 @@ def main() -> int:
     ap.add_argument('--out', default=None, help='default result/<SLURM_JOB_NAME or ShowCameraEffects>/')
     args: argparse.Namespace = ap.parse_args()
 
-    cfg: DomainGapConfig = DomainGapConfig()
+    cfg: DomainGapConfig = FOV_RECIPES['plain'].gap          # the class defaults, written out as a recipe
     out_dir: Path = Path(args.out or job_result_dir('ShowCameraEffects'))
     out_dir.mkdir(parents=True, exist_ok=True)
     inputs: List[Tuple[str, np.ndarray]] = [('checkerboard', checkerboard())]
