@@ -84,6 +84,13 @@ LR="${LR:-1e-4}"
 LR_PATIENCE="${LR_PATIENCE:-3}"
 LR_FACTOR="${LR_FACTOR:-0.5}"
 LOSS="${LOSS:-bal}"
+# LOSSES: several losses in ONE job, space separated (LOSSES="bal ord_a ord_b"). Every loss gets
+# the whole set of runs below, dealt out over the PARALLEL queues together; each run's weights
+# carry its loss in the file name (bal none), so they share one $OUT, and evaluate.py runs once
+# at the end over all of them. Unset: just $LOSS, the job as it was. Three losses is three times
+# the runs: ask for more cards (PARALLEL=8 sbatch --gpus-per-node=8 --cpus-per-task=96
+# --mem=1600G) to keep the wall time.
+LOSSES="${LOSSES:-$LOSS}"
 ORDINAL_WEIGHT="${ORDINAL_WEIGHT:-1.0}"
 ORDINAL_SIGMA="${ORDINAL_SIGMA:-1.0}"
 ENCODE_BATCH="${ENCODE_BATCH:-256}"
@@ -120,6 +127,11 @@ EVAL_ONLY="${EVAL_ONLY:-0}"
 # as it trained), on (routing-support-native for all), off (routing-query for all).
 # Off the default its CSVs are test_scores[_kxk]_support-<on|off>_*.
 EVAL_SUPPORT_NATIVE="${EVAL_SUPPORT_NATIVE:-checkpoint}"
+# SUPPORT_NATIVE (training): the probability, per episode, that the SUPPORT is rendered
+# routing-support-native (rotation only) rather than routing-query. Unset: 0, never (the runs
+# before it existed); 1: always; 0.5: a coin per support batch. Val then uses native support
+# whenever it is above 0. A run with another value writes the SAME weight files, so a run that
+# should keep the old ones goes to another OUT.
 
 if [ "$SMOKE" = "1" ]; then
     # Rung 32 is ~1 position per ki67 slide, so a few slides only supply a
@@ -181,7 +193,7 @@ MATCHING_NET="off:bilstm:attnlstm:cosine_logsumexp"
 python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
 
 echo "======== PrototypicalRoutingHead ========"
-echo "  train_dataset=$TRAIN_DATASET  encoder=$ENCODER  pooling=$POOLING  loss=$LOSS"
+echo "  train_dataset=$TRAIN_DATASET  encoder=$ENCODER  pooling=$POOLING  loss=$LOSSES"
 echo "  models=${#MODELS[@]}  episode reuse: $EPISODE_REUSES  + matching net x $CROSS_DOMAIN_DATASET"
 echo "  reuse-k=$REUSE_K  val-reuse-k=$VAL_REUSE_K  episodes-per-epoch=$EPISODES_PER_EPOCH  (given; each run prints what it used)"
 echo "  n_support=$N_SUPPORT  n_query=$N_QUERY  max_overlap=$MAX_OVERLAP  epochs=$EPOCHS"
@@ -194,18 +206,24 @@ echo "  out=$OUT"
 # RUN_I counts them for the title line; run_one is a function in THIS shell, not
 # a subshell, so the counter survives between calls.
 RUN_I=0
-RUN_N=$(( ${#MODELS[@]} * $(wc -w <<< "$EPISODE_REUSES") + 1 ))
+N_LOSSES=$(wc -w <<< "$LOSSES")
+RUN_N=$(( (${#MODELS[@]} * $(wc -w <<< "$EPISODE_REUSES") + 1) * N_LOSSES ))
 
 # run_one <episode_reuse> <cross_domain_dataset> <model spec> [extra args...]
+# The loss it trains is $RUN_LOSS, which the run loops below set per run ($LOSS when unset).
 run_one () {
     local REUSE="$1" CROSS="$2" SPEC="$3"
+    local LOSS_NOW="${RUN_LOSS:-$LOSS}"
     shift 3
     IFS=':' read -r COLLAPSE SUPPORT_CONTEXT QUERY_CONTEXT ROUTING_HEAD <<< "$SPEC"
-    local RUN_NAME_ARG=""
-    [ -n "$RUN_NAME" ] && RUN_NAME_ARG="--run-name $RUN_NAME"
+    # the wandb run is named <job>-<encoder>-<collapse>-<head>-<reuse> by train.py: with several
+    # losses in one job that would be one name for all of them, so the loss goes into the prefix
+    local RUN_NAME_ARG="" NAME_BASE="$RUN_NAME"
+    [ "$N_LOSSES" -gt 1 ] && NAME_BASE="${RUN_NAME:-${SLURM_JOB_NAME:-PrototypicalRoutingHead}}-$LOSS_NOW"
+    [ -n "$NAME_BASE" ] && RUN_NAME_ARG="--run-name $NAME_BASE"
     echo ""
     RUN_I=$((RUN_I + 1))
-    echo "-------- [$RUN_I/$RUN_N] $REUSE | $COLLAPSE | $ROUTING_HEAD | ctx $SUPPORT_CONTEXT/$QUERY_CONTEXT | cross ${CROSS:-off} --------"
+    echo "-------- [$RUN_I/$RUN_N] $LOSS_NOW | $REUSE | $COLLAPSE | $ROUTING_HEAD | ctx $SUPPORT_CONTEXT/$QUERY_CONTEXT | cross ${CROSS:-off} --------"
     python training/PrototypicalRoutingHead/cli/train.py \
         --train-dataset "$TRAIN_DATASET" \
         --encoder "$ENCODER" \
@@ -235,7 +253,7 @@ run_one () {
         --lr "$LR" \
         --lr-patience "$LR_PATIENCE" \
         --lr-factor "$LR_FACTOR" \
-        --loss "$LOSS" \
+        --loss "$LOSS_NOW" \
         --ordinal-weight "$ORDINAL_WEIGHT" \
         --ordinal-sigma "$ORDINAL_SIGMA" \
         --encode-batch "$ENCODE_BATCH" \
@@ -247,6 +265,7 @@ run_one () {
         $RUN_NAME_ARG \
         $MAX_WSI_ARG \
         ${FEASIBILITY_TRIES:+--feasibility-tries $FEASIBILITY_TRIES} \
+        ${SUPPORT_NATIVE:+--support-native $SUPPORT_NATIVE} \
         --out "$OUT" "$@"
 }
 
@@ -261,20 +280,22 @@ fi
 FAILED=()
 FAIL_DIR="$OUT/.failed"
 if [ "$EVAL_ONLY" != "1" ]; then
-# The runs of this job as "reuse|cross|spec" lines: every model under every
-# reuse mode (cross-domain off), then the matching net (run [2]).
+# The runs of this job as "loss|reuse|cross|spec" lines: for every loss, every model under
+# every reuse mode (cross-domain off), then the matching net (run [2]).
 RUNS=()
-for REUSE in $EPISODE_REUSES; do
-    for spec in "${MODELS[@]}"; do
-        RUNS+=("$REUSE||$spec")
+for L in $LOSSES; do
+    for REUSE in $EPISODE_REUSES; do
+        for spec in "${MODELS[@]}"; do
+            RUNS+=("$L|$REUSE||$spec")
+        done
     done
+    RUNS+=("$L|none|$CROSS_DOMAIN_DATASET|$MATCHING_NET")
 done
-RUNS+=("none|$CROSS_DOMAIN_DATASET|$MATCHING_NET")
 
 if [ "$PARALLEL" -le 1 ]; then
     for entry in "${RUNS[@]}"; do
-        IFS='|' read -r REUSE CROSS spec <<< "$entry"
-        run_one "$REUSE" "$CROSS" "$spec" || FAILED+=("$REUSE $spec cross=${CROSS:-off}")
+        IFS='|' read -r RUN_LOSS REUSE CROSS spec <<< "$entry"
+        run_one "$REUSE" "$CROSS" "$spec" || FAILED+=("$RUN_LOSS $REUSE $spec cross=${CROSS:-off}")
     done
 else
     # PARALLEL=N: N queues at once, one card each, sharing this job's cpus
@@ -316,10 +337,10 @@ else
         (
             export CUDA_VISIBLE_DEVICES=$i
             for ((j = i; j < ${#RUNS[@]}; j += PARALLEL)); do
-                IFS='|' read -r REUSE CROSS spec <<< "${RUNS[$j]}"
+                IFS='|' read -r RUN_LOSS REUSE CROSS spec <<< "${RUNS[$j]}"
                 RUN_I=$j        # run_one counts up from here: [j+1/N]
                 run_one "$REUSE" "$CROSS" "$spec" \
-                    || echo "$REUSE $spec cross=${CROSS:-off}" >> "$FAIL_DIR/p$i"
+                    || echo "$RUN_LOSS $REUSE $spec cross=${CROSS:-off}" >> "$FAIL_DIR/p$i"
             done
         ) > "$LOG.p$i" 2>&1 &
         pids+=($!)
