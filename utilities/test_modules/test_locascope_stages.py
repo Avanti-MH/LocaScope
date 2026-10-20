@@ -8,6 +8,11 @@ same kind of encoder, and re-wrote most of the same argparse flags.
     python utilities/test_modules/test_locascope_stages.py --stages 1,2
     python utilities/test_modules/test_locascope_stages.py --stages 2,3
     python utilities/test_modules/test_locascope_stages.py --stages 1,2,3
+    python utilities/test_modules/test_locascope_stages.py --only matcher
+
+`--only matcher` is the stage 3 ratio matcher against OpenCV's on made-up
+descriptors (what `test_sift_matcher.py` was, merged in): no slide, no model, a
+few seconds, CPU or GPU. A run that includes stage 3 does it first (`[3b]`).
 
 `--stages` is a CONTIGUOUS run: `1`, `1,2`, `1,2,3`, `2,3` are the only legal
 values -- never a bare `3` (stage 3 needs stage 2's retrieval result to
@@ -44,11 +49,12 @@ import tempfile
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Tuple
+from typing import Callable, List, Tuple
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..'))
 
+import cv2
 import numpy as np
 import torch
 from _paths import job_result_dir, setup_import_paths
@@ -71,7 +77,8 @@ from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noq
 from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig      # noqa: E402
 from stage2_retrieval.RetrieverSlidingWinSimRot import (            # noqa: E402
     RetrieverSlidingWinSimRot, RetrieverSlidingWinSimRotConfig, _sim_tensors)
-from stage3_localization.SIFT_RANSAC import SIFT_RECIPES, SiftRansacLocalizer  # noqa: E402
+from stage3_localization.SIFT_RANSAC import (SIFT_RECIPES, SiftRansacLocalizer,  # noqa: E402
+                                              knn_ratio_matches)
 
 
 # ── --stages ─────────────────────────────────────────────────────────────────
@@ -309,14 +316,92 @@ def run_stage3(wsi, query_qc, cs, args, device=None):
     return result
 
 
+RATIO: float = 0.75
+
+
+def made_up_descriptors(seed: int, n_query: int = 600, n_crop: int = 4000
+                        ) -> Tuple[np.ndarray, np.ndarray]:
+    """SIFT-shaped descriptors (128 floats, 0..255). Crop ones, and query ones that are a third noisy
+    copies of crop ones (matches the ratio test keeps), a third near-copies of two crop descriptors at
+    once (the ratio test's borderline) and a third unrelated."""
+    rng: np.random.Generator = np.random.default_rng(seed)
+    crop: np.ndarray = rng.uniform(0, 255, (n_crop, 128)).astype(np.float32)
+    own: np.ndarray = crop[rng.integers(0, n_crop, n_query // 3)]
+    near: np.ndarray = (own + rng.normal(0, 6, own.shape)).astype(np.float32)
+    a: np.ndarray = crop[rng.integers(0, n_crop, n_query // 3)]
+    b: np.ndarray = crop[rng.integers(0, n_crop, n_query // 3)]
+    mix: np.ndarray = (rng.uniform(0.4, 0.6, (len(a), 1)) * a
+                       + (1 - rng.uniform(0.4, 0.6, (len(a), 1))) * b).astype(np.float32)
+    lone: np.ndarray = rng.uniform(0, 255, (n_query - len(near) - len(mix), 128)).astype(np.float32)
+    return np.concatenate([near, mix, lone]), crop
+
+
+def opencv_matches(query: np.ndarray, crop: np.ndarray) -> List[Tuple[int, int, float]]:
+    """`BFMatcher.knnMatch` and Lowe's ratio test: the reference the GPU matcher must reproduce."""
+    found = cv2.BFMatcher(cv2.NORM_L2).knnMatch(query, crop, k=2)
+    return [(m.queryIdx, m.trainIdx, m.distance) for m, n in found if m.distance < RATIO * n.distance]
+
+
+def same_as_opencv(seed: int, chunk: int, device: str) -> None:
+    query, crop = made_up_descriptors(seed)
+    want: List[Tuple[int, int, float]] = opencv_matches(query, crop)
+    got: List[Tuple[int, int, float]] = [
+        (m.queryIdx, m.trainIdx, m.distance)
+        for m in knn_ratio_matches(query, crop, RATIO, torch.device(device), chunk)]
+    assert len(want) > 50, f'only {len(want)} matches: the data tests nothing'
+    assert [w[:2] for w in want] == [g[:2] for g in got], (
+        f'{len(want)} matches by OpenCV, {len(got)} here; '
+        f'{len({w[:2] for w in want} ^ {g[:2] for g in got})} differ')
+    worst: float = max(abs(w[2] - g[2]) for w, g in zip(want, got))
+    assert worst < 1e-3, f'a distance differs by {worst}'
+
+
+def matcher_checks() -> bool:
+    """Stage 3's `knn_ratio_matches` against OpenCV's matcher on made-up descriptors: the same matches and
+    distances. No slide and no model. The matcher runs on the CPU, and on CUDA when there is one."""
+    results: List[Tuple[str, bool]] = []
+
+    def check(name: str, fn: Callable[[], None]) -> None:
+        try:
+            fn()
+            results.append((name, True))
+            print(f'  ok    {name}')
+        except Exception as exc:                                     # noqa: BLE001
+            results.append((name, False))
+            print(f'  FAIL  {name}: {exc}')
+
+    def keeps_nothing_when_nothing_is_close() -> None:
+        rng = np.random.default_rng(9)
+        q = rng.uniform(0, 255, (50, 128)).astype(np.float32)
+        c = rng.uniform(0, 255, (200, 128)).astype(np.float32)
+        assert len(knn_ratio_matches(q, c, 0.01, torch.device('cpu'))) == 0
+
+    print('stage 3 ratio matcher')
+    for seed in (0, 1, 2):
+        check(f'cpu, seed {seed}: the matches and distances are OpenCV\'s',
+              lambda seed=seed: same_as_opencv(seed, 2048, 'cpu'))
+    check('cpu, a chunk smaller than the query: the same', lambda: same_as_opencv(3, 64, 'cpu'))
+    if torch.cuda.is_available():
+        for seed in (0, 1):
+            check(f'cuda, seed {seed}: the same', lambda seed=seed: same_as_opencv(seed, 2048, 'cuda'))
+    else:
+        print('  (no cuda here: the GPU run is not tested)')
+    check('a ratio nothing passes gives no matches', keeps_nothing_when_nothing_is_close)
+
+    failed: List[str] = [n for n, ok in results if not ok]
+    print(f'{len(results) - len(failed)}/{len(results)} passed')
+    if failed:
+        print('failed: ' + ', '.join(failed))
+    return not failed
+
+
 def check_stage3_matcher(wsi, query_qc, cs, args, device, gpu_result) -> bool:
     """The GPU matcher is OpenCV's matcher, on this very candidate and not only
     on made-up descriptors: the same query and crop matched both ways must give
     the same number of matches, the same inliers and the same place. Skipped on
-    a machine with no CUDA. The made-up descriptors, 7 cases, are
-    `test_sift_matcher.py`'s, run first."""
-    import test_sift_matcher                                         # noqa: PLC0415
-    ok: bool = test_sift_matcher.main() == 0
+    a machine with no CUDA. The made-up descriptors (`matcher_checks`, 7 cases
+    with CUDA) are run first."""
+    ok: bool = matcher_checks()
     if device.type != 'cuda':
         print('  (no cuda: the real candidate is matched with OpenCV only)')
         return ok
@@ -342,6 +427,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stages', type=parse_stages, default=(1, 2, 3))
+    ap.add_argument('--only', choices=['matcher'], default=None,
+                    help='run one slide-free check and stop: `matcher`, stage 3\'s ratio matcher against '
+                         'OpenCV\'s on made-up descriptors')
     # The slide comes from a virtual dataset whose masks are already cached, and
     # the query from a TileSampler draw on it -- the way Stage1MppBench picks
     # both -- so the test segments nothing and its ground truth is a placed FoV.
@@ -384,6 +472,11 @@ def main() -> int:
                     help='stage 2: its maps against the frozen pre-2026-10-06 '
                          'path and against a feature-cache read (check_sims)')
     args = ap.parse_args()
+
+    if args.only == 'matcher':
+        passed: bool = matcher_checks()
+        print('PASS' if passed else 'FAIL')
+        return 0 if passed else 1
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     timings: dict = {}
