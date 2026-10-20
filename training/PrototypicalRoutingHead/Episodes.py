@@ -31,9 +31,9 @@ TEST keeps its original per-episode draw as well (`sample_val_episode`,
 `cli/evaluate.py` can report the numbers it always reported next to the
 new K x K ones.
 
-NOT NAMED `Datasets.py`: `training/MppRoutingHead/` already has one, and this
+NOT NAMED `Datasets.py`: `training/ClassifyingRoutingHead/` already has one, and this
 file imports it fully qualified. Position sampling itself (mask + TileSampler)
-is `MppRoutingHead.Datasets.build_manifest`, run once up front; this module
+is `ClassifyingRoutingHead.Datasets.build_manifest`, run once up front; this module
 only draws from what it built.
 '''
 from __future__ import annotations
@@ -48,11 +48,18 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-# MppRoutingHead's -- see module docstring. CameraBank/render_row are public
+# ClassifyingRoutingHead's -- see module docstring. CameraBank/render_row are public
 # there so this import is legitimate reuse.
-from training.MppRoutingHead.Datasets import (
+from training.ClassifyingRoutingHead.Datasets import (
     CameraBank, ManifestRow, RUNGS, RenderConfig, render_row)
-from WsiSplit import BRACS_RUNGS
+
+
+#: Rungs a 4x-per-level pyramid can supply at its OWN native levels -- BRACS
+#: SVS steps 4x per level (`DsLadder`'s module docstring: ds 1, 4, 16, 32). A
+#: combination inside it can put the cross-domain pool on one side of a draw;
+#: every slide of that pool is native at all four (`make_dataset.py` keeps
+#: it so).
+BRACS_RUNGS: frozenset = frozenset((1.0, 4.0, 16.0, 32.0))
 
 
 #: Rung combinations reserved for validation -- `training_combos` never
@@ -198,7 +205,7 @@ def sample_val_episode(manifest_by_wsi: Dict[str, List[ManifestRow]],
     (spec.md's "Task"), where support and query come from the SAME WSI's
     domain; cross-domain pairing is a TRAINING-time technique for forcing
     domain-invariant parameters, not a different definition of the task
-    being scored. `--eval-datasets` already covers the cross-dataset
+    being scored. `--val-dataset` already covers the cross-dataset
     generalisation question on the query/support-together axis (bracs/test
     vs ki67_with_photo, each internally consistent), which is what this
     function keeps measuring.
@@ -586,7 +593,7 @@ def prefetched(produce: Iterator, depth: int) -> Iterator:
     an exception in `produce` is raised in the caller at the item it failed
     on. The caller must exhaust it (or close it) before touching anything
     `produce` touches, such as the camera bank or the episode rng.
-    `utilities/bench_modules/bench_window_retrieval.prefetched`, which does
+    `utilities/bench_modules/bench_stage2_retriever.prefetched`, which does
     the same for the window bench's reads."""
     if depth <= 0:
         yield from produce
@@ -657,7 +664,7 @@ def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
                    pool: Optional[ThreadPoolExecutor] = None
                    ) -> Optional[RenderedEpisode]:
     '''Renders every position in `episode` through `render_row`
-    (`MppRoutingHead.Datasets`'s own render path -- fresh augmentation when
+    (`ClassifyingRoutingHead.Datasets`'s own render path -- fresh augmentation when
     `deterministic=False`, the training case; `rng` seeded from each row's
     own identity when `True`, the eval case -- see `RenderConfig`'s own
     docstring, "Camera: train vs eval").
@@ -673,7 +680,7 @@ def render_episode(episode: Episode, bank: CameraBank, cfg: RenderConfig, *,
     training match that on the support side, when a caller asks for it.
 
     `None` if ANY position fails to render (`render_row` returns `None`
-    near a region edge, same rare per-position case `MppRoutingHead` already
+    near a region edge, same rare per-position case `ClassifyingRoutingHead` already
     lives with) -- the caller draws a fresh episode rather than scoring a
     partial one.
 

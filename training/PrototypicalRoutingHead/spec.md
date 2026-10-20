@@ -1,23 +1,23 @@
 # PrototypicalRoutingHead — spec
 
-Same task as `training/MppRoutingHead`: route an unknown tile/photo to the
+Same task as `training/ClassifyingRoutingHead`: route an unknown tile/photo to the
 `DsLadder` rung (equivalently, the mpp) it was taken at. Different mechanism —
-this is the "ultimate goal" `MppRoutingHead/spec.md` names and defers: given a
+this is the "ultimate goal" `ClassifyingRoutingHead/spec.md` names and defers: given a
 handful of prototype tiles each labelled with their own scale, tell an unknown
 tile which one it is closest to, so that a NEW WSI (a new `base_mpp`, a new
 scanner) needs a fresh set of prototypes, not a fresh training run.
 
-`MppRoutingHead` is the classifier-head baseline this has to beat, not a step
+`ClassifyingRoutingHead` is the classifier-head baseline this has to beat, not a step
 towards it. Both sit on the same `stage1_compare` scorecard as `KnnEstMpp`
 (`utilities/bench_modules/bench_stage1_mpp.py`) — see that
 file's own module docstring for the comparison shape every stage-1 candidate
 is measured on.
 
 **Why this earns a separate project rather than living inside
-`MppRoutingHead`.** The forward pass takes TWO kinds of input at once — a
+`ClassifyingRoutingHead`.** The forward pass takes TWO kinds of input at once — a
 support set (to build a prototype from) and a query (to classify against
 it) — and training is episodic, not epoch-over-manifest. Every training-loop,
-checkpoint and data-loading assumption `MppRoutingHead/Runtime.py`,
+checkpoint and data-loading assumption `ClassifyingRoutingHead/Runtime.py`,
 `cli/train.py` and `Datasets.py` make is built around ONE input per forward
 pass. Retrofitting that shape to carry two would be the same mistake
 `common/Head.py`'s own docstring already names for a different case:
@@ -28,13 +28,13 @@ primitives, precision handling, checkpoint idioms) lives in
 
 ## Task
 
-Unchanged from `MppRoutingHead/spec.md`: 6-way classification over
+Unchanged from `ClassifyingRoutingHead/spec.md`: 6-way classification over
 `DsLadder.DEFAULT_RUNGS = (1, 2, 4, 8, 16, 32)`. Not mpp regression, not
 ordinal regression as the label shape — but SEE "Ordinal-aware loss" below:
-`MppRoutingHead/spec.md`'s own late addition (the class-imbalance-weighted +
+`ClassifyingRoutingHead/spec.md`'s own late addition (the class-imbalance-weighted +
 soft-ordinal-target loss) is adopted here from the start, not retrofitted,
 and rung 32's training scarcity (roughly 1% of rung 1's supply, same
-`RICHNESS`-driven shortfall `MppRoutingHead` measured) is accepted as a fact
+`RICHNESS`-driven shortfall `ClassifyingRoutingHead` measured) is accepted as a fact
 about the data rather than something to fix by resampling — this project's
 own bet is that the loss shape, not the data supply, is what has to close
 that gap. If it does not, that is a finding, not a blocker.
@@ -51,7 +51,7 @@ not a simplification of it.
 Two axes run through this whole design, not four independent choices:
 **which arm is the MAIN LINE** (build and score first, alone) and **which
 arms are OBSERVATION ARMS** (built one at a time, after the main line has a
-number, never assumed better for having more parameters — `MppRoutingHead
+number, never assumed better for having more parameters — `ClassifyingRoutingHead
 2-5`/`3-2` already found that more head capacity does not reliably help
 cross-dataset generalisation, and `2-3` ArcFace was the worst performer
 despite being the most geometrically sophisticated frozen-feature head).
@@ -141,7 +141,7 @@ attended-support mix (Matching Net, feeding straight in from Stage 2).
 **Gaussian/Mahalanobis and the hyperbolic Poincaré-ball head are explicitly
 OUT of scope (settled with the user 2026-09-19), not deferred-and-forgotten:**
 Mahalanobis needs a covariance estimate accumulated by a fit-once streaming
-pass beside gradient descent — the exact plumbing gap `MppRoutingHead
+pass beside gradient descent — the exact plumbing gap `ClassifyingRoutingHead
 spec.md`'s own "Status" section already names as unbuilt for its own 2-4.
 Poincaré solves a problem this label space does not have: hyperbolic
 geometry earns its keep on HIERARCHICAL (tree-shaped) label sets, and
@@ -151,18 +151,18 @@ the extra geometry to represent here.
 ### Stage 4 — training and loss
 
 Not in `aiNNModel/models/` — training loops and losses are task-specific by
-this repo's own convention (`MppRoutingHead/Runtime.py`'s own docstring: "task
+this repo's own convention (`ClassifyingRoutingHead/Runtime.py`'s own docstring: "task
 specific so it stays here rather than moving to `aiNNModel/models/`"). Lives
 in this project's own `cli/train.py` + a `Losses.py`.
 
-**Loss — adopted from `MppRoutingHead/spec.md`'s "Ordinal-aware loss" section
+**Loss — adopted from `ClassifyingRoutingHead/spec.md`'s "Ordinal-aware loss" section
 verbatim, from the start:**
 
 ```
 K=6 rungs, ell_c = log2(rung_c) = (0,1,2,3,4,5)
 w_c = N / (K * n_c)                              (class-imbalance weight, Datasets.class_weights' formula)
 
-L_bal   = -w_y * log p_y                          (weighted CE -- today's MppRoutingHead default)
+L_bal   = -w_y * log p_y                          (weighted CE -- today's ClassifyingRoutingHead default)
 L_ord_A = L_bal + lambda * sum_i w_i (E_c[ell_c] - ell_i)^2 / sum_i w_i
                                                   (regression penalty on the expected log-rung,
                                                    class-weighted like L_bal)
@@ -171,7 +171,7 @@ L_ord_B = w_y * (-sum_c q_c(y) log p_c)             (soft target: Gaussian kerne
 
 Both `lambda` (A) and `sigma` (B, the kernel bandwidth) are new hyperparameters,
 default to the value that recovers plain `L_bal` (`lambda=0`, `sigma->0`) so a
-smoke run without them is comparable to a `MppRoutingHead` run. Which of A/B
+smoke run without them is comparable to a `ClassifyingRoutingHead` run. Which of A/B
 wins is an empirical question this project answers itself — it is not
 inherited as a decision, only as a formula.
 
@@ -223,23 +223,23 @@ all six at once.
 whether the metric space generalises to a rung COMBINATION never asked about
 jointly -- every rung in them still appears in plenty of training
 combinations. A third evaluation axis alongside the held-out WSIs
-(the recorded split, `make_split.py`) and the full-6-way deployment task.
+(`@legacy-val`, `make_dataset.py`) and the full-6-way deployment task.
 
 **What changes in the loss for a variable N.** `log2_rungs`
-(`MppRoutingHead spec.md`'s ordinal-loss formulas, adopted here) must be
+(`ClassifyingRoutingHead spec.md`'s ordinal-loss formulas, adopted here) must be
 built from THIS EPISODE's own `N` chosen rungs, not the fixed
 `DsLadder.DEFAULT_RUNGS` 6-tuple — and `target` must be the LOCAL index
 into that episode's own rung list (`0..N-1`), not the global rung index
 (`0..5`), since `CosineTauHead` returns `[query_N, N]` logits shaped by
 however many prototypes it was actually handed.
 
-Support and query render through `Camera` the same way `MppRoutingHead/
+Support and query render through `Camera` the same way `ClassifyingRoutingHead/
 Datasets.py`'s own `CameraBank`/`render_row` already do (`Episodes.
 render_draw`): on train each capture draws its augmentation from a generator
 seeded off the episode sampler, so a resumed run renders the photos the
 uninterrupted one would have; on eval each row renders from its own
 identity, the same photo every time. Both names were renamed public
-in `MppRoutingHead/Datasets.py` first (were `_CameraBank`/`_render_row`) so
+in `ClassifyingRoutingHead/Datasets.py` first (were `_CameraBank`/`_render_row`) so
 this reuse is legitimate rather than reaching past a no-stability-promise
 underscore — every reference to the old names, including comments in
 `cli/train.py`/`Runtime.py`/`test_camera.py`, was updated
@@ -275,7 +275,7 @@ kind.
 
 **Test** (`cli/evaluate.py`) writes two tables: the ORIGINAL one (random full
 6-way episodes, accuracy pooled per combination -- unchanged, comparable with
-earlier runs and tile by tile with `MppRoutingHead`) and the K x K one above
+earlier runs and tile by tile with `ClassifyingRoutingHead`) and the K x K one above
 on the test split.
 
 **Resume** (`--resume-dir`, `aiNNModel/models/common/Resume.py`). Unset:
@@ -297,7 +297,7 @@ BOTH which architecture and which training arm produced it.
 
 | Arm | Training | Inner-loop grad steps | Cost |
 |---|---|---|---|
-| **Baseline prototype learning** | ordinary, non-episodic supervised training of the embedding (identical shape to `MppRoutingHead`'s own baseline 2: every training tile classified directly, e.g. through `CosineTauHead` against a FIXED learned weight matrix, or any existing `Heads.py` classifier). Prototypes are computed POST-HOC at inference by averaging a support set's embeddings in this trained space — Chen et al. 2019's "Baseline" category for few-shot classification, and the closest thing to `MppRoutingHead spec.md`'s still-unbuilt 2-2 (NCM), except the embedding space is now one this project trained on purpose rather than a frozen foundation model's raw exit | 0 | cheapest — identical per-step cost to `MppRoutingHead` |
+| **Baseline prototype learning** | ordinary, non-episodic supervised training of the embedding (identical shape to `ClassifyingRoutingHead`'s own baseline 2: every training tile classified directly, e.g. through `CosineTauHead` against a FIXED learned weight matrix, or any existing `Heads.py` classifier). Prototypes are computed POST-HOC at inference by averaging a support set's embeddings in this trained space — Chen et al. 2019's "Baseline" category for few-shot classification, and the closest thing to `ClassifyingRoutingHead spec.md`'s still-unbuilt 2-2 (NCM), except the embedding space is now one this project trained on purpose rather than a frozen foundation model's raw exit | 0 | cheapest — identical per-step cost to `ClassifyingRoutingHead` |
 | **Metric-based meta-learning** (built, plan.md 1.1-1.3) | episodic; the "adaptation" to a new support set is a forward-pass COMPUTATION (mean, or `SetTransformerPrototype`'s self-attention) — no gradient steps at all. ONE backward pass per episode updates the embedding. This is Prototypical Networks' own category (Snell et al.), and what plan.md has been building | 0 (no inner loop) | current main line's cost |
 | **Optimization-based meta-learning** (NEW arm, not yet designed in code) | episodic; an INNER loop takes `K` real SGD steps on a COPY of the embedding's parameters, using a loss computed FROM the support set itself, before the OUTER loss (query, scored with the ADAPTED copy) backprops to update the ORIGINAL parameters — MAML's own shape (Finn et al. 2017) | `K` (typically 1-5) | `K+1` forward/backward passes per episode; full (second-order) MAML backprops THROUGH the inner loop's own gradients (Hessian-vector products); first-order approximations (FOMAML, Reptile) drop that term and are cheaper and more stable at some fidelity cost |
 
@@ -338,7 +338,7 @@ computed from it:
 
 Current lean: **build Reptile first.** It needs no second-order gradients
 and no functional-parameter machinery at all, which matters given this
-codebase's fp16-under-Adam NaN history (`MppRoutingHead spec.md`'s Status
+codebase's fp16-under-Adam NaN history (`ClassifyingRoutingHead spec.md`'s Status
 section) -- the fastest path to a real answer on whether optimization-based
 training helps here at all, with FOMAML as the next step up in fidelity if
 Reptile's result looks worth sharpening, and full MAML last. Not yet a
@@ -349,7 +349,7 @@ final decision.
 1. **Checkpoint format — RESOLVED, built 2026-09-20.**
    `Checkpoints.save_checkpoint`/`build_from_checkpoint`
    (`aiNNModel/models/common/Checkpoints.py`) are shaped around ONE encoder +
-   ONE `Head` and have real callers today (`MppRoutingHead`,
+   ONE `Head` and have real callers today (`ClassifyingRoutingHead`,
    `stage1_estimation/ClassifierEstMpp.py`) that must not break —
    untouched. Added `save_prototype_checkpoint`/`build_prototype_from_
    checkpoint` in the SAME file instead: three trained modules (pooling,
@@ -388,7 +388,7 @@ final decision.
    select between besides today's one entry per axis. Concretely:
    - `Runtime.py` (new): `GENERATOR_CHOICES`/`ROUTING_HEAD_CHOICES` — see
      the file's own docstring for why each entry is a BUILDER FUNCTION
-     rather than a `(class, config_class)` tuple `MppRoutingHead.
+     rather than a `(class, config_class)` tuple `ClassifyingRoutingHead.
      HEAD_CHOICES`-style: a future arm's config shape (Matching Net's own
      W_q/W_k dims) is not yet known, and forcing one shape now would be
      guessing it before a second entry exists to test it against.
@@ -437,18 +437,18 @@ final decision.
      encoder pass / episodic support-query / episodic + inner-loop
      gradients) and their CLI argument sets barely overlap
      (`n_support`/`n_query`/`--episode-reuse` mean nothing to the baseline arm).
-     Same principle `MppRoutingHead/cli/train.py`'s own `run_baseline2`/
+     Same principle `ClassifyingRoutingHead/cli/train.py`'s own `run_baseline2`/
      `run_baseline3` split uses (one file, two functions, because the two
      shapes differ) — this project just needed the split one level up, at
      the file boundary, because even the CLI surface diverges, not only the
      inner loop.
    - `cli/train.py` imports `training.PrototypicalRoutingHead.Runtime`
-     despite `training/MppRoutingHead/Runtime.py` sharing the bare name
+     despite `training/ClassifyingRoutingHead/Runtime.py` sharing the bare name
      `Runtime.py` — RESOLVED by construction: `training/`,
-     `training/MppRoutingHead/` and `training/PrototypicalRoutingHead/`
+     `training/ClassifyingRoutingHead/` and `training/PrototypicalRoutingHead/`
      are real Python packages (each with its own `__init__.py`), so
      every cross-file import within these two packages is fully-qualified
-     (`from training.MppRoutingHead.Datasets import ...`, `from training.
+     (`from training.ClassifyingRoutingHead.Datasets import ...`, `from training.
      PrototypicalRoutingHead.Episodes import ...`) and resolves by import
      path alone — no `sys.path` ordering involved, and no future same-named
      file in either package can collide again. `SuperPathPoint` still uses
@@ -458,9 +458,9 @@ final decision.
    2026-09-21.** Both axes needed at once, each resolved by reusing
    something that already existed rather than a new design:
    - **Held-out WSI**: `--eval-datasets` (`bracs/test`/`ki67_with_photo`,
-     same defaults) × `wsi_split` pointed at `MppRoutingHead`'s own cache
+     same defaults) × `wsi_split` pointed at `ClassifyingRoutingHead`'s own cache
      (`result/cache/mpp_routing_head/`) — the EXACT same mechanism
-     `MppRoutingHead/cli/train.py`'s own `val_rows` uses, so both scripts
+     `ClassifyingRoutingHead/cli/train.py`'s own `val_rows` uses, so both scripts
      read the IDENTICAL held-out WSI names under shared defaults, by
      construction (same file on disk via `wsi_split`'s "EXISTING WINS"
      rule), not by two independent derivations happening to agree.
@@ -474,12 +474,12 @@ final decision.
      WSI/position-slicing mechanics are not duplicated between the two.
    - Val episodes are drawn with a FRESH `random.Random(args.seed)` every
      epoch (not the training loop's own advancing `rng`), so the val SET
-     stays identical epoch to epoch — same reasoning `MppRoutingHead.
+     stays identical epoch to epoch — same reasoning `ClassifyingRoutingHead.
      predict`'s own `epoch_seed=0` gives.
    - The scoring formula (`score`/`rescore`) is kept in sync with
-     `MppRoutingHead/cli/train.py`'s and `cli/train_baseline.py`'s own —
+     `ClassifyingRoutingHead/cli/train.py`'s and `cli/train_baseline.py`'s own —
      these were ADDED to this package's own `Runtime.py` (a duplicate of
-     `MppRoutingHead/Runtime.py`'s same-named functions, same bare-name-
+     `ClassifyingRoutingHead/Runtime.py`'s same-named functions, same bare-name-
      collision reasoning as decision 5's wandb section), not written a
      third, differently-shaped way.
    - EVOLVED THROUGH THREE SHAPES the same day before settling: (1) a
@@ -663,20 +663,20 @@ training/PrototypicalRoutingHead/
                                      max_feasible_k; plus the ORIGINAL
                                      per-episode draw cli/evaluate.py's
                                      first table still uses. Draws from a
-                                     manifest built by MppRoutingHead.
+                                     manifest built by ClassifyingRoutingHead.
                                      Datasets.build_manifest -- REUSED
                                      (imported), not copied, since nothing
                                      about "which positions exist for a WSI
                                      at a rung" is specific to how a caller
                                      trains on them. NOT named Datasets.py --
-                                     MppRoutingHead already has a top-level
+                                     ClassifyingRoutingHead already has a top-level
                                      module by that name; even though both
                                      packages are now real Python packages
                                      with fully-qualified imports (2026-09-22,
                                      see this file's "Open design decisions"
                                      5), a second Datasets.py here would
                                      still read as confusable with this
-                                     file's own `from training.MppRoutingHead.
+                                     file's own `from training.ClassifyingRoutingHead.
                                      Datasets import ...` line, so it keeps
                                      its distinct name regardless.
                                      sample_val_episode (built 2026-09-21)
@@ -696,7 +696,7 @@ training/PrototypicalRoutingHead/
                                      AND score/rescore/rescore_by_rung
                                      (added 2026-09-21 for cli/train.py's
                                      val loop) -- all duplicates of
-                                     MppRoutingHead/Runtime.py's own,
+                                     ClassifyingRoutingHead/Runtime.py's own,
                                      100% generic, same bare-name-collision
                                      reason as decision 5's own Runtime.py
                                      note
@@ -737,7 +737,7 @@ jobscripts/PrototypicalRoutingHead/
                                      then cli/evaluate.py. RESUME_DIR
                                      defaults to $OUT/resume -- resubmit the
                                      same command to continue. Reads
-                                     MppRoutingHead's mask/sampler caches.
+                                     the Masks cache's masks and MppRoutingHead's draws.
                                      SUPPLY_ONLY=1 prints supply and the
                                      auto K / episodes and stops
 ```

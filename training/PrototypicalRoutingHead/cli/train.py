@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 '''Trains the metric-based meta-learning line: `Pooling` -> Stage 2
 (support context G, query context F, Collapse) -> Stage 3 routing head,
-episodic, on `ki67_pure` -- optionally with `bracs/train` as a second staining
-domain a draw may put on either side (`--cross-domain-dataset`).
+episodic, on the `--train-stain` (Ki67) slides of `--train-dataset` (`@pure-train`) --
+optionally with its slides of the other stain (HE) as a second domain a draw may
+put on either side (`--cross-domain`).
 
     python training/PrototypicalRoutingHead/cli/train.py --encoder uni2 \
         --episode-reuse hold_q --reuse-k auto
@@ -37,9 +38,9 @@ epoch prints each combination's accuracy and its per-rung accuracies.
 held-out combination. The val draw uses a fresh `random.Random(--seed)` every
 epoch, so the same questions are asked every epoch and only the model changes.
 
-CHECKPOINTS: `_best.pt` when EVERY dataset scores at least what the saved epoch
-did and one scores more (`improves_everywhere`), `_6rung.pt` on the full 6-way
-combination's accuracy (mean over datasets), `_native.pt` on the mean over the
+CHECKPOINTS: `--best.pt` when EVERY dataset scores at least what the saved epoch
+did and one scores more (`improves_everywhere`), `--6rung.pt` on the full 6-way
+combination's accuracy (mean over datasets), `--native.pt` on the mean over the
 combinations whose every query rendered natively.
 
 RESUME (`aiNNModel/models/common/Resume.py`): with `--resume-dir`, the run's
@@ -62,7 +63,7 @@ import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities'))
@@ -72,31 +73,31 @@ setup_import_paths()
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
-from training.MppRoutingHead.Datasets import (                      # noqa: E402
+from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, build_manifest, cache_jobs, CameraBank, data_record,
     open_caches,
     RenderConfig, RUNGS)
-from AccessDatasets import list_names, pick_wsi_names                # noqa: E402
-from WsiSplit import native_bracs_rung_wsi_names                     # noqa: E402
+from AccessDatasets import by_source, pick_wsi_names, stains        # noqa: E402
 from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
     HELD_OUT_COMBOS, REUSE_MODES, batch_shape, draw, epoch_schedule,
     episodes_per_epoch,
     group_by_wsi_name, max_feasible_k, pool_by_rung, prefetched, render_draw,
     reuse_pairs,
-    training_combos, training_pools)
-from WsiSplit import BRACS_RUNGS                                       # noqa: E402
+    training_combos, training_pools, BRACS_RUNGS)
 from training.PrototypicalRoutingHead.Losses import compute_loss     # noqa: E402
 from Pooling import Pooling, PoolingConfig                            # noqa: E402
 from training.PrototypicalRoutingHead.Runtime import (               # noqa: E402
     COLLAPSE_CHOICES, ROUTING_HEAD_CHOICES, SUPPORT_CONTEXT_CHOICES,
     QUERY_CONTEXT_CHOICES, wandb_init, wandb_log, wandb_finish, rescore)
-from Checkpoints import save_prototype_checkpoint                    # noqa: E402
-from Features import encode_raw                                      # noqa: E402
+from Checkpoints import data_tag, save_prototype_checkpoint, weights_name   # noqa: E402
+from Features import cat_tokens, encode_raw                          # noqa: E402
+from Heads import resolve_encoder_layers                             # noqa: E402
+from training.ClassifyingRoutingHead.Runtime import MIX_LAYERS               # noqa: E402
 from Resume import ResumeFile, resume_identity                       # noqa: E402
 
 
 def build_encoder(name: str, dtype: str, device):
-    '''Same pattern `MppRoutingHead/cli/train.py`'s `run_baseline2` uses --
+    '''Same pattern `ClassifyingRoutingHead/cli/train.py`'s `run_baseline2` uses --
     `dtype` lives on the nested `ModelConfig`, so it has to go in as a
     `dataclasses.replace` on the CONFIG, not a kwarg `encoder_config` itself
     would raise on.'''
@@ -107,15 +108,16 @@ def build_encoder(name: str, dtype: str, device):
     return cfg.build(device)
 
 
-def encode_group(group, encoder, batch_size: int, device):
+def encode_group(group, encoder, batch_size: int, device, layers: Sequence[int] = ()):
     """One rendered batch `{rung: [(patch, native), ...]}` through the FROZEN
-    encoder, once: `{rung: raw tokens [n, L, D]}`, plus `native` per rung.
+    encoder, once: `{rung: raw tokens [n, L, D]}`, plus `native` per rung --
+    `LayerTokens` with `layers` (the pooling's `encoder_layers`, a mix).
     Every pair a batch takes part in reuses these tokens -- only what trains
     runs again per pair."""
     raw, native = {}, {}
     for rung, items in group.items():
         stacked = torch.from_numpy(np.stack([p for p, _n in items]))
-        raw[rung] = encode_raw(encoder, stacked, batch_size, device)
+        raw[rung] = encode_raw(encoder, stacked, batch_size, device, layers=layers)
         native[rung] = [bool(n) for _p, n in items]
     return raw, native
 
@@ -148,7 +150,7 @@ def pair_forward(rungs, support_raw, query_raw, query_native, *, num_prefix: int
         q_raw.append(query_raw[rung])
         target += [local_idx] * len(query_raw[rung])
         native += query_native[rung]
-    query_vecs = query_context(pooling(torch.cat(q_raw), num_prefix),
+    query_vecs = query_context(pooling(cat_tokens(q_raw), num_prefix),
                                g_output_by_rung)
     logits = head(query_vecs, prototypes)
     return (logits, torch.tensor(target, dtype=torch.long, device=device),
@@ -161,8 +163,9 @@ def episode_forward(rendered, *, encoder, num_prefix: int, pooling,
     """The original one-support-one-query episode (`Episodes.RenderedEpisode`)
     -> `(logits, target, native)`. Kept for `cli/evaluate.py`'s original test
     scoring; it is `encode_group` + `pair_forward` on the one pair."""
-    s_raw, _s_native = encode_group(rendered.support, encoder, batch_size, device)
-    q_raw, q_native = encode_group(rendered.query, encoder, batch_size, device)
+    layers: tuple = pooling.cfg.encoder_layers
+    s_raw, _s_native = encode_group(rendered.support, encoder, batch_size, device, layers)
+    q_raw, q_native = encode_group(rendered.query, encoder, batch_size, device, layers)
     return pair_forward(rendered.rungs, s_raw, q_raw, q_native,
                         num_prefix=num_prefix, pooling=pooling,
                         support_context=support_context,
@@ -171,35 +174,31 @@ def episode_forward(rendered, *, encoder, num_prefix: int, pooling,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  held-out validation -- held-out WSI (same split MppRoutingHead/cli/
+#  held-out validation -- held-out WSI (same split ClassifyingRoutingHead/cli/
 #  train.py reads) x held-out rung combination (Episodes.HELD_OUT_COMBOS)
 # ══════════════════════════════════════════════════════════════════════════
 
 def val_manifests(args, caches, out_dir: Path):
-    '''`({dataset_id: {rung: [row, ...]}}, {dataset_id: (val WSIs, test WSIs)})`
-    -- the MIXED pool of every `--eval-datasets` entry's held-out WSIs, and how
-    many WSIs the split gave val and test (the supply table prints both).
+    '''`({dataset_id: {rung: [row, ...]}}, {dataset_id: val WSIs})`
+    -- one pool per dataset `--val-dataset`'s slides come from, and how many
+    WSIs each gave (the supply table prints it).
 
-    The held-out names are READ from the split `utilities/cli/build_cache/
-    make_split.py` wrote (`--split-cache-job`, default MakeSplit) --
-    the same file `MppRoutingHead/cli/train.py`'s `val_rows` reads, so both
+    The held-out names are READ from the virtual dataset
+    `utilities/cli/build_cache/make_dataset.py` wrote -- the same one
+    `ClassifyingRoutingHead/cli/train.py`'s `val_rows` reads by default, so both
     packages hold out the IDENTICAL slides by construction rather than by two
     derivations happening to agree. The BRACS native filter is applied there,
     by the one writer.
     '''
     out, sizes = {}, {}
-    for dataset_id in args.eval_datasets:
-        val_names = list_names(dataset=f'{dataset_id}#val',
-                               split_job=caches.split_job)
-        test_names = list_names(dataset=f'{dataset_id}#test',
-                                split_job=caches.split_job)
+    for dataset_id, val_names in by_source(args.val_dataset):
         part = build_manifest(
             dataset_id, masks=caches.masks, draw_job=caches.draw_job,
             report_dir=(out_dir / 'sampler_reports'
                         / f'{dataset_id.replace("/", "_")}_val'),
             tile_size=args.tile, n_per_rung=args.val_n_per_rung,
             seed=args.seed, wsi_names=val_names)
-        sizes[dataset_id] = (len(val_names), len(test_names))
+        sizes[dataset_id] = len(val_names)
         out[dataset_id] = pool_by_rung(part)
     return out, sizes
 
@@ -432,8 +431,9 @@ def score_kxk(pools_by_dataset, combos, *, k: int, n_support: int, n_query: int,
                     cache[dataset_id, label] = None
                 continue
             # ////////////////////////////////////////////////////////////////// end add by me
-            s_enc = [encode_group(g, encoder, batch_size, device) for g in rendered.supports]
-            q_enc = [encode_group(g, encoder, batch_size, device) for g in rendered.queries]
+            layers: tuple = pooling.cfg.encoder_layers
+            s_enc = [encode_group(g, encoder, batch_size, device, layers) for g in rendered.supports]
+            q_enc = [encode_group(g, encoder, batch_size, device, layers) for g in rendered.queries]
             if cache is not None:
                 cache[dataset_id, label] = (rendered.rungs, s_enc, q_enc)
             per_combo[label] = _score_pairs(
@@ -527,51 +527,63 @@ def kxk_report(results, epoch: int, *, k: int, header: bool = True,
                                        native=_nanmean(native_accs))
 
 
-def _cross_domain_tag(cross_domain_dataset: str) -> str:
-    '''`args.cross_domain_dataset`, filename/CSV-safe -- `'bracs/train'` ->
-    `'bracs_train'`, `''` (disabled, `--cross-domain-dataset ""`) ->
-    `'none'` so an empty CSV cell never silently compares equal to a
-    genuinely missing column the way `''` would.'''
-    return cross_domain_dataset.replace('/', '_') if cross_domain_dataset else 'none'
+def _pooling_tag(args) -> str:
+    '''`--pooling`, and `+mix` with `--mix`: `attn+mix`.'''
+    return args.pooling + ('+mix' if args.mix else '')
 
 
-def _prototype_weight_filename(encoder_name: str, pooling: str,
-                               support_context: str, query_context: str,
-                               collapse: str, routing_head: str,
-                               cross_domain_dataset: str, loss: str,
-                               tag: str, episode_reuse: str = 'none',
-                               reuse_k: int = 1) -> str:
-    '''`<encoder>_frozen_<pooling>_<support_context>_<query_context>_
-    <collapse>_<routing_head>_<cross_domain_dataset>_<loss>_<tag>.pt` (the
-    `<loss>` segment omitted when `loss` is `'bal'`) -- the prototype-
-    checkpoint analogue of `Checkpoints.weight_filename`. Not that function
-    itself: it is shaped for ONE `Head` (`<encoder>_<frozen|finetuned>_
-    <head>_<tag>.pt`), and this checkpoint holds FIVE modules (pooling/
-    support_context/query_context/collapse/head) plus axes (`pooling`,
-    `cross_domain_dataset`, `loss`) that function's own world has no name
-    for. `support_context`/`query_context`: `identity` (both, by default)
-    trains nothing, but `bilstm`/`attnlstm` do, and a run with one of those
-    enabled vs one without is a different experiment even when every other
-    flag matches.
+def _cross_domain_tag(cross_domain: bool) -> str:
+    '''`--cross-domain` as a filename/CSV value: `on` or `off`.'''
+    return 'on' if cross_domain else 'off'
 
-    `loss`: `bal` gets NO segment, `ord_a`/`ord_b` get a distinct one, the
-    same rule as `Checkpoints.weight_filename`.
 
-    `<episode_reuse>-k<K>`: the three reuse modes and their K
-    are three experiments over the same modules and would otherwise share one
-    `_best.pt`. The RESOLVED K, never `auto`: two `auto` runs over different
+def train_names(args) -> List[Tuple[str, List[str]]]:
+    '''`--train-dataset`'s slides of `--train-stain` by the dataset each comes
+    from, `--max-wsi` of each chosen at random with `--seed`.'''
+    return [(source, pick_wsi_names(names, args.max_wsi, args.seed))
+            for source, names in by_source(args.train_dataset, stain=args.train_stain)]
+
+
+def cross_domain_names(args) -> List[Tuple[str, List[str]]]:
+    '''The cross-domain pool: `--train-dataset`'s slides of every stain but
+    `--train-stain` (the HE half of `@pure-train`), by the dataset each comes
+    from, `--max-wsi` of each chosen at random with `--seed`. That BRACS slides
+    are native at every `BRACS_RUNGS` rung, so a cross-domain draw never pairs a
+    resampled bracs position with a native ki67 one, is the dataset's own
+    business (`make_dataset.py`).'''
+    others: List[str] = [s for s in stains() if s != args.train_stain]
+    return [(source, pick_wsi_names(names, args.max_wsi, args.seed))
+            for source, names in by_source(args.train_dataset, stain=others)]
+
+
+def _prototype_weight_filename(args, tag: str, episode_reuse: str, reuse_k: int) -> str:
+    '''`<data>--<encoder>--<pooling>--G_<support_context>--F_<query_context>--
+    <collapse>--<routing_head>--cross_<on|off>--<episode_reuse>_k<K>--<loss>--
+    <tag>.pt` (`Checkpoints.weights_name`, the data from `data_tag`):
+    `pure-train_Ki67--gigapath--cls--G_identity--F_identity--set_transformer--
+    cosine_tau--cross_off--hold_q_k5--bal--6rung.pt`. Not
+    `Checkpoints.weight_filename`: that one is shaped for ONE `Head`, and this
+    checkpoint holds FIVE modules (pooling/support_context/query_context/
+    collapse/head) plus axes (`pooling`, `cross_domain`, `loss`) that
+    function's own world has no name for. Every segment is always there, its
+    default too, so every prototype file has the same ones; `G_`, `F_`,
+    `cross_` and `_k` say which axis a bare value (`identity`, `on`) is on.
+
+    `<episode_reuse>_k<K>`: the three reuse modes and their K are three
+    experiments over the same modules and would otherwise share one
+    `--best.pt`. The RESOLVED K, never `auto`: two `auto` runs over different
     supplies are different experiments.
     '''
-    tag_cd = _cross_domain_tag(cross_domain_dataset)
-    loss_seg = '' if loss == 'bal' else f'{loss}_'
     # The mask recipe is recorded in the checkpoint's args, not named here --
     # `Checkpoints.weight_filename`'s rule.
-    return (f'{encoder_name}_frozen_{pooling}_{support_context}_{query_context}_'
-           f'{collapse}_{routing_head}_{tag_cd}_{episode_reuse}-k{int(reuse_k)}_'
-           f'{loss_seg}{tag}.pt')
+    return weights_name(
+        data_tag([args.train_dataset], args.train_stain), args.encoder, _pooling_tag(args),
+        f'G_{args.support_context}', f'F_{args.query_context}', args.collapse,
+        args.routing_head, f'cross_{_cross_domain_tag(args.cross_domain)}',
+        f'{episode_reuse}_k{int(reuse_k)}', args.loss, tag)
 
 
-#: `_merge_val_scores`' merge key -- the role `MppRoutingHead/cli/train.py`'s
+#: `_merge_val_scores`' merge key -- the role `ClassifyingRoutingHead/cli/train.py`'s
 #: own `(baseline, encoder, head)` plays for ITS `_merge_val_scores`.
 #: `training_framework` identifies WHICH of spec.md's Stage 4 three-way
 #: comparison produced a row -- `'metric_based'` here, a CONSTANT (this file
@@ -586,8 +598,8 @@ def _prototype_weight_filename(encoder_name: str, pooling: str,
 #: `--merge` exists to not overwrite.
 _IDENTITY_FIELDS = ('training_framework', 'encoder', 'pooling',
                     'support_context', 'query_context', 'collapse',
-                    'routing_head', 'cross_domain_dataset',
-                    'train_dataset', 'loss', 'support_native',
+                    'routing_head', 'cross_domain',
+                    'train_dataset', 'train_stain', 'loss', 'support_native',
                     'episode_reuse', 'reuse_k')
 
 
@@ -595,14 +607,14 @@ def _merge_val_scores(path: Path, out_rows):
     '''Under `--merge`: `out_rows`' own `_IDENTITY_FIELDS` key REPLACES the
     matching rows already in `path` -- a rerun of one arm overwrites that
     arm's history, every OTHER arm's rows already on disk are kept. Same
-    shape as `MppRoutingHead/cli/train.py`'s own `_merge_val_scores` --
+    shape as `ClassifyingRoutingHead/cli/train.py`'s own `_merge_val_scores` --
     ALL of `PrototypicalRoutingHead`'s runs share one job name (`--out`
     defaults to `job_result_dir('PrototypicalRoutingHead')`, always the
     same directory), so training a second arm (a different `--collapse`,
     say) without `--merge` would silently truncate the first arm's rows
     away instead of accumulating next to them -- exactly the shape that
     lets `bench_stage1_mpp.py`-style tooling compare every
-    arm the same way it already compares `MppRoutingHead`'s several heads.
+    arm the same way it already compares `ClassifyingRoutingHead`'s several heads.
 
     `.get(k, '')`, not `r[k]`: a row without a column for one of
     `_IDENTITY_FIELDS` would raise. Missing means "compares as `''`" for this key,
@@ -624,11 +636,11 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
     """Three files, three criteria, because they do not always pick the same
     epoch:
 
-        _best.pt    every dataset (its mean over combos of rungs) no lower than
+        --best.pt   every dataset (its mean over combos of rungs) no lower than
                     the saved epoch's, one higher
-        _6rung.pt   the full 6-way combination, mean over datasets -- the
+        --6rung.pt  the full 6-way combination, mean over datasets -- the
                     deployment task, never rehearsed in training
-        _native.pt  the mean over combinations whose every query rendered
+        --native.pt  the mean over combinations whose every query rendered
                     natively (no resampled pixels)
 
     `run` carries the resolved episode settings (`episode_reuse`, `reuse_k`,
@@ -640,7 +652,7 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
     common = dict(pooling=pooling, support_context=support_context,
                   query_context=query_context, collapse=collapse, head=head,
                   encoder=encoder, encoder_name=args.encoder, frozen=True,
-                  pooling_cfg=PoolingConfig(kind=args.pooling, in_dim=in_dim),
+                  pooling_cfg=pooling.cfg,
                   support_context_cfg=support_context_cfg,
                   query_context_cfg=query_context_cfg,
                   collapse_cfg=collapse_cfg,
@@ -653,17 +665,14 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
                            native_accuracy=summary['native'],
                            by_dataset=summary['by_dataset']),
                   run_args=vars(args),
-                  extra=dict(cross_domain_dataset=args.cross_domain_dataset,
+                  extra=dict(cross_domain=args.cross_domain,
                              data=data_record(args.tile, args.seg), **run))
 
     def fname(tag: str) -> str:
-        return _prototype_weight_filename(
-            args.encoder, args.pooling, args.support_context, args.query_context,
-            args.collapse, args.routing_head, args.cross_domain_dataset,
-            args.loss, tag, run['episode_reuse'], run['reuse_k'])
+        return _prototype_weight_filename(args, tag, run['episode_reuse'], run['reuse_k'])
 
     best = dict(best)
-    # `_best.pt`: every dataset at least as good as the saved epoch's, one
+    # `--best.pt`: every dataset at least as good as the saved epoch's, one
     # strictly better -- not the mean going up, which one dataset can carry
     # while another falls.
     now = summary['by_dataset']
@@ -731,14 +740,12 @@ def _auto_int(value: str):
     return n
 
 
-def _supply_line(label: str, pool, n_wsi: int, n_test=None) -> str:
-    """One row of the supply table: positions per rung, their total, how many
-    WSIs they came from, and (val only) how many WSIs the split held back for
-    test. The total is the row's sum, so nothing else prints it."""
+def _supply_line(label: str, pool, n_wsi: int) -> str:
+    """One row of the supply table: positions per rung, their total and how many
+    WSIs they came from. The total is the row's sum, so nothing else prints it."""
     counts = [len(pool.get(float(r), ())) for r in RUNGS]
-    held = '-' if n_test is None else str(n_test)
     return (f'  {label:28s}' + '  '.join(f'{c:>7d}' for c in counts)
-            + f'  {sum(counts):>8d}  {n_wsi:>5d}  {held:>19s}')
+            + f'  {sum(counts):>8d}  {n_wsi:>5d}')
 
 
 def _rung_cells(values, width: int = 8, fmt: str = '.4f') -> str:
@@ -763,7 +770,7 @@ def rung_header(left: str = '') -> str:
 _NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
                  'wandb_mode', 'run_name', 'merge', 'encode_batch', 'supply_only',
                  'cache_shard',
-                 'mask_cache_job', 'draw_cache_job', 'split_cache_job',
+                 'mask_cache_job', 'draw_cache_job',
                  'feasibility_tries', 'cpu_processes')
 
 
@@ -778,19 +785,14 @@ def warm_cache_shard(args, caches, reports: Path) -> int:
     if not 0 <= i < n:
         raise SystemExit(f'--cache-shard {args.cache_shard}: need 0 <= I < N')
     jobs = []      # (dataset, name, n_per_rung, report_dir)
-    names = pick_wsi_names(list_names(dataset=args.train_dataset),
-                           args.max_wsi, args.seed)
     rd = reports / f'{args.train_dataset.replace("/", "_")}_train'
-    jobs += [(args.train_dataset, nm, args.n_per_rung, rd) for nm in names]
-    if args.cross_domain_dataset:
-        cd = args.cross_domain_dataset
-        names = (native_bracs_rung_wsi_names(cd) if cd.startswith('bracs')
-                 else list_names(dataset=cd))
-        names = pick_wsi_names(names, args.max_wsi, args.seed)
-        rd = reports / f'{cd.replace("/", "_")}_cross_domain'
-        jobs += [(cd, nm, args.n_per_rung, rd) for nm in names]
-    for dataset_id in args.eval_datasets:
-        names = list_names(dataset=f'{dataset_id}#val', split_job=caches.split_job)
+    jobs += [(source, nm, args.n_per_rung, rd)
+             for source, names in train_names(args) for nm in names]
+    if args.cross_domain:
+        rd = reports / f'{args.train_dataset.replace("/", "_")}_cross_domain'
+        jobs += [(source, nm, args.n_per_rung, rd)
+                 for source, names in cross_domain_names(args) for nm in names]
+    for dataset_id, names in by_source(args.val_dataset):
         rd = reports / f'{dataset_id.replace("/", "_")}_val'
         jobs += [(dataset_id, nm, args.val_n_per_rung, rd) for nm in names]
     mine = jobs[i::n]
@@ -874,12 +876,15 @@ def resolve_episodes(args, train_pool, cross_pool, val_pools):
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--train-dataset', default='ki67_pure')
-    ap.add_argument('--cross-domain-dataset', default='bracs/train',
-                    help="a SECOND staining domain: a draw whose rung "
-                         "combination fits Episodes.BRACS_RUNGS puts it on "
-                         "one side, --train-dataset on the other. Empty "
-                         "string disables it")
+    ap.add_argument('--train-dataset', default='@pure-train',
+                    help='an AccessDatasets id; training draws only its --train-stain slides')
+    ap.add_argument('--train-stain', default='Ki67',
+                    help='the stain trained on')
+    ap.add_argument('--cross-domain', action='store_true',
+                    help='a draw whose rung combination fits Episodes.BRACS_RUNGS '
+                         'puts --train-dataset\'s slides of the other stains (HE) on '
+                         'one side and its --train-stain ones on the other; off, '
+                         'both sides are --train-stain')
     ap.add_argument('--encoder', default='uni2',
                     choices=('gigapath', 'uni2', 'conch_vit'))
     ap.add_argument('--dtype', choices=('fp16', 'fp32'), default='fp32',
@@ -891,6 +896,10 @@ def main() -> int:
                     help="Stage 2's shared support/query pooling. "
                          "'passthrough' is refused: Collapse needs one vector "
                          "per tile")
+    ap.add_argument('--mix', action='store_true',
+                    help='pool a mix of the encoder blocks at a quarter, half, three quarters and '
+                         'the whole of its depth (ClassifyingRoutingHead MIX_LAYERS, the classifier mix_ '
+                         'heads\' own) instead of the last block. Not with --pooling cls')
     ap.add_argument('--support-context', choices=sorted(SUPPORT_CONTEXT_CHOICES),
                     default='identity', help='Stage 2, G')
     ap.add_argument('--query-context', choices=sorted(QUERY_CONTEXT_CHOICES),
@@ -936,10 +945,10 @@ def main() -> int:
     ap.add_argument('--feasibility-tries', type=int, default=100,
                     help='attempts per combination when measuring the largest '
                          'drawable K, and per draw in val')
-    ap.add_argument('--eval-datasets', nargs='+',
-                    default=['bracs/test', 'ki67_with_photo'],
-                    help='held-out val -- the same datasets and held-out WSIs '
-                         'as MppRoutingHead/cli/train.py')
+    ap.add_argument('--val-dataset', default='@legacy-val',
+                    help='held-out val, an AccessDatasets id (a virtual @<name>) '
+                         'scored per dataset its slides come from -- the same '
+                         'default as ClassifyingRoutingHead/cli/train.py')
     ap.add_argument('--val-n-per-rung', type=int, default=20)
     ap.add_argument('--merge', action='store_true',
                     help="val_scores_per_combo.csv / _per_rung.csv: this run's "
@@ -977,11 +986,11 @@ def main() -> int:
                          'segment disjoint slides side by side')
     ap.add_argument('--max-wsi', type=int, default=None,
                     help='cap on the WSIs each training manifest (--train-'
-                         'dataset AND --cross-domain-dataset) draws from: N '
+                         'stain and the cross-domain pool, per dataset) draws from: N '
                          'of them, chosen at random with --seed, so the same '
                          'N every time. At or above a dataset\'s size it '
-                         'changes nothing. Val and test slides are named by '
-                         'the split and ignore it')
+                         'changes nothing. Val slides are named by '
+                         '--val-dataset and ignore it')
     ap.add_argument('--wandb-project', default='prototypical-routing-head')
     ap.add_argument('--wandb-mode', default=os.environ.get('WANDB_MODE', 'online'))
     ap.add_argument('--run-name', default='')
@@ -990,6 +999,8 @@ def main() -> int:
     if args.pooling == 'passthrough':
         ap.error("--pooling passthrough gives Collapse an unpooled grid, not one "
                  "vector per tile -- pick cls/avg/max/attn")
+    if args.mix and args.pooling == 'cls':
+        ap.error('--mix mixes patch grids and --pooling cls reads none -- pick avg/max/attn')
 
     # This process renders its own batches (no DataLoader), in `workers`
     # threads of its own share of the job's cpus -- all of them alone, a half
@@ -1015,31 +1026,29 @@ def main() -> int:
     if args.cache_shard:
         return warm_cache_shard(args, caches, reports)
 
-    print(f'building manifest ({args.train_dataset})...', flush=True)
-    rows = build_manifest(
-        args.train_dataset, masks=caches.masks, draw_job=caches.draw_job,
-        report_dir=reports / f'{args.train_dataset.replace("/", "_")}_train',
-        tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
-        max_wsi=args.max_wsi)
+    print(f'building manifest ({args.train_dataset}, {args.train_stain})...', flush=True)
+    rows: List = []
+    for source, names in train_names(args):
+        rows += build_manifest(
+            source, masks=caches.masks, draw_job=caches.draw_job,
+            report_dir=reports / f'{args.train_dataset.replace("/", "_")}_train',
+            tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
+            wsi_names=names)
     train_pool = pool_by_rung(rows)
     n_train_wsi = len(group_by_wsi_name(rows))
 
     cross_pool = None
-    if args.cross_domain_dataset:
-        print(f'building cross-domain manifest ({args.cross_domain_dataset})...',
-              flush=True)
-        # Only the BRACS WSIs native at every BRACS_RUNGS rung, so a
-        # cross-domain draw never pairs a resampled bracs position with a
-        # native ki67 one.
-        cd_wsi_names = (native_bracs_rung_wsi_names(args.cross_domain_dataset)
-                        if args.cross_domain_dataset.startswith('bracs') else None)
-        cd_rows = build_manifest(
-            args.cross_domain_dataset, masks=caches.masks,
-            draw_job=caches.draw_job,
-            report_dir=(reports / f'{args.cross_domain_dataset.replace("/", "_")}'
-                                  f'_cross_domain'),
-            tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
-            max_wsi=args.max_wsi, wsi_names=cd_wsi_names)
+    if args.cross_domain:
+        print(f'building cross-domain manifest ({args.train_dataset}, not '
+              f'{args.train_stain})...', flush=True)
+        cd_rows: List = []
+        for source, names in cross_domain_names(args):
+            cd_rows += build_manifest(
+                source, masks=caches.masks, draw_job=caches.draw_job,
+                report_dir=(reports / f'{args.train_dataset.replace("/", "_")}'
+                                      f'_cross_domain'),
+                tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
+                wsi_names=names)
         cross_pool = pool_by_rung(cd_rows)
         n_cross_wsi = len(group_by_wsi_name(cd_rows))
 
@@ -1048,22 +1057,21 @@ def main() -> int:
 
     print('\nsupply (positions per rung)', flush=True)
     print(f'  {"":28s}' + '  '.join(f'{r:>7g}' for r in RUNGS)
-          + f'  {"total":>8s}  {"WSIs":>5s}  {"held back for test":>19s}', flush=True)
-    print(_supply_line(f'train {args.train_dataset}', train_pool, n_train_wsi),
+          + f'  {"total":>8s}  {"WSIs":>5s}', flush=True)
+    print(_supply_line(f'train {args.train_stain}', train_pool, n_train_wsi),
           flush=True)
     if cross_pool is not None:
-        print(_supply_line(f'cross {args.cross_domain_dataset}', cross_pool,
+        print(_supply_line('cross (other stains)', cross_pool,
                            n_cross_wsi), flush=True)
     for dataset_id, pool in val_pools.items():
-        n_val, n_test = val_sizes[dataset_id]
-        print(_supply_line(f'val {dataset_id}', pool, n_val, n_test), flush=True)
+        print(_supply_line(f'val {dataset_id}', pool, val_sizes[dataset_id]), flush=True)
 
     if args.supply_only and cross_pool is not None:
         # The cross-domain pool can lower K (bracs supplies a side of some
         # draws), so a run WITH it and a run without can resolve `auto`
-        # differently. Both are shown; the second is what a run with
-        # --cross-domain-dataset "" would use.
-        print(f'\n[with cross-domain {args.cross_domain_dataset}]', flush=True)
+        # differently. Both are shown; the second is what a run without
+        # --cross-domain would use.
+        print('\n[with cross-domain]', flush=True)
         resolve_episodes(args, train_pool, cross_pool, val_pools)
         print('\n[without cross-domain]', flush=True)
         resolve_episodes(args, train_pool, None, val_pools)
@@ -1083,7 +1091,10 @@ def main() -> int:
     print(f'\nmodel\n  encoder    {args.encoder}  (frozen)   dim {in_dim}   '
           f'prefix tokens {num_prefix}   kind {spec.kind}', flush=True)
 
-    pooling = Pooling(PoolingConfig(kind=args.pooling, in_dim=in_dim)).to(device)
+    mix: tuple = resolve_encoder_layers(MIX_LAYERS, encoder.depth) if args.mix else ()
+    if mix:
+        print(f'  pooling    {args.pooling} over a mix of blocks {mix} of {encoder.depth}', flush=True)
+    pooling = Pooling(PoolingConfig(kind=args.pooling, in_dim=in_dim, encoder_layers=mix)).to(device)
     support_context, support_context_cfg = SUPPORT_CONTEXT_CHOICES[
         args.support_context](in_dim, device)
     query_context, query_context_cfg = QUERY_CONTEXT_CHOICES[
@@ -1122,9 +1133,7 @@ def main() -> int:
     start_epoch = 0
 
     run_stem = _prototype_weight_filename(
-        args.encoder, args.pooling, args.support_context, args.query_context,
-        args.collapse, args.routing_head, args.cross_domain_dataset, args.loss,
-        'x', run['episode_reuse'], run['reuse_k'])[:-len('_x.pt')]
+        args, 'x', run['episode_reuse'], run['reuse_k'])[:-len('--x.pt')]
     resume = ResumeFile.for_model(args.resume_dir, run_stem)
     identity = {**resume_identity(args, _NOT_IDENTITY), **run}
     state = resume.load(identity)
@@ -1157,7 +1166,7 @@ def main() -> int:
     if start_epoch < args.epochs:
         wb = wandb_init(args.wandb_project, args.wandb_mode, run_name, config=dict(
             vars(args), **run,
-            # `vars(args)` holds None for an unset --split-cache-job; these hold
+            # `vars(args)` holds None for an unset --*-cache-job; these hold
             # the job each cache was really read from, so the config can be
             # filtered on
             **cache_jobs(args, 'PrototypicalRoutingHead', caches),
@@ -1167,11 +1176,11 @@ def main() -> int:
 
     identity_cols = dict(
         training_framework='metric_based', encoder=args.encoder,
-        pooling=args.pooling, support_context=args.support_context,
+        pooling=_pooling_tag(args), support_context=args.support_context,
         query_context=args.query_context, collapse=args.collapse,
         routing_head=args.routing_head,
-        cross_domain_dataset=_cross_domain_tag(args.cross_domain_dataset),
-        train_dataset=args.train_dataset, loss=args.loss,
+        cross_domain=_cross_domain_tag(args.cross_domain),
+        train_dataset=args.train_dataset, train_stain=args.train_stain, loss=args.loss,
         support_native=args.support_native, seg=args.seg,
         episode_reuse=args.episode_reuse, reuse_k=k)
     # The val draws, rendered and encoded on the first val pass and replayed
@@ -1220,9 +1229,9 @@ def main() -> int:
         for rendered, redraws in prefetched(drawn(), depth=2):
             n_redraws += redraws
             n_draws += 1
-            s_enc = [encode_group(g, encoder, args.encode_batch, device)
+            s_enc = [encode_group(g, encoder, args.encode_batch, device, pooling.cfg.encoder_layers)
                      for g in rendered.supports]
-            q_enc = [encode_group(g, encoder, args.encode_batch, device)
+            q_enc = [encode_group(g, encoder, args.encode_batch, device, pooling.cfg.encoder_layers)
                      for g in rendered.queries]
             for si, qj in pairs:
                 logits, target, _native = pair_forward(
@@ -1325,7 +1334,7 @@ def main() -> int:
                 wr.writeheader()
                 wr.writerows(write_rows)
             print(f'{path}  ({len(write_rows)} rows)', flush=True)
-    print(f'{weights_dir}  (*_best.pt / *_6rung.pt / *_native.pt)', flush=True)
+    print(f'{weights_dir}  (*--best.pt / *--6rung.pt / *--native.pt)', flush=True)
     return 0
 
 

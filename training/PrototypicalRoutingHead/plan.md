@@ -12,13 +12,13 @@
    1.4 Checkpoint 存讀（Open design decision 1 拍板後才能做）
 2. Loss + episodic 訓練迴圈 —— 這一步訓練的是「Metric-based meta-learning」
    這個 arm（Stage 4 三選一之一，spec.md 2026-09-20 新增的分類）
-   2.1 L_bal（沿用 MppRoutingHead 的 class_weights 公式，先跑通訓練迴圈本身）
+   2.1 L_bal（沿用 ClassifyingRoutingHead 的 class_weights 公式，先跑通訓練迴圈本身）
    2.2 L_ord_A / L_ord_B 補上（spec.md 的 3a/3b，這次是從頭就有，不是後補）
    2.3 Support/query WSI 同一張 vs 不同張的機率 p_same_wsi（spec.md 新增段落）
 3. Metric-based 主線完整跑一次，上 stage1_compare 計分板跟 KnnEstMpp/
-   MppRoutingHead 比
+   ClassifyingRoutingHead 比
 4. Baseline prototype learning arm（Stage 4 三選一之二）—— 便宜，跟
-   MppRoutingHead 自己的訓練形狀幾乎一樣（一般 supervised 訓練 embedding，
+   ClassifyingRoutingHead 自己的訓練形狀幾乎一樣（一般 supervised 訓練 embedding，
    prototype 是推論時事後平均出來的），當作下限對照 —— 已完成（架構+訓練
    迴圈，還沒跑過；不等 metric-based 有分數才動工，因為兩邊訓練互不依賴）
 5. 主線+baseline 分數都出來後，逐一加觀察臂（一次只加一個，跟主線分開比）
@@ -50,7 +50,7 @@ routing head（Cosine/τ / 交叉注意力度量路由）。這次只搭骨架�
   不是讀上面那個新 registry——兩邊的呼叫形狀不一樣，`LearnedPrototypeClassifier`
   自己的 docstring 早就講過這是「例外」）。`_VALID_CLASSIFIERS` 現在只有
   `prototype_cosine` 一個，之後 Stage 3 多一個 arm 就要同時加進兩邊的 registry。
-- Stage 4 這條軸維持三個獨立 CLI 檔案，沒有合併——跟 MppRoutingHead 自己
+- Stage 4 這條軸維持三個獨立 CLI 檔案，沒有合併——跟 ClassifyingRoutingHead 自己
   `run_baseline2`/`run_baseline3` 用兩個函式而非一個函式裡 if-else 是同一個
   原則,只是這裡連 CLI 參數集合都幾乎不重疊,所以拆到檔案這一層。
 
@@ -66,14 +66,14 @@ routing head（Cosine/τ / 交叉注意力度量路由）。這次只搭骨架�
   避免比較結果混進「參數變少」或「沒有 residual 錨定」這些跟 attention 本身
   無關的干擾項。更窄（width_mult=0.5）是合理的第二個問題,等這個 config 有
   分數之後再開一個新的 registry entry,不是同一個 entry 開關就好——跟
-  MppRoutingHead 的 `mlp`/`mlp_narrow` 是兩個獨立命名而非一個 flag 同一個
+  ClassifyingRoutingHead 的 `mlp`/`mlp_narrow` 是兩個獨立命名而非一個 flag 同一個
   道理。
 - Matching Net（5.1 剩下的部分）還沒動工，需要 `CrossAttentionMatch.py`。
 - Pooling（avg/max/attn）本來就是既有的獨立軸（`--pooling`），跟這次的
   generator 軸互相獨立，不需要額外動工。
 
 **已完成（2026-09-20 追加）：`cli/train.py` 的 log 補齊到跟
-`cli/train_baseline.py`/`MppRoutingHead` 一樣的樣式，兩邊都加了 wandb**——
+`cli/train_baseline.py`/`ClassifyingRoutingHead` 一樣的樣式，兩邊都加了 wandb**——
 使用者發現兩個正在跑的 job 印出來的東西完全不一樣，追問 episodic 訓練內部
 到底能怎麼呈現：
 - `cli/train.py` 現在每個 epoch 印一個 composition 風格的區塊：這個 epoch
@@ -85,10 +85,10 @@ routing head（Cosine/τ / 交叉注意力度量路由）。這次只搭骨架�
   held-out-rung-combo 這個設計（module docstring 裡的「NO VAL LOOP YET」
   段落還在,沒有解決,只是現在不再是唯一有訊號可看的東西了)。
 - `cli/train.py`/`cli/train_baseline.py` 都加了 wandb（`--wandb-project`/
-  `--wandb-mode`/`--run-name`,跟 MppRoutingHead 同一套 flag,jobscript 也都
+  `--wandb-mode`/`--run-name`,跟 ClassifyingRoutingHead 同一套 flag,jobscript 也都
   補上 `WANDB_PROJECT`/`RUN_NAME` env var)。`cli/train.py` 的
   `wandb_init`/`wandb_log`/`wandb_finish` 放進這個專案自己的
-  `Runtime.py`（全是通用函式，跟 `MppRoutingHead/Runtime.py` 裡的完全等價,
+  `Runtime.py`（全是通用函式，跟 `ClassifyingRoutingHead/Runtime.py` 裡的完全等價,
   照抄一份是因為 import 會撞名);`cli/train_baseline.py` 沒有 import 任何一個
   `Runtime.py`（它自己的理由本來就寫在 module docstring 裡了),所以是再抄
   一份局部的 `_wandb_init`/`_wandb_log`/`_wandb_finish`。
@@ -97,8 +97,8 @@ routing head（Cosine/τ / 交叉注意力度量路由）。這次只搭骨架�
 「NO VAL LOOP YET 沒有解決」現在解決了。** 兩條軸都是沿用現成的東西,不是
 重新設計：
 - **Held-out WSI**：`--eval-datasets`（`bracs/test`/`ki67_with_photo`，跟
-  `MppRoutingHead`/`train_baseline.py` 同預設值）x `wsi_split` 指到
-  `MppRoutingHead` 自己的 cache——跟 `train_baseline.py` 的 `val_rows`
+  `ClassifyingRoutingHead`/`train_baseline.py` 同預設值）x `wsi_split` 指到
+  `ClassifyingRoutingHead` 自己的 cache——跟 `train_baseline.py` 的 `val_rows`
   完全同一套機制，三個腳本讀到的 held-out WSI 是**同一批**。訓練用的
   `ki67_pure` 完全不切，維持使用者說的「train 還是整個 ki67_pure」。
 - **Held-out rung 組合**：`Episodes.HELD_OUT_COMBOS` 加了第三組——全 6 個
@@ -110,11 +110,11 @@ routing head（Cosine/τ / 交叉注意力度量路由）。這次只搭骨架�
   的抽法，只有「rung 組合怎麼選」這一步不一樣。
 - Val episode 每個 epoch 用**新建的** `random.Random(args.seed)` 抽，不是
   訓練迴圈自己一直往前走的那個 `rng`——這樣每個 epoch 的驗證題目完全一樣,
-  分數變化才是模型在變,不是題目在變（跟 `MppRoutingHead.predict` 自己
+  分數變化才是模型在變,不是題目在變（跟 `ClassifyingRoutingHead.predict` 自己
   `epoch_seed=0` 的理由一樣）。
 - 算法跟印法跟另外兩個腳本同步（n-weighted/dataset-avg/per-rung、native/
   resampled）——`score`/`rescore`/`rescore_by_rung` 這次加進了這個專案自己
-  的 `Runtime.py`（一樣是照抄 `MppRoutingHead/Runtime.py` 的版本，同一個
+  的 `Runtime.py`（一樣是照抄 `ClassifyingRoutingHead/Runtime.py` 的版本，同一個
   撞名理由，不是 import）。
 - Checkpoint 現在有 `_best`/`_best_unweighted` 了——因為 prototype checkpoint
   是三個模組（pooling/generator/head），`Checkpoints.weight_filename` 那個
@@ -128,18 +128,18 @@ routing head（Cosine/τ / 交叉注意力度量路由）。這次只搭骨架�
 `PrototypicalRoutingHead`（跟 `...Baseline`）的每次執行都用同一個 job
 name,結果一定寫進同一個目錄——這是刻意的,為的是讓不同 arm（不同
 `--generator`/`--routing-head`/`--pooling`/`--classifier`）的結果能疊在
-一起比,像 `bench_stage1_mpp.py` 現在比較 `MppRoutingHead`
+一起比,像 `bench_stage1_mpp.py` 現在比較 `ClassifyingRoutingHead`
 好幾個 head 一樣。但原本 `val_scores.csv`/`val_scores_per_rung.csv` 每次都是
 整份覆寫,換一個 arm 重跑就會把前一個 arm 的歷史洗掉。現在照抄
-`MppRoutingHead/cli/train.py` 自己的 `--merge`/`_merge_val_scores` 慣例：
+`ClassifyingRoutingHead/cli/train.py` 自己的 `--merge`/`_merge_val_scores` 慣例：
 `cli/train.py` 用 `(encoder, pooling, generator, routing_head)` 當 key,
 `cli/train_baseline.py` 用 `(arm, encoder, classifier)`——同一個 key 的舊
 row 被這次跑的結果取代,其他 arm 的 row 保留。順便把 `pooling`/`classifier`
 補進 CSV 的 identity 欄位（之前漏掉,不然同一個 generator/routing_head 換
 pooling 重跑會分不出來是哪一次)。Jobscript 都加了 `MERGE` env var,跟
-`MppRoutingHead.sh` 同一個 pattern。
+`ClassifyingRoutingHead.sh` 同一個 pattern。
 
-**已完成（2026-09-21 追加）：修正 `arm` 這個詞的說法。** 使用者問「MppRoutingHead
+**已完成（2026-09-21 追加）：修正 `arm` 這個詞的說法。** 使用者問「ClassifyingRoutingHead
 有 arm 嗎」——沒有，那個專案 2026-09-17 就刻意把 `arm` 改名成 `head`/
 `baseline`（`cli/train.py` 自己的 module docstring 講過理由：「arm」暗示
 side-by-side 比較，`ClassifierEstMpp.py` 單一 head 推論的場景沒有這個意思）。
@@ -215,28 +215,28 @@ tau 推成負的。初始值 `tau_init=10.0`，未驗證，之後可調。
 episode 自己重新算 `w_c`（sklearn balanced 公式，scope 是這個 episode 的
 query batch，不是固定 6-way 的 table——N-way 設計下沒有一個固定分佈可以套,
 細節見 spec.md/`Losses.py` 自己的 docstring)。之後 `cli/train.py` 會用
-`--loss {bal,ord_a,ord_b}` 選,跟 `MppRoutingHead` 的
+`--loss {bal,ord_a,ord_b}` 選,跟 `ClassifyingRoutingHead` 的
 `--class-weight {balanced,none}` 同一個慣例。
 
 ### 2.2 `Episodes.py` —— 已完成（position 抽樣 + render 都接好了）
 
 `sample_episode(manifest_by_wsi, rng, p_same_wsi=, n_support=, n_query=, ...)`
 ——抽 support/query WSI、抽 N-way rung 子集（排除 `HELD_OUT_COMBOS`）、從
-`MppRoutingHead.Datasets.build_manifest` 建好的 manifest 裡切位置。
+`ClassifyingRoutingHead.Datasets.build_manifest` 建好的 manifest 裡切位置。
 `render_episode(episode, bank, cfg, deterministic=)` 接著把位置 render 成
 `RenderedEpisode`（`{rung: [(patch, native), ...]}`），沿用
-`MppRoutingHead.Datasets.render_row`/`CameraBank` 不變。`RenderedEpisode`
+`ClassifyingRoutingHead.Datasets.render_row`/`CameraBank` 不變。`RenderedEpisode`
 故意不存 label——LOCAL index（0..N-1）用 `rungs.index(rung)` 現算，不重複
 存一個可能跟 `rungs` 兜不起來的數字。
 
 **改名**：這個檔案原本規劃叫 `Datasets.py`，寫的時候發現會撞名——
-`MppRoutingHead` 自己就有一個同名的 top-level 模組,兩個目錄都在
+`ClassifyingRoutingHead` 自己就有一個同名的 top-level 模組,兩個目錄都在
 `sys.path` 上,Python 用模組名稱快取,先載入的那個會被兩邊共用,包括
-MppRoutingHead 自己的程式碼都可能拿錯。改叫 `Episodes.py`,spec.md 已同步
+ClassifyingRoutingHead 自己的程式碼都可能拿錯。改叫 `Episodes.py`,spec.md 已同步
 更新。
 
 **`_CameraBank`/`_render_row` 已改成公開**（`CameraBank`/`render_row`,
-2026-09-20，使用者選了「聯動改動」這個選項）——`MppRoutingHead/Datasets.py`
+2026-09-20，使用者選了「聯動改動」這個選項）——`ClassifyingRoutingHead/Datasets.py`
 自己內部的呼叫、`cli/train.py`/`Runtime.py`/
 `test_camera.py` 裡提到這兩個名字的註解,全部同步改名,
 `py_compile` 都過。
@@ -266,7 +266,7 @@ loss 要改：`log2_rungs` 要用這個 episode 自己選中的 N 個 rung 算�
 
 保留 epoch，當作記帳單位：`episodes_per_epoch` 個 episode 算一個 epoch,
 epoch 邊界不影響 episode 抽樣邏輯本身,只決定多久印一次進度、跑一次 val、
-存一次 checkpoint——跟 `MppRoutingHead` 現有的節奏一致。
+存一次 checkpoint——跟 `ClassifyingRoutingHead` 現有的節奏一致。
 
 ### `cli/train.py` —— 主線訓練迴圈已寫完，還沒跑過
 
@@ -289,7 +289,7 @@ test 再放大規模。
 ## 3. Metric-based 主線分數
 
 上 `stage1_compare` 那個計分板（`utilities/bench_modules/
-bench_stage1_mpp.py`），跟 `KnnEstMpp`、`MppRoutingHead` 現有
+bench_stage1_mpp.py`），跟 `KnnEstMpp`、`ClassifyingRoutingHead` 現有
 checkpoint 站在同一批 slide 上比——需要一個新的 `PrototypicalEstMpp`
 （`stage1_estimation/`，`StageInterface.MppEstimator` 形狀),但這是
 之後的事,先不寫。
@@ -298,17 +298,17 @@ checkpoint 站在同一批 slide 上比——需要一個新的 `PrototypicalEst
 
 跟 metric-based 用同一套 Stage 3 距離函式（`CosineTauHead`），但訓練方式換成
 一般 supervised（不切 episode，每個訓練 tile 直接對一個 FIXED 學出來的權重
-矩陣分類，形狀跟 `MppRoutingHead` 自己的訓練迴圈幾乎一樣）。Prototype
+矩陣分類，形狀跟 `ClassifyingRoutingHead` 自己的訓練迴圈幾乎一樣）。Prototype
 只在推論時才算——對一批 support tile 的 embedding 事後平均，那時 `self.
 weight` 整個丟棄不用。這是 Chen et al. 2019 few-shot literature 的
-「Baseline」分類，也是 `MppRoutingHead` spec.md 還沒做的 2-2（NCM）的加強版
+「Baseline」分類，也是 `ClassifyingRoutingHead` spec.md 還沒做的 2-2（NCM）的加強版
 （embedding 是這個專案自己訓練出來的，不是原始 frozen 特徵）。便宜，可以當
 「episodic 訓練到底有沒有比一般訓練好」這個問題的下限對照。
 
 **已完成（2026-09-20）**：`LearnedPrototypeClassifier`（`aiNNModel/models/
 PrototypeRoutingHeads.py`，註冊進 `Heads._CLASSIFIER_REGISTRY` 當
 `'prototype_cosine'`）+ `cli/train_baseline.py`（完全沿用
-`MppRoutingHead.Datasets` 的 `build_manifest`/`iterate_epoch`/
+`ClassifyingRoutingHead.Datasets` 的 `build_manifest`/`iterate_epoch`/
 `class_weights`、`common.Head.Head`、**原始未改動的**
 `Checkpoints.save_checkpoint`/`build_from_checkpoint`——這個 arm 的訓練形狀
 （一次 encoder pass、一次 classify pass、對整個 manifest 跑一般 epoch）正好
@@ -325,32 +325,32 @@ PrototypeRoutingHeads.py`，註冊進 `Heads._CLASSIFIER_REGISTRY` 當
 sh` 的 `SMOKE=1` 是第一次真的跑。
 
 **已完成（2026-09-20 追加）**：補上 val 迴圈 + per-rung 印出，log 樣式對齊
-`MppRoutingHead/cli/train.py`（composition/class weights/per-epoch val
+`ClassifyingRoutingHead/cli/train.py`（composition/class weights/per-epoch val
 n-weighted+per-dataset/per-rung breakdown 都印，`_best`/`_best_unweighted`
 存檔）。
-Val 用的 WSI 跟 `MppRoutingHead` 自己 held out 的**同一批**——`val_rows`
-把 `wsi_split` 指到 `result/cache/mpp_routing_head/`（`MppRoutingHead` 自己的
+Val 用的 WSI 跟 `ClassifyingRoutingHead` 自己 held out 的**同一批**——`val_rows`
+把 `wsi_split` 指到 `result/cache/mpp_routing_head/`（`ClassifyingRoutingHead` 自己的
 cache 目錄，不是這個專案自己的），靠 `wsi_split`「EXISTING WINS」的規則讀到
-同一個檔案，兩邊的比較才站得住腳。順便修了 `MppRoutingHead/cli/train.py`
+同一個檔案，兩邊的比較才站得住腳。順便修了 `ClassifyingRoutingHead/cli/train.py`
 自己的 `rung_report`：那個函式從一開始就只寫 CSV，從沒真的印到 log 過
 （這次一起補上，兩邊算是雙修）。
 
 `predict`/`score`/`rescore`/`rescore_by_rung` 沒有直接 import
-`MppRoutingHead/Runtime.py` 的同名函式，是照抄一份簡化版（單一 head，不是
+`ClassifyingRoutingHead/Runtime.py` 的同名函式，是照抄一份簡化版（單一 head，不是
 dict of heads）——原因跟 `Datasets.py` 沒有沿用同名是同一個：spec.md 自己
 規劃了這個專案未來要有一個 `Runtime.py`（Stage-2 x Stage-3 arm 組合的
-registry），跟 `MppRoutingHead/Runtime.py` 撞名，現在 import 沒事，那個檔案
+registry），跟 `ClassifyingRoutingHead/Runtime.py` 撞名，現在 import 沒事，那個檔案
 一造出來就會靜默出錯。
 
 **已完成（2026-09-21 追加）：`val_report` 的 per-dataset acc 公式跟
-`MppRoutingHead/cli/train.py` 同步**——使用者把 `MppRoutingHead` 那邊的
+`ClassifyingRoutingHead/cli/train.py` 同步**——使用者把 `ClassifyingRoutingHead` 那邊的
 per-dataset `level_accuracy` 改成六個 rung 直接平均（不是 pooled-per-tile），
 `(all, pooled)` 這個印出來的標籤也順便改成 `(all, n-weighted)`（更準確描述
 現在的算法：先各 dataset 算六個 rung 的平均，再用 dataset 的 n 加權合併，
 不是所有 tile 攤平算一個數字）。這邊也照樣改了同一套公式跟標籤——不改的話,
 兩邊 `val_scores.csv` 裡同一個欄位名稱 `level_accuracy` 實際上是兩種不同的
 算法,拿來比較會在不知不覺間比錯東西,而這個 arm 存在的整個目的就是要跟
-`MppRoutingHead` 站在同一個量尺上比。`/work/u26130998/log/PrototypicalRoutingHead`
+`ClassifyingRoutingHead` 站在同一個量尺上比。`/work/u26130998/log/PrototypicalRoutingHead`
 （episodic 主線）不需要改——那個腳本現在沒有 held-out val,沒有這一整套
 pooled/n-weighted/dataset-avg 的東西存在。
 
@@ -363,7 +363,7 @@ checkpoint 存的 key（`best_pooled`/`best_n_weighted` 從來都只是 in-memor
 `aiNNModel/models/common/Checkpoints.py` 裡 `weight_filename` 自己的
 docstring（原本講「POOLED val accuracy (torch.cat before scoring)」）也
 一起改了,現在講的是 n-weighted 的算法,並且說明這個 generic 檔案本身不算
-公式,公式在 `MppRoutingHead`/`PrototypicalRoutingHead` 各自的 `val_report`
+公式,公式在 `ClassifyingRoutingHead`/`PrototypicalRoutingHead` 各自的 `val_report`
 裡,兩邊刻意保持同步。
 
 ## 5. 觀察臂，一次一個

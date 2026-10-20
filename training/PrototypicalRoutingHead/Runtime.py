@@ -1,5 +1,5 @@
 '''`cli/train.py`'s wandb wrapper and held-out-val scoring
-(`score`/`rescore`/`rescore_by_rung`) -- both DUPLICATES of `MppRoutingHead/
+(`score`/`rescore`/`rescore_by_rung`) -- both DUPLICATES of `ClassifyingRoutingHead/
 Runtime.py`'s own same-named functions, not imports from there; see each
 section's own comment for why.
 
@@ -13,7 +13,7 @@ composition rather than a registry entry -- so the GENERIC checkpoint layer
 re-exported here.
 
 `cli/train.py` imports this file as `training.PrototypicalRoutingHead.
-Runtime`: `training/MppRoutingHead/` and `training/PrototypicalRoutingHead/`
+Runtime`: `training/ClassifyingRoutingHead/` and `training/PrototypicalRoutingHead/`
 are real Python packages (each with its own `__init__.py`, under
 `training/__init__.py`), so a same-named `Runtime.py` in each package is
 disambiguated by the QUALIFIED import path itself, not by which directory
@@ -25,21 +25,21 @@ from typing import Dict, List
 
 import torch
 
-from training.MppRoutingHead.Datasets import RUNGS
+from training.ClassifyingRoutingHead.Datasets import RUNGS
 from PrototypeChoices import (SUPPORT_CONTEXT_CHOICES, QUERY_CONTEXT_CHOICES,  # noqa: E501,F401
                               COLLAPSE_CHOICES, ROUTING_HEAD_CHOICES)
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  wandb -- a DUPLICATE of MppRoutingHead/Runtime.py's own wandb_init/
+#  wandb -- a DUPLICATE of ClassifyingRoutingHead/Runtime.py's own wandb_init/
 #  wandb_log/wandb_finish (all three are 100% generic -- neither reads
 #  HEAD_CHOICES nor anything else specific to that package), not an import
 #  from there -- these are two INDEPENDENT training packages (this file's
 #  own module docstring), and importing one's generic plumbing from the
-#  other would couple them for no reason: a change to MppRoutingHead's copy should
+#  other would couple them for no reason: a change to ClassifyingRoutingHead's copy should
 #  not be able to move PrototypicalRoutingHead's runs. `wandb_epoch_metrics`
 #  is NOT duplicated --
-#  that one IS shaped around MppRoutingHead's own val_report row schema
+#  that one IS shaped around ClassifyingRoutingHead's own val_report row schema
 #  (`row['head']`/`row['val_dataset']`), so this project's own per-epoch
 #  metrics (episode loss, redraws, per-rung TRAIN accuracy -- see
 #  `cli/train.py`'s epoch loop) are flattened directly at the call site
@@ -86,7 +86,7 @@ def wandb_finish(run) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  scoring -- a DUPLICATE of MppRoutingHead/Runtime.py's own score/rescore/
+#  scoring -- a DUPLICATE of ClassifyingRoutingHead/Runtime.py's own score/rescore/
 #  rescore_by_rung (same reasoning as the wandb section above: generic,
 #  duplicated rather than imported across the package boundary), for
 #  `cli/train.py`'s own held-out val loop.

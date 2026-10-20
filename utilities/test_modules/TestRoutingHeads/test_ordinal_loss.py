@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The ordinal losses, in BOTH places they are written -- `training/
-PrototypicalRoutingHead/Losses.compute_loss` and `training/MppRoutingHead/
+PrototypicalRoutingHead/Losses.compute_loss` and `training/ClassifyingRoutingHead/
 cli/train._compute_loss` -- named after the formula rather than a module
 because what it checks is that the two agree and that both weight the
 regression term.
@@ -39,7 +39,7 @@ import torch.nn.functional as F                                  # noqa: E402
 
 from training.PrototypicalRoutingHead.Losses import (            # noqa: E402
     compute_loss, episode_class_weights)
-from training.MppRoutingHead.cli.train import _compute_loss      # noqa: E402
+from training.ClassifyingRoutingHead.cli.train import _compute_loss      # noqa: E402
 
 RUNGS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 _RESULTS = []

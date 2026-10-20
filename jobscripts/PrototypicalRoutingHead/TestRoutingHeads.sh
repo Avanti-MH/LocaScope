@@ -28,12 +28,12 @@ source jobscripts/_env.sh
 #
 #    episodes   training/PrototypicalRoutingHead/Episodes.py -- the mixed-pool
 #               draws training and validation make (also reads
-#               MppRoutingHead/Datasets.py's ManifestRow)
+#               ClassifyingRoutingHead/Datasets.py's ManifestRow)
 #    kxk        kxk_report in PrototypicalRoutingHead/cli/train.py -- the
 #               validation accuracy the checkpoints are chosen on
 #    ordinal    the ordinal losses in BOTH places they are written,
 #               PrototypicalRoutingHead/Losses.compute_loss and
-#               MppRoutingHead/cli/train._compute_loss, held to the same numbers
+#               ClassifyingRoutingHead/cli/train._compute_loss, held to the same numbers
 #
 #  No slide and no model: fake pools and toy tensors, seconds. The GPU line above
 #  is there because this cluster wants one, not because the assertions need it.

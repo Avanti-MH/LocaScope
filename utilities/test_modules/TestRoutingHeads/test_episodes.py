@@ -34,7 +34,7 @@ from _paths import setup_import_paths                            # noqa: E402
 
 setup_import_paths()
 
-from training.MppRoutingHead.Datasets import (                    # noqa: E402
+from training.ClassifyingRoutingHead.Datasets import (                    # noqa: E402
     ManifestRow, pick_wsi_names)
 from training.PrototypicalRoutingHead.Episodes import (          # noqa: E402
     HELD_OUT_COMBOS, batch_shape, draw, epoch_schedule, episodes_per_epoch,

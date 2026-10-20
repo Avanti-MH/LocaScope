@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-'''Scores saved `cli/train.py` checkpoints on the TEST half of the recorded split,
+'''Scores saved `cli/train.py` checkpoints on the TEST set (`--test-dataset`, @legacy-test),
 two ways, into two pairs of CSVs:
 
     original   test_scores_per_combo.csv / _per_rung.csv -- random full 6-way
                episodes, accuracy pooled over their query tiles. Unchanged, so
                its numbers stay comparable with every earlier run and, tile by
-               tile, with MppRoutingHead's.
+               tile, with ClassifyingRoutingHead's.
     K x K      test_scores_kxk_per_combo.csv / _per_rung.csv -- the same
                definition training's val uses (`train.kxk_report`): every
                held-out combination, K support x K query batches, rung ->
@@ -13,9 +13,9 @@ two ways, into two pairs of CSVs:
 
     python training/PrototypicalRoutingHead/cli/evaluate.py
 
-Separate from `train.py` on purpose, same reasoning `MppRoutingHead/cli/
-evaluate.py`'s own module docstring gives: the test split is every WSI
-`train.py` did NOT hold out for val, and it is meant to be looked at once a
+Separate from `train.py` on purpose, same reasoning `ClassifyingRoutingHead/cli/
+evaluate.py`'s own module docstring gives: the test set is the slides
+of the two datasets `train.py`'s val set did NOT take, and it is meant to be looked at once a
 question is settled, not once per training run.
 
 NOT A SECOND SCORING IMPLEMENTATION: this calls `train.py`'s OWN
@@ -24,12 +24,11 @@ deterministic draw of TEST episodes -- the exact per-combo, per-rung,
 native/resampled discipline `combo_report`'s own docstring explains
 ("blending combos together answers no single question cleanly") applies
 here exactly as it does to held-out val; writing a second version of that
-logic against the test split would be the same mistake in a new file.
+logic against the test set would be the same mistake in a new file.
 
-DEEPER, FEWER SLIDES than val: `--n-wsi 5 --n-per-rung
-50` (val: 10 slides, `--val-n-per-rung 20`) -- the same "shallow-and-wide
-for cheap per-epoch selection, deep-and-narrow for the one-shot final number"
-split `MppRoutingHead/cli/evaluate.py`'s own defaults use.
+AS MANY SLIDES AS VAL, DEEPER: `--n-wsi 10 --n-per-rung 50` (val: the same 10
+slides of each dataset, `--val-n-per-rung 20`) -- every slide of `@pure-half-test`,
+the same depth `ClassifyingRoutingHead/cli/evaluate.py`'s own defaults use.
 
 ONLY the full 6-way combo (`tuple(RUNGS)`, `Episodes.HELD_OUT_COMBOS`'s own
 third entry) -- not the 3-way/4-way probes. Those are compositional-
@@ -39,7 +38,7 @@ generalise), and mixing the probes back in here would just re-measure, at
 greater depth, a question val already answers.
 
 `--tag` (`nargs='+'`, default ALL THREE: `6rung`/`native`/`best`) -- unlike
-`MppRoutingHead/cli/evaluate.py`'s `best`/`last`/`best_unweighted`, this
+`ClassifyingRoutingHead/cli/evaluate.py`'s `best`/`last`/`best_unweighted`, this
 project's three checkpoint-selection criteria (`save_tagged`'s own
 docstring) do not always agree on which epoch wins, so scoring only one by
 default would silently answer "which epoch under ONE of three criteria" --
@@ -48,7 +47,7 @@ visible.
 
 A checkpoint's own filename already carries its full arm identity
 (`_prototype_weight_filename`'s own doc), so the default (no `--weights`)
-scores EVERY `*_<tag>.pt` under the run directory in one call -- a 9-arm
+scores EVERY `*--<tag>.pt` under the run directory in one call -- a 9-arm
 sweep x 3 tags = 27 files, all landing in ONE `test_scores_per_combo.csv`,
 comparable the same way `val_scores_per_combo.csv` already lets several arms
 sit side by side. Re-running against a newly-added checkpoint MERGES by
@@ -76,11 +75,11 @@ setup_import_paths()
 
 import torch                                                        # noqa: E402
 
-from training.MppRoutingHead.Datasets import (                      # noqa: E402
+from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, build_manifest, data_record, open_caches, RUNGS,
     RenderConfig,
     CameraBank)
-from AccessDatasets import list_names                                # noqa: E402
+from AccessDatasets import by_source                                 # noqa: E402
 from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
     HELD_OUT_COMBOS, group_by_wsi_name, max_feasible_k, pool_by_rung,
     render_episode, sample_val_episode)
@@ -96,17 +95,15 @@ def test_manifests(args, caches, out_dir: Path):
     train.py`'s own `val_manifests`, drawn through the same per-slide sampler
     cache.
 
-    THE FIRST `args.n_wsi` of the recorded test order, not a fresh draw --
-    the recorded split already shuffled once, so a prefix is a sample, and the
+    THE FIRST `args.n_wsi` of each dataset in the test set's order (`by_source`),
+    not a fresh draw -- the virtual dataset already shuffled once, so a prefix is a sample, and the
     SAME sample every time without a second seed to keep in step with the
-    first (`MppRoutingHead/cli/evaluate.py`'s own `test_rows` reasoning).
-    The split is READ (`<dataset>#test`; it refuses when the split is missing): one derived
+    first (`ClassifyingRoutingHead/cli/evaluate.py`'s own `test_rows` reasoning).
+    The set is READ (`--test-dataset`; it refuses when it was never written): one derived
     here could disagree with the one `train.py` selected checkpoints on.
     '''
     out, pools, sizes = {}, {}, {}
-    for dataset_id in args.eval_datasets:
-        names = list_names(dataset=f'{dataset_id}#test',
-                           split_job=caches.split_job)[:args.n_wsi]
+    for dataset_id, names in by_source(args.test_dataset, args.n_wsi):
         part = build_manifest(
             dataset_id, masks=caches.masks, draw_job=caches.draw_job,
             report_dir=(out_dir / 'sampler_reports'
@@ -124,10 +121,10 @@ def find_weights(args, out_dir: Path) -> List[Path]:
         return [Path(w) for w in args.weights]
     found = []
     for tag in args.tag:
-        found += sorted((out_dir / 'weights').glob(f'*_{tag}.pt'))
+        found += sorted((out_dir / 'weights').glob(f'*--{tag}.pt'))
     if not found:
         raise FileNotFoundError(
-            f'no *_{{{"|".join(args.tag)}}}.pt under {out_dir / "weights"} -- '
+            f'no *--{{{"|".join(args.tag)}}}.pt under {out_dir / "weights"} -- '
             f'name one with --weights, or point --out at the run that wrote them')
     return found
 
@@ -154,18 +151,19 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--weights', nargs='+', default=None,
-                    help='checkpoint paths; default is every *_<tag>.pt '
+                    help='checkpoint paths; default is every *--<tag>.pt '
                          'under the run directory, for EVERY --tag')
     ap.add_argument('--tag', nargs='+', choices=('6rung', 'native', 'best'),
                     default=['6rung', 'native', 'best'],
                     help="which of save_tagged's three selection criteria "
                          "to score, when --weights is not given (default: "
                          "all three -- see this module's own docstring)")
-    ap.add_argument('--eval-datasets', nargs='+',
-                    default=['bracs/test', 'ki67_with_photo'])
+    ap.add_argument('--test-dataset', default='@legacy-test',
+                    help='AccessDatasets id the test set is (a virtual @<name>), '
+                         'scored per dataset its slides come from')
     ap.add_argument('--tile', type=int, default=256)
-    ap.add_argument('--n-wsi', type=int, default=5,
-                    help="slides taken from each dataset's test half")
+    ap.add_argument('--n-wsi', type=int, default=10,
+                    help='slides of each dataset --test-dataset draws from')
     ap.add_argument('--n-per-rung', type=int, default=50,
                     help='TileSampler budget per WSI -- the pool test '
                          'episodes draw from, not the episode count')
@@ -222,9 +220,9 @@ def main() -> int:
         max_overlap=args.max_overlap, tries=args.feasibility_tries,
         seed=args.seed) for pool in test_pools.values())
     kxk_k = kxk_max if args.kxk_k == 'auto' else args.kxk_k
-    print(f'\n======== evaluate.py -- TEST split ========', flush=True)
+    print(f'\n======== evaluate.py -- TEST set {args.test_dataset} ========', flush=True)
     where = ('given by --weights' if args.weights else
-             f'{", ".join("*_" + t + ".pt" for t in args.tag)} in {out_dir / "weights"}')
+             f'{", ".join("*--" + t + ".pt" for t in args.tag)} in {out_dir / "weights"}')
     print(f'checkpoints   {len(weights)}  ({where})', flush=True)
     for i, (dataset_id, (n_wsi, n_pos, names)) in enumerate(test_sizes.items()):
         print(f'{"test slides" if i == 0 else "":<14s}{dataset_id:<17s} {n_wsi} WSIs  '
@@ -319,25 +317,26 @@ def main() -> int:
         # here was retrained under the top-level scheme.
         identity = dict(
             training_framework='metric_based', encoder=ckpt['encoder'],
-            pooling=run_args.get('pooling', ''),
+            pooling=run_args.get('pooling', '') + ('+mix' if run_args.get('mix') else ''),
             support_context=ckpt['support_context_name'],
             query_context=ckpt['query_context_name'],
             collapse=ckpt['collapse_name'],
             routing_head=ckpt['routing_head_name'],
-            cross_domain_dataset=extra.get('cross_domain_dataset', ''),
+            cross_domain='on' if extra.get('cross_domain') else 'off',
             # train_dataset/loss: the same fields as train.py's own
             # _IDENTITY_FIELDS -- read off ckpt['args'] since
             # neither one is in `extra` (they are plain CLI values, not a
             # registry name needing a lookup).
             train_dataset=run_args.get('train_dataset', ''),
+            train_stain=run_args.get('train_stain', ''),
             loss=run_args.get('loss', ''),
             support_native=trained_share,
             eval_support='native' if support_native else 'full',
             seg=run_args['seg'],
             episode_reuse=extra.get('episode_reuse', ''),
             reuse_k=extra.get('reuse_k', ''))
-        tag = path.stem.rsplit('_', 1)[-1]
-        cross = identity['cross_domain_dataset'] or 'off'
+        tag = path.stem.rsplit('--', 1)[-1]
+        cross = identity['cross_domain']
         print(f'\n-------- [{i_ckpt}/{len(weights)}] reuse '
               f'{identity["episode_reuse"] or "-"} | {identity["collapse"]} | '
               f'{identity["routing_head"]} | ctx {identity["support_context"]}/'
@@ -345,16 +344,19 @@ def main() -> int:
               flush=True)
         print(f'{path.name}', flush=True)
 
-        cache_key = (ckpt['encoder'], str(run_args.get('dtype')), support_native)
+        # the blocks encoded are part of what is cached: a mix reads more of them
+        cache_key = (ckpt['encoder'], str(run_args.get('dtype')), support_native,
+                     tuple(pooling.cfg.encoder_layers))
         episode_cache = episode_caches.setdefault(cache_key, {})
         rng = random.Random(args.seed)
-        detail: Dict[str, List[Dict]] = {d: [] for d in args.eval_datasets}
+        detail: Dict[str, List[Dict]] = {d: [] for d in test_by_dataset}
         n_redraws = 0
-        for dataset_id in args.eval_datasets:
+        for dataset_id in test_by_dataset:
             if dataset_id not in episode_cache:
                 episode_cache[dataset_id] = _encode_episodes(
                     test_by_dataset[dataset_id], rng, args, six_way, bank,
-                    render_cfg, support_native, render_pool, encoder, device)
+                    render_cfg, support_native, render_pool, encoder, device,
+                    tuple(pooling.cfg.encoder_layers))
             encoded, redraws = episode_cache[dataset_id]
             n_redraws += redraws
             for rungs, s_raw, q_raw, q_native in encoded:
@@ -412,7 +414,7 @@ def _to(raw_by_rung: Dict, device) -> Dict:
 
 
 def _encode_episodes(manifest_by_wsi, rng, args, combos, bank, render_cfg,
-                     support_native: bool, pool, encoder, device):
+                     support_native: bool, pool, encoder, device, layers: tuple = ()):
     '''`([(rungs, s_raw, q_raw, q_native)], redraws)`: `--n-episodes`
     episodes of the original test table drawn from `rng`, rendered and
     encoded -- the tokens on the host, so the cache holding them does not
@@ -445,9 +447,9 @@ def _encode_episodes(manifest_by_wsi, rng, args, combos, bank, render_cfg,
             continue
         in_a_row = 0
         s_raw, _s_native = encode_group(rendered.support, encoder,
-                                        args.encode_batch, device)
+                                        args.encode_batch, device, layers)
         q_raw, q_native = encode_group(rendered.query, encoder,
-                                       args.encode_batch, device)
+                                       args.encode_batch, device, layers)
         encoded.append((rendered.rungs, _to(s_raw, 'cpu'), _to(q_raw, 'cpu'),
                         q_native))
     return encoded, redraws

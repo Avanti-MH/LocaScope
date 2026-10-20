@@ -1,4 +1,4 @@
-'''`L_bal` / `L_ord_a` / `L_ord_b` -- `MppRoutingHead/spec.md`'s "Ordinal-aware
+'''`L_bal` / `L_ord_a` / `L_ord_b` -- `ClassifyingRoutingHead/spec.md`'s "Ordinal-aware
 loss" formulas, adopted here from the start (spec.md's own words: "adopted
 ... verbatim, from the start"). One real difference from that project: `N`
 (how many rungs one call's logits/target range over) VARIES per episode --
@@ -14,7 +14,7 @@ training -- so every function here takes the EPISODE's own rung list, never
 
 `w_c` (the class-imbalance weight) is recomputed PER EPISODE from this
 episode's own query batch, not read from a table built once over the whole
-training manifest the way `MppRoutingHead/Datasets.class_weights` does --
+training manifest the way `ClassifyingRoutingHead/Datasets.class_weights` does --
 there is no single fixed rung distribution to build that table from once N
 varies episode to episode. Cheap (one bincount over a small batch) and
 adapts automatically to whichever subset was drawn AND however short the
@@ -31,7 +31,7 @@ import torch.nn.functional as F
 
 def episode_class_weights(target: torch.Tensor, num_classes: int) -> torch.Tensor:
     '''`w_c = N / (K * n_c)` from THIS episode's own `target` batch -- the
-    same formula `MppRoutingHead.Datasets.class_weights` uses, scoped to one
+    same formula `ClassifyingRoutingHead.Datasets.class_weights` uses, scoped to one
     episode instead of the whole training manifest. `num_classes` is `K`
     (this episode's own rung count), not a fixed 6.
 
@@ -60,7 +60,7 @@ def compute_loss(logits: torch.Tensor, target: torch.Tensor,
         'ord_b' = w_y * (-sum_c q_c(y) log p_c)              (soft target, REPLACES
                                                               the one-hot CE target
                                                               rather than adding to it
-                                                              -- see MppRoutingHead/
+                                                              -- see ClassifyingRoutingHead/
                                                               cli/train.py's own
                                                               _compute_loss for why)
 
