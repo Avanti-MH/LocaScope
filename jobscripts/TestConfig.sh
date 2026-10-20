@@ -42,5 +42,6 @@ for t in $ONLY; do
   echo ""
 done
 
-echo "======== done (exit $status) ========"
+# the last line says it all: ALL PASS, or FAILED with the exit code
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
 exit $status

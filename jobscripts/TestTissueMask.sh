@@ -88,5 +88,6 @@ python utilities/test_modules/test_tissue_mask.py \
   $REGION_IDX --bbox-lw $BBOX_LW
 rc=$?
 [ $rc -ne 0 ] && status=$rc
-echo "======== done (exit $status) ========"
+# the last line says it all: ALL PASS, or FAILED with the exit code
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
 exit $status

@@ -108,5 +108,6 @@ EOF
     run utilities/test_modules/test_fov_supply.py --wsi "$path" --level "$CAMERA_LEVEL"
 done
 echo ""
-echo "======== done (exit $status) ========"
+# the last line says it all: ALL PASS, or FAILED with the exit code
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
 exit $status
