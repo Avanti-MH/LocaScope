@@ -102,7 +102,7 @@ class FovRecipe:
 #:                         sensor, the full gap with no mpp jitter, the plain
 #:                         lattice draw, every native level. What a diagnostic
 #:                         switches one part of.
-#: routing-query           MppRoutingHead's query tiles: a tile-sized sensor
+#: routing-query           ClassifyingRoutingHead's query tiles: a tile-sized sensor
 #:                         (`--tile` replaces it), the full gap with the two
 #:                         frame-referenced optics present half the time and no
 #:                         stage shift, over DsLadder's six rungs. The half is a
@@ -141,7 +141,7 @@ FOV_RECIPES: Dict[str, FovRecipe] = {
                 jitter_cap=0.0),
             inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
                                   on_incomplete='drop'),
-            candidates='lattice', max_tries_per_tile=5),
+            candidates='lattice', max_tries_per_tile=5, reserve_in_region=True),
         rungs='native', max_ds=16.0),
     'plain': FovRecipe(
         sensor=(1440, 1024),

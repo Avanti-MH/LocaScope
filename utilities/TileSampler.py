@@ -879,12 +879,22 @@ class SamplerConfig(IdentifiedConfig):
     #: it changes which tiles come out of the random arm.
     max_tries_per_tile: int = 5
 
+    #: Where the RESERVE must lie. False: in the scanned rectangle only, and the
+    #: FoV in the region (`_bounds`); a photo turned or zoomed out then reaches past
+    #: its region into the glass, which a warp's context may do. True: the whole
+    #: reserve -- the camera's read at every turn and zoom -- lies in the region, so
+    #: a FoV's photo is wholly in its region at any turn, which is what a search
+    #: that only knows the region's tiles (stage 2) needs to have an answer.
+    #: The regions that cannot hold a reserve host no FoV.
+    reserve_in_region: bool = False
+
     # No region prep here: it belongs to the mask's recipe
     # (`TissueMaskConfig.min_region_ratio` / `merge`, hashed into `region_id`).
 
     BASELINE = {'n_per_rung': 500, 'seed': 0, 'richness': 'RichnessConfig',
                 'overlap': 'OverlapConfig', 'inherit': 'InheritConfig',
-                'candidates': 'lattice', 'max_tries_per_tile': 5}
+                'candidates': 'lattice', 'max_tries_per_tile': 5,
+                'reserve_in_region': False}
 
     def __post_init__(self):
         if self.candidates not in ('lattice', 'random'):
@@ -919,7 +929,7 @@ SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
             jitter_cap=0.0),
         inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
                               on_incomplete='drop'),
-        candidates='lattice', max_tries_per_tile=10),
+        candidates='lattice', max_tries_per_tile=10, reserve_in_region=False),
     'reference-bank': SamplerConfig(
         n_per_rung=100, seed=0,
         richness=RichnessConfig(
@@ -934,7 +944,7 @@ SAMPLER_RECIPES: Dict[str, SamplerConfig] = {
             jitter_cap=0.0),
         inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
                               on_incomplete='drop'),
-        candidates='lattice', max_tries_per_tile=10),
+        candidates='lattice', max_tries_per_tile=10, reserve_in_region=False),
 }
 
 
@@ -1161,7 +1171,13 @@ class TileSampler:
         two-rectangle rule in `_lattice`: the TILE is the training sample and
         has to be in tissue; the RESERVE is only context for a warp and has to
         be READABLE.
+
+        With `cfg.reserve_in_region` the reserve is what must be in the region
+        (see `_bounds`), so a region hosts a rung only if it holds the reserve.
         """
+        if self.cfg.reserve_in_region:
+            side: int = int(plan.footprint_l0) + 2 * _margin_of(plan)
+            return [r for r in self.mask.tissue_regions if r.w >= side and r.h >= side]
         if plan.is_rect:
             # a region hosts a rectangular FoV if it holds the RECTANGLE;
             # `patchable` takes one side and would ask for the long one twice
@@ -1250,16 +1266,28 @@ class TileSampler:
 
         "The tile" is the camera's FoV: the footprint square, or the rectangle
         centred in it (`_dims`, `_offset`), which is what a rectangular sensor
-        actually photographs."""
+        actually photographs.
+
+        `cfg.reserve_in_region` makes it ONE requirement: the reserve -- the
+        footprint grown by the margin that holds the camera's read at every turn
+        and zoom -- lies in the region (and so in the scanned rectangle, which
+        the region is in). The FoV's photo is then wholly in the region at any
+        turn, not only at the turn the rectangle is drawn at."""
         fp = int(plan.footprint_l0)
         pad = _margin_of(plan)
         fw, fh = self._dims(plan)
         offx, offy = self._offset(plan)
         sx0, sy0, sx1, sy1 = _scanned_rect(self.mask)
-        x0 = max(region.x - offx, sx0 + pad)
-        y0 = max(region.y - offy, sy0 + pad)
-        x1 = min(region.x + region.w - fw - offx, sx1 - pad - fp)
-        y1 = min(region.y + region.h - fh - offy, sy1 - pad - fp)
+        if self.cfg.reserve_in_region:
+            x0 = max(region.x + pad, sx0 + pad)
+            y0 = max(region.y + pad, sy0 + pad)
+            x1 = min(region.x + region.w - pad - fp, sx1 - pad - fp)
+            y1 = min(region.y + region.h - pad - fp, sy1 - pad - fp)
+        else:
+            x0 = max(region.x - offx, sx0 + pad)
+            y0 = max(region.y - offy, sy0 + pad)
+            x1 = min(region.x + region.w - fw - offx, sx1 - pad - fp)
+            y1 = min(region.y + region.h - fh - offy, sy1 - pad - fp)
         if x1 < x0 or y1 < y0:
             return None
         return x0, y0, x1, y1
@@ -1305,14 +1333,23 @@ class TileSampler:
         cannot fail it. The two paths that place a position NOT from the
         lattice -- `_top_up` and `_place_inherited` -- have to ask: a top-up
         displacement of up to 1.25 tiles can walk past the region edge.
+
+        With `cfg.reserve_in_region` it must be wholly inside ONE REGION too
+        (`_bounds`), so a displaced position cannot leave the region the
+        lattice kept every other position in.
         """
         fp = int(plan.footprint_l0)
         pad = _margin_of(plan)
         reserve = fp + 2 * pad          # never `plan.reserve`: see SampleMeta
         x0, y0 = x - pad, y - pad
         sx0, sy0, sx1, sy1 = _scanned_rect(self.mask)
-        return (x0 >= sx0 and y0 >= sy0
-                and x0 + reserve <= sx1 and y0 + reserve <= sy1)
+        if not (x0 >= sx0 and y0 >= sy0
+                and x0 + reserve <= sx1 and y0 + reserve <= sy1):
+            return False
+        if not self.cfg.reserve_in_region:
+            return True
+        return any(x0 >= r.x and y0 >= r.y and x0 + reserve <= r.x + r.w and y0 + reserve <= r.y + r.h
+                   for r in self._regions(plan))
 
     def _rate(self, xy: np.ndarray, plan: RungPlan):
         """Score and bucket a set of positions. One door for every caller.

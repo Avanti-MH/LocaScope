@@ -295,6 +295,52 @@ def t_reserve_is_what_must_fit_not_what_the_tile_covers():
     return f'{plain.n_candidates} -> {reserved.n_candidates} with a 3x reserve'
 
 
+def _reserve_outside_regions(sample, mask) -> int:
+    """How many of `sample`'s tiles have a reserve that is not wholly inside one region."""
+    out: int = 0
+    for item in sample:
+        m = item.meta
+        x0, y0, side = m.x - m.margin, m.y - m.margin, m.reserve
+        if not any(x0 >= r.x and y0 >= r.y and x0 + side <= r.x + r.w and y0 + side <= r.y + r.h
+                   for r in mask.tissue_regions):
+            out += 1
+    return out
+
+
+def t_reserve_in_region_keeps_the_whole_reserve_in_one_region():
+    """Off, the reserve may reach into the glass beside the region (it only has to be readable); on,
+    every tile's reserve -- the camera's read at every turn and zoom -- is wholly in one region.
+
+    The decoy is the same fixture with the option off: it must leave the region, or this test cannot
+    tell the option from a fixture whose region is already big enough."""
+    wsi, mask = _one_big_block()
+    plans = _plans((1.0, 2.0), factor=3)
+    off = TileSampler(wsi, mask, _cfg(reserve_in_region=False)).sample(plans)
+    on = TileSampler(wsi, mask, _cfg(reserve_in_region=True)).sample(plans)
+    assert len(off) and len(on), 'a fixture that places nothing proves nothing'
+    out_off, out_on = _reserve_outside_regions(off, mask), _reserve_outside_regions(on, mask)
+    assert out_off, 'the decoy (option off) kept every reserve in the region: the fixture cannot show the option'
+    assert out_on == 0, f'{out_on} of {len(on)} tiles reserve ground outside every region with the option on'
+    return f'{out_off} of {len(off)} leave the region with it off, {out_on} of {len(on)} with it on'
+
+
+def t_a_displaced_position_is_held_to_the_region_too():
+    """`_reserve_fits` is the question `_top_up` and `_place_inherited` ask of a position they did not
+    take from the lattice: with the option on it is about the region, not only the scanned rectangle."""
+    wsi, mask = _one_big_block()
+    plan = _plans((1.0,), factor=3)[0]
+    pad = (int(plan.reserve_l0) - int(plan.footprint_l0)) // 2
+    region = mask.tissue_regions[0]
+    edge = (int(region.x) + pad - 40, int(region.y) + pad + 100)      # its reserve starts 40 px outside
+    inside = (int(region.x) + pad + 100, int(region.y) + pad + 100)
+    off = TileSampler(wsi, mask, _cfg(reserve_in_region=False))
+    on = TileSampler(wsi, mask, _cfg(reserve_in_region=True))
+    assert off._reserve_fits(*edge, plan), 'the decoy: readable ground, so it fits with the option off'
+    assert not on._reserve_fits(*edge, plan), 'a reserve 40 px out of the region fitted with the option on'
+    assert off._reserve_fits(*inside, plan) and on._reserve_fits(*inside, plan)
+    return 'a position 40 px out of its region: fits off, refused on; one inside: fits both'
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  2. overlap
 # ══════════════════════════════════════════════════════════════════════════════
@@ -815,6 +861,17 @@ def t_bucket_frame_changes_what_a_chain_carries():
 # ══════════════════════════════════════════════════════════════════════════════
 #  5. identity
 # ══════════════════════════════════════════════════════════════════════════════
+
+def t_reserve_in_region_moves_the_id_only_when_it_is_on():
+    """Off is the field's zero point, so a draw made before the field existed keeps its name; on is a
+    different draw (other positions) and gets its own."""
+    base = _cfg()
+    assert _cfg(reserve_in_region=False).identity_id() == base.identity_id(), (
+        'writing the option off moved the id: every existing draw would be drawn again')
+    assert _cfg(reserve_in_region=True).identity_id() != base.identity_id(), (
+        'the option on shares the off draw\'s name: two different draws under one')
+    return 'off keeps the id, on moves it'
+
 
 def t_sampler_id_moves_with_every_axis():
     base = _cfg()
@@ -1688,7 +1745,9 @@ _SECTIONS = {
                  't_every_placed_tile_keeps_its_reserve_inside_the_scanned_rectangle',
                  't_the_reserve_is_derived_from_the_margin_and_not_asked_for',
                  't_an_R_rung_reads_level_0_and_an_F_rung_grows',
-                 't_reserve_is_what_must_fit_not_what_the_tile_covers'],
+                 't_reserve_is_what_must_fit_not_what_the_tile_covers',
+                 't_reserve_in_region_keeps_the_whole_reserve_in_one_region',
+                 't_a_displaced_position_is_held_to_the_region_too'],
     'overlap':  ['t_a_disjoint_lattice_overlaps_nothing_and_the_random_arm_does',
                  't_a_half_step_lattice_under_a_tight_bound_is_refused',
                  't_the_overlapping_share_is_a_budget_and_binds',
@@ -1706,7 +1765,8 @@ _SECTIONS = {
                  't_inherited_positions_are_exempt_from_the_overlap_bound',
                  't_stacks_returns_complete_chains_only_and_names_what_is_missing',
                  't_bucket_frame_changes_what_a_chain_carries'],
-    'identity': ['t_sampler_id_moves_with_every_axis',
+    'identity': ['t_reserve_in_region_moves_the_id_only_when_it_is_on',
+                 't_sampler_id_moves_with_every_axis',
                  't_sampler_id_does_not_move_with_provenance'],
     'access':   ['t_where_returns_a_container_and_composes_with_stacks',
                  't_neighbours_separates_same_rung_from_cross_rung',

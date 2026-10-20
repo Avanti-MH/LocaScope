@@ -85,7 +85,7 @@ RECIPES = {
             jitter_cap=0.0),
         inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
                               on_incomplete='drop'),
-        candidates='lattice', max_tries_per_tile=25),
+        candidates='lattice', max_tries_per_tile=25, reserve_in_region=False),
     'stageB-fOwn': SamplerConfig(
         n_per_rung=200, seed=0,
         richness=RichnessConfig(
@@ -100,7 +100,7 @@ RECIPES = {
             jitter_cap=0.0),
         inherit=InheritConfig(stack_kind='F', share=1.0, source_rung=16.0,
                               on_incomplete='drop'),
-        candidates='lattice', max_tries_per_tile=12),
+        candidates='lattice', max_tries_per_tile=12, reserve_in_region=False),
     'stageB-cOwn': SamplerConfig(
         n_per_rung=10, seed=0,
         richness=RichnessConfig(
@@ -115,7 +115,7 @@ RECIPES = {
             jitter_cap=0.0),
         inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
                               on_incomplete='drop'),
-        candidates='lattice', max_tries_per_tile=250),
+        candidates='lattice', max_tries_per_tile=250, reserve_in_region=False),
 }
 
 #: Which recipe is each survival axis's own corpus. R reads stageA's tiles.
