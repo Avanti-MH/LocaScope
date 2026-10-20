@@ -722,7 +722,7 @@ def main() -> int:
                     help='skip the unit tests (implies --with-model)')
     ap.add_argument('--slides', nargs='+', default=['BRACS_1411', 'S1104233,G7E,110208'],
                     help='slide NAMES, resolved by AccessDatasets. The defaults '
-                         'have a hest mask in result/cache/MppRoutingHead_mask')
+                         'have a hest mask in result/cache/Masks')
     ap.add_argument('--seg', default='hest', help='mask recipe (MASK_RECIPES)')
     ap.add_argument('--mask-cache-job', default=None,
                     help='whose mask cache to read and fill: result/cache/<this>_'

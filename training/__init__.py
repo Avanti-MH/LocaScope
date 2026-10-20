@@ -1,7 +1,7 @@
-'''Namespace package only -- `training/MppRoutingHead/` and `training/
+'''Namespace package only -- `training/ClassifyingRoutingHead/` and `training/
 PrototypicalRoutingHead/` are real Python packages under it so
 their own cross-file imports can be fully-qualified (`from training.
-MppRoutingHead.Runtime import ...`), so `sys.path` ORDER never has to tell
+ClassifyingRoutingHead.Runtime import ...`), so `sys.path` ORDER never has to tell
 the two packages' same-named files apart -- see `utilities/_paths.setup_import_paths`.
 
 `training/SuperPathPoint/` does NOT need this: it has no top-level bare

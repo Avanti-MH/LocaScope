@@ -37,14 +37,14 @@ this class goes through -- is `@torch.no_grad()`, which is right for GigaPath
 and UNI2 (always used as a frozen encoder here) and is ALSO right for this
 class whenever it is used the same way: as a frozen, natural-image-pretrained
 CNN feature extractor to compare against the frozen pathology foundation
-models. It is NOT what `training/MppRoutingHead`'s baseline 3 wants --
+models. It is NOT what `training/ClassifyingRoutingHead`'s baseline 3 wants --
 end-to-end fine-tuning needs gradients flowing through the trunk, which this
 frozen-inference class structurally cannot give (no code path here ever calls
 the model outside `torch.no_grad()`). That trainable arm builds its own
 `nn.Module` directly from `timm.create_model(cfg.model.arch, ...)` using this
 config's `model`/`transform` fields for the checkpoint name and preprocessing,
 and trains it with an ordinary grad-enabled forward pass -- see
-`training/MppRoutingHead/Models.py`. This class exists so ConvNeXt V2 can ALSO
+`training/ClassifyingRoutingHead/Models.py`. This class exists so ConvNeXt V2 can ALSO
 be dropped into the exact same frozen-encoder-plus-head comparison GigaPath
 and UNI2 already sit in (a natural-image prior instead of a pathology one),
 not because baseline 3 is built on top of it.

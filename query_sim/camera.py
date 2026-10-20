@@ -95,7 +95,7 @@ def photo_rng(*key) -> random.Random:
     The key's parts are joined with '|'; a caller writes each the way it wants
     it compared (a ds as `:g`, say). sha256 and not `hash()`, which Python
     randomises per process for a str. THE ONE DEFINITION: `FovSupply` and
-    MppRoutingHead's eval render (`Datasets.render_row`) both draw through it."""
+    ClassifyingRoutingHead's eval render (`Datasets.render_row`) both draw through it."""
     text = '|'.join(str(k) for k in key)
     return random.Random(int(hashlib.sha256(text.encode()).hexdigest()[:16], 16))
 
@@ -231,7 +231,7 @@ class Render:
 
         `rng`, if given, is used INSTEAD of this camera's own generator for
         this one call. For a caller that needs the SAME (x, y) to always render
-        the SAME photo regardless of call order (`training/MppRoutingHead/
+        the SAME photo regardless of call order (`training/ClassifyingRoutingHead/
         spec.md`, "Camera: train vs eval"): pass `rng=random.Random(derived
         from the sample's own identity)` instead of building a fresh Render.
 

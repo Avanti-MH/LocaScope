@@ -32,7 +32,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #                                                      output, on real tiles
 #    ONLY_MODEL=1 sbatch jobscripts/TestStore.sh       just that measurement
 #  ENCODER (default uni2), TILES (per slide and level, default 200), LEVELS, SLIDES,
-#  SEG (default hest), MASK_CACHE_JOB (default MppRoutingHead: its hest masks are
+#  SEG (default hest), MASK_CACHE_JOB (default Masks: the shared hest masks are
 #  reused; empty = this job's own cache).
 # =============================================================================
 
@@ -41,11 +41,11 @@ status=0
 ARGS=()
 [ "${WITH_MODEL:-0}" = "1" ] && ARGS+=(--with-model)
 [ "${ONLY_MODEL:-0}" = "1" ] && ARGS+=(--only-model)
-# Masks are read from an existing cache: MppRoutingHead already segmented most of
-# the slides with hest, and a hit builds no segmenter. MASK_CACHE_JOB= (empty)
+# Masks are read from an existing cache: the Masks cache already holds most of
+# the slides' hest masks, and a hit builds no segmenter. MASK_CACHE_JOB= (empty)
 # uses this job's own cache instead, and segments what it does not find.
 ARGS+=(--encoder "${ENCODER:-uni2}" --tiles "${TILES:-200}")
-MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB-Masks}"
 [ -n "$MASK_CACHE_JOB" ] && ARGS+=(--mask-cache-job "$MASK_CACHE_JOB")
 [ -n "${SEG:-}" ] && ARGS+=(--seg "$SEG")
 [ -n "${SLIDES:-}" ] && ARGS+=(--slides $SLIDES)
@@ -63,5 +63,6 @@ rc=$?
 [ $rc -ne 0 ] && status=$rc
 
 echo ""
-echo "======== done (exit $status) ========"
+# the last line says it all: ALL PASS, or FAILED with the exit code
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
 exit $status

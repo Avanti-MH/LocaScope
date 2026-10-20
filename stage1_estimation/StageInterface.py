@@ -147,7 +147,7 @@ def reference_bank(wsi, mask, sampler_cfg, tile_size: int, *, masks=None,
 
 def weights_path(weights: str) -> str:
     """A checkpoint named in a recipe: relative to the results root
-    (`MppRoutingHead/weights/<file>`), so a recipe holds no mount; an absolute
+    (`ClassifyingRoutingHead/weights/<file>`), so a recipe holds no mount; an absolute
     path is used as it is."""
     import os                                                     # noqa: PLC0415
     from _paths import RESULT_DIR                                 # noqa: PLC0415

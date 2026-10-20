@@ -23,19 +23,19 @@ from typing import Dict, List, Optional, Tuple
 
 import torch                                                        # noqa: E402
 
-from training.MppRoutingHead.Datasets import (                      # noqa: E402
+from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     RUNGS, RenderConfig, iterate_epoch)
 from Heads import ArcFaceHead, HeadConfig, LinearHead, MlpHead       # noqa: E402
 from Head import Head, grid_view, pooled_view                       # noqa: E402
 from Features import encode_raw, normalise_patches, trunk_raw       # noqa: E402
-from Checkpoints import (build_from_checkpoint, save_checkpoint,    # noqa: E402
-                         weight_filename)
+from Checkpoints import (build_from_checkpoint, data_tag,          # noqa: E402
+                         save_checkpoint, weight_filename)
 
 __all__ = [
     'ArcFaceHead', 'HeadConfig', 'LinearHead', 'MlpHead',
     'Head', 'grid_view', 'pooled_view',
     'encode_raw', 'normalise_patches', 'trunk_raw',
-    'build_from_checkpoint', 'save_checkpoint', 'weight_filename',
+    'build_from_checkpoint', 'data_tag', 'save_checkpoint', 'weight_filename',
     'BASELINE3_ENCODER', 'HEAD_CHOICES', 'MIX_LAYERS', 'head_parts', 'heads_for',
     'wandb_init', 'wandb_log', 'wandb_finish', 'wandb_epoch_metrics',
     'score', 'rescore', 'predict',
@@ -114,6 +114,8 @@ HEAD_CHOICES = {
                               dict(mlp_depth=2, encoder_layers=MIX_LAYERS)),
     'mix_clsattn_mlp_deep':  ('clsattn', MlpHead, (2,),
                               dict(mlp_depth=2, encoder_layers=MIX_LAYERS)),
+    # the mix under the shallowest classifier, against attn_linear
+    'mix_attn_linear':       ('attn', LinearHead, (2,), dict(encoder_layers=MIX_LAYERS)),
     'arcface':       ('fixed', ArcFaceHead, (2,),   {}),  # 2-3      angular margin
 }
 

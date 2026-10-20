@@ -58,14 +58,14 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #           /work/u26130998/datasets/Ki67_with_photo/S1103520_G7E_110126_mrxs/S1103520,G7E,110126.mrxs
 
 # python aiNNModel/models/common/migrate_checkpoint.py \
-#   /work/u26130998/result/MppRoutingHead/weights/*mlp*.pt  --write
+#   /work/u26130998/result/ClassifyingRoutingHead/weights/*mlp*.pt  --write
 
 # python utilities/test_modules/test_cache.py
 # python utilities/test_modules/test_tissue_mask.py
 # python utilities/test_modules/test_tile_sampler.py
 # python utilities/test_modules/test_uni2_pca_seg.py
 # python utilities/test_modules/test_patching_lib.py
-# python utilities/cli/build_cache/make_split.py --cache-job MakeSplit
+# python utilities/cli/build_cache/make_dataset.py --catalog --recipe pure legacy
 # python utilities/test_modules/test_store.py
 # python utilities/test_modules/TestSuperPathPoint/test_chain_stack.py
 # python utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py

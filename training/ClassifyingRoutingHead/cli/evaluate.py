@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-'''Score saved checkpoints on the TEST split.
+'''Score saved checkpoints on the TEST set.
 
-    python training/MppRoutingHead/cli/evaluate.py                  # every *_best.pt
+    python training/ClassifyingRoutingHead/cli/evaluate.py                  # every *--best.pt
     python .../evaluate.py --tag last
-    python .../evaluate.py --weights .../gigapath_frozen_arcface_best.pt
+    python .../evaluate.py --weights .../pure-train_Ki67--gigapath--frozen--arcface--bal--best.pt
 
-Separate from `train.py` on purpose. The test split is every WSI of the eval
-datasets that `train.py` did NOT hold out for val, and it is meant to be looked
+Separate from `train.py` on purpose. The test set (`--test-dataset`, @legacy-test) is
+the slides of the two datasets `train.py`'s val set did NOT take, and it is meant to be looked
 at once a question is settled -- not once per training run. Putting it behind
 its own entry point is what makes "did anyone score on test today" answerable.
 
@@ -15,15 +15,15 @@ A checkpoint carries everything needed to rebuild its model (see
 and no head geometry: passing any of those would be a second source of truth
 able to disagree with the weights.
 
-The split comes from the recorded split, written once by
-`utilities/cli/build_cache/make_split.py`.
-Read rather than re-derived: a split recomputed from
+The set is a virtual dataset, written once by
+`utilities/cli/build_cache/make_dataset.py`.
+Read rather than re-derived: a set recomputed from
 `--seed` is one library version away from silently becoming a different
 experiment, and then the "test" set contains slides the model selected on.
 
-`--n-wsi` (5) slides from each dataset's test half, `--n-per-rung` (50)
-positions on each rung of each -- so 5 x 6 x 50 = 1500 positions per dataset,
-deeper per slide than val is and over fewer slides.
+`--n-wsi` (10) slides of each dataset the test set draws from, `--n-per-rung` (50)
+positions on each rung of each -- so 10 x 6 x 50 = 3000 positions per dataset,
+every slide of `@pure-half-test`, as many as val has and as deep per slide.
 
 Two CSVs come out: `test_scores_<tag>.csv`, one row per (checkpoint, dataset),
 and `test_predictions_<tag>.csv`, ONE ROW PER TILE with its `wsi_name`, `x`,
@@ -60,32 +60,30 @@ setup_import_paths()
 import torch                                                        # noqa: E402
 
 import _paths                                                       # noqa: E402
-from training.MppRoutingHead.Datasets import (                      # noqa: E402
+from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     RUNGS, add_cache_args, build_manifest, data_record, open_caches,
     read_label_of)
-from AccessDatasets import list_names                                # noqa: E402
-from training.MppRoutingHead.Runtime import (                       # noqa: E402
+from AccessDatasets import by_source                                 # noqa: E402
+from training.ClassifyingRoutingHead.Runtime import (                       # noqa: E402
     build_from_checkpoint, encode_raw, head_parts, predict, rescore_by_rung,
     trunk_raw)
 
 
-def test_rows(args, caches, out_dir, dataset_id: str) -> List:
-    '''`--n-wsi` slides from the test half, `--n-per-rung` positions on each
+def test_rows(args, caches, out_dir, dataset_id: str, names: List[str]) -> List:
+    '''`names`, slides of `dataset_id`, `--n-per-rung` positions on each
     rung of each.
 
-    THE FIRST `n_wsi` OF THE RECORDED ORDER, not a fresh draw.
-    `split_wsi_names` shuffles before it splits and the recorded split keeps that
-    order, so the test rows in the file are already randomised -- taking a
+    THE FIRST `n_wsi` OF THE RECORDED ORDER (`by_source`), not a fresh draw.
+    `Selection.split` shuffles before it cuts and the virtual dataset keeps that
+    order, so its slides are already randomised -- taking a
     prefix is a sample, and it is the SAME sample every time without a second
     seed to keep in step with the first. Which five were used is then readable
     off the rows' own `wsi_name` column and the sampler reports.
 
-    The split is READ (`<dataset>#test`; it refuses when the split is missing): a split
+    The set is READ (`--test-dataset`; it refuses when it was never written): a set
     derived here could disagree with the one that selected the checkpoints,
     and the disagreement would show up as a good score.
     '''
-    names = list_names(dataset=f'{dataset_id}#test',
-                       split_job=caches.split_job)[:args.n_wsi]
     print(f'[test]  {dataset_id}: {len(names)} WSIs ({", ".join(names)})',
           flush=True)
     return build_manifest(
@@ -99,10 +97,10 @@ def test_rows(args, caches, out_dir, dataset_id: str) -> List:
 def find_weights(args, out_dir: Path) -> List[Path]:
     if args.weights:
         return [Path(w) for w in args.weights]
-    found = sorted((out_dir / 'weights').glob(f'*_{args.tag}.pt'))
+    found = sorted((out_dir / 'weights').glob(f'*--{args.tag}.pt'))
     if not found:
         raise FileNotFoundError(
-            f'no *_{args.tag}.pt under {out_dir / "weights"} -- name one with '
+            f'no *--{args.tag}.pt under {out_dir / "weights"} -- name one with '
             f'--weights, or point --out at the run that wrote them')
     return found
 
@@ -111,7 +109,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--weights', nargs='+', default=None,
-                    help='checkpoint paths; default is every *_<tag>.pt under '
+                    help='checkpoint paths; default is every *--<tag>.pt under '
                          'the run directory')
     ap.add_argument('--tag', choices=['best', 'last', 'best_unweighted'],
                     default='best',
@@ -123,11 +121,12 @@ def main() -> int:
                          "datasets -- see cli/train.py's val_report/"
                          "save_tagged for why these can pick different "
                          "epochs")
-    ap.add_argument('--eval-datasets', nargs='+',
-                    default=['bracs/test', 'ki67_with_photo'])
+    ap.add_argument('--test-dataset', default='@legacy-test',
+                    help='AccessDatasets id the test set is (a virtual @<name>), '
+                         'scored per dataset its slides come from')
     ap.add_argument('--tile', type=int, default=256)
-    ap.add_argument('--n-wsi', type=int, default=5,
-                    help='slides taken from each dataset\'s test half')
+    ap.add_argument('--n-wsi', type=int, default=10,
+                    help='slides of each dataset --test-dataset draws from')
     ap.add_argument('--n-per-rung', type=int, default=50,
                     help='positions per rung per slide')
     ap.add_argument('--wsi-group-size', type=int, default=8)
@@ -144,13 +143,13 @@ def main() -> int:
     print(f'  {CpuBudget.for_job(workers=args.num_workers).apply().line()}', flush=True)
 
     device = torch.device(args.device)
-    caches = open_caches(args, 'MppRoutingHead', device)
-    out_dir = Path(args.out or _paths.job_result_dir('MppRoutingHead'))
+    caches = open_caches(args, 'ClassifyingRoutingHead', device)
+    out_dir = Path(args.out or _paths.job_result_dir('ClassifyingRoutingHead'))
     weights = find_weights(args, out_dir)
-    print(f'{len(weights)} checkpoint(s), test split of '
-          f'{", ".join(args.eval_datasets)}', flush=True)
+    print(f'{len(weights)} checkpoint(s), test set {args.test_dataset}', flush=True)
 
-    rows = {d: test_rows(args, caches, out_dir, d) for d in args.eval_datasets}
+    rows = {d: test_rows(args, caches, out_dir, d, names)
+            for d, names in by_source(args.test_dataset, args.n_wsi)}
     caches.masks.close()
     out_rows: List[Dict] = []
     tile_rows: List[Dict] = []
@@ -274,7 +273,7 @@ def write_csvs(out_dir: Path, tag: str, out_rows: List[Dict],
     (`wsi_name`, `x`, `y`), what it is (`rung`, `bucket`, `native`) and what
     happened (`gt_class`/`gt_rung`, `pred_class`/`pred_rung`, `correct`). The
     summary cannot say whether the errors are one bad slide, one richness
-    bucket, or the resampled rungs; this can, and at 1500 positions per dataset
+    bucket, or the resampled rungs; this can, and at 3000 positions per dataset
     it is a few MB.
     '''
     written = []

@@ -108,7 +108,7 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random,
         # is. The seed can, and it comes off the same `rng` as everything else
         # -- which is what puts the noise under `Render(seed=)`/`capture(rng=)`.
         # Nothing is expected to READ this back (see
-        # training/MppRoutingHead/spec.md on recording for reproducibility
+        # training/ClassifyingRoutingHead/spec.md on recording for reproducibility
         # rather than for correction); it exists so the same seed reproduces
         # the same shot.
         'noise_seed':        rng.getrandbits(32),

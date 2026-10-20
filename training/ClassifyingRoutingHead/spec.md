@@ -1,4 +1,4 @@
-# MppRoutingHead — spec
+# ClassifyingRoutingHead — spec
 
 Trains a classifier head that routes an unknown tile/photo to the DsLadder
 rung (equivalently, the mpp) it was taken at. Sits next to `KnnEstMpp`
@@ -552,7 +552,7 @@ aiNNModel/models/           generic encoder+head plumbing, shared by any task
                             (e.g. this package's `cli/train.py`) records
                             anything the format itself has no opinion about
 
-training/MppRoutingHead/
+training/ClassifyingRoutingHead/
     spec.md              this file
     Datasets.py           split_wsi_names/write_wsi_split (the WSI-level
                             val/test split, recorded not re-derived);
@@ -579,8 +579,8 @@ training/MppRoutingHead/
                             val_scores.csv. Never touches test.
         evaluate.py          rebuilds a model from a checkpoint alone and
                             scores it on the test split
-jobscripts/MppRoutingHead/
-    MppRoutingHead.sh
+jobscripts/ClassifyingRoutingHead/
+    ClassifyingRoutingHead.sh
 
 query_sim/camera.py    Camera.capture/capture_with_gt gain an optional `rng`
                         parameter (see "Camera: train vs eval" above) —
@@ -881,7 +881,7 @@ Every touched file `py_compile`s clean; NOT run
 (no `python` execution on the login node — see `who-runs-commands` — so the
 actual `Camera`/encoder/DataLoader-worker wiring is unverified at runtime).
 
-Not yet written: the jobscript (`jobscripts/MppRoutingHeadJobs/Train.sh`), and
+Not yet written: the jobscript (`jobscripts/ClassifyingRoutingHeadJobs/Train.sh`), and
 arms **2-2 (NCM)** and **2-4 (Mahalanobis)**. Those two are not blocked on
 design but on plumbing: neither is trained by gradient descent — they fit
 statistics in one pass (per-class means; means plus a pooled covariance) — so

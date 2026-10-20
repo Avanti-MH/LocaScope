@@ -44,7 +44,7 @@ AINM_DIR = os.path.join(PROJECT_ROOT, 'aiNNModel')
 
 #: Generic encoder+head plumbing (`Heads.py`, `common/Head.py`/`Features.py`/
 #: `Checkpoints.py`) shared by any task built on an encoder+head pair --
-#: `training/MppRoutingHead/` today, `stage1_estimation/ClassifierEstMpp.py`
+#: `training/ClassifyingRoutingHead/` today, `stage1_estimation/ClassifierEstMpp.py`
 #: and the planned retrieval work (GraphNN/tree/reranking NN) after it. Two
 #: entries, not one, for the same reason `AINM_DIR` and `SUPERPATHPOINT_DIR`
 #: are separate from `PROJECT_ROOT`: what goes on sys.path is the directory
@@ -64,13 +64,17 @@ SUPERPATHPOINT_DIR = os.path.join(PROJECT_ROOT, 'training', 'SuperPathPoint')
 #: Same rule as SUPERPATHPOINT_DIR, same reason: the training package itself,
 #: not `training/`, so `from Datasets import ...` and `from Runtime import
 #: ...` resolve for `Runtime.py`/`cli/train.py`/`cli/evaluate.py`.
-MPPROUTINGHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'MppRoutingHead')
+CLASSIFYINGROUTINGHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'ClassifyingRoutingHead')
 
 #: Same rule again -- `training/PrototypicalRoutingHead/spec.md`'s own
 #: package, so its `Pooling.py`/`Runtime.py`/`Losses.py`/`cli/train.py`
-#: resolve each other the same way MPPROUTINGHEAD_DIR's siblings do.
+#: resolve each other the same way CLASSIFYINGROUTINGHEAD_DIR's siblings do.
 PROTOTYPICALROUTINGHEAD_DIR = os.path.join(
     PROJECT_ROOT, 'training', 'PrototypicalRoutingHead')
+
+#: The second phase of stage 2 (`training/RerankHead/spec.md`): same rule again.
+RERANKHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'RerankHead')
+
 
 def setup_import_paths(*training_packages: str) -> None:
     """Make utilities/, query_sim/, aiNNModel/ (+ its models/ and
@@ -87,7 +91,7 @@ def setup_import_paths(*training_packages: str) -> None:
     No training package directory is added unless named: the packages each
     have their own `Runtime.py` / `Datasets.py` / ..., and with all of them
     on `sys.path` a bare `from Runtime import ...` resolves to whichever comes
-    first, not the caller's sibling. `MppRoutingHead` and
+    first, not the caller's sibling. `ClassifyingRoutingHead` and
     `PrototypicalRoutingHead` are real packages imported by full name
     (`training/__init__.py`); a SuperPathPoint entry names `'SuperPathPoint'`.
     """
@@ -103,8 +107,9 @@ def setup_import_paths(*training_packages: str) -> None:
 #: names `training/<name>/` uses on disk, not a separate vocabulary.
 TRAINING_PACKAGE_DIRS = {
     'SuperPathPoint': SUPERPATHPOINT_DIR,
-    'MppRoutingHead': MPPROUTINGHEAD_DIR,
+    'ClassifyingRoutingHead': CLASSIFYINGROUTINGHEAD_DIR,
     'PrototypicalRoutingHead': PROTOTYPICALROUTINGHEAD_DIR,
+    'RerankHead': RERANKHEAD_DIR,
 }
 
 

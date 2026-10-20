@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-'''Train both baselines, select on a held-out val split, save weights.
+'''Train both baselines, select on a held-out val set, save weights.
 
-    python training/MppRoutingHead/cli/train.py            # --baseline all
+    python training/ClassifyingRoutingHead/cli/train.py            # --baseline all
     python .../train.py --baseline 2 --encoders gigapath
     python .../train.py --baseline 3 --heads linear
     python .../train.py --baseline 2 --heads arcface    # 2-3, baseline 2 only
@@ -16,19 +16,19 @@
     baseline 1   the KNN (`KnnEstMpp`). Not here: it trains nothing.
                  `bench_stage1_mpp.py` scores it.
 
-THREE SPLITS, SPLIT BY WSI
----------------------------
-    train   ki67_pure, every WSI
-    val     10 WSIs from EACH of the eval datasets (make_split.py --val-n-wsi)
-    test    the rest of those datasets -- NOT touched here at all
+THREE SETS, SET BY WSI
+---------------------
+    train   --train-dataset @pure-train, its --train-stain (Ki67) slides: ki67_pure's 100
+    val     --val-dataset (default @legacy-val), both stains
+    test    cli/evaluate.py's --test-dataset -- NOT touched here at all
 
-The val half is drawn per dataset by `utilities/cli/build_cache/make_split.py`
-(run it first) and recorded in its `dataset=<dataset>/split/` entry, so which slides
+The val and test sets are virtual datasets written once by
+`utilities/cli/build_cache/make_dataset.py` (run it first), so which slides
 were held out is a recorded fact rather than a consequence of `--seed` -- and
-the same fact for every package that reads it. Val spans BOTH eval datasets on purpose: selecting on
+the same fact for every package that reads it. Val spans BOTH datasets on purpose: selecting on
 it selects for cross-dataset generalisation, which is what this package is for.
 
-Scoring the test split is `cli/evaluate.py`'s job, off a saved checkpoint.
+Scoring the test set is `cli/evaluate.py`'s job, off a saved checkpoint.
 Keeping it out of this file is what stops the test set from being looked at
 once per training run.
 
@@ -49,7 +49,7 @@ variable (`online` if unset), so a smoke run stays off the server with
 `WANDB_MODE=offline` in the environment rather than a flag here -- see
 `jobscripts/_env.sh`.
 
-`best` is by val `level_accuracy` on the val split.
+`best` is by val `level_accuracy` on the val set.
 
 WHY ONE ENCODER PASS FEEDS EVERY HEAD (baseline 2)
 ----------------------------------------------------
@@ -85,6 +85,7 @@ import argparse
 import csv
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -102,17 +103,17 @@ import torch                                                        # noqa: E402
 import torch.nn.functional as F                                     # noqa: E402
 
 import _paths                                                       # noqa: E402
-from training.MppRoutingHead.Datasets import (                      # noqa: E402
+from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     NUM_CLASSES, READ_LEVELS, RESAMPLE_FROM, RUNGS, RenderConfig,
     add_cache_args, build_manifest, cache_jobs, class_weights, data_record,
     iterate_epoch,
     open_caches)
-from AccessDatasets import list_names                                # noqa: E402
+from AccessDatasets import by_source                                 # noqa: E402
 from Heads import HeadConfig, resolve_encoder_layers                # noqa: E402
 from Features import check_layer_tokens                              # noqa: E402
-from training.MppRoutingHead.Runtime import (                       # noqa: E402
+from training.ClassifyingRoutingHead.Runtime import (                       # noqa: E402
     BASELINE3_ENCODER, HEAD_CHOICES, encode_raw, heads_for, predict,
-    rescore, rescore_by_rung, save_checkpoint, trunk_raw,
+    data_tag, rescore, rescore_by_rung, save_checkpoint, trunk_raw,
     wandb_epoch_metrics, wandb_finish, wandb_init, wandb_log, weight_filename)
 from Head import Head                                                # noqa: E402
 from Resume import ResumeFile, resume_identity                       # noqa: E402
@@ -124,7 +125,7 @@ _NOT_IDENTITY = ('epochs', 'out', 'device', 'resume_dir', 'wandb_project',
                  'wandb_mode', 'run_name', 'merge', 'num_workers', 'cpu_processes',
                  'encoders',
                  'heads', 'baseline', 'encode_batch', 'mask_cache_job',
-                 'draw_cache_job', 'split_cache_job',
+                 'draw_cache_job',
                  # the read mode enters as ONE key, `read_tag`, and only when it
                  # is not the default -- see `_identity`
                  'read_level', 'resample_from', 'max_resample_factor',
@@ -175,35 +176,40 @@ def _report_dir(out_dir, dataset_id: str, split: str) -> Path:
 
 def train_rows(args, caches, out_dir) -> List:
     '''Positions only -- the pixels are rendered fresh every epoch (spec.md,
-    "Camera: train vs eval"), so there is nothing here to go stale.'''
-    rows = build_manifest(
-        args.train_dataset, masks=caches.masks,
-        draw_job=caches.draw_job,
-        report_dir=_report_dir(out_dir, args.train_dataset, 'train'),
-        tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
-        max_wsi=args.max_wsi)
-    print(f'[train] {args.train_dataset}: {len(rows)} positions', flush=True)
+    "Camera: train vs eval"), so there is nothing here to go stale. Over
+    `--train-dataset`'s slides of `--train-stain`, one manifest per dataset they
+    come from, `--max-wsi` of each.'''
+    rows: List = []
+    for dataset_id, names in by_source(args.train_dataset, stain=args.train_stain):
+        rows += build_manifest(
+            dataset_id, masks=caches.masks,
+            draw_job=caches.draw_job,
+            report_dir=_report_dir(out_dir, args.train_dataset, 'train'),
+            tile_size=args.tile, n_per_rung=args.n_per_rung, seed=args.seed,
+            max_wsi=args.max_wsi, wsi_names=names)
+    print(f'[train] {args.train_dataset} {args.train_stain}: {len(rows)} positions', flush=True)
     return rows
 
 
+def val_datasets(args) -> List[str]:
+    '''The datasets `--val-dataset` draws from, in its order: val is scored per
+    each of them and over all of them.'''
+    return [source for source, _ in by_source(args.val_dataset)]
+
+
 def val_rows(args, caches, out_dir) -> List:
-    '''The val halves of every eval dataset, concatenated. The split is READ
-    (the datasets `<id>#val` and `<id>#test`), never derived here -- `make_split.py` is the
-    one place that writes it.'''
+    '''`--val-dataset`'s slides, one manifest per dataset they come from,
+    concatenated. Which slides is the virtual dataset's fixed list
+    (`make_dataset.py`), never derived here.'''
     rows: List = []
-    for dataset_id in args.eval_datasets:
-        val_names = list_names(dataset=f'{dataset_id}#val',
-                               split_job=caches.split_job)
-        test_names = list_names(dataset=f'{dataset_id}#test',
-                                split_job=caches.split_job)
+    for dataset_id, val_names in by_source(args.val_dataset):
         part = build_manifest(
             dataset_id, masks=caches.masks, draw_job=caches.draw_job,
             report_dir=_report_dir(out_dir, dataset_id, 'val'),
             tile_size=args.tile, n_per_rung=args.val_n_per_rung,
             seed=args.seed, wsi_names=val_names)
         print(f'[val]   {dataset_id}: {len(part)} positions from '
-              f'{len(val_names)} WSIs ({len(test_names)} held back for test)',
-              flush=True)
+              f'{len(val_names)} WSIs of {args.val_dataset}', flush=True)
         rows += part
     return rows
 
@@ -628,10 +634,10 @@ class _Baseline2Model:
             ordinal_weight=args.ordinal_weight, ordinal_sigma=args.ordinal_sigma,
             lr=args.lr, epochs=args.epochs, n_per_rung=args.n_per_rung,
             tile=args.tile, batch_size=args.batch_size, seed=args.seed,
-            train_dataset=args.train_dataset, eval_datasets=args.eval_datasets,
+            train_dataset=args.train_dataset, val_dataset=args.val_dataset,
             slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
             slurm_job_name=slurm_job_name, read_level_label=read_cfg.read_label,
-            **cache_jobs(args, 'MppRoutingHead', caches)),
+            **cache_jobs(args, 'ClassifyingRoutingHead', caches)),
             run_id=self.resume.wandb_run_id(state is not None))
 
     def train_batch(self, args, batch, weights, device, totals) -> None:
@@ -667,24 +673,26 @@ class _Baseline2Model:
             f'{n} {t[0] / max(t[1], 1):.4f}' for n, t in totals.items()),
             flush=True)
         # The per-tile detail is used for the per-dataset breakdown and then
-        # dropped; only the TEST split's rows are written out (evaluate.py),
+        # dropped; only the TEST set's rows are written out (evaluate.py),
         # since ten epochs of val rows would be ten CSVs nobody opens.
+        t_val: float = time.perf_counter()
         val, detail = predict(vrows, self.heads, self.raw_of, self.num_prefix,
                               tile=args.tile, wsi_group_size=args.wsi_group_size,
                               batch_size=args.batch_size,
                               num_workers=args.num_workers, cache=self.val_cache)
+        print(f'  val time [{self.name}] {(time.perf_counter() - t_val) / 60:.1f} min', flush=True)
         # PER HEAD, val_report then rung_report for the SAME head before
         # moving to the next one -- see val_report's own docstring for why.
         epoch_rows: List[Dict] = []
         epoch_rung_rows: List[Dict] = []
         for name in self.heads:
             epoch_rows += val_report(
-                name, val[name], detail[name], args.eval_datasets, epoch,
+                name, val[name], detail[name], val_datasets(args), epoch,
                 end_epoch, totals[name][0] / max(totals[name][1], 1),
                 baseline=2, encoder=self.name, loss_kind=args.loss,
                 read_level=train_render_cfg(args).read_label, seg=args.seg)
             epoch_rung_rows += rung_report(
-                name, detail[name], args.eval_datasets, epoch,
+                name, detail[name], val_datasets(args), epoch,
                 baseline=2, encoder=self.name, loss_kind=args.loss,
                 read_level=train_render_cfg(args).read_label, seg=args.seg)
         self.out += epoch_rows
@@ -702,6 +710,33 @@ class _Baseline2Model:
         # not: the rerun trains that epoch again, wandb refuses its step as
         # already logged, and the curve keeps the dead job's numbers.
         wandb_log(self.wb, epoch, wandb_epoch_metrics(epoch_rows))
+
+
+class EpochClock:
+    '''Where an epoch's wall time went: waiting on the render workers for the
+    next batch (`render`) and the batch's forward and backward (`train`). A
+    batch's train time ends at `float(loss)`, which waits for the GPU, so it is
+    the GPU's own time, not the kernel launch. Render-bound (render > train)
+    says a second GPU on the same renders buys nothing; train-bound says it does.'''
+
+    def __init__(self) -> None:
+        self.render: float = 0.0
+        self.train: float = 0.0
+        self._t: float = time.perf_counter()
+
+    def rendered(self) -> None:
+        now: float = time.perf_counter()
+        self.render += now - self._t
+        self._t = now
+
+    def trained(self) -> None:
+        now: float = time.perf_counter()
+        self.train += now - self._t
+        self._t = now
+
+    def line(self) -> str:
+        return (f'time  render wait {self.render / 60:.1f} min  train {self.train / 60:.1f} min  '
+                f'({"render" if self.render > self.train else "train"}-bound)')
 
 
 def run_baseline2(args, encoder_names: List[str], caches, out_dir,
@@ -737,15 +772,19 @@ def run_baseline2(args, encoder_names: List[str], caches, out_dir,
         totals = {m.name: {n: [0.0, 0] for n in m.heads} for m in active}
         seen_class = torch.zeros(NUM_CLASSES, dtype=torch.int64)
         native_class = torch.zeros(NUM_CLASSES, dtype=torch.int64)
+        clock = EpochClock()
         for batch in iterate_epoch(
                 rows, wsi_group_size=args.wsi_group_size,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 cfg=train_render_cfg(args), epoch_seed=epoch):
+            clock.rendered()
             seen_class += torch.bincount(batch['labels'], minlength=NUM_CLASSES)
             native_class += torch.bincount(batch['labels'][batch['native']],
                                            minlength=NUM_CLASSES)
             for m in active:
                 m.train_batch(args, batch, weights, device, totals[m.name])
+            clock.trained()
+        print(f'  epoch {epoch}/{end_epoch}  {" + ".join(m.name for m in active)}  {clock.line()}', flush=True)
         print_composition(rows, seen_class, native_class)
         for m in active:
             m.end_epoch(args, vrows, out_dir, epoch, totals[m.name])
@@ -860,10 +899,10 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
             lr=args.lr, trunk_lr=args.trunk_lr, epochs=args.epochs,
             n_per_rung=args.n_per_rung, tile=args.tile, batch_size=args.batch_size,
             seed=args.seed, train_dataset=args.train_dataset,
-            eval_datasets=args.eval_datasets,
+            val_dataset=args.val_dataset,
             slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
             slurm_job_name=slurm_job_name, read_level_label=read_cfg.read_label,
-            **cache_jobs(args, 'MppRoutingHead', caches)),
+            **cache_jobs(args, 'ClassifyingRoutingHead', caches)),
             run_id=resume.wandb_run_id(state is not None))
 
         for epoch in range(start_epoch + 1, end_epoch + 1):
@@ -873,10 +912,12 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
             total, seen = 0.0, 0
             seen_class = torch.zeros(NUM_CLASSES, dtype=torch.int64)
             native_class = torch.zeros(NUM_CLASSES, dtype=torch.int64)
+            clock = EpochClock()
             for batch in iterate_epoch(
                     rows, wsi_group_size=args.wsi_group_size,
                     batch_size=args.batch_size, num_workers=args.num_workers,
                     cfg=train_render_cfg(args), epoch_seed=epoch):
+                clock.rendered()
                 target = batch['labels'].to(device)
                 seen_class += torch.bincount(batch['labels'], minlength=NUM_CLASSES)
                 native_class += torch.bincount(batch['labels'][batch['native']],
@@ -890,24 +931,27 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
                 opt.step()
                 total += float(loss) * len(target)
                 seen += len(target)
+                clock.trained()
 
-            print(f'  epoch {epoch}/{end_epoch}  loss {total / max(seen, 1):.4f}',
+            print(f'  epoch {epoch}/{end_epoch}  loss {total / max(seen, 1):.4f}  {clock.line()}',
                   flush=True)
             print_composition(rows, seen_class, native_class)
 
             encoder.eval()      # dropout / drop_path off while scoring
+            t_val: float = time.perf_counter()
             val, detail = predict(vrows, {name: head}, raw_of, 0, tile=args.tile,
                                   wsi_group_size=args.wsi_group_size,
                                   batch_size=args.batch_size,
                                   num_workers=args.num_workers)
+            print(f'  val time {(time.perf_counter() - t_val) / 60:.1f} min', flush=True)
             epoch_rows = val_report(
-                name, val[name], detail[name], args.eval_datasets, epoch,
+                name, val[name], detail[name], val_datasets(args), epoch,
                 end_epoch, total / max(seen, 1),
                 baseline=3, encoder=BASELINE3_ENCODER, loss_kind=args.loss,
                 read_level=train_render_cfg(args).read_label, seg=args.seg)
             head_rows += epoch_rows
             head_rung_rows += rung_report(
-                name, detail[name], args.eval_datasets, epoch,
+                name, detail[name], val_datasets(args), epoch,
                 baseline=3, encoder=BASELINE3_ENCODER, loss_kind=args.loss,
                 read_level=train_render_cfg(args).read_label, seg=args.seg)
             best = save_tagged(out_dir, head, encoder, BASELINE3_ENCODER, False,
@@ -950,6 +994,12 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
     # checkpoint format (`aiNNModel/models/common/Checkpoints.py`) has no
     # opinion about -- see `save_checkpoint`'s own docstring.
     read_tag = train_render_cfg(args).read_tag
+
+    def name(which: str) -> str:
+        return weight_filename(encoder_name, frozen, head_name, which,
+                               data=data_tag([args.train_dataset], args.train_stain),
+                               loss=args.loss, read_tag=read_tag)
+
     common = dict(head=head, encoder=encoder, encoder_name=encoder_name,
                   frozen=frozen, head_name=head_name, head_cfg=head_cfg,
                   epoch=epoch, val=val, run_args=vars(args),
@@ -965,28 +1015,18 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
                              # what the tiles were made of; evaluate.py
                              # refuses test data whose record differs
                              data=data_record(args.tile, args.seg)))
-    save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                           'last', loss=args.loss,
-                                           read_tag=read_tag), **common)
+    save_checkpoint(wdir / name('last'), **common)
 
     acc = val['level_accuracy']
     if acc > best_n_weighted:
-        save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                               'best', loss=args.loss,
-                                               read_tag=read_tag), **common)
-        print(f'      new best, n-weighted ({acc:.4f}) -> '
-              f'{weight_filename(encoder_name, frozen, head_name, "best", loss=args.loss, read_tag=read_tag)}',
-              flush=True)
+        save_checkpoint(wdir / name('best'), **common)
+        print(f'      new best, n-weighted ({acc:.4f}) -> {name("best")}', flush=True)
         best_n_weighted = acc
 
     acc_u = val['level_accuracy_unweighted']
     if acc_u > best_unweighted:
-        save_checkpoint(wdir / weight_filename(encoder_name, frozen, head_name,
-                                               'best_unweighted', loss=args.loss,
-                                               read_tag=read_tag), **common)
-        print(f'      new best, unweighted ({acc_u:.4f}) -> '
-              f'{weight_filename(encoder_name, frozen, head_name, "best_unweighted", loss=args.loss, read_tag=read_tag)}',
-              flush=True)
+        save_checkpoint(wdir / name('best_unweighted'), **common)
+        print(f'      new best, unweighted ({acc_u:.4f}) -> {name("best_unweighted")}', flush=True)
         best_unweighted = acc_u
 
     return best_n_weighted, best_unweighted
@@ -1040,11 +1080,13 @@ def main() -> int:
                     help='baseline 2 only; one frozen run per name')
     ap.add_argument('--heads', nargs='+', choices=sorted(HEAD_CHOICES),
                     default=sorted(HEAD_CHOICES))
-    ap.add_argument('--train-dataset', default='ki67_pure')
-    ap.add_argument('--eval-datasets', nargs='+',
-                    default=['bracs/test', 'ki67_with_photo'],
-                    help='val is drawn from these; the rest is test, which '
-                         'only cli/evaluate.py ever touches')
+    ap.add_argument('--train-dataset', default='@pure-train',
+                    help='an AccessDatasets id; training draws only its --train-stain slides')
+    ap.add_argument('--train-stain', default='Ki67', help='the stain trained on')
+    ap.add_argument('--val-dataset', default='@legacy-val',
+                    help='AccessDatasets id val is drawn from (a virtual @<name>), '
+                         'scored per dataset its slides come from. The test set '
+                         'only cli/evaluate.py reads')
     ap.add_argument('--val-n-per-rung', type=int, default=50)
     ap.add_argument('--tile', type=int, default=256)
     ap.add_argument('--n-per-rung', type=int, default=100)
@@ -1165,7 +1207,7 @@ def main() -> int:
                          'pipeline itself is trusted')
     add_cache_args(ap)
     ap.add_argument('--seed', type=int, default=42,
-                    help='sampling AND the val/test WSI split')
+                    help='sampling')
     ap.add_argument('--max-wsi', type=int, default=None,
                     help='smoke run: N training WSIs, chosen at random with --seed')
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -1179,7 +1221,7 @@ def main() -> int:
                          'a finished model resumes into nothing. A model is an '
                          'encoder with all its heads (baseline 2) or one head '
                          'with its trunk (baseline 3)')
-    ap.add_argument('--wandb-project', default='mpp-routing-head')
+    ap.add_argument('--wandb-project', default='classifying-routing-head')
     # Reads WANDB_MODE, same convention as SuperPathPoint/FewShotEoMT's own
     # --wandb-mode: `wandb.init(mode=...)` takes an EXPLICIT argument, which
     # beats the env var, so the default has to read it rather than hardcode a
@@ -1212,8 +1254,8 @@ def main() -> int:
           flush=True)
 
     device = torch.device(args.device)
-    caches = open_caches(args, 'MppRoutingHead', device)
-    out_dir = Path(args.out or _paths.job_result_dir('MppRoutingHead'))
+    caches = open_caches(args, 'ClassifyingRoutingHead', device)
+    out_dir = Path(args.out or _paths.job_result_dir('ClassifyingRoutingHead'))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     wanted = ('2', '3') if args.baseline == 'all' else (args.baseline,)
@@ -1287,7 +1329,7 @@ def main() -> int:
         print(f'{rung_path}  ({len(write_rung_rows)} rows)')
 
     print(f'{out_dir / "weights"}  '
-          f'(*_last.pt and *_best.pt; cli/evaluate.py scores them on test)')
+          f'(*--last.pt and *--best.pt; cli/evaluate.py scores them on test)')
     return 0
 
 

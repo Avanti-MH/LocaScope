@@ -248,7 +248,7 @@ def check_same_seed_same_pixels(wsi, level_ds, x, y, seed) -> list:
     it must not change the pixels.
 
     That interleaved order is not hypothetical -- it is exactly what
-    `training/MppRoutingHead/Datasets.py`'s `CameraBank` does (one Render per
+    `training/ClassifyingRoutingHead/Datasets.py`'s `CameraBank` does (one Render per
     rung of a slide, all built before any of them shoots).
     """
     failures = []
@@ -273,7 +273,7 @@ def check_same_seed_same_pixels(wsi, level_ds, x, y, seed) -> list:
     print(f'  {"ok  " if not failures else "FAIL"} two Renders, same seed, '
           f'built before either shoots -> identical pixels')
 
-    # The property training/MppRoutingHead/Datasets.py's eval split depends on:
+    # The property training/ClassifyingRoutingHead/Datasets.py's eval split depends on:
     # one Render, a per-call rng derived from the sample's identity, same
     # answer every time regardless of what ran in between.
     before = len(failures)

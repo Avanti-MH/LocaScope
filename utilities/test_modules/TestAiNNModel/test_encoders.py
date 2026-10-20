@@ -101,7 +101,7 @@ ENCODERS = {
         local=None),
 }
 
-#: The arms bench_window_retrieval asks for. Named here so the admissibility
+#: The arms bench_stage2_retriever asks for. Named here so the admissibility
 #: check is asked about the set the sweeps actually use, rather than about a
 #: list invented for a test.
 WANTED = ('cls', 'cls_avg', 'cls_std', 'rings3',
@@ -388,7 +388,7 @@ def t_spatial_is_the_tokens_laid_out(enc, name, spec):
 
 
 def t_layer_tokens_gate_passes_and_catches(enc, name, spec):
-    """`Features.check_layer_tokens` -- the gate MppRoutingHead runs on the first
+    """`Features.check_layer_tokens` -- the gate ClassifyingRoutingHead runs on the first
     batch of any run with a mix_ head -- passes on the real `layer_tokens`, and
     FAILS on the two wrong versions it exists to catch, each of which returns the
     right shape:

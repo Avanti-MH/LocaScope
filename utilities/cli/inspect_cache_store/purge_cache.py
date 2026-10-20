@@ -3,7 +3,7 @@
 
     python utilities/cli/inspect_cache_store/purge_cache.py --job BenchLocaScope \\
         --level slide=BRACS_1228 seg=hest-caadecfe1e1afe67 --entry mask --id <id>
-    python utilities/cli/inspect_cache_store/purge_cache.py --job MppRoutingHead \\
+    python utilities/cli/inspect_cache_store/purge_cache.py --job ClassifyingRoutingHead \\
         --level slide=BRACS_1228 seg=hsv-0123456789abcdef
     ... --yes        actually delete; without it, only list
 

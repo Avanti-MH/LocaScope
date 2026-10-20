@@ -177,7 +177,7 @@ class SharedMlpPrototype(nn.Module):
     `n_head=8`/`dim_feedforward=4*in_dim`. A narrower variant is a
     legitimate SECOND question ("how cheap can this get without losing
     much"), answered once THIS config has a real number -- a separate
-    registry entry, the same reason `MppRoutingHead.HEAD_CHOICES`'
+    registry entry, the same reason `ClassifyingRoutingHead.HEAD_CHOICES`'
     `mlp`/`mlp_narrow` are two names rather than one guessed default.
 
     BOTH residuals are unconditional, not a knob: the OUTER one

@@ -1,4 +1,4 @@
-'''Training/eval data for MppRoutingHead. See spec.md's "Camera: train vs
+'''Training/eval data for ClassifyingRoutingHead. See spec.md's "Camera: train vs
 eval", "Caching" and "Handle count" sections for the reasoning; this file is
 the implementation of all three.
 
@@ -57,7 +57,6 @@ from TileSampler import PlanSpec, TileSampler                       # noqa: E402
 from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
 from ReadGeometry import finer_levels                               # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
-from WsiSplit import SPLIT_JOB                                       # noqa: E402
 from camera import Render, photo_rng, render_spec                    # noqa: E402
 from SlideReader import SlideReader                                  # noqa: E402
 from FovSupply import FOV_RECIPES                                    # noqa: E402
@@ -202,7 +201,7 @@ class ManifestRow:
 
 
 def add_cache_args(ap) -> None:
-    """The four flags that say where positions come from -- the same four in
+    """The three flags that say where positions come from -- the same three in
     every CLI that draws a manifest, so they cannot drift apart."""
     ap.add_argument('--seg', choices=sorted(MASK_RECIPES), default='hest',
                     help='tissue-mask recipe the positions are drawn inside '
@@ -213,9 +212,6 @@ def add_cache_args(ap) -> None:
     ap.add_argument('--draw-cache-job', default=None,
                     help='whose cache the draws are read from and written to: '
                          'result/cache/<this>/. Default: this job')
-    ap.add_argument('--split-cache-job', default=None,
-                    help=f'whose val/test split to read: result/cache/<this>/. '
-                         f'Default: {SPLIT_JOB}. Written only by make_split.py')
 
 
 @dataclass
@@ -224,28 +220,24 @@ class Caches:
     `masks.close()` once the manifests are drawn, or it stays on the card."""
     masks: MaskMaker
     draw_job: str
-    split_job: str
 
 
 def open_caches(args, job: str, device) -> Caches:
     """`job` is the calling package's default job name. Each cache defaults to
-    THIS job's (`Cache.job_name`, SLURM_JOB_NAME first); the split defaults to
-    its one writer's."""
+    THIS job's (`Cache.job_name`, SLURM_JOB_NAME first)."""
     made_by = job_name(job)
     return Caches(
         masks=MaskMaker(MASK_RECIPES[args.seg], args.mask_cache_job or made_by,
                         device),
-        draw_job=args.draw_cache_job or made_by,
-        split_job=args.split_cache_job or SPLIT_JOB)
+        draw_job=args.draw_cache_job or made_by)
 
 
 def cache_jobs(args, job: str, caches: Caches) -> dict:
-    """The three `--*-cache-job` flags as `open_caches` RESOLVED them. An unset
+    """The two `--*-cache-job` flags as `open_caches` RESOLVED them. An unset
     flag is None in `vars(args)`, which names no cache and is nothing to filter a
     wandb config on; this is the job it actually read."""
     return dict(mask_cache_job=caches.masks.made_by,
-                draw_cache_job=caches.draw_job,
-                split_cache_job=caches.split_job)
+                draw_cache_job=caches.draw_job)
 
 
 def build_manifest(dataset_id: str, *, masks, draw_job: str,
@@ -254,10 +246,9 @@ def build_manifest(dataset_id: str, *, masks, draw_job: str,
                    seed: int = 42, max_wsi: Optional[int] = None,
                    wsi_names: Optional[Sequence[str]] = None,
                    ) -> List[ManifestRow]:
-    '''One row per drawn position. Over `wsi_names` when given (that is how the
-    val/test halves of one dataset get separate manifests -- see
-    `WsiSplit`), otherwise over every WSI `list_names(dataset=
-    dataset_id)` currently finds.
+    '''One row per drawn position. Over `wsi_names` when given (the slides of
+    `dataset_id` a virtual dataset holds, `AccessDatasets.by_source`),
+    otherwise over every WSI `list_names(dataset=dataset_id)` currently finds.
 
     Every slide goes through `TileSampler.cached`: a slide already drawn under
     this recipe, config and plan is read back from `draw_job`'s cache without
@@ -275,7 +266,7 @@ def build_manifest(dataset_id: str, *, masks, draw_job: str,
     `report_dir`, when given, receives one `sampler_report_<slide>.md` and
     `samples_<slide>.csv` per slide.
 
-    Identical for every split; `Camera` (with its own randomness / determinism
+    Identical for train, val and test; `Camera` (with its own randomness / determinism
     concerns) only enters at render time, in `render_row` below.
     '''
     rows: List[ManifestRow] = []
@@ -596,7 +587,7 @@ def render_row(bank: CameraBank, row: ManifestRow, cfg: RenderConfig, *,
 
     `native` (default `False`): passed straight through
     to `CameraBank.camera_for`'s own switch of the same name -- see that
-    method's docstring. `MppRoutingHead`'s own callers never pass this; it
+    method's docstring. `ClassifyingRoutingHead`'s own callers never pass this; it
     exists for `Episodes.render_episode`'s
     `support_native` switch.
 
