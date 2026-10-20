@@ -5,7 +5,7 @@
 #   timm (>=1.0.3)             GigaPath / UNI2 / ConvNeXtV2 / CONCH ViT（hf_hub: 載入）
 #   huggingface_hub            timm hf_hub 與 hf_hub_download
 #   safetensors                Store / TissueMask / KeypointLabelStore
-#   numpy, scipy, scikit-learn, matplotlib, pillow, opencv-python
+#   numpy, scipy, scikit-learn, faiss-cpu, matplotlib, pillow, opencv-python
 #   pandas                     utilities/cli/plot/plot_locascope.py 的 join table
 #   openslide + openslide-python   WSI 讀取
 #   python-dotenv              aiNNModel/*Func.py 讀 HF token
@@ -37,6 +37,7 @@ dependencies:
       - pandas==2.3.3
       - scipy==1.13.1
       - scikit-learn==1.5.2
+      - faiss-cpu==1.13.0
       - matplotlib==3.9.4
       - pillow==10.4.0
       - opencv-python==4.10.0.84
