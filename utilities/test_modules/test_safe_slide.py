@@ -342,7 +342,12 @@ def main():
     args = ap.parse_args()
 
     if not os.path.exists(args.wsi):
-        print(f'[SKIP] no such slide: {args.wsi}')
+        print(f'[FAIL] no such slide: {args.wsi}\n'
+              f'  This test needs a slide with a scanner hole (the default is S1103037, kept outside the\n'
+              f'  datasets in {HOLED_DATASETS_DIR}), and it has nothing to check without one -- so it\n'
+              f'  fails here rather than pass on nothing. Put that slide there, or give another with a\n'
+              f'  known hole: --wsi <path> --bad-x .. --bad-y .. --bad-w .. --bad-h .. (a rectangle whose\n'
+              f'  read fails) and --good-x .. (one that reads fine).')
         return 1
 
     bad = (args.bad_x, args.bad_y, args.bad_w, args.bad_h)

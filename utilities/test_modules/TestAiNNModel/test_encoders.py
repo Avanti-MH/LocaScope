@@ -507,7 +507,12 @@ def t_hub_and_local_are_the_same_weights(name, spec, dev, dtype):
     """
     path = spec['local']
     assert path is not None, 'no second route'
-    assert path.exists(), f'no such checkpoint: {path}'
+    assert path.exists(), (
+        f'no such checkpoint: {path}. This check builds the model twice, once from the hub cache and once '
+        f'from this plain copy, and compares the weights; it needs that copy as a SEPARATE download, '
+        f'not a link to the hub cache (a link would make the two the same file and the check pass on '
+        f'nothing). Download the repo\'s pytorch_model.bin to that path, or run the other checks with '
+        f'--no-dual-load (NO_DUAL_LOAD=1 in TestAiNNModel.sh).')
 
     hub = encoder_config(name, **spec['over']).with_model(dtype=dtype).build(dev)
     hub_id = weights_id(hub.model)
