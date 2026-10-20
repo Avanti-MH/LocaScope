@@ -169,7 +169,6 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dataset', nargs='+', default=None)
     ap.add_argument('--wsi', nargs='+', default=None, help='explicit WSI path(s)')
-    ap.add_argument('--val-only', action='store_true')
     ap.add_argument('--stop-after', choices=TIERS, default=TIERS[-1],
                     help='run the funnel through and including this tier. '
                          'Default: the whole funnel (yield)')
@@ -207,8 +206,7 @@ def main() -> int:
     if not args.dataset and not args.wsi:
         ap.error('need --dataset and/or --wsi')
 
-    entries = resolve_wsi_paths(dataset=args.dataset, wsi=args.wsi,
-                                val_only=args.val_only)
+    entries = resolve_wsi_paths(dataset=args.dataset, wsi=args.wsi)
     print(f'{len(entries)} WSI(s) selected', flush=True)
     if not entries:
         return 1

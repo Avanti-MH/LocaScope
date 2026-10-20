@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How many tiles does each (slide, tile_size, ds) yield, and in which buckets?
 
-    python utilities/cli/diagnostics/probe_tile_yield.py --dataset 'bracs/test#val' [--seg uni2_pca] [--n 500]
+    python utilities/cli/diagnostics/probe_tile_yield.py --dataset @legacy-val [--seg uni2_pca] [--n 500]
 
 Outputs (in result/<SLURM_JOB_NAME or ProbeTileYield>/):
     tile_yield.png
@@ -683,7 +683,6 @@ def main():
                          '<id>#<split> for a recorded split)')
     ap.add_argument('--wsi', nargs='+', default=None,
                     help='explicit WSI path(s), instead of or beside --dataset')
-    ap.add_argument('--val-only', action='store_true')
     ap.add_argument('--tile-size', dest='tile_sizes', type=int, nargs='+',
                     default=[256, 512, 1024],
                     help='the three models of spec.md 6.5')
@@ -731,8 +730,7 @@ def main():
 
     if not (args.dataset or args.wsi):
         ap.error('name the slides: --dataset (an id or <id>#<split>) or --wsi')
-    entries = resolve_wsi_paths(dataset=args.dataset, wsi=args.wsi,
-                                val_only=args.val_only)
+    entries = resolve_wsi_paths(dataset=args.dataset, wsi=args.wsi)
 
     prober = TileYieldProbe(
         seg=args.seg, mask_cache_job=args.mask_cache_job,

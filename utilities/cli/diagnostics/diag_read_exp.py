@@ -72,7 +72,7 @@ from camera import Render, render_spec                                # noqa: E4
 from pipeline import simulate_with_gt                                 # noqa: E402
 from ReadGeometry import REAL_PHOTO_SENSOR                            # noqa: E402
 from FovSupply import FOV_RECIPES, FovSupply                          # noqa: E402
-import training.MppRoutingHead.Datasets as Datasets                    # noqa: E402
+import training.ClassifyingRoutingHead.Datasets as Datasets                    # noqa: E402
 
 TILE = 256
 RUNGS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
@@ -613,7 +613,7 @@ def main() -> int:
                     help='pca: scattered positions compared, as the fit reads')
     ap.add_argument('--phase-levels', type=int, nargs='+', default=[1, 2, 3],
                     help='phase: levels of every slide (a level it lacks is skipped)')
-    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--mask-cache-job', default='Masks',
                     help="phase: masks from this job's cache (hest)")
     ap.add_argument('--seed', type=int, default=0, help='phase')
     ap.add_argument('--out', default=None)

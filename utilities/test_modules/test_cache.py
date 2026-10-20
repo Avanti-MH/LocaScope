@@ -105,7 +105,9 @@ def _rec(id_, **parts):
 
 def t_every_entry_level_is_a_level_and_every_parent_a_kind():
     assert all(p in Cache.TREE for k in Cache.TREE for p in Cache._parents(k))
-    assert all(lv in Cache.TREE for lvs in Cache.ENTRIES.values() for lv in lvs)
+    assert all(lv is None or lv in Cache.TREE for lvs in Cache.ENTRIES.values() for lv in lvs)
+    # an entry at the job's root (None): its directory is the root's own
+    assert Cache.Address('J').entry('vdataset').dir == Cache.Address('J').root / 'vdataset'
     return f'{len(Cache.TREE)} levels, {len(Cache.ENTRIES)} entry kinds'
 
 
@@ -187,10 +189,9 @@ def t_on_keeps_the_levels_and_moves_the_root():
 def t_a_dataset_id_is_one_path_component():
     assert Cache.dataset_key('bracs/test') == 'bracs_test'
     assert Cache.dataset_key('ki67_with_photo') == 'ki67_with_photo'
-    _refused(Cache.dataset_key, 'bracs/test#val')     # a split is not a dataset
     # a Ki67 MRXS stem: commas are part of real slide names
     assert Cache.Address('J', slide='S1104233,G7E,110208').leaf == 'slide'
-    return 'bracs/test -> bracs_test; a #split refused; a Ki67 stem accepted'
+    return 'bracs/test -> bracs_test; a Ki67 stem accepted'
 
 
 def t_entry_sits_only_where_entries_says():

@@ -19,17 +19,14 @@ from pathlib import Path
 from AccessDatasets import list_names, locate
 
 
-def resolve_wsi_paths(dataset=None, wsi=None, val_only: bool = False) -> list:
+def resolve_wsi_paths(dataset=None, wsi=None) -> list:
     """`[{'dataset': id_or_None, 'wsi_name': name, 'path': str}, ...]`.
 
     Exactly one of `dataset`/`wsi` is the normal case:
 
-        dataset=['ki67_pure', 'bracs/test']   every WSI AccessDatasets knows
-                                              in those datasets (val_only=True
-                                              narrows to the recorded val
-                                              split -- needs cli/train.py to
-                                              have already run for that
-                                              dataset; see `val_split_names`)
+        dataset=['ki67_pure', '@legacy-val']  every WSI AccessDatasets knows
+                                              in those datasets, a registered
+                                              one or a virtual `@<name>`
         wsi=['/path/to/one.svs', ...]         explicit files, the escape
                                               hatch for a slide that is not
                                               (or not yet) in the registry --
@@ -49,9 +46,7 @@ def resolve_wsi_paths(dataset=None, wsi=None, val_only: bool = False) -> list:
 
     entries = []
     for dataset_id in (dataset or []):
-        names = (val_split_names(dataset_id) if val_only
-                else list_names(dataset=dataset_id))
-        for name in names:
+        for name in list_names(dataset=dataset_id):
             entry = locate(name, dataset=dataset_id)
             entries.append(dict(dataset=dataset_id, wsi_name=name,
                                 path=entry.path))
@@ -60,11 +55,3 @@ def resolve_wsi_paths(dataset=None, wsi=None, val_only: bool = False) -> list:
         entries.append(dict(dataset=None,
                             wsi_name=Path(path).stem, path=path))
     return entries
-
-
-def val_split_names(dataset_id: str, split_job: str = None) -> list:
-    """The recorded val half of `dataset_id`'s split -- read, never
-    re-derived: a split recomputed here could disagree with the one a
-    checkpoint was actually selected against. The dataset `<id>#val` refuses,
-    naming `make_split.py`, when the split has not been written."""
-    return list_names(dataset=f'{dataset_id}#val', split_job=split_job)

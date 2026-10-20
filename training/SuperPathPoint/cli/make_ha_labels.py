@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """spec.md 12 step 4: run Homographic Adaptation over a corpus.
 
-    python training/SuperPathPoint/cli/make_ha_labels.py --datasets 'bracs/test#val'
+    python training/SuperPathPoint/cli/make_ha_labels.py --datasets @legacy-val
     python training/SuperPathPoint/cli/make_ha_labels.py --wsi BRACS_1228 --limit 100
 
 Outputs (under each slide's draw of the corpus in this job's cache tree,

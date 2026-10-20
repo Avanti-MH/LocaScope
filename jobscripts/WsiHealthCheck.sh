@@ -54,7 +54,6 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #   sbatch --export=ALL,DATASET="ki67_pure" jobscripts/WsiHealthCheck.sh
 DATASET="${DATASET:-ki67_pure ki67_with_photo}"
 WSI="${WSI:-}"                  # explicit path(s), combined with DATASET if both set
-VAL_ONLY="${VAL_ONLY:-0}"
 
 STOP_AFTER="${STOP_AFTER:-yield}"
 SKIP_SCALE="${SKIP_SCALE:-0}"
@@ -87,7 +86,6 @@ ARGS=(--dataset $DATASET --stop-after "$STOP_AFTER" --seg "$SEG" --mask-cache-jo
       --levels $LEVELS --block "$BLOCK" --sweep "$SWEEP"
       --figure-slides "$FIGURE_SLIDES" --out "$OUT")
 [ -n "$WSI" ] && ARGS+=(--wsi $WSI)
-[ "$VAL_ONLY" = "1" ] && ARGS+=(--val-only)
 [ "$SKIP_SCALE" = "1" ] && ARGS+=(--skip-scale)
 
 # ---------------- Step 1: how expensive is one read? (holes tier only) ------

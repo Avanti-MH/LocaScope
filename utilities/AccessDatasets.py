@@ -37,18 +37,22 @@ mistypes a name and gets back some OTHER slide's path silently analyses the
 wrong tissue; the error lists every name each registered dataset currently
 holds, so the typo is obvious.
 
-A RECORDED SPLIT IS A DATASET TOO. `<dataset>#<split>` -- `bracs/test#val`,
-`ki67_with_photo#test` -- names the slides one recorded split of a dataset holds,
-and `list_names()` / `locate()` take it wherever they take a dataset id:
+A VIRTUAL DATASET IS A NAMED LIST OF SLIDES, `@<name>` -- `@train`, `@val`,
+`@test63`, `@KiHE` -- drawn from any registered datasets, and it is read through
+the same two calls:
 
-    list_names(dataset='bracs/test#val')              # the val slides
-    locate(name, dataset='bracs/test#val')            # KeyError if it is not in val
-    list_names(dataset='bracs/test#val', split_job='OtherJob')
+    list_names(dataset='@val')                # its slides, in its order
+    locate(name, dataset='@val')              # KeyError if it is not in @val
 
-The split is READ from `<split_job>`'s `dataset=<dataset>/split/split_recorded.csv`
-(`split,wsi_name`; `split_job` defaults to `SPLIT_JOB`), never written here:
-`utilities/cli/build_cache/make_split.py` is the one writer, and a missing file
-is a refusal that names it. `dataset_ids()` lists the real datasets only.
+No slide is copied: a virtual dataset is one list, `dataset,name`, in the
+`DATASETS_JOB` cache (`vdataset/list_<name>.csv`, with a record of how it was
+drawn), and every slide resolves through its own dataset's rule. It is drawn
+with `select()`, which narrows the registry by dataset, by stain and by what
+each slide's header says (`where=`, a test of its `SlideInfo` in the CATALOG,
+`catalog()`), into a `Selection` that combines (`| & -`), samples and splits
+into disjoint parts; `save_virtual` writes one, once.
+`utilities/cli/build_cache/make_dataset.py` builds the catalog and runs the
+recipes that write them. `virtual_ids()` lists them.
 """
 
 from __future__ import annotations
@@ -57,12 +61,15 @@ import csv
 import glob
 import os
 import random
+import re
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 from Cache import Address, Entry, dataset_key
+from ReadGeometry import is_native, level_for
 from _paths import DATASETS_DIR
 
 _BRACS_TEST_ROOT = os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it/BRACS_WSI/test')
@@ -103,11 +110,15 @@ class _Dataset:
     which is the right error (module docstring: no fuzzy anything here).
     `list_fn()` enumerates every name CURRENTLY found (a fresh directory
     read, not a cached table -- `list_names`'s own docstring).
+    `info_fn(entry)`, when the dataset has one, gives the labels its own
+    layout carries for a slide (BRACS's `group` and `type`, from the path),
+    which the catalog keeps beside the slide's header (`SlideInfo.labels`).
     """
     id: str
     stain: str
     locate_fn: Callable[..., Optional[WsiEntry]]
     list_fn: Callable[[], List[str]]
+    info_fn: Optional[Callable[[WsiEntry], Dict[str, str]]] = None
 
 
 def _mrxs_name_in(container: str) -> Optional[str]:
@@ -214,7 +225,12 @@ def _locate_bracs(dataset_id: str, root: str, stain: str) -> _Dataset:
         paths = glob.glob(os.path.join(root, '*', '*', '*.svs'))
         return sorted(os.path.basename(p)[:-len('.svs')] for p in paths)
 
-    return _Dataset(id=dataset_id, stain=stain, locate_fn=_locate, list_fn=_list)
+    def _info(entry: WsiEntry) -> Dict[str, str]:
+        """`<Group>/<Type>/`, the two directories the slide sits in."""
+        type_dir: str = os.path.dirname(entry.path)
+        return {'group': os.path.basename(os.path.dirname(type_dir)), 'type': os.path.basename(type_dir)}
+
+    return _Dataset(id=dataset_id, stain=stain, locate_fn=_locate, list_fn=_list, info_fn=_info)
 
 
 #: THE REGISTRY. One entry per DATASET (a root + naming convention), not one
@@ -235,69 +251,429 @@ _DATASETS: List[_Dataset] = [
 ]
 
 
-#: The job whose recorded split `<dataset>#<split>` reads by default. The one
-#: writer, `make_split.py`, writes under this name unless told otherwise, and
-#: `WsiSplit.SPLIT_JOB` is this same value.
-SPLIT_JOB = 'MakeSplit'
+# ── the catalog: what each slide's header says ────────────────────────────────
 
-#: `<dataset>#<split>`: the separator, and the sets a split can hold.
-SPLIT_SEP = '#'
-SPLITS = ('train', 'val', 'test')
+#: The cache root of the catalog and of every virtual dataset: AccessDatasets' own, never a job's. Every job --
+#: a smoke run, a bench, a training -- reads the same ones, whatever it is called, and none writes another.
+DATASETS_JOB = 'Datasets'
 
-
-#: The one variant of a dataset's `split` entry. A split is a record, never
-#: re-derived from a config, so it has no config id to be named by.
-SPLIT_ID = 'recorded'
+#: What a catalog row holds; another set of columns is another version, and an older catalog is refused.
+CATALOG_VERSION = 1
 
 
-def split_entry(dataset_id: str, split_job: Optional[str] = None) -> Entry:
-    """The `split` entry at `dataset=<dataset>/` in `split_job`'s cache."""
-    return Address(split_job or SPLIT_JOB,
-                   dataset=dataset_key(dataset_id)).entry('split')
+@dataclass(frozen=True)
+class SlideInfo:
+    """One slide of the catalog: where it is registered, its stain, what its header says, and the labels its
+    dataset's layout gives it (`_Dataset.info_fn`: BRACS's `group` and `type`). `error` is why its header
+    could not be read; such a slide has no mpp and no levels."""
+    dataset: str
+    name: str
+    stain: str
+    base_mpp: Optional[float]
+    level_downsamples: Tuple[float, ...]
+    level_dimensions: Tuple[Tuple[int, int], ...]
+    has_photos: bool
+    labels: Dict[str, str] = field(default_factory=dict)
+    error: str = ''
+
+    @property
+    def n_levels(self) -> int:
+        return len(self.level_downsamples)
+
+    @property
+    def dimensions(self) -> Tuple[int, int]:
+        """Level 0's `(width, height)`."""
+        return self.level_dimensions[0] if self.level_dimensions else (0, 0)
+
+    def native_at(self, rungs: Sequence[float]) -> bool:
+        """Every rung comes off a level of the slide's own with no resampling: the level `level_for` reads it
+        from is that very downsample (`ReadGeometry.is_native`). False for a slide whose header was not read."""
+        if not self.level_downsamples:
+            return False
+        return all(is_native(self.level_downsamples[level_for(self.level_downsamples, r)], r) for r in rungs)
 
 
-def split_file(dataset_id: str, split_job: Optional[str] = None) -> Path:
-    """`dataset=<dataset>/split/split_recorded.csv`: where one dataset's
-    recorded split lives. The only place that path is spelled."""
-    return split_entry(dataset_id, split_job).path('split', SPLIT_ID, '.csv')
+def catalog_entry() -> Entry:
+    return Address(DATASETS_JOB).entry('catalog')
 
 
-def parse_dataset_id(dataset_id: str) -> Tuple[str, Optional[str]]:
-    """`'bracs/test#val'` -> `('bracs/test', 'val')`; `'bracs/test'` ->
-    `('bracs/test', None)`. A set that is not train / val / test is an error
-    here, not an empty list a caller could take for an empty set."""
-    base, sep, split = dataset_id.partition(SPLIT_SEP)
-    if not sep:
-        return dataset_id, None
-    if split not in SPLITS:
-        raise KeyError(f'{dataset_id!r}: {split!r} is not a split set; after '
-                       f'{SPLIT_SEP!r} put one of {list(SPLITS)}')
-    return base, split
+def _dataset(dataset_id: str) -> _Dataset:
+    for d in _DATASETS:
+        if d.id == dataset_id:
+            return d
+    raise KeyError(f'{dataset_id!r} is not a registered dataset id. Known dataset ids: {dataset_ids()}')
+
+
+def _cells(values: Iterable[Any]) -> str:
+    return ' '.join(str(v) for v in values)
+
+
+def _catalog_row(ds: _Dataset, name: str, opener: Callable[[str], Any]) -> Dict[str, Any]:
+    """The catalog row of one slide: its header, read through `opener` (a slide handle with `base_mpp`,
+    `level_downsamples`, `level_dimensions`, `close`), and its labels. A header that cannot be read is a row
+    with the error, not a stopped catalog."""
+    entry: Optional[WsiEntry] = ds.locate_fn(name)
+    if entry is None:
+        return dict(name=name, error='not found')
+    row: Dict[str, Any] = dict(name=name, has_photos=int('photos' in entry.related))
+    if ds.info_fn is not None:
+        row.update({f'label_{k}': v for k, v in ds.info_fn(entry).items()})
+    try:
+        wsi: Any = opener(entry.path)
+        try:
+            row.update(base_mpp=float(wsi.base_mpp), level_downsamples=_cells(wsi.level_downsamples),
+                       level_dimensions=_cells(f'{w}x{h}' for w, h in wsi.level_dimensions))
+        finally:
+            wsi.close()
+    except Exception as e:                                              # noqa: BLE001
+        row['error'] = f'{type(e).__name__}: {e}'
+    return row
+
+
+def _write_catalog(dataset_id: str, rows: List[Dict[str, Any]]) -> Path:
+    entry: Entry = catalog_entry()
+    key: str = dataset_key(dataset_id)
+    rec: Dict[str, Any] = dict(id=key, parts=[f'dataset={dataset_id}'], versions={'catalog': CATALOG_VERSION},
+                               upstream={}, env={}, n=len(rows), updated_at=time.strftime('%Y-%m-%dT%H:%M:%S'))
+    cols: List[str] = list(dict.fromkeys(k for r in rows for k in r))
+    with entry.writing(key, rec) as put:
+        with open(put('slides', '.csv'), 'w', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=cols or ['name'], restval='')
+            writer.writeheader()
+            writer.writerows(rows)
+    return entry.path('slides', key, '.csv')
 
 
 @lru_cache(maxsize=None)
-def _read_split(path: str, mtime_ns: int) -> Dict[str, Tuple[str, ...]]:
-    """`{set: names}` in file order. Keyed on the modification time as well, so
-    a rewritten file is read again and an unchanged one is read once."""
-    out: Dict[str, List[str]] = {}
+def _read_catalog(path: str, mtime_ns: int) -> Tuple[Dict[str, str], ...]:
     with open(path, newline='') as handle:
-        for row in csv.DictReader(handle):
-            out.setdefault(row['split'], []).append(row['wsi_name'])
-    return {k: tuple(v) for k, v in out.items()}
+        return tuple(csv.DictReader(handle))
 
 
-def _split_names(base: str, split: str, split_job: Optional[str]) -> List[str]:
-    path = split_file(base, split_job)
-    if not path.exists():
-        raise FileNotFoundError(
-            f'{path} does not exist. The split of {base!r} is written once, by '
-            f'utilities/cli/build_cache/make_split.py -- run it first, so every '
-            f'package scores on the same held-out slides')
-    by_split = _read_split(str(path), path.stat().st_mtime_ns)
-    if split not in by_split:
-        raise KeyError(f'{base}{SPLIT_SEP}{split}: the split recorded at {path} '
-                       f'holds {sorted(by_split)} only')
-    return list(by_split[split])
+def _catalog_rows(dataset_id: str) -> Optional[Tuple[Dict[str, str], ...]]:
+    """The stored rows of one dataset's catalog; None when it has none. A catalog of another version is an
+    error: its columns are not the ones `SlideInfo` reads."""
+    entry: Entry = catalog_entry()
+    key: str = dataset_key(dataset_id)
+    stored: Optional[Dict[str, Any]] = entry.stored(key)
+    if stored is None:
+        return None
+    if stored.get('versions', {}).get('catalog') != CATALOG_VERSION:
+        raise ValueError(f'the catalog of {dataset_id!r} is version {stored.get("versions")}, this code reads '
+                         f'{CATALOG_VERSION}: run make_dataset.py --catalog --refresh')
+    path: Path = entry.path('slides', key, '.csv')
+    return _read_catalog(str(path), path.stat().st_mtime_ns)
+
+
+def build_catalog(datasets: Optional[Sequence[str]] = None, *, refresh: bool = False,
+                  opener: Optional[Callable[[str], Any]] = None,
+                  log: Callable[[str], None] = print) -> Dict[str, Tuple[int, int]]:
+    """Write the catalog of each dataset (every registered one by default): `{dataset: (headers read, slides)}`.
+    Only a slide the catalog does not hold yet is opened -- a header, not a pixel -- unless `refresh`, and a
+    slide no longer on disk leaves it. `opener` opens a slide (`SafeSlide`, whose `base_mpp` is the one
+    definition); a test passes its own."""
+    if opener is None:
+        from SafeSlide import SafeSlide                                 # noqa: PLC0415
+        opener = SafeSlide
+    out: Dict[str, Tuple[int, int]] = {}
+    for dataset_id in (datasets or dataset_ids()):
+        ds: _Dataset = _dataset(dataset_id)
+        names: List[str] = ds.list_fn()
+        old: Dict[str, Dict[str, str]] = ({} if refresh else
+                                          {r['name']: dict(r) for r in (_catalog_rows(dataset_id) or ())})
+        rows: List[Dict[str, Any]] = []
+        read: int = 0
+        for name in names:
+            if name in old and not old[name].get('error'):
+                rows.append(old[name])
+                continue
+            rows.append(_catalog_row(ds, name, opener))
+            read += 1
+        if read or set(old) != set(names):
+            _write_catalog(dataset_id, rows)
+        bad: int = sum(1 for r in rows if r.get('error'))
+        log(f'  {dataset_id:17s} {len(rows)} slides, {read} headers read'
+            + (f', {bad} unreadable' if bad else ''))
+        out[dataset_id] = (read, len(rows))
+    return out
+
+
+def _floats(cell: str) -> Tuple[float, ...]:
+    return tuple(float(v) for v in str(cell or '').split())
+
+
+def _sizes_of(cell: str) -> Tuple[Tuple[int, int], ...]:
+    return tuple((int(w), int(h)) for w, h in (v.split('x') for v in str(cell or '').split()))
+
+
+def catalog(datasets: Optional[Sequence[str]] = None) -> List[SlideInfo]:
+    """The catalog of each dataset (every registered one by default), a `SlideInfo` per slide. Read only: a
+    dataset with no catalog is a refusal that names its writer, never a header opened here."""
+    out: List[SlideInfo] = []
+    for dataset_id in (datasets or dataset_ids()):
+        ds: _Dataset = _dataset(dataset_id)
+        rows: Optional[Tuple[Dict[str, str], ...]] = _catalog_rows(dataset_id)
+        if rows is None:
+            raise FileNotFoundError(f'{dataset_id!r} has no catalog in {catalog_entry().dir}: run '
+                                    f'utilities/cli/build_cache/make_dataset.py --catalog')
+        for r in rows:
+            mpp: str = r.get('base_mpp', '')
+            out.append(SlideInfo(
+                dataset=dataset_id, name=r['name'], stain=ds.stain, base_mpp=float(mpp) if mpp else None,
+                level_downsamples=_floats(r.get('level_downsamples', '')),
+                level_dimensions=_sizes_of(r.get('level_dimensions', '')),
+                has_photos=r.get('has_photos', '') == '1',
+                labels={k[len('label_'):]: v for k, v in r.items() if k.startswith('label_') and v},
+                error=r.get('error', '') or ''))
+    return out
+
+
+# ── selections: how a virtual dataset is drawn ───────────────────────────────
+
+#: One slide of the registry: `(dataset id, name)`.
+Member = Tuple[str, str]
+
+#: How big a part of a split is: a count of slides, a share of the selection, or `'rest'`.
+Size = Union[int, float, str]
+
+
+def _resolve_sizes(sizes: Sequence[Size], n: int) -> List[int]:
+    """Slides per part for a selection of `n`: a count as it is, a share rounded to the nearest slide (at least
+    one), `'rest'` (at most one part) what the others leave, at least one. Asking for more than there is is an
+    error, not a short part."""
+    if list(sizes).count('rest') > 1:
+        raise ValueError(f'{list(sizes)}: only one part can be the rest')
+    fixed: List[Optional[int]] = []
+    for size in sizes:
+        if size == 'rest':
+            fixed.append(None)
+        elif isinstance(size, bool) or not isinstance(size, (int, float)):
+            raise ValueError(f'{size!r}: a part is a count (10), a share (0.2) or \'rest\'')
+        elif isinstance(size, int):
+            if size < 1:
+                raise ValueError(f'{size}: a part needs at least one slide')
+            fixed.append(size)
+        else:
+            if not 0.0 < size <= 1.0:
+                raise ValueError(f'{size}: a share is in (0, 1]')
+            fixed.append(max(1, int(size * n + 0.5)))
+    used: int = sum(s for s in fixed if s is not None)
+    if used > n:
+        raise ValueError(f'{list(sizes)} ask for {used} slides of {n}')
+    if None in fixed and n - used < 1:
+        raise ValueError(f'{list(sizes)}: the rest of {n} would be empty')
+    return [n - used if s is None else s for s in fixed]
+
+
+class Selection:
+    """Slides of the registry, `(dataset, name)` in an order, each once, and how they were drawn (`how`, the
+    record a virtual dataset keeps). `| & -` combine two (the left one's order first); `where` narrows by the
+    catalog; `split` cuts disjoint parts and `sample` one, from the slides sorted and shuffled by a seed."""
+
+    def __init__(self, members: Iterable[Member], how: str) -> None:
+        self.members: Tuple[Member, ...] = tuple(dict.fromkeys((str(d), str(n)) for d, n in members))
+        self.how: str = how
+
+    def __len__(self) -> int:
+        return len(self.members)
+
+    def __iter__(self) -> Iterator[Member]:
+        return iter(self.members)
+
+    def __contains__(self, member: object) -> bool:
+        return member in self.members
+
+    def __repr__(self) -> str:
+        return f'Selection({len(self)} slides: {self.how})'
+
+    def names(self) -> List[str]:
+        return [n for _, n in self.members]
+
+    def __or__(self, other: 'Selection') -> 'Selection':
+        return Selection(self.members + other.members, f'({self.how}) | ({other.how})')
+
+    def __and__(self, other: 'Selection') -> 'Selection':
+        keep: set = set(other.members)
+        return Selection([m for m in self.members if m in keep], f'({self.how}) & ({other.how})')
+
+    def __sub__(self, other: 'Selection') -> 'Selection':
+        drop: set = set(other.members)
+        return Selection([m for m in self.members if m not in drop], f'({self.how}) - ({other.how})')
+
+    def where(self, test: Callable[[SlideInfo], bool], label: str = '') -> 'Selection':
+        """The slides whose catalog row passes `test`; `label` says what it tests, for the record (a lambda has
+        no name worth keeping). A slide the catalog does not hold is an error: run the catalog first."""
+        info: Dict[Member, SlideInfo] = {(s.dataset, s.name): s
+                                         for s in catalog(sorted({d for d, _ in self.members}))}
+        missing: List[Member] = [m for m in self.members if m not in info]
+        if missing:
+            raise KeyError(f'the catalog holds no {missing[:5]}{" ..." if len(missing) > 5 else ""}: run '
+                           f'make_dataset.py --catalog')
+        said: str = label or getattr(test, '__name__', 'test')
+        return Selection([m for m in self.members if test(info[m])], f'{self.how} where {said}')
+
+    def sorted(self) -> 'Selection':
+        return Selection(sorted(self.members), f'{self.how} sorted')
+
+    def split(self, *sizes: Size, seed: int) -> Tuple['Selection', ...]:
+        """Disjoint parts, cut in the order given from the slides sorted and shuffled by `seed`. Each part keeps
+        that shuffled order, so a prefix of it is a random sample of it too. Parts that leave slides over
+        (no `'rest'`) leave them in no part."""
+        pool: List[Member] = sorted(self.members)
+        random.Random(seed).shuffle(pool)
+        counts: List[int] = _resolve_sizes(sizes, len(pool))
+        out: List[Selection] = []
+        at: int = 0
+        for i, count in enumerate(counts):
+            out.append(Selection(pool[at:at + count],
+                                 f'{self.how} split({", ".join(map(repr, sizes))}, seed={seed})[{i}]'))
+            at += count
+        return tuple(out)
+
+    def sample(self, size: Size, *, seed: int) -> 'Selection':
+        """`size` of the slides, at random by `seed` (a count or a share), in that random order."""
+        (part,) = self.split(size, seed=seed)
+        return Selection(part.members, f'{self.how} sample({size!r}, seed={seed})')
+
+
+def select(*, dataset: Union[None, str, Sequence[str]] = None, stain: Union[None, str, Sequence[str]] = None,
+           where: Optional[Callable[[SlideInfo], bool]] = None, label: str = '') -> Selection:
+    """The registry's slides as a `Selection`: those of `dataset` -- one id or several, a registered dataset or
+    a virtual one `@<name>`; every registered dataset when None -- of `stain` (one or several), passing
+    `where`, a test of each slide's catalog row (`Selection.where`). In each dataset's own order: sorted for a
+    registered one, the recorded order for a virtual one."""
+    ids: List[str] = ([dataset] if isinstance(dataset, str) else list(dataset)) if dataset is not None \
+        else dataset_ids()
+    stains_wanted: Optional[set] = None if stain is None else ({stain} if isinstance(stain, str) else set(stain))
+    members: List[Member] = []
+    for dataset_id in ids:
+        if is_virtual(dataset_id):
+            members += list(_virtual_members(dataset_id))
+        else:
+            members += [(dataset_id, n) for n in _dataset(dataset_id).list_fn()]
+    if stains_wanted is not None:
+        members = [m for m in members if _dataset(m[0]).stain in stains_wanted]
+    how: str = f'select(dataset={ids!r}' + (f', stain={sorted(stains_wanted)!r}' if stains_wanted else '') + ')'
+    chosen: Selection = Selection(members, how)
+    return chosen.where(where, label) if where is not None else chosen
+
+
+def by_source(dataset_id: str, n: Optional[int] = None,
+              stain: Union[None, str, Sequence[str]] = None) -> List[Tuple[str, List[str]]]:
+    """The slides of a dataset id -- a registered dataset or a virtual one `@<name>` -- by the dataset each is
+    registered in: `[(dataset, names)]`, the datasets in the order their first slide comes, each one's names in
+    the id's own order, the first `n` of each when given, only the slides of `stain` (one or several) when
+    given. What a caller that draws a dataset at a time (a manifest, a sampler) iterates; a virtual dataset is
+    shuffled when it is drawn, so a prefix is a random pick."""
+    out: Dict[str, List[str]] = {}
+    for source, name in select(dataset=dataset_id, stain=stain):
+        names: List[str] = out.setdefault(source, [])
+        if n is None or len(names) < n:
+            names.append(name)
+    return list(out.items())
+
+
+# ── virtual datasets ─────────────────────────────────────────────────────────
+
+#: A virtual dataset's id is `@<name>`. The `@` tells it from a registered dataset at a glance and means
+#: nothing to a shell or a Makefile (a word starting with `#` would be a comment, silently dropped).
+VIRTUAL_PREFIX = '@'
+_VIRTUAL_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]*\Z')
+
+
+def is_virtual(dataset_id: str) -> bool:
+    return str(dataset_id).startswith(VIRTUAL_PREFIX)
+
+
+def _virtual_name(dataset_id: str) -> str:
+    """`'@val'` -> `'val'`; anything that is not `@` and letters, digits, `_`, `-` is refused."""
+    name: str = str(dataset_id)[len(VIRTUAL_PREFIX):]
+    if not is_virtual(dataset_id) or not _VIRTUAL_NAME.match(name):
+        raise ValueError(f'{dataset_id!r}: a virtual dataset is {VIRTUAL_PREFIX}<name>, the name letters, digits, '
+                         f'`_` and `-`, starting with a letter or digit')
+    return name
+
+
+def vdataset_entry() -> Entry:
+    return Address(DATASETS_JOB).entry('vdataset')
+
+
+def vdataset_file(dataset_id: str) -> Path:
+    """`vdataset/list_<name>.csv` (`dataset,name`): where one virtual dataset's slides are. The only place that
+    path is spelled."""
+    return vdataset_entry().path('list', _virtual_name(dataset_id), '.csv')
+
+
+def virtual_ids() -> List[str]:
+    """Every virtual dataset written, `@<name>`, sorted."""
+    return [VIRTUAL_PREFIX + i for i in vdataset_entry().ids()]
+
+
+def virtual_record(dataset_id: str) -> Dict[str, Any]:
+    """How a virtual dataset was drawn: its record (`how`, `recipe`, `n`, `sources`, `created_at`)."""
+    stored: Optional[Dict[str, Any]] = vdataset_entry().stored(_virtual_name(dataset_id))
+    if stored is None:
+        raise KeyError(f'{dataset_id!r} is not a virtual dataset; written: {virtual_ids()} '
+                       f'(utilities/cli/build_cache/make_dataset.py writes them)')
+    return stored
+
+
+@lru_cache(maxsize=None)
+def _read_members(path: str, mtime_ns: int) -> Tuple[Member, ...]:
+    with open(path, newline='') as handle:
+        return tuple((r['dataset'], r['name']) for r in csv.DictReader(handle))
+
+
+def _virtual_members(dataset_id: str) -> Tuple[Member, ...]:
+    """The slides of a virtual dataset, in its order, each checked to be on disk now: a slide moved or gone is
+    an error naming it, never a shorter list. One directory read per dataset it draws from."""
+    virtual_record(dataset_id)
+    path: Path = vdataset_file(dataset_id)
+    members: Tuple[Member, ...] = _read_members(str(path), path.stat().st_mtime_ns)
+    gone: List[str] = []
+    for source in sorted({d for d, _ in members}):
+        if source not in dataset_ids():
+            gone += [f'{source}:{n}' for d, n in members if d == source]
+            continue
+        have: set = set(_dataset(source).list_fn())
+        gone += [f'{source}:{n}' for d, n in members if d == source and n not in have]
+    if gone:
+        raise FileNotFoundError(f'{dataset_id}: {len(gone)} of its {len(members)} slides are not found now: '
+                                f'{gone[:5]}{" ..." if len(gone) > 5 else ""}')
+    return members
+
+
+def save_virtual(dataset_id: str, selection: Selection, *, recipe: str = '') -> Path:
+    """Write `selection` as the virtual dataset `dataset_id` (`@<name>`): its slides in its order, and a record
+    of how they were drawn (`selection.how`, `recipe`). Written ONCE: one that exists is refused, never
+    overwritten -- a checkpoint chosen on `@val` must not be scored on a `@val` that has changed since. Delete
+    its entry to write another under that name. An empty selection, a slide not on disk, and one name from two
+    datasets (`locate(name, dataset='@...')` could not tell them apart) are refused too."""
+    name: str = _virtual_name(dataset_id)
+    entry: Entry = vdataset_entry()
+    if entry.stored(name) is not None:
+        raise FileExistsError(f'{dataset_id} exists ({entry.record_path(name)}); a virtual dataset is written once')
+    if not len(selection):
+        raise ValueError(f'{dataset_id}: the selection is empty ({selection.how})')
+    names: List[str] = selection.names()
+    twice: List[str] = sorted({n for n in names if names.count(n) > 1})
+    if twice:
+        raise ValueError(f'{dataset_id}: {twice} are in it from two datasets')
+    for source in sorted({d for d, _ in selection}):
+        have: set = set(_dataset(source).list_fn())
+        absent: List[str] = [n for d, n in selection if d == source and n not in have]
+        if absent:
+            raise FileNotFoundError(f'{dataset_id}: {source} holds no {absent[:5]}')
+    rec: Dict[str, Any] = dict(id=name, parts=[f'recipe={recipe}'] if recipe else [], versions={}, upstream={},
+                               env={}, how=selection.how, recipe=recipe, n=len(selection),
+                               sources=sorted({d for d, _ in selection}),
+                               created_at=time.strftime('%Y-%m-%dT%H:%M:%S'))
+    with entry.writing(name, rec) as put:
+        with open(put('list', '.csv'), 'w', newline='') as handle:
+            writer = csv.writer(handle)
+            writer.writerow(('dataset', 'name'))
+            writer.writerows(selection.members)
+    return vdataset_file(dataset_id)
 
 
 def pick_wsi_names(names: Sequence[str], max_wsi: Optional[int], seed: int
@@ -319,8 +695,7 @@ def pick_wsi_names(names: Sequence[str], max_wsi: Optional[int], seed: int
     return [n for i, n in enumerate(names) if i in keep]
 
 
-def locate(name: str, *, dataset: Optional[str] = None,
-           split_job: Optional[str] = None, **kwargs) -> WsiEntry:
+def locate(name: str, *, dataset: Optional[str] = None, **kwargs) -> WsiEntry:
     """The resolved entry for `name`. Raises `KeyError` naming every name
     each registered dataset currently holds if `name` resolves in NONE of
     them -- there is no fuzzy match, because a wrong guess here means every
@@ -342,15 +717,15 @@ def locate(name: str, *, dataset: Optional[str] = None,
     convention they belong to; passing any without `dataset=` raises rather
     than being silently ignored or guessed at.
 
-    `dataset` may be a recorded split, `<id>#<split>`: the slide is resolved by
-    the real dataset and must be in that split, else `KeyError` -- a test slide
-    asked for under `#val` is a mistake, not a path to hand back. `split_job`
-    picks whose split file is read (default `SPLIT_JOB`); giving it without a
-    `#` in `dataset` is an error, not something silently ignored.
+    `dataset` may be a virtual dataset, `@<name>`: the slide must be in its list
+    and resolves by the dataset it was drawn from (`**kwargs` are that one's).
     """
-    if split_job is not None and (dataset is None or SPLIT_SEP not in dataset):
-        raise ValueError('split_job= only means something with dataset='
-                         '<id>#<split>')
+    if dataset is not None and is_virtual(dataset):
+        # a virtual dataset: the slide must be in its list, and resolves by the dataset it was drawn from
+        sources: List[str] = [d for d, n in _virtual_members(dataset) if n == name]
+        if not sources:
+            raise KeyError(f'{name!r} is not in {dataset!r}')
+        return locate(name, dataset=sources[0], **kwargs)
     if kwargs and dataset is None:
         raise ValueError(
             f'kwargs {list(kwargs)} were given without dataset= -- they are '
@@ -358,14 +733,10 @@ def locate(name: str, *, dataset: Optional[str] = None,
             f'without knowing which dataset they belong to')
 
     if dataset is not None:
-        base, split = parse_dataset_id(dataset)
-        chosen = [d for d in _DATASETS if d.id == base]
+        chosen = [d for d in _DATASETS if d.id == dataset]
         if not chosen:
             raise KeyError(f'{dataset!r} is not a registered dataset id. '
                            f'Known dataset ids: {dataset_ids()}')
-        if split is not None and name not in _split_names(base, split, split_job):
-            raise KeyError(f'{name!r} is not in {dataset!r}; it is either in '
-                           f'another split of {base!r} or not in {base!r}')
         entry = chosen[0].locate_fn(name, **kwargs)
         if entry is None:
             raise KeyError(f'{name!r} is not found in dataset {dataset!r}.')
@@ -386,15 +757,14 @@ def locate(name: str, *, dataset: Optional[str] = None,
 
 def dataset_ids() -> List[str]:
     """Every registered dataset `id`, in registration order -- what
-    `locate(name, dataset=...)` picks by. The real datasets only: a recorded
-    split is `<id>#<split>` and is not listed.
+    `locate(name, dataset=...)` picks by. The real datasets only: a virtual
+    dataset is `virtual_ids()`'s.
     """
     return [d.id for d in _DATASETS]
 
 
 def list_names(*, stain: Optional[str] = None, dataset: Optional[str] = None,
-              n: Optional[int] = None, split_job: Optional[str] = None
-              ) -> List[str]:
+               n: Optional[int] = None) -> List[str]:
     """Every name currently found across every registered dataset,
     optionally narrowed to one `stain` and/or one `dataset` id, optionally
     capped at the first `n` (dataset registration order, then each dataset's
@@ -409,28 +779,22 @@ def list_names(*, stain: Optional[str] = None, dataset: Optional[str] = None,
     dataset=...)`, rather than silently returning an empty list a caller
     could mistake for "this dataset really is empty".
 
-    `dataset='<id>#<split>'` gives the slides that recorded split holds, in the
-    order the file has them (`split_job=` picks whose file, default
-    `SPLIT_JOB`); a stain that is not that dataset's gives an empty list.
+    `dataset='@<name>'` gives a virtual dataset's slides in its order, those of
+    `stain` only when given; one of them not on disk now is an error.
 
     A FRESH SCAN EVERY CALL, ON PURPOSE: this is the one function whose
     whole job is "what is actually there right now", not a lookup in a
     static table -- a name this returns is guaranteed findable by `locate`
     at the same moment (modulo a concurrent transfer).
     """
-    if split_job is not None and (dataset is None or SPLIT_SEP not in dataset):
-        raise ValueError('split_job= only means something with dataset='
-                         '<id>#<split>')
+    if dataset is not None and is_virtual(dataset):
+        listed: List[str] = [name for d, name in _virtual_members(dataset)
+                             if stain is None or _dataset(d).stain == stain]
+        return listed if n is None else listed[:n]
     if dataset is not None:
-        base, split = parse_dataset_id(dataset)
-        if base not in dataset_ids():
+        if dataset not in dataset_ids():
             raise KeyError(f'{dataset!r} is not a registered dataset id. '
                            f'Known dataset ids: {dataset_ids()}')
-        if split is not None:
-            entry = next(d for d in _DATASETS if d.id == base)
-            names = ([] if stain is not None and entry.stain != stain
-                     else _split_names(base, split, split_job))
-            return names if n is None else names[:n]
     names: List[str] = []
     for entry in _DATASETS:
         if stain is not None and entry.stain != stain:

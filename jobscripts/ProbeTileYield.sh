@@ -35,16 +35,16 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #    ENCODER=gigapath TILE_SIZE=256 sbatch jobscripts/ProbeTileYield.sh
 #    DATASET=bracs/test FP32=1 sbatch jobscripts/ProbeTileYield.sh   # narrows the slides
 #
-#  WHICH SLIDES: every slide that has a mask in result/cache/<MASK_CACHE_JOB>_mask/
-#  <seg_id>/ -- by default the hest masks MppRoutingHead made -- so every row has
+#  WHICH SLIDES: every slide that has a mask in result/cache/<MASK_CACHE_JOB>/
+#  slide=*/mask/ -- by default the shared hest masks of Masks -- so every row has
 #  both the no-mask and the mask columns. DATASET="ki67_with_photo bracs/test"
 #  (or WSI=path...) narrows to those instead, and a slide of them with no mask
 #  then gets its no-mask columns only.
 # =============================================================================
 
-DATASET="${DATASET:-bracs/test#val ki67_with_photo#val}"   # ids or <id>#<split>
+DATASET="${DATASET:-@legacy-val}"   # AccessDatasets ids, registered or @<name>
 SEG="${SEG:-hest}"
-MASK_CACHE_JOB="${MASK_CACHE_JOB:-MppRoutingHead}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-Masks}"
 FEATURE_MAP="${FEATURE_MAP:-only}"
 ENCODER="${ENCODER:-uni2}"
 TILE_SIZE="${TILE_SIZE:-256}"        # what FeatureMapCache stores; the probe's own default also lists 512 and 1024

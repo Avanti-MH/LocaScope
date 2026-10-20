@@ -19,7 +19,6 @@ no pixel reads.
 Usage:
     python utilities/cli/diagnostics/diag_wsi_scale.py                      # every registered dataset, every WSI
     python utilities/cli/diagnostics/diag_wsi_scale.py --dataset ki67_pure bracs/test
-    python utilities/cli/diagnostics/diag_wsi_scale.py --dataset bracs/test --val-only  # only the recorded val split -- the original tool's own scope
     python utilities/cli/diagnostics/diag_wsi_scale.py --wsi /path/to/one.svs /path/to/two.mrxs
     python utilities/cli/diagnostics/diag_wsi_scale.py --quiet              # summaries only, skip the per-slide/per-rung dump
 """
@@ -155,11 +154,6 @@ def main() -> int:
     ap.add_argument('--wsi', nargs='+', default=None,
                     help='explicit WSI path(s), for a slide not in the '
                          'registry -- combined with --dataset if both given')
-    ap.add_argument('--val-only', action='store_true',
-                    help="only the recorded val split (needs "
-                         "utilities/cli/build_cache/make_split.py to have "
-                         "written it) -- the original diagnose_native_split.py's "
-                         "own scope. Default: every WSI in the dataset")
     ap.add_argument('--quiet', action='store_true',
                     help='skip the per-slide/per-rung dump, print only the '
                          'summaries')
@@ -170,11 +164,9 @@ def main() -> int:
 
     from AccessDatasets import dataset_ids                          # noqa: PLC0415
     datasets = args.dataset or (None if args.wsi else dataset_ids())
-    entries = resolve_wsi_paths(dataset=datasets, wsi=args.wsi,
-                                val_only=args.val_only)
+    entries = resolve_wsi_paths(dataset=datasets, wsi=args.wsi)
     print(f'{len(entries)} WSI(s)'
-         f'{f" across {len(datasets)} dataset(s)" if datasets else ""}'
-         f'{"  (--val-only)" if args.val_only else ""}')
+         f'{f" across {len(datasets)} dataset(s)" if datasets else ""}')
 
     rows = WsiScaleCheck(quiet=args.quiet).run(entries)
     if not rows:

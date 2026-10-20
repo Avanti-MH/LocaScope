@@ -409,7 +409,6 @@ def main() -> int:
     ap.add_argument('--dataset', nargs='+', default=None)
     ap.add_argument('--wsi-path', dest='wsi_paths', nargs='+', default=None,
                     help='explicit WSI path(s)')
-    ap.add_argument('--val-only', action='store_true')
     add_mask_args(ap)
     ap.add_argument('--grid', type=int, default=48,
                     help='slide-wide probe budget is --grid squared, split by '
@@ -431,8 +430,7 @@ def main() -> int:
     if not args.dataset and not wsi_paths:
         ap.error('need --dataset and/or --wsi-path (or a single positional path)')
 
-    entries = resolve_wsi_paths(dataset=args.dataset, wsi=wsi_paths or None,
-                                val_only=args.val_only)
+    entries = resolve_wsi_paths(dataset=args.dataset, wsi=wsi_paths or None)
     print(f'{len(entries)} WSI(s)')
 
     check = MaskValidityCheck(

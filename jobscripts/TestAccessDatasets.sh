@@ -40,11 +40,6 @@ python utilities/test_modules/test_access_datasets.py
 status=$?
 
 echo ""
-echo "======== test_wsi_split (the split's one writer) ========"
-python utilities/test_modules/test_wsi_split.py
-rc=$?
-[ $rc -ne 0 ] && status=$rc
-
-echo ""
-echo "======== done (exit $status) ========"
+# the last line says it all: ALL PASS, or FAILED with the exit code
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
 exit $status

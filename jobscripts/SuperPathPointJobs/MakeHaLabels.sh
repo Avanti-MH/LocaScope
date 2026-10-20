@@ -115,9 +115,9 @@ LADDER="0.001 0.015 0.025"
 CORPUS="${CORPUS:-stageA}"
 DRAW_CACHE_JOB="${DRAW_CACHE_JOB:-SuperPathPointCorpus}"
 
-# The slides labelled and inspected: AccessDatasets ids or <id>#<split>, N_WSI
-# of each (empty: all).
-DATASETS="${DATASETS:-bracs/test#val ki67_with_photo#val}"
+# The slides labelled and inspected: AccessDatasets ids, registered or @<name>,
+# N_WSI of each (empty: all).
+DATASETS="${DATASETS:-@legacy-val}"
 N_WSI="${N_WSI:-}"
 
 # The demo cuts its own pre-tile off the slide rather than reading a corpus.

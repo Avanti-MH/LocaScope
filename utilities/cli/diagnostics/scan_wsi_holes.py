@@ -343,7 +343,6 @@ def main():
     ap.add_argument('--dataset', nargs='+', default=None)
     ap.add_argument('--wsi-path', dest='wsi_paths', nargs='+', default=None,
                     help='explicit WSI path(s)')
-    ap.add_argument('--val-only', action='store_true')
     ap.add_argument('--levels', default='0,1,2,3',
                     help='comma-separated pyramid levels; one column each')
     ap.add_argument('--block', type=int, default=4096,
@@ -371,8 +370,7 @@ def main():
     if not args.dataset and not wsi_paths:
         ap.error('need --dataset and/or --wsi-path (or explicit positional paths)')
 
-    entries = resolve_wsi_paths(dataset=args.dataset, wsi=wsi_paths or None,
-                                val_only=args.val_only)
+    entries = resolve_wsi_paths(dataset=args.dataset, wsi=wsi_paths or None)
     levels = [int(v) for v in args.levels.split(',') if v.strip()]
 
     scanner = WsiHolesScan(levels=levels, block=args.block,

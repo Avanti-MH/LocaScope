@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """spec.md 12 step 5: the decision point. Are these labels worth training on?
 
-    python training/SuperPathPoint/cli/inspect_ha_labels.py --datasets 'bracs/test#val'
+    python training/SuperPathPoint/cli/inspect_ha_labels.py --datasets @legacy-val
     python training/SuperPathPoint/cli/inspect_ha_labels.py --wsi BRACS_1228 --with-model --tiles 8
 
 Outputs (in result/<SLURM_JOB_NAME or InspectHaLabels>/):

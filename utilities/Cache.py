@@ -44,7 +44,7 @@ WHO MADE IT
 `made_by` is the job that PRODUCED the cache, not a job that reads it: every
 CLI defaults to its own job name, and a reader that wants another job's cache
 names it explicitly (`--mask-cache-job`, `--draw-cache-job`, ...). Every cache
-is in this tree -- masks, draws, renders, splits, features, stage results,
+is in this tree -- masks, draws, renders, features, stage results,
 keypoint labels, chain-stack tiles -- and this module is the only
 one that spells a `<kind>=` path (test_config_identity's lint).
 
@@ -86,7 +86,6 @@ class CacheMismatch(RuntimeError):
 #: Each level kind and the level it nests under; None is the job's root. A
 #: tuple names the levels it may nest under, one of which the address has.
 TREE: Dict[str, Union[None, str, Tuple[str, ...]]] = {
-    'dataset': None,
     'slide':   None,
     'seg':     'slide',
     'region':  'seg',
@@ -99,9 +98,10 @@ TREE: Dict[str, Union[None, str, Tuple[str, ...]]] = {
     'stage2':  'stage1',
 }
 
-#: Each entry kind and the levels whose directory may hold its `<kind>/`.
-ENTRIES: Dict[str, Tuple[str, ...]] = {
-    'split':      ('dataset',),
+#: Each entry kind and the levels whose directory may hold its `<kind>/`; None is the job's root.
+ENTRIES: Dict[str, Tuple[Optional[str], ...]] = {
+    'catalog':    (None,),
+    'vdataset':   (None,),
     'mask':       ('slide',),
     'features':   ('grid', 'draw', 'render'),
     'draw':       ('plan',),
@@ -132,7 +132,7 @@ def _name(what: str, value) -> str:
 
 
 def dataset_key(dataset_id: str) -> str:
-    """The `dataset=` level of a dataset id: `bracs/test` -> `bracs_test`."""
+    """A dataset id as one path component: `bracs/test` -> `bracs_test`."""
     return _name('dataset id', dataset_id.replace('/', '_'))
 
 

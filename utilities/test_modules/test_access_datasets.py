@@ -279,174 +279,7 @@ def t_every_name_from_list_names_resolves_and_exists():
     return f'{len(names)} names, {n_related} related files, all exist'
 
 
-# ── 5. a recorded split as a dataset: `<id>#<split>` ─────────────────────────
-#
-# The split file is made up (real slide names, written to a temporary file) and
-# `AD.split_file` is pointed at it, so nothing here reads or writes a real
-# the real cache.
-
-@contextlib.contextmanager
-def _split_file_of(rows, dataset='ki67_with_photo'):
-    """Write `rows` (`(split, name)`) as a `wsi_split.csv` and make
-    `AD.split_file` return it for `dataset` (any other id: a missing file)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / 'wsi_split.csv'
-        with open(path, 'w', newline='') as handle:
-            writer = csv.writer(handle)
-            writer.writerow(('split', 'wsi_name'))
-            writer.writerows(rows)
-        real = AD.split_file
-        AD.split_file = lambda d, job=None: (path if d == dataset
-                                             else Path(tmp) / 'absent' / d)
-        try:
-            yield path
-        finally:
-            AD.split_file = real
-
-
-def _ki67(k):
-    names = AD.list_names(dataset='ki67_with_photo')
-    if len(names) < k:
-        raise AssertionError(f'ki67_with_photo has {len(names)} names, need {k}')
-    return names[:k]
-
-
-def _rows(val, test, train=()):
-    return ([('val', n) for n in val] + [('test', n) for n in test]
-            + [('train', n) for n in train])
-
-
-def t_split_id_lists_the_recorded_names_in_file_order():
-    names = _ki67(6)
-    val, test = [names[4], names[0], names[2]], [names[5], names[1]]
-    with _split_file_of(_rows(val, test)):
-        assert AD.list_names(dataset='ki67_with_photo#val') == val
-        assert AD.list_names(dataset='ki67_with_photo#test') == test
-        assert AD.list_names(dataset='ki67_with_photo#val', n=2) == val[:2]
-        assert AD.list_names(dataset='ki67_with_photo#val', n=99) == val
-    return 'val and test, in file order, capped by n'
-
-
-def t_split_id_locate_accepts_a_member_and_refuses_anything_else():
-    names = _ki67(4)
-    with _split_file_of(_rows(names[:2], names[2:])):
-        got = AD.locate(names[0], dataset='ki67_with_photo#val')
-        assert got.path == AD.locate(names[0]).path, 'a member resolves to its own path'
-        for wrong in (names[2], names[3]):
-            try:
-                AD.locate(wrong, dataset='ki67_with_photo#val')
-            except KeyError as exc:
-                assert 'another split' in str(exc), exc
-            else:
-                raise AssertionError(f'{wrong!r} is a test slide; #val took it')
-    return 'a member resolves, a test slide under #val is a KeyError'
-
-
-def t_split_id_unknown_set_and_unknown_dataset_raise():
-    names = _ki67(2)
-    with _split_file_of(_rows(names[:1], names[1:])):
-        for bad in ('ki67_with_photo#dev', 'ki67_with_photo#'):
-            try:
-                AD.list_names(dataset=bad)
-            except KeyError:
-                pass
-            else:
-                raise AssertionError(f'{bad!r} did not raise')
-        try:
-            AD.list_names(dataset='no_such_dataset#val')
-        except KeyError:
-            pass
-        else:
-            raise AssertionError('an unregistered base id did not raise')
-
-
-def t_split_id_missing_file_names_the_writer():
-    with _split_file_of([], dataset='some_other_dataset'):
-        try:
-            AD.list_names(dataset='ki67_with_photo#val')
-        except FileNotFoundError as exc:
-            assert 'make_split.py' in str(exc), exc
-        else:
-            raise AssertionError('a missing split file did not raise')
-
-
-def t_split_id_absent_set_lists_what_the_file_holds():
-    names = _ki67(3)
-    with _split_file_of(_rows(names[:1], names[1:])):
-        try:
-            AD.list_names(dataset='ki67_with_photo#train')
-        except KeyError as exc:
-            assert "'val'" in str(exc) and "'test'" in str(exc), exc
-        else:
-            raise AssertionError('#train of a file with no train rows did not raise')
-
-
-def t_split_id_train_rows_leave_val_and_test_as_they_were():
-    names = _ki67(6)
-    val, test, train = names[:2], names[2:4], names[4:]
-    with _split_file_of(_rows(val, test)):
-        old = (AD.list_names(dataset='ki67_with_photo#val'),
-               AD.list_names(dataset='ki67_with_photo#test'))
-    with _split_file_of(_rows(val, test, train)):
-        new = (AD.list_names(dataset='ki67_with_photo#val'),
-               AD.list_names(dataset='ki67_with_photo#test'))
-        assert AD.list_names(dataset='ki67_with_photo#train') == train
-    assert old == new == (val, test)
-
-
-def t_split_job_without_a_hash_is_an_error_not_ignored():
-    for call in (lambda: AD.list_names(dataset='ki67_with_photo', split_job='X'),
-                 lambda: AD.list_names(split_job='X'),
-                 lambda: AD.locate(_ki67(1)[0], dataset='ki67_with_photo',
-                                   split_job='X')):
-        try:
-            call()
-        except ValueError:
-            pass
-        else:
-            raise AssertionError('split_job= with no #split was accepted')
-
-
-def t_split_file_is_read_again_after_it_is_rewritten():
-    names = _ki67(4)
-    with _split_file_of(_rows(names[:1], names[1:])) as path:
-        first = AD.list_names(dataset='ki67_with_photo#val')
-        with open(path, 'w', newline='') as handle:
-            writer = csv.writer(handle)
-            writer.writerow(('split', 'wsi_name'))
-            writer.writerows(_rows(names[:2], names[2:]))
-        stamp = path.stat().st_mtime + 5
-        os.utime(path, (stamp, stamp))
-        second = AD.list_names(dataset='ki67_with_photo#val')
-    assert first == names[:1] and second == names[:2], (first, second)
-
-
-def t_split_id_stain_that_is_not_the_datasets_gives_nothing():
-    names = _ki67(2)
-    with _split_file_of(_rows(names[:1], names[1:])):
-        assert AD.list_names(dataset='ki67_with_photo#val', stain='HE') == []
-        assert AD.list_names(dataset='ki67_with_photo#val', stain='Ki67') == names[:1]
-
-
-def t_wsi_split_reads_the_same_file_the_same_way():
-    """The writer's reader (`WsiSplit.read_sets`) and the dataset id agree on one
-    file -- and `WsiSplit.split_path` is `AD.split_file`, not a second copy of the
-    path."""
-    import WsiSplit                                            # noqa: PLC0415
-    names = _ki67(6)
-    val, test, train = names[:2], names[2:4], names[4:]
-    with _split_file_of(_rows(val, test, train)) as path:
-        assert WsiSplit.split_path('AnyJob', 'ki67_with_photo') == path
-        sets = WsiSplit.read_sets(path)
-        assert sets == {'val': val, 'test': test, 'train': train}, sets
-        assert (AD.list_names(dataset='ki67_with_photo#val'),
-                AD.list_names(dataset='ki67_with_photo#test'),
-                AD.list_names(dataset='ki67_with_photo#train')) == \
-            (sets['val'], sets['test'], sets['train'])
-    assert WsiSplit.SPLIT_JOB == AD.SPLIT_JOB
-
-
-# ── 6. pick_wsi_names ────────────────────────────────────────────────────────
+# ── 5. pick_wsi_names ────────────────────────────────────────────────────────
 
 def t_pick_wsi_names_is_seeded_ordered_and_capped():
     names = [f'w{i:03d}' for i in range(100)]
@@ -466,8 +299,241 @@ def t_pick_wsi_names_a_cap_of_all_changes_nothing():
 
 def t_pick_wsi_names_is_the_one_datasets_py_uses():
     """`Datasets.py` and AccessDatasets share one function."""
-    import training.MppRoutingHead.Datasets as D               # noqa: PLC0415
+    import training.ClassifyingRoutingHead.Datasets as D               # noqa: PLC0415
     assert D.pick_wsi_names is AD.pick_wsi_names
+
+
+# ── 6. virtual datasets: the catalog, selections, `@<name>` ─────────────────
+
+from typing import Any, Dict, Iterator, List, Optional, Tuple       # noqa: E402
+
+import Cache                                                         # noqa: E402
+
+
+@contextlib.contextmanager
+def _own_cache() -> Iterator[Path]:
+    """AccessDatasets' cache in a temporary directory, for the length of a test."""
+    old: str = Cache.RESULT_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        Cache.RESULT_DIR = tmp
+        try:
+            yield Path(tmp)
+        finally:
+            Cache.RESULT_DIR = old
+
+
+class _Header:
+    """What the catalog reads of a slide, made up from its file name: base mpp 0.25 or 0.5 by its characters'
+    sum, a 4x pyramid of three levels. One name (`_BROKEN`) cannot be opened."""
+
+    def __init__(self, path: str) -> None:
+        if os.path.splitext(os.path.basename(path))[0] == _BROKEN[0]:
+            raise OSError('unreadable header')
+        self.base_mpp: float = 0.25 if sum(map(ord, os.path.basename(path))) % 2 else 0.5
+        self.level_downsamples: Tuple[float, ...] = (1.0, 4.0, 16.0)
+        self.level_dimensions: Tuple[Tuple[int, int], ...] = ((4096, 3072), (1024, 768), (256, 192))
+
+    def close(self) -> None:
+        pass
+
+
+#: the slide `_Header` refuses to open (filled with a real name by the test that needs one)
+_BROKEN: List[str] = ['\0']
+
+
+def _photo_names() -> List[str]:
+    names: List[str] = AD.list_names(dataset='ki67_with_photo')
+    if len(names) < 8:
+        raise AssertionError(f'ki67_with_photo has {len(names)} names, need 8')
+    return names
+
+
+def t_virtual_ids_are_an_at_and_a_plain_name() -> str:
+    assert AD.is_virtual('@val') and not AD.is_virtual('bracs/test') and not AD.is_virtual('bracs/test#val')
+    assert AD._virtual_name('@test63') == 'test63' and AD._virtual_name('@Ki-HE_2') == 'Ki-HE_2'
+    for bad in ('val', '@', '@a/b', '@#x', '@a b', '@_x', '@x.y'):
+        try:
+            AD._virtual_name(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f'{bad!r} was taken for a virtual dataset')
+    return '@<letters, digits, _ and ->'
+
+
+def t_a_selection_combines_keeping_the_left_ones_order() -> str:
+    names: List[str] = _photo_names()
+    a: AD.Selection = AD.Selection([('ki67_with_photo', n) for n in names[:4]], 'a')
+    b: AD.Selection = AD.Selection([('ki67_with_photo', n) for n in names[2:6]], 'b')
+    assert (a | b).names() == names[:6] and (b | a).names() == names[2:6] + names[:2]
+    assert (a & b).names() == names[2:4] and (a - b).names() == names[:2]
+    assert len(AD.Selection(list(a) + list(a), 'twice')) == 4, 'a slide is in a selection once'
+    assert (a - b).how == '(a) - (b)'
+    return 'union, intersection, difference; each slide once'
+
+
+def t_a_split_is_disjoint_complete_and_seeded() -> str:
+    pool: AD.Selection = AD.select(dataset='ki67_with_photo')
+    n: int = len(pool)
+    parts: Tuple[AD.Selection, ...] = pool.split(3, 0.25, 'rest', seed=1)
+    assert [len(p) for p in parts] == [3, int(0.25 * n + 0.5), n - 3 - int(0.25 * n + 0.5)], [len(p) for p in parts]
+    assert set().union(*(set(p) for p in parts)) == set(pool), 'every slide is in a part'
+    assert all(not (set(p) & set(q)) for i, p in enumerate(parts) for q in parts[i + 1:]), 'no slide in two'
+    again: Tuple[AD.Selection, ...] = pool.split(3, 0.25, 'rest', seed=1)
+    assert [p.members for p in again] == [p.members for p in parts], 'the same seed, the same parts'
+    assert pool.split(3, 0.25, 'rest', seed=2)[2].members != parts[2].members, 'another seed, another order'
+    assert pool.sample(5, seed=1).members == pool.split(5, seed=1)[0].members
+    assert len(pool.split(3, seed=1)) == 1, 'no rest: the slides left over are in no part'
+    for sizes in ((n + 1,), ('rest', 'rest'), (0,), (1.5,), (n, 'rest'), (True,)):
+        try:
+            pool.split(*sizes, seed=0)
+        except ValueError:
+            continue
+        raise AssertionError(f'split{sizes} of {n} was accepted')
+    return f'{[len(p) for p in parts]} of {n}; seeded; refused: too many, two rests, 0, 1.5, an empty rest'
+
+
+def t_select_narrows_by_dataset_and_stain() -> str:
+    both: AD.Selection = AD.select(dataset=['ki67_with_photo', 'ki67_pure'])
+    assert both.names() == AD.list_names(dataset='ki67_with_photo') + AD.list_names(dataset='ki67_pure')
+    assert {d for d, _ in both} == {'ki67_with_photo', 'ki67_pure'}
+    assert not len(AD.select(dataset=['ki67_with_photo', 'ki67_pure'], stain='HE'))
+    he: AD.Selection = AD.select(stain='HE')
+    assert {d for d, _ in he} <= {'bracs/test', 'bracs/train'} and len(he)
+    try:
+        AD.select(dataset='ki67_with_photo#val')
+        raise AssertionError('an id that is no dataset was drawn from')
+    except KeyError:
+        pass
+    return f'{len(both)} Ki67, {len(he)} HE; an unknown id refused'
+
+
+def t_the_catalog_is_read_once_per_slide_and_read_back_without_opening() -> str:
+    names: List[str] = _photo_names()
+    opened: List[str] = []
+
+    def opener(path: str) -> _Header:
+        opened.append(path)
+        return _Header(path)
+
+    _BROKEN[0] = names[3]
+    try:
+        with _own_cache():
+            try:
+                AD.catalog(['ki67_with_photo'])
+                raise AssertionError('a dataset with no catalog was read')
+            except FileNotFoundError as e:
+                assert 'make_dataset.py --catalog' in str(e), e
+            AD.build_catalog(['ki67_with_photo'], opener=opener, log=lambda s: None)
+            assert len(opened) == len(names)
+            AD.build_catalog(['ki67_with_photo'], opener=opener, log=lambda s: None)
+            assert len(opened) == len(names) + 1, 'only the unreadable slide is opened again'
+            rows: List[AD.SlideInfo] = AD.catalog(['ki67_with_photo'])
+            assert [r.name for r in rows] == names and all(r.stain == 'Ki67' for r in rows)
+            broken: AD.SlideInfo = next(r for r in rows if r.name == names[3])
+            assert broken.error and broken.base_mpp is None and not broken.native_at((1.0,))
+            good: AD.SlideInfo = rows[0]
+            assert good.level_downsamples == (1.0, 4.0, 16.0) and good.dimensions == (4096, 3072)
+            assert good.n_levels == 3 and good.native_at((1.0, 4.0, 16.0)) and not good.native_at((1.0, 2.0))
+            assert good.has_photos, 'Ki67_with_photo slides have their photos'
+    finally:
+        _BROKEN[0] = '\0'
+    return f'{len(names)} headers once, the unreadable one again; levels, mpp, native, photos read back'
+
+
+def t_where_narrows_by_the_header() -> str:
+    names: List[str] = _photo_names()
+    with _own_cache():
+        AD.build_catalog(['ki67_with_photo'], opener=_Header, log=lambda s: None)
+        fine: AD.Selection = AD.select(dataset='ki67_with_photo', where=lambda s: s.base_mpp == 0.25,
+                                       label='base_mpp 0.25')
+        want: List[str] = [n for n in names
+                           if _Header(AD.locate(n, dataset='ki67_with_photo').path).base_mpp == 0.25]
+        assert fine.names() == want and want, (fine.names(), want)
+        assert fine.how.endswith('where base_mpp 0.25'), fine.how
+        try:
+            AD.select(dataset='ki67_pure', where=lambda s: True)
+            raise AssertionError('a dataset with no catalog was narrowed')
+        except FileNotFoundError:
+            pass
+    return f'{len(want)} of {len(names)}; a dataset with no catalog refused'
+
+
+def t_a_virtual_dataset_is_read_and_located_like_a_dataset() -> str:
+    names: List[str] = _photo_names()
+    chosen: List[str] = [names[5], names[0], names[3]]
+    with _own_cache():
+        path: Path = AD.save_virtual('@t1', AD.Selection([('ki67_with_photo', n) for n in chosen], 'by hand'),
+                                     recipe='test')
+        assert path == AD.vdataset_file('@t1') and path.name == 'list_t1.csv'
+        assert AD.list_names(dataset='@t1') == chosen and AD.list_names(dataset='@t1', n=2) == chosen[:2]
+        assert AD.list_names(dataset='@t1', stain='HE') == [] and AD.list_names(dataset='@t1', stain='Ki67') == chosen
+        assert AD.locate(chosen[1], dataset='@t1') == AD.locate(chosen[1], dataset='ki67_with_photo')
+        try:
+            AD.locate(names[1], dataset='@t1')
+            raise AssertionError('a slide not in @t1 was located in it')
+        except KeyError:
+            pass
+        assert AD.virtual_ids() == ['@t1'] and '@t1' not in AD.dataset_ids()
+        rec: Dict[str, Any] = AD.virtual_record('@t1')
+        assert (rec['how'], rec['recipe'], rec['n'], rec['sources']) == ('by hand', 'test', 3, ['ki67_with_photo'])
+        assert AD.select(dataset='@t1').names() == chosen, 'a virtual dataset is a source of a selection too'
+    return 'list_names, locate, stain, select: in its order'
+
+
+def t_a_virtual_dataset_is_written_once_and_a_bad_list_is_refused() -> str:
+    names: List[str] = _photo_names()
+    one: AD.Selection = AD.Selection([('ki67_with_photo', names[0])], 'one')
+    with _own_cache():
+        AD.save_virtual('@once', one)
+        refused: List[str] = []
+        for vid, sel, err in (('@once', one, FileExistsError),
+                              ('@empty', AD.Selection([], 'none'), ValueError),
+                              ('@gone', AD.Selection([('ki67_with_photo', 'no-such-slide')], 'gone'),
+                               FileNotFoundError),
+                              ('@two', AD.Selection([('ki67_with_photo', names[0]), ('ki67_pure', names[0])],
+                                                    'two'), ValueError),
+                              ('plain', one, ValueError)):
+            try:
+                AD.save_virtual(vid, sel)
+            except err:
+                refused.append(vid)
+                continue
+            raise AssertionError(f'{vid} was written')
+        assert AD.virtual_ids() == ['@once'], 'nothing refused left a trace'
+        try:
+            AD.list_names(dataset='@never')
+            raise AssertionError('an unwritten virtual dataset was read')
+        except KeyError as e:
+            assert '@once' in str(e), 'the error names what is written'
+    return f'refused: {refused}'
+
+
+def t_a_virtual_dataset_with_a_slide_gone_is_an_error_not_a_shorter_list() -> str:
+    names: List[str] = _photo_names()
+    with _own_cache():
+        AD.save_virtual('@t2', AD.Selection([('ki67_with_photo', n) for n in names[:2]], 'two'))
+        with open(AD.vdataset_file('@t2'), 'a', newline='') as handle:
+            csv.writer(handle).writerow(('ki67_with_photo', 'moved-away'))
+        try:
+            AD.list_names(dataset='@t2')
+            raise AssertionError('a list with a slide gone was read')
+        except FileNotFoundError as e:
+            assert 'moved-away' in str(e), e
+    return 'FileNotFoundError naming the slide'
+
+
+def t_the_cache_is_access_datasets_own_whatever_the_job() -> str:
+    old: Optional[str] = os.environ.get('SLURM_JOB_NAME')
+    os.environ['SLURM_JOB_NAME'] = 'SomeOtherJob'
+    try:
+        assert AD.vdataset_entry().address.made_by == AD.DATASETS_JOB
+        assert AD.catalog_entry().address.made_by == AD.DATASETS_JOB
+    finally:
+        if old is None:
+            os.environ.pop('SLURM_JOB_NAME', None)
+        else:
+            os.environ['SLURM_JOB_NAME'] = old
+    return f'result/cache/{AD.DATASETS_JOB}/ under any job name'
 
 
 _SECTIONS = {
@@ -488,19 +554,19 @@ _SECTIONS = {
     'list':     ['t_list_names_stain_filter_agrees_with_locate_for_every_name',
                 't_list_names_n_caps_but_never_raises_past_the_end'],
     'disk':     ['t_every_name_from_list_names_resolves_and_exists'],
-    'split':    ['t_split_id_lists_the_recorded_names_in_file_order',
-                't_split_id_locate_accepts_a_member_and_refuses_anything_else',
-                't_split_id_unknown_set_and_unknown_dataset_raise',
-                't_split_id_missing_file_names_the_writer',
-                't_split_id_absent_set_lists_what_the_file_holds',
-                't_split_id_train_rows_leave_val_and_test_as_they_were',
-                't_split_job_without_a_hash_is_an_error_not_ignored',
-                't_split_file_is_read_again_after_it_is_rewritten',
-                't_split_id_stain_that_is_not_the_datasets_gives_nothing',
-                't_wsi_split_reads_the_same_file_the_same_way'],
     'pick':     ['t_pick_wsi_names_is_seeded_ordered_and_capped',
                 't_pick_wsi_names_a_cap_of_all_changes_nothing',
                 't_pick_wsi_names_is_the_one_datasets_py_uses'],
+    'virtual':  ['t_virtual_ids_are_an_at_and_a_plain_name',
+                't_a_selection_combines_keeping_the_left_ones_order',
+                't_a_split_is_disjoint_complete_and_seeded',
+                't_select_narrows_by_dataset_and_stain',
+                't_the_catalog_is_read_once_per_slide_and_read_back_without_opening',
+                't_where_narrows_by_the_header',
+                't_a_virtual_dataset_is_read_and_located_like_a_dataset',
+                't_a_virtual_dataset_is_written_once_and_a_bad_list_is_refused',
+                't_a_virtual_dataset_with_a_slide_gone_is_an_error_not_a_shorter_list',
+                't_the_cache_is_access_datasets_own_whatever_the_job'],
 }
 
 

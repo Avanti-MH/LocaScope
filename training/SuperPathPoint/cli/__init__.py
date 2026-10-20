@@ -76,12 +76,9 @@ def add_slides_args(ap) -> None:
     routing heads name theirs. Nothing searches a cache for slides."""
     ap.add_argument('--datasets', nargs='+', default=None,
                     help='the slides of these datasets: AccessDatasets ids, '
-                         '<id>#<split> for a recorded split')
+                         'registered or virtual (@<name>)')
     ap.add_argument('--n-wsi', type=int, default=None,
                     help='slides per dataset, a seeded pick; default every one')
-    ap.add_argument('--split-cache-job', default=None,
-                    help='whose recorded split a <id>#<split> dataset reads. '
-                         'Default: MakeSplit')
     ap.add_argument('--wsi', nargs='+', default=None,
                     help='slide paths or AccessDatasets names, instead of or '
                          'beside --datasets')
@@ -93,14 +90,11 @@ def slides_from_args(args, seed: int = 0) -> List[str]:
     from common.Corpora import Corpus                              # noqa: PLC0415
     paths = []
     for dataset in args.datasets or []:
-        split_job = args.split_cache_job if '#' in dataset else None
-        names = pick_wsi_names(list_names(dataset=dataset, split_job=split_job),
-                               args.n_wsi, seed)
-        paths += [str(locate(n, dataset=dataset, split_job=split_job).path)
-                  for n in names]
+        names = pick_wsi_names(list_names(dataset=dataset), args.n_wsi, seed)
+        paths += [str(locate(n, dataset=dataset).path) for n in names]
     paths += [Corpus.path_of(w) for w in args.wsi or []]
     if not paths:
-        raise SystemExit('name the slides: --datasets (an id or <id>#<split>) '
+        raise SystemExit('name the slides: --datasets (an AccessDatasets id) '
                          'or --wsi')
     return paths
 

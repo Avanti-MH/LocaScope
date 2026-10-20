@@ -92,7 +92,6 @@ def main() -> int:
     ap.add_argument('--dataset', nargs='+', default=None)
     ap.add_argument('--wsi', nargs='+', default=None,
                     help='explicit WSI path(s)')
-    ap.add_argument('--val-only', action='store_true')
     ap.add_argument('--no-properties', action='store_true',
                     help='skip the full raw-property dump per slide -- '
                          'default is to show it, which gets long fast over '
@@ -110,8 +109,7 @@ def main() -> int:
     if not args.dataset and not wsi_paths:
         ap.error('need --dataset and/or --wsi (or a single positional path)')
 
-    entries = resolve_wsi_paths(dataset=args.dataset, wsi=wsi_paths or None,
-                                val_only=args.val_only)
+    entries = resolve_wsi_paths(dataset=args.dataset, wsi=wsi_paths or None)
     rows = WsiInfoCheck(full=not args.no_properties).run(entries)
 
     if args.out or len(rows) > 1:
