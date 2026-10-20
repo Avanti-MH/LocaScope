@@ -1,11 +1,12 @@
-'''Stage 2 (retrieval)'s shared interface: what every retriever hands back and
-the shape of the two calls that produce it. The stage-1 counterpart is
-`stage1_estimation/StageInterface.py`; spec.md in this directory is the design.
+'''Stage 2 (retrieval)'s candidates: what every retriever's list is made of, and
+the frame it is expressed in. The retriever itself is `Retriever.py`; the
+stage-1 counterpart is `stage1_estimation/StageInterface.py`; spec.md in this
+directory is the design.
 
 Each stage eats the previous stage's output:
 
-    stage 1   est.estimate(query)            -> EstMppResult
-    stage 2   ret.retrieve(query, EstMppResult) -> CandidateSet
+    stage 1   est.estimate(query)                  -> EstMppResult
+    stage 2   ret.retrieve(EstMppResult, query)    -> RetrievalOutput, its .candidates a CandidateSet
     stage 3   loc.localize(query, CandidateSet, topk) -> LocalizationResultSet
               (stage3_localization/StageInterface.py)
 
@@ -26,16 +27,10 @@ the window starts at, `PatchGrid.tile_origin_l0`; nothing here truncates.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Protocol, Tuple, Union, runtime_checkable
-
-import numpy as np
+from typing import TYPE_CHECKING, Any, Dict, Tuple
 
 if TYPE_CHECKING:       # annotations only: nothing here is imported at run time
     from PatchingLib import PatchGrid
-    from SafeSlide import SafeSlide
-    from TileEncoderFunc import TileEncoder
-    from TissueMask import TissueMask
-    from stage1_estimation.StageInterface import EstMppResult
 
 
 #: The rotations a retriever tries, in degrees; the query is turned by these
@@ -60,6 +55,68 @@ class Candidate:
 
     def key(self) -> Tuple[int, str, int, int, int]:
         return (self.region_index, self.lattice, self.row, self.col, self.rotation)
+
+    def shift_px(self) -> Tuple[int, int]:
+        '''(dx, dy) in LEVEL px that a refining method moved the window off its
+        lattice origin; (0, 0) for a window that sits on its lattice.
+        `CandidateSet.origin_l0` adds it, so the one formula for a position
+        stays one formula.'''
+        return (0, 0)
+
+    def extra(self) -> Dict[str, Any]:
+        '''What this kind of candidate carries beyond the six fields, as table
+        columns. A subclass adds fields for what only its method knows and
+        names them here; the base class has none.'''
+        return {}
+
+
+@dataclass(frozen=True)
+class RerankedCandidate(Candidate):
+    '''A candidate a reranker handed back. `score` is the last phase's;
+    `first_score` and `first_rank` are what the FIRST phase (the retriever,
+    a union included) gave this window -- not an intermediate reranker's -- so
+    a caller can tell a window the reranker pulled up from one the retriever
+    already had on top. Defaults only so subclasses can add fields after them.'''
+    first_score: float = 0.0
+    first_rank: int = 0
+
+    def extra(self) -> Dict[str, Any]:
+        return dict(first_score=self.first_score, first_rank=self.first_rank)
+
+
+@dataclass(frozen=True)
+class ShiftedCandidate(RerankedCandidate):
+    '''A window moved off its lattice by `shift` = (dx, dy) level px (a
+    sub-tile refinement). Identity (`key`) stays the lattice window it came
+    from: two shifts of one window are one hypothesis.'''
+    shift: Tuple[int, int] = (0, 0)
+
+    def shift_px(self) -> Tuple[int, int]:
+        return (int(self.shift[0]), int(self.shift[1]))
+
+    def extra(self) -> Dict[str, Any]:
+        return dict(super().extra(), dx=int(self.shift[0]), dy=int(self.shift[1]))
+
+
+@dataclass(frozen=True)
+class TokenMatchCandidate(RerankedCandidate):
+    '''A window verified on patch tokens: how many of the token matches agree on
+    one similarity transform, and their share of the tokens compared.'''
+    n_inliers: int = 0
+    inlier_ratio: float = 0.0
+
+    def extra(self) -> Dict[str, Any]:
+        return dict(super().extra(), n_inliers=self.n_inliers,
+                    inlier_ratio=self.inlier_ratio)
+
+
+@dataclass(frozen=True)
+class VoteCandidate(Candidate):
+    '''A window found by tile voting: the weight the tiles voted for it with.'''
+    votes: float = 0.0
+
+    def extra(self) -> Dict[str, Any]:
+        return dict(votes=self.votes)
 
 
 @dataclass(frozen=True)
@@ -120,14 +177,22 @@ class CandidateSet:
         return q.grid_rows, q.grid_cols
 
     def window_local(self, c: Candidate) -> Tuple[int, int]:
-        '''Level px of the window's top-left from its region's own origin.'''
+        '''Level px of the window's top-left from its region's own origin,
+        shift included.'''
         grid = self.grids[c.region_index]
         x, y = grid.tile_origin(c.lattice, c.row, c.col)
-        return x - grid.x_offset, y - grid.y_offset
+        dx, dy = c.shift_px()
+        return x - grid.x_offset + dx, y - grid.y_offset + dy
 
     def origin_l0(self, c: Candidate) -> Tuple[int, int]:
-        '''Level-0 integer a read of the window starts at.'''
-        return self.grids[c.region_index].tile_origin_l0(c.lattice, c.row, c.col)
+        '''Level-0 integer a read of the window starts at: its lattice tile's
+        origin, plus the shift a refining method gave it (level px times ds,
+        rounded; none for a window on its lattice).'''
+        x, y = self.grids[c.region_index].tile_origin_l0(c.lattice, c.row, c.col)
+        dx, dy = c.shift_px()
+        if dx or dy:
+            return x + int(round(dx * self.ds)), y + int(round(dy * self.ds))
+        return x, y
 
     def window_l0(self, c: Candidate, query) -> Tuple[float, float]:
         '''(w, h) of the window in level-0 px.'''
@@ -149,40 +214,7 @@ class CandidateSet:
             (x, y), (w, h) = self.origin_l0(c), self.window_l0(c, query)
             out.append(dict(rank=rank, region=c.region_index, lattice=c.lattice,
                             row=c.row, col=c.col, rotation=c.rotation,
-                            score=c.score, x0=x, y0=y, w0=w, h0=h))
+                            score=c.score, x0=x, y0=y, w0=w, h0=h, **c.extra()))
         return out
 
 
-class Retriever(Protocol):
-    '''First phase (spec.md): the whole slide -> top-K windows. Every method
-    that replaces `SlidingWinSimRot` honours this and nothing else is assumed
-    of it: the pipeline, the bench and locate_photo see no concrete class.
-
-    `tile_size` and `overlap` are how the method cuts a query, which a caller
-    needs to turn a window into its level-0 box (`CandidateSet.rows`).
-    `encoder` is None for a method with no tile encoder. Not
-    `runtime_checkable`: an isinstance check would read `encoder`, which may
-    build a model.
-
-    A method may offer more, and a caller asks for it with `getattr` and does
-    without when it is absent: `tile_sim_rows(candidates)` (a table of the
-    per-tile cosines), `rotations_searched()`, `last_level_seconds`,
-    `nearest_window(...)` (needs ground truth, the synthetic bench only) and
-    `frame(level)` (an empty CandidateSet in that level's frame, to put stored
-    candidates in).'''
-    encoder: Optional[TileEncoder]
-    tile_size: int
-    overlap: bool
-
-    def build(self, wsi: Union[str, SafeSlide], mask: Optional[TissueMask],
-              feature_store: Optional[Any] = None) -> 'Retriever': ...
-
-    def retrieve(self, query: np.ndarray, estimate: EstMppResult) -> CandidateSet: ...
-
-
-@runtime_checkable
-class Reranker(Protocol):
-    '''Second phase (spec.md): same type in and out, so it can be skipped.
-    No implementation yet.'''
-    def build(self, wsi, encoder) -> 'Reranker': ...
-    def rerank(self, query, candidates: CandidateSet) -> CandidateSet: ...
