@@ -33,7 +33,8 @@ reads the entries that hit and loads no model for them. The tables are the
 bench's, without the truth tables a real photo has no ground for:
 
     stage 1   output  neighbours  probs  votes  prototypes_index
-    stage 2   output  tile_sims          (what the retriever offers is written)
+    stage 2   output  tile_sims  rerank_scores   one entry per phase of the chain
+                                       (what each retriever offers is written)
     stage 3   output  matches  answer
 
 `answer` is one row per photo: the verified candidate with the largest
@@ -75,10 +76,9 @@ from BenchCommon import (ROLES, RunClock, Shot, Stage, fmt_each, fmt_rate,  # no
 DATASET: str = 'ki67_with_photo'
 PHOTO_SUFFIXES: Tuple[str, ...] = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
 
-#: The tables of each stage's entry: the bench's, without `truth` and
-#: `truth_sim`, and stage 3's with the answer.
-ROLES_REAL: Dict[int, Tuple[str, ...]] = {
-    1: ROLES[1], 2: ('output', 'tile_sims'), 3: ('output', 'matches', 'answer')}
+#: The tables of stages 1 and 3: the bench's, and stage 3's with the answer. Stage 2's are each phase's
+#: (`BenchCommon.phase_roles`, with no truth).
+ROLES_REAL: Dict[int, Tuple[str, ...]] = {1: ROLES[1], 3: ('output', 'matches', 'answer')}
 
 
 # ── a slide's photos ─────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ def main() -> int:
     ap.add_argument('--stage3', default='sift:default', help='<method>:<recipe>')
     ap.set_defaults(route='stage1')     # a real photo has no placed level: no oracle
     add_mask_args(ap)
-    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--mask-cache-job', default='Masks',
                     help="whose mask cache the --seg mask is read from and "
                          'written to')
     ap.add_argument('--slides', nargs='*', default=[],

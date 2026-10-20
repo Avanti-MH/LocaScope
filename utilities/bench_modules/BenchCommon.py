@@ -12,7 +12,7 @@ Three programs run shots through the stages and keep the same entries:
     bench_modules/bench_stage1_mpp.py     stage 1 only, several methods
 
 and three read them: `cli/plot/plot_locascope.py`, `cli/metrics/
-analyze_stage1_metrics.py`, `bench_window_retrieval.py` (its slides and
+analyze_stage1_metrics.py`, `bench_stage2_retriever.py` (its slides and
 photos). What they share is here, so none imports another's entry point.
 
 STAGE ENTRIES. Each stage's tables for a slide are ONE cache entry, written
@@ -20,7 +20,7 @@ when the slide is done (`Cache.Entry.writing`), under the address of the shots
 (`render=<gap>` for synthetic FoVs, `photos=<id>` for real ones):
 
     <shots>/stage1/{output,neighbours,probs,votes,prototypes_index}_<s1>.csv
-    <shots>/stage1=<s1|oracle>/stage2/{output,tile_sims,truth,truth_sim}_<s2>.csv
+    <shots>/stage1=<s1|oracle>/stage2/{output,tile_sims,truth,truth_sim,rerank_scores}_<s2>.csv
     <shots>/stage1=<s1|oracle>/stage2=<s2>/stage3/{output,matches}_<s3>.csv
 
 `<sN>` is `<method>-<recipe>-<16 hex>`: the hex is the config's identity (for
@@ -28,8 +28,9 @@ stage 2 together with the mask it searches). Every table has an `index`
 column, the shot's number. A record holds what makes the entry the one asked
 for -- the config, the code's versions, the upstream ids, `limit` -- and NOT
 which tables it holds: that is its content (`status`'s `roles`, against the
-files the entry lists as its `members`). A table a method does not offer (a
-retriever without `tile_sim_rows`) is left empty.
+files the entry lists as its `members`). A table a stage-1 or stage-3 method
+does not offer is left empty; a stage-2 phase writes only the tables it holds
+(`phase_roles`).
 """
 
 from __future__ import annotations
@@ -43,10 +44,11 @@ import math
 import sys
 import threading
 import time
+import dataclasses
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import (Any, Callable, Dict, Iterable, Iterator, List, Optional,
+from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
                     Sequence, Tuple)
 
 import numpy as np
@@ -54,32 +56,121 @@ import torch
 
 import Cache                                                           # noqa: E402
 from ConfigArgs        import add_config_args, config_from_args          # noqa: E402
-from ConfigIdentity    import record, short_id                          # noqa: E402
+from ConfigIdentity    import file_fingerprint, record, short_id                          # noqa: E402
 from LocaScopePipeline import LocaScopePipeline, construct_stage        # noqa: E402
 from PatchingLib       import QueryPatchContainer                       # noqa: E402
 from TileSampler       import PlanSpec                                  # noqa: E402
 from TissueMaskConfig  import (MASK_RECIPES, MaskMaker, add_mask_args,  # noqa: E402
                                mask_cfg_from_args)
-from AccessDatasets    import list_names, locate                        # noqa: E402
+from AccessDatasets    import by_source, locate                         # noqa: E402
 from SlideReader       import SlideReader                               # noqa: E402
 from camera            import Render                                    # noqa: E402
 from FovSupply         import FovSupply, add_fov_args, fov_from_args    # noqa: E402
 from stage1_estimation.StageInterface import EstMppResult               # noqa: E402
-from stage2_retrieval.StageInterface import Candidate, CandidateSet, Retriever  # noqa: E402
+from stage2_retrieval.Context import nearest_window, query_dims          # noqa: E402
+from stage2_retrieval.Retriever import RetrievalOutput, Retriever        # noqa: E402
+from stage2_retrieval.StageInterface import (Candidate, CandidateSet,  # noqa: E402
+                                             RerankedCandidate, ShiftedCandidate)
 from stage3_localization.StageInterface import LocalizationResultSet     # noqa: E402
 import stage1_estimation                                                 # noqa: E402
 import stage2_retrieval                                                  # noqa: E402
 import stage3_localization                                               # noqa: E402
+from stage2_retrieval.Naming import config_label, entry_name, stage_name   # noqa: E402
 
 
 #: The route whose level is the one the FoV was placed at.
 ORACLE = 'oracle'
 
 #: Fields a `--stageN-*` flag does not reach: configs of their own, chosen by
-#: the recipe (stage 1's encoder, bank draw) or by --seg (the mask). Stage 2's
-#: encoder is reached: `--stage2-encoder-pooling cls_avg`, `--stage2-encoder-...`.
-_NOT_FLAGS = {1: ('encoder', 'mask_cfg', 'sampler_cfg', 'levels'), 2: (),
-              3: ()}
+#: the recipe (stage 1's encoder, bank draw) or by --seg (the mask). A single
+#: stage-2 retriever's fields are reached (`--stage2-raw-topk 500`,
+#: `--stage2-encoder-pooling cls_avg`); a chain's `phases` (configs of different
+#: classes) are chosen by the recipe or the arm: no flag sets a chain.
+_NOT_FLAGS = {1: ('encoder', 'mask_cfg', 'sampler_cfg', 'levels'),
+              2: ('phases',), 3: ()}
+
+
+def weights_of_config(cfg: Any) -> List[str]:
+    """Every checkpoint file a config reads, nested configs and chains included: each `weights` field that
+    names a file, and what `weights_files()` lists. Sorted, once each."""
+    found: set = set()
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, (tuple, list)):
+            for item in obj:
+                walk(item)
+        elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            for f in dataclasses.fields(obj):
+                value: Any = getattr(obj, f.name)
+                if f.name == 'weights' and isinstance(value, str) and value:
+                    found.add(value)
+                else:
+                    walk(value)
+            listed: Any = getattr(obj, 'weights_files', None)
+            if callable(listed):
+                found.update(listed())
+
+    walk(cfg)
+    return sorted(found)
+
+
+def stage_hexid(cfg: Any, also_id: tuple = ()) -> str:
+    """The hex id of a stage's entry: the config's identity, `also_id` (the mask ...) and the CONTENT of every
+    checkpoint the config reads, so a retrained file under the same name is another entry and a renamed
+    file with the same bytes is the same one. A checkpoint that is not there is a part of its own (the
+    build fails on it later). A config that reads none keeps the id it had."""
+    from stage1_estimation.StageInterface import weights_path    # noqa: PLC0415
+    prints: List[str] = []
+    for name in weights_of_config(cfg):
+        try:
+            prints.append(f'weights={file_fingerprint(weights_path(name))}')
+        except OSError:
+            prints.append(f'weights={name}:missing')
+    if not also_id and not prints:
+        return cfg.identity_id()
+    return short_id([cfg.identity_id(), *also_id, *prints])
+
+
+def weights_prints(cfg: Any) -> Dict[str, str]:
+    """`{'weights[<file>]': fingerprint}` of every checkpoint `cfg` reads, for its record."""
+    from stage1_estimation.StageInterface import weights_path    # noqa: PLC0415
+    out: Dict[str, str] = {}
+    for name in weights_of_config(cfg):
+        try:
+            out[f'weights[{name}]'] = file_fingerprint(weights_path(name))
+        except OSError:
+            out[f'weights[{name}]'] = 'missing'
+    return out
+
+
+def phase_ids(cfg: Any, also_id: tuple = ()) -> List[Tuple[str, str]]:
+    """`(entry name, own hash)` of every phase of a stage-2 chain: each phase's hash is its config's (with its
+    checkpoints, `stage_hexid`), the mask (`also_id`) and the hash of the phase before it, which its name
+    carries too (`_after-`). A phase is the same entry in every chain that runs it after the same phases."""
+    out: List[Tuple[str, str]] = []
+    up: str = ''
+    for phase in cfg.phases:
+        own: str = stage_hexid(phase, tuple(also_id) + ((up,) if up else ()))
+        out.append((entry_name(config_label(phase), own, up), own))
+        up = own
+    return out
+
+
+def phase_record(cfg: Any, name: str, after: str, **upstream) -> dict:
+    """The record of one phase of a stage-2 chain: that phase's config and code, its checkpoints, and the hash
+    of the phase it reads its list from (`after`, '' for the first). The pipeline's and the stage-2 bench's
+    entries of one phase are one entry, so both make its record here."""
+    return dict(record(cfg, also=(stage2_retrieval.retriever_class(cfg),), after=after, **upstream,
+                       **weights_prints(cfg)), label=name)
+
+
+def as_chain(cfg: Any, cls: type) -> Tuple[Any, type]:
+    """A stage-2 config as a chain: a single retriever is a chain of one phase, so every stage 2 is filed the
+    same way, phase by phase."""
+    from stage2_retrieval.MultiPhases import MultiPhases, MultiPhasesConfig   # noqa: PLC0415
+    if isinstance(cfg, MultiPhasesConfig):
+        return cfg, cls
+    return MultiPhasesConfig(phases=(cfg,)), MultiPhases
 
 
 # ── the stages: a recipe, its id, its record ─────────────────────────────────
@@ -99,9 +190,14 @@ class Stage:
         self.name: str = name
         self.cfg: Any = cfg
         self.cls: type = cls
-        hexid: str = (short_id([cfg.identity_id(), *also_id]) if also_id
-                      else cfg.identity_id())
+        hexid: str = stage_hexid(cfg, also_id)
         self.id: str = f'{method}-{name}-{hexid}'
+        #: stage 2, a chain (`MultiPhasesConfig`): `(entry name, own hash)` of every phase, each filed after the
+        #: one before (`phase_ids`); the stage's id is its last phase's, the list stage 3 reads
+        self.phases: List[Tuple[str, str]] = []
+        if n == 2 and hasattr(cfg, 'phases'):
+            self.phases = phase_ids(cfg, also_id)
+            self.id = self.phases[-1][0]
         self._runtime: Dict[str, Any] = runtime
         self._obj: Optional[Any] = None
 
@@ -121,15 +217,14 @@ class Stage:
         return self._obj
 
     def record(self, **upstream) -> dict:
-        """The config's record, the class's code and, for a method with a
-        checkpoint, the file's fingerprint: `weights` is no part of the
-        config's id, so a retrained file under the same name is seen here."""
-        weights = getattr(self.cfg, 'weights', None)
-        if weights:
-            from ConfigIdentity import file_fingerprint           # noqa: PLC0415
-            from stage1_estimation.StageInterface import weights_path  # noqa: PLC0415
-            upstream['weights'] = file_fingerprint(weights_path(weights))
-        return dict(record(self.cfg, also=(self.cls,), **upstream), label=self.id)
+        """The config's record, the class's code and the fingerprint of every
+        checkpoint it reads (the content is in the id too: `stage_hexid`)."""
+        return dict(record(self.cfg, also=(self.cls,), **upstream, **weights_prints(self.cfg)), label=self.id)
+
+    def phase_record(self, i: int, **upstream) -> dict:
+        """The record of phase `i` of a stage-2 chain (`phase_record`)."""
+        return phase_record(self.cfg.phases[i], self.phases[i][0], self.phases[i - 1][1] if i else '',
+                            **upstream)
 
 
 def parse_stage(args, n: int):
@@ -255,10 +350,11 @@ def run_stage1(est: Any, img: np.ndarray, tables: Tables,
         if hasattr(est, 'patch_probs'):
             patches = est.query_patches(img)
             probs = est.patch_probs(img)
-            r1 = est.from_probs(probs, est.cfg.vote)
+            r1 = est.from_probs(probs, est.cfg.vote, patches=patches)
         else:
             r1 = est.estimate(img)
     except Exception as e:                                          # noqa: BLE001
+        print(f'  [stage 1] photo {index} failed: {type(e).__name__}: {e}', flush=True)
         tables.add('output', index, [dict(error=f'{type(e).__name__}: {e}')])
         return None
     tables.add('output', index, [dict(r1.row(), error='',
@@ -362,139 +458,352 @@ def _levels(cell: str) -> Tuple[int, ...]:
 
 
 def run_stage2(pl: LocaScopePipeline, img: np.ndarray, route: EstMppResult,
-               truth: Optional[Truth], tables: Tables,
+               truth: Optional[Truth], tables: Dict[int, Tables],
+               stored: Dict[int, Dict[int, List[Dict[str, str]]]],
                index: int) -> Optional[CandidateSet]:
-    """The CandidateSet of the FoV, routed by `route`, its rows added; None when
-    stage 2 failed or no level could be searched. `truth` places the FoV (a
-    synthetic one; a real photo has none): its window is the one at the photo's
-    own level, scored only when stage 2 searched that level, its box alone
-    (`_truth_box`) when it was sent elsewhere. The methods' optional tables are
-    asked for with `getattr` and left out when the retriever has none."""
+    """The list stage 3 reads (the chain's last phase's) for the FoV, routed by
+    `route`; None when stage 2 failed or no level could be searched. Stage 2 is a
+    chain (`MultiPhases`); `tables` are the phases to write, by phase, and
+    `stored` the rows of the phases whose entries hit: such a phase is not run,
+    its list goes on to the next (`MultiPhases.run`'s `cached`).
+
+    Each phase written gets its list (`output`), the tables its retriever writes
+    of what it offers (`Retriever.tables`), and on the first phase, with `truth`
+    (a synthetic FoV), the answers (`truth_rows`): scored and ranked among every
+    window when the phase searched the photo's own level, their windows alone
+    otherwise."""
+    chain: Any = pl.retriever
+
+    def cached(i: int, upstream: Any) -> Optional[CandidateSet]:
+        if i not in stored:
+            return None
+        rows: List[Dict[str, str]] = stored[i].get(index, [])
+        return frame_from_rows(chain, rows) if rows and not rows[0].get('error') else None
+
     t0: float = time.perf_counter()
     try:
-        cs: CandidateSet = pl.stage2(img, route)
+        out: RetrievalOutput = pl.stage2(img, route, cached)
     except Exception as e:                                          # noqa: BLE001
-        tables.add('output', index, [dict(level=route.chosen_level,
-                                          error=f'{type(e).__name__}: {e}')])
+        for tab in tables.values():
+            tab.add('output', index, [dict(level=route.chosen_level, error=f'{type(e).__name__}: {e}')])
         return None
     t: float = round(time.perf_counter() - t0, 3)
-    ret: Retriever = pl.retriever
-    frame: Dict[str, Any] = dict(level=cs.level, ds=cs.ds,
-                                 irretrievable_lvl=_cells(cs.irretrievable_lvl),
+    outs: List[RetrievalOutput] = chain.outputs(out)
+    first: Any = chain.cfg.phases[0]
+    tile: int = int(first.tile_size)
+    overlap: bool = bool(getattr(first, 'overlap', True))
+    # the query as the first phase cut it: a window's size is its tile grid
+    qc: QueryPatchContainer = QueryPatchContainer(img)
+    qc.extract_all(tile, overlap=overlap)
+    for i, tab in tables.items():
+        write_phase(tab, index, outs[i], chain.phases[i], img, qc, truth, tile, overlap, t)
+    last: CandidateSet = outs[-1].candidates
+    return last if len(last) else None
+
+
+def write_phase(tab: Tables, index: int, out: RetrievalOutput, retriever: Any, img: np.ndarray,
+                qc: QueryPatchContainer, truth: Optional[Truth], tile: int, overlap: bool, t_s: float) -> None:
+    """One FoV's rows of one phase's entry: its list (`output`, in the frame it is expressed in), the tables
+    its retriever writes of what it offers (`Retriever.tables`), and, when the entry holds a truth
+    (`phase_roles`) and the FoV has one, its answers (`truth_rows`). The one writer of a stage-2 entry, the
+    pipeline's and the stage-2 bench's alike."""
+    cs: CandidateSet = out.candidates
+    frame: Dict[str, Any] = dict(level=cs.level, ds=cs.ds, irretrievable_lvl=_cells(cs.irretrievable_lvl),
                                  alter_lvl=_cells(cs.alter_lvl))
     if not len(cs):
-        tables.add('output', index, [dict(frame, error='no level holds the query',
-                                          t_s=t)])
-        return None
-    # the query as the retriever cut it: a window's size is its tile grid
-    qc: QueryPatchContainer = QueryPatchContainer(img)
-    qc.extract_all(ret.tile_size, overlap=ret.overlap)
-    # the output interface itself: the CandidateSet, one row per window, in
-    # the frame it is expressed in
-    tables.add('output', index, [dict(r, **frame, error='', t_s=t)
-                                 for r in cs.rows(qc)])
-    tile_rows: Optional[Callable[..., List[Dict[str, Any]]]] = getattr(
-        ret, 'tile_sim_rows', None)
-    if tile_rows is not None:
-        tables.add('tile_sims', index, tile_rows(cs.candidates))
-    if truth is not None:
+        tab.add('output', index, [dict(frame, error='no level holds the query', t_s=t_s)])
+        return
+    tab.add('output', index, [dict(r, **frame, n_listed=len(cs), error='', t_s=t_s) for r in cs.rows(qc)])
+    for role, rows in retriever.tables(out, qc).items():
+        if role in tab.rows:
+            tab.add(role, index, rows)
+    if truth is not None and 'truth' in tab.rows:
         try:
-            centre: Tuple[float, float] = truth.centre(ret.tile_size)
-            if cs.level == truth.level and hasattr(ret, 'nearest_window'):
-                row: Dict[str, Any]
-                tiles: List[Dict[str, Any]]
-                row, tiles = _truth_rows(ret, cs, qc, centre, truth.rot)
-                tables.add('truth_sim', index, tiles)
-            else:
-                row = _truth_box(img.shape, truth.rot, ret.tile_size, truth.ds, centre)
-            tables.add('truth', index, [dict(row, truth_level=truth.level)])
+            row, tiles = truth_rows(out, img, qc, truth, tile, overlap, getattr(retriever, 'frame', None))
+            if 'truth_sim' in tab.rows:
+                tab.add('truth_sim', index, tiles)
+            tab.add('truth', index, [dict(row, truth_level=truth.level)])
         except Exception as e:                                      # noqa: BLE001
-            tables.add('truth', index, [dict(error=f'{type(e).__name__}: {e}')])
-    return cs
+            tab.add('truth', index, [dict(error=f'{type(e).__name__}: {e}')])
 
 
-def _truth_box(shape, rot_deg: int, tile: int, ds: float, centre) -> dict:
-    """The truth row of a FoV stage 2 searched at a level not its own: the
-    level-0 box the query's tile grid, turned by `rot_deg`, covers at its own
-    level (`ds`), centred on `centre`. No window there was scored, so no
-    rank, score or cosines."""
-    H, W = shape[:2]
-    Hr, Wr = (H, W) if (rot_deg // 90) % 2 == 0 else (W, H)
-    w0, h0 = (Wr // tile) * tile * ds, (Hr // tile) * tile * ds
+# ── answers: which windows are a FoV's truth, and where they rank ──────────────
+#
+# THE ONE DEFINITION of a FoV's answer windows, their ranks in a first phase's scores, and their places in a
+# list, for everyone that judges stage 2 -- the pipeline's truth (`truth_rows`), the stage-2 bench (its streamed
+# pass and its engine), and the analyses reading the cache back (`answers_of_row`). A second copy of any of
+# these is how the bench once named one window and the stage another.
+
+#: A FoV's two answers, by lattice: the main-lattice window and the offset-lattice window whose centre is
+#: nearest the point its query's tile grid stands for. The main one is THE answer; a list holding either has
+#: the FoV.
+ANSWER_LATTICES: Tuple[str, ...] = ('main', 'offset')
+
+#: A window's identity, `Candidate.key()`: `(region, lattice, row, col, rotation)`.
+Key = Tuple[int, str, int, int, int]
+
+#: A first phase's score of every window (`window_scores`): one `[rows, cols]` per `(rotation, region, lattice)`.
+Maps = Dict[Tuple[int, int, str], torch.Tensor]
+
+
+@dataclass(frozen=True)
+class Answer:
+    """One answer of a FoV: the window of `lattice`, at the rotation that sets the photo upright, whose centre is
+    nearest the level-0 point the query's tile grid stands for, among the windows the stage scores -- the real
+    grid's (`Context.nearest_window`, `PatchGrid.tile_origin_l0`). `box` is its level-0 `(x0, y0, w0, h0)`,
+    `dist_l0` its centre's distance to the point; `dx`, `dy` that distance by axis (None for an answer read
+    back from a table, which keeps the distance only)."""
+    lattice: str
+    region: int
+    row: int
+    col: int
+    rotation: int
+    box: Tuple[int, int, float, float]
+    dist_l0: float
+    dx: Optional[float] = None
+    dy: Optional[float] = None
+
+    @property
+    def key(self) -> Key:
+        return (self.region, self.lattice, self.row, self.col, self.rotation)
+
+    @property
+    def origin(self) -> Tuple[int, int]:
+        return int(self.box[0]), int(self.box[1])
+
+
+@dataclass(frozen=True)
+class Answers:
+    """A FoV's answers: `main`, THE answer, and `offset` when there is that lattice."""
+    main: Answer
+    offset: Optional[Answer] = None
+
+    def __iter__(self) -> Iterator[Answer]:
+        yield self.main
+        if self.offset is not None:
+            yield self.offset
+
+    def main_only(self) -> 'Answers':
+        return Answers(self.main)
+
+    def within(self, half_l0: float) -> bool:
+        """Every answer is less than `half_l0` from the point on each axis: half a tile is where the lattice
+        point nearest the point lies, so a farther one is a window standing in for one the region lacks."""
+        return all(a.dx is not None and a.dy is not None and abs(a.dx) <= half_l0 and abs(a.dy) <= half_l0
+                   for a in self)
+
+
+def answers(frame: CandidateSet, dims: Tuple[int, int], centre: Tuple[float, float], rotation: int,
+            lattices: Sequence[str] = ANSWER_LATTICES) -> Optional[Answers]:
+    """The answers of a query of `dims` (rows, cols of its tile grid at `rotation`) whose grid stands for the
+    level-0 `centre`, in `frame` (a level's regions and grids), one per lattice of `lattices` that has a window;
+    None when the main lattice has none."""
     cx, cy = centre
-    return dict(truth_rotation=rot_deg, truth_x0=int(round(cx - w0 / 2)),
-                truth_y0=int(round(cy - h0 / 2)), truth_w0=w0, truth_h0=h0)
+    out: Dict[str, Answer] = {}
+    for lattice in lattices:
+        found: Optional[Tuple[int, str, int, int, float]] = nearest_window(frame, dims, cx, cy, rotation,
+                                                                           (lattice,))
+        if found is None:
+            continue
+        region, _, i, j, dist = found
+        x0, y0 = frame.origin_l0(Candidate(region, lattice, i, j, int(rotation), 0.0))
+        tile: float = float(frame.grids[region].tile_size) * float(frame.ds)
+        w0, h0 = dims[1] * tile, dims[0] * tile
+        out[lattice] = Answer(lattice=lattice, region=region, row=i, col=j, rotation=int(rotation),
+                              box=(x0, y0, w0, h0), dist_l0=float(dist),
+                              dx=x0 + w0 / 2.0 - cx, dy=y0 + h0 / 2.0 - cy)
+    if 'main' not in out:
+        return None
+    return Answers(out['main'], out.get('offset'))
 
 
-def window_counts(ret: Any, main_score: float) -> Dict[str, int]:
-    """How many windows the retriever scored for the query it holds the maps of,
-    and where a main window scoring `main_score` stands among the main ones:
-
-        pool_all         every window of every rotation, lattice and region
-        pool_main        the main lattice's
-        truth_rank_main  1 + the main windows scoring strictly above `main_score`
-                         (a tie goes to it, as `nearest_window`'s rank does)
-
-    Read off the retriever's public maps (`sim_maps_by_rot`, one `[H, W, R_q,
-    C_q]` per rotation, region and lattice) and its `score`, so the stage's own
-    code is not touched. Empty for a retriever that keeps no such maps."""
-    maps: Optional[Dict[int, list]] = getattr(ret, 'sim_maps_by_rot', None)
-    if not maps:
-        return {}
-    from stage2_retrieval.SlidingWinSimRot import window_score       # noqa: PLC0415
-    kind: str = getattr(ret, 'score', 'mean')
-    pool_main: int = 0
-    pool_offset: int = 0
-    higher: int = 0
-    pair: list
-    for pair in maps.values():
-        main_sim: torch.Tensor
-        offset_sim: torch.Tensor
-        for main_sim, offset_sim in pair:
-            if main_sim.numel():
-                scores: torch.Tensor = window_score(main_sim, kind)
-                pool_main += scores.numel()
-                higher += int((scores > main_score).sum())
-            if offset_sim.numel():
-                pool_offset += int(np.prod(offset_sim.shape[:-2]))
-    return dict(pool_all=pool_main + pool_offset, pool_main=pool_main,
-                truth_rank_main=higher + 1)
+def _number(text: Any) -> Optional[float]:
+    """A table cell as a number: None for '', None or NaN."""
+    try:
+        value: float = float(text)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) else value
 
 
-def _truth_rows(ret: Any, cs: CandidateSet, qc: QueryPatchContainer,
-                centre: Tuple[float, float], rot_deg: int
-                ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """`(truth row, truth tile rows)`: the window at `rot_deg`, the rotation
-    that sets the photo upright, whose centre is nearest `centre` -- the
-    level-0 point the query's tile grid stands for, not the photo's centre
-    (`query_grid_centre`) -- over both lattices: its score, its level-0 box,
-    its distance to `centre` and its per-tile cosines; and the distance to
-    the nearest main-lattice window (`d_main`). And where those windows stand
-    among ALL the windows the retriever scored (it slides over both lattices,
-    every rotation, every region): `truth_rank_all` for the window above,
-    `truth_rank_main_in_all` for the nearest main one, `truth_rank_main` for
-    that main one among the main windows only, with the pools they are ranks
-    in (`pool_all`, `pool_main`; `window_counts`). The retriever scored every
-    window, so these cost a count, not another pass. Needs the similarity
-    maps, so it is computed here."""
-    cx, cy = centre
-    tw, rank_all, dist = ret.nearest_window(cx, cy, rot_deg)
-    mw, rank_main_in_all, mdist = ret.nearest_window(cx, cy, rot_deg, lattices=('main',))
-    box = CandidateSet(candidates=(tw,), level=cs.level, ds=cs.ds,
-                       grids=cs.grids, irretrievable_lvl=(),
-                       alter_lvl=()).rows(qc)[0]
-    row = dict(
-        truth_region=tw.region_index, truth_lattice=tw.lattice,
-        truth_row=tw.row, truth_col=tw.col, truth_rotation=tw.rotation,
-        truth_score=tw.score, truth_dist_l0=dist, truth_main_dist_l0=mdist,
-        truth_x0=box['x0'], truth_y0=box['y0'], truth_w0=box['w0'],
-        truth_h0=box['h0'], truth_rank_all=rank_all,
-        truth_rank_main_in_all=rank_main_in_all, **window_counts(ret, mw.score))
-    # the window's own tiles: the retriever's table without the rank column
-    tiles: List[Dict[str, Any]] = [
-        {k: v for k, v in r.items() if k != 'rank'}
-        for r in ret.tile_sim_rows([tw])]
-    return row, tiles
+def answers_of_row(row: Mapping[str, Any]) -> Optional[Answers]:
+    """The answers a `truth` row (`truth_row`, read back as text or numbers) names; None when it names none."""
+    def one(lattice: str) -> Optional[Answer]:
+        p: str = f'truth_{lattice}_'
+        cells: List[Optional[float]] = [_number(row.get(p + k)) for k in ('region', 'row', 'col', 'x0', 'y0',
+                                                                          'w0', 'h0', 'dist_l0')]
+        rotation: Optional[float] = _number(row.get('truth_rotation'))
+        if any(v is None for v in cells) or rotation is None:
+            return None
+        region, r, c, x0, y0, w0, h0, dist = cells
+        return Answer(lattice=lattice, region=int(region), row=int(r), col=int(c), rotation=int(rotation),
+                      box=(int(x0), int(y0), float(w0), float(h0)), dist_l0=float(dist))
+
+    main: Optional[Answer] = one('main')
+    return None if main is None else Answers(main, one('offset'))
+
+
+@dataclass(frozen=True)
+class Pools:
+    """How many windows a first phase scored for a query: every region, rotation and lattice."""
+    main: int
+    offset: int
+
+    @property
+    def all(self) -> int:
+        return self.main + self.offset
+
+
+def pools_of(scores: Maps) -> Pools:
+    """The pools of a first phase's search, counted off its scores (a region too small for the query has none)."""
+    main: int = sum(int(m.numel()) for (_, _, lattice), m in scores.items() if lattice == 'main')
+    offset: int = sum(int(m.numel()) for (_, _, lattice), m in scores.items() if lattice == 'offset')
+    return Pools(main=main, offset=offset)
+
+
+def answer_score(scores: Maps, key: Key) -> Optional[float]:
+    """The score of the window `key` names; None when no map holds it."""
+    region, lattice, row, col, rotation = key
+    m: Optional[torch.Tensor] = scores.get((rotation, region, lattice))
+    if m is None or m.numel() == 0 or not (0 <= row < m.shape[0] and 0 <= col < m.shape[1]):
+        return None
+    return float(m[row, col])
+
+
+def rank_among(scores: Maps, score: float, lattices: Sequence[str]) -> int:
+    """1 + the windows of `lattices`, every region and rotation, scoring STRICTLY above `score`: a tie goes
+    to the window ranked."""
+    return 1 + sum(int((m > score).sum()) for (_, _, lattice), m in scores.items()
+                   if lattice in lattices and m.numel())
+
+
+def _scored(scores: Maps, found: Answers) -> Answers:
+    """`found` without an offset answer when no offset window was scored (a main-only phase)."""
+    return found if any(k[2] == 'offset' for k in scores) else found.main_only()
+
+
+def ranked_ranks(scores: Maps, found: Answers, pools: Pools) -> Dict[str, int]:
+    """The ranks of the RANKED mode (no suppression, every window): the main answer among the main windows
+    (`rank_main`) and among all (`rank_main_in_all`); with an offset answer the same of it (`rank_offset_in_offset`,
+    `rank_offset_in_all`). An answer no map holds has the miss value, its pool + 1."""
+    def rank(a: Answer, among: Sequence[str], miss: int) -> int:
+        s: Optional[float] = answer_score(scores, a.key)
+        return miss if s is None else min(miss, rank_among(scores, s, among))
+
+    found = _scored(scores, found)
+    out: Dict[str, int] = {'rank_main': rank(found.main, ('main',), pools.main + 1),
+                           'rank_main_in_all': rank(found.main, ANSWER_LATTICES, pools.all + 1)}
+    if found.offset is not None:
+        out.update(rank_offset_in_offset=rank(found.offset, ('offset',), pools.offset + 1),
+                   rank_offset_in_all=rank(found.offset, ANSWER_LATTICES, pools.all + 1))
+    return out
+
+
+#: A listed window as the list hands it on: its identity and the level-0 point a read of it starts at (its
+#: lattice origin plus any shift a refining phase gave it).
+Listed = Tuple[Key, Tuple[int, int]]
+
+
+def listed_windows(cs: CandidateSet) -> List[Listed]:
+    return [(c.key(), cs.origin_l0(c)) for c in cs.candidates]
+
+
+def listed_places(listed: Sequence[Listed], found: Answers, pools: Pools, tol_px: float) -> Dict[str, int]:
+    """The ranks of the LISTED mode: each answer's PLACE in the list. The list was cut by a suppression that
+    drops a window when a better one of its rotation lies within `tol_px` (level-0 px: `min_sep_tiles` tiles),
+    so the answer's window may be gone, dropped for the one that kept its place: that window stands for it.
+    An answer's place is the first window of the list that IS it, or has its rotation and starts nearer than
+    `tol_px` to it; with none it is not listed, its pool + 1. `rank_main` is THE answer's (the main one);
+    `rank_main_in_all` the same against the whole pool; the offset answer's two when there is one. With `tol_px`
+    0 only the window itself counts."""
+    def place(a: Answer) -> Optional[int]:
+        ox, oy = a.origin
+        for n, (key, (x, y)) in enumerate(listed, 1):
+            if key == a.key or (key[4] == a.rotation and math.hypot(x - ox, y - oy) < tol_px):
+                return n
+        return None
+
+    def capped(value: Optional[int], miss: int) -> int:
+        return miss if value is None else min(value, miss)
+
+    at_main: Optional[int] = place(found.main)
+    out: Dict[str, int] = {'rank_main': capped(at_main, pools.main + 1),
+                           'rank_main_in_all': capped(at_main, pools.all + 1)}
+    if found.offset is not None:
+        at_offset: Optional[int] = place(found.offset)
+        out.update(rank_offset_in_offset=capped(at_offset, pools.offset + 1),
+                   rank_offset_in_all=capped(at_offset, pools.all + 1))
+    return out
+
+
+def listed_of_rows(rows: Iterable[Mapping[str, Any]]) -> List[Listed]:
+    """A stored list (a phase's `output` rows, in rank order, as read back) as `listed_places` reads it."""
+    return [((int(float(r['region'])), str(r['lattice']), int(float(r['row'])), int(float(r['col'])),
+              int(float(r['rotation']))), (int(float(r['x0'])), int(float(r['y0'])))) for r in rows]
+
+
+def first_place(listed: Sequence[Listed], found: Answers, tol_px: float) -> Optional[int]:
+    """The place of the better of the answers in a list (`listed_places`); None when it holds neither."""
+    n: int = len(listed)
+    places: Dict[str, int] = listed_places(listed, found, Pools(main=n, offset=n), tol_px)
+    best: int = min(places['rank_main_in_all'], places.get('rank_offset_in_all', 2 * n + 1))
+    return best if best <= n else None
+
+
+def truth_row(found: Answers, scores: Optional[Maps]) -> Dict[str, Any]:
+    """The `truth` row of a FoV: each answer's window, level-0 box and distance (`truth_<lattice>_*`); with the
+    first phase's `scores` (it searched the photo's own level), each scored answer's score, the ranked ranks
+    (`truth_` + `ranked_ranks`) and the pools (`pool_main`, `pool_all`; the offset pool is the difference)."""
+    row: Dict[str, Any] = dict(truth_rotation=found.main.rotation)
+    for a in found:
+        p: str = f'truth_{a.lattice}_'
+        x0, y0, w0, h0 = a.box
+        row.update({f'{p}region': a.region, f'{p}row': a.row, f'{p}col': a.col, f'{p}x0': x0, f'{p}y0': y0,
+                    f'{p}w0': w0, f'{p}h0': h0, f'{p}dist_l0': a.dist_l0})
+        s: Optional[float] = answer_score(scores, a.key) if scores else None
+        if s is not None:
+            row[f'{p}score'] = s
+    if scores:
+        pools: Pools = pools_of(scores)
+        row.update({f'truth_{k}': v for k, v in ranked_ranks(scores, found, pools).items()})
+        row.update(pool_main=pools.main, pool_all=pools.all)
+    return row
+
+
+def truth_rows(out: RetrievalOutput, img: np.ndarray, qc: QueryPatchContainer, truth: Truth, tile: int,
+               overlap: bool, frame_of: Optional[Callable[[int], CandidateSet]] = None
+               ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """`(truth row, truth tile rows)` of one phase's output: the FoV's answers (`answers`, on the lattices of the
+    photo's own level) as `truth_row` writes them, scored and ranked when the phase scored every window there
+    (`window_scores`), and, when it offers per-tile cosines (`tile_sims`), each scored answer's, by its
+    `lattice`. A phase that searched another level scored no answer: the windows alone, in the frame of the
+    photo's level (`frame_of`, the retriever's `frame`), and without one the rotation alone."""
+    cs: CandidateSet = out.candidates
+    scored: bool = 'window_scores' in out.extras and cs.level == truth.level
+    frame: Optional[CandidateSet] = cs if cs.level == truth.level else None
+    if frame is None and frame_of is not None:
+        try:
+            frame = frame_of(truth.level)
+        except Exception:                                           # noqa: BLE001
+            frame = None                  # a level the retriever cannot read: no lattice to place them on
+    if frame is None:
+        return dict(truth_rotation=truth.rot), []
+    found: Optional[Answers] = answers(frame, query_dims(img, tile, overlap)[truth.rot], truth.centre(tile),
+                                       truth.rot, ANSWER_LATTICES if overlap else ('main',))
+    if found is None:
+        if scored:
+            raise ValueError('no window at this level holds the query')
+        return dict(truth_rotation=truth.rot), []
+    scores: Optional[Maps] = out.extras['window_scores'].value if scored else None
+    tiles: List[Dict[str, Any]] = []
+    if scores and 'tile_sims' in out.extras:
+        from stage2_retrieval.RetrieverSlidingWinSimRot import tile_sim_rows   # noqa: PLC0415
+        for a in _scored(scores, found):
+            window: Candidate = Candidate(a.region, a.lattice, a.row, a.col, a.rotation, 0.0)
+            # the window's own tiles: the retriever's table without the rank column
+            tiles += [dict(lattice=a.lattice, **{k: v for k, v in r.items() if k != 'rank'})
+                      for r in tile_sim_rows(out.extras['tile_sims'].value, [window])]
+    return truth_row(found, scores), tiles
 
 
 def run_stage3(pl: LocaScopePipeline, img: np.ndarray, cs: CandidateSet,
@@ -521,10 +830,31 @@ def run_stage3(pl: LocaScopePipeline, img: np.ndarray, cs: CandidateSet,
     return rs
 
 
+def _number(text: str, default: float = 0.0) -> float:
+    return float(text) if text not in ('', None) else default
+
+
 def stored_candidates(rows: Sequence[Dict[str, str]]) -> List[Candidate]:
-    return [Candidate(int(r['region']), r['lattice'], int(r['row']), int(r['col']),
-                      int(r['rotation']), float(r['score']))
-            for r in sorted(rows, key=lambda r: int(r['rank']))]
+    """The candidates of stored `output` rows, in rank order. A row a reranker
+    wrote carries `first_score` / `first_rank` (and `dx` / `dy` when it moved
+    the window): it comes back as the kind of candidate that holds them, so
+    stage 3 reads the same position the rows were written for. What only a
+    method's own table needs (votes, inliers) is not read back."""
+    out: List[Candidate] = []
+    for r in sorted(rows, key=lambda r: int(r['rank'])):
+        base: Tuple[int, str, int, int, int, float] = (
+            int(r['region']), r['lattice'], int(r['row']), int(r['col']),
+            int(r['rotation']), float(r['score']))
+        first: Dict[str, Any] = dict(first_score=_number(r.get('first_score', '')),
+                                     first_rank=int(_number(r.get('first_rank', ''))))
+        if r.get('dx', '') != '' or r.get('dy', '') != '':
+            out.append(ShiftedCandidate(*base, **first, shift=(
+                int(_number(r.get('dx', ''))), int(_number(r.get('dy', ''))))))
+        elif r.get('first_rank', '') != '':
+            out.append(RerankedCandidate(*base, **first))
+        else:
+            out.append(Candidate(*base))
+    return out
 
 
 def frame_from_rows(retriever: Retriever,
@@ -557,7 +887,7 @@ def stage2_for_stage3(pl: LocaScopePipeline, img: np.ndarray,
     if est is None:
         return None
     try:
-        again: CandidateSet = pl.stage2(img, est)
+        again: CandidateSet = pl.stage2(img, est).candidates
     except Exception:                                               # noqa: BLE001
         return None
     return again if len(again) else None
@@ -565,16 +895,38 @@ def stage2_for_stage3(pl: LocaScopePipeline, img: np.ndarray,
 
 # ── one slide ────────────────────────────────────────────────────────────────
 
-#: The tables of each stage's entry.
+#: The tables of each stage's entry. Stage 2's are every table a phase's entry can hold; which of them one
+#: holds is that phase's (`phase_roles`).
 ROLES = {1: ('output', 'neighbours', 'probs', 'votes', 'prototypes_index'),
-         2: ('output', 'tile_sims', 'truth', 'truth_sim'),
+         2: ('output', 'tile_sims', 'truth', 'truth_sim', 'rerank_scores'),
          3: ('output', 'matches')}
 
 
+def roles_of(stages: Tuple[Stage, Stage, Stage]) -> Dict[int, Tuple[str, ...]]:
+    """`ROLES`: the same for every method of stages 1 and 3 (what a method does not offer is an empty
+    table); stage 2's are each phase's own (`phase_roles`)."""
+    return dict(ROLES)
+
+
+def phase_roles(cls: type, first: bool, truth: bool) -> Tuple[str, ...]:
+    """The tables of a stage-2 phase's entry: its list, the tables its retriever offers (`Retriever.TABLES`),
+    and with `truth` (a synthetic FoV), on a first phase -- the one that scores every window -- the answers
+    (`truth`) and, when it offers per-tile cosines, theirs (`truth_sim`). A reranker scores its list alone, so
+    it has no truth of its own: its FoVs' answers are its chain's first phase's. What a phase does not offer
+    is not written, and a hit does not ask for it."""
+    offered: Tuple[str, ...] = tuple(getattr(cls, 'TABLES', ()))
+    roles: Tuple[str, ...] = ('output', *offered)
+    if truth and first:
+        roles += ('truth',) + (('truth_sim',) if 'tile_sims' in offered else ())
+    return roles
+
+
 #: The bench's own code in the stage-2 entry: how the truth window is placed
-#: (`query_grid_centre`, `matching_rotation`, `_truth_rows`). No stage class
-#: owns it, so a change to it is bumped here.
-TRUTH_VERSION = 3
+#: (`query_grid_centre`, `matching_rotation`, `truth_rows`). No stage class
+#: owns it, so a change to it made to be compared is bumped here; a bug fix is not (ConfigIdentity rule 3).
+#: 4: both answers (main and offset), each with its window, box, distance, score and ranks; per-tile
+#: cosines of both; no truth in a reranker's entry.
+TRUTH_VERSION = 4
 
 
 def stage1_record(s1: Stage, base: Cache.Address, limit: int = 0) -> Dict[str, Any]:
@@ -586,6 +938,19 @@ def stage1_record(s1: Stage, base: Cache.Address, limit: int = 0) -> Dict[str, A
     upstream: Dict[str, str] = ({'render': levels['render']} if 'render' in levels
                                 else {'photos': levels['photos']})
     return dict(s1.record(**upstream), rules=list(RULES), limit=int(limit))
+
+
+def stage2_entries(base: Cache.Address, stages: Tuple[Stage, Stage, Stage], route: str, mask_cfg: Any,
+                   limit: int = 0, truth: bool = True) -> List[tuple]:
+    """`[(entry, id, record)]` of every phase of stage 2's chain on `route`, first phase first: all in the
+    route's `stage2` entry, each under its own name (`Stage.phases`). The last is the list stage 3 reads."""
+    s1, s2, _ = stages
+    up: str = s1.id if route == 'stage1' else ORACLE
+    entry: Any = base.at(stage1=up).entry('stage2')
+    extra: Dict[str, Any] = dict({'truth': TRUTH_VERSION} if truth else {}, limit=int(limit))
+    return [(entry, name, dict(s2.phase_record(i, stage1=up, seg=mask_cfg.seg_id(), region=mask_cfg.region_id()),
+                               **extra))
+            for i, (name, _) in enumerate(s2.phases)]
 
 
 def stage_entries(base: Cache.Address, stages: Tuple[Stage, Stage, Stage],
@@ -601,10 +966,7 @@ def stage_entries(base: Cache.Address, stages: Tuple[Stage, Stage, Stage],
     up = s1.id if route == 'stage1' else ORACLE
     a1 = base.at(stage1=up)
     out = {
-        2: (a1.entry('stage2'), s2.id,
-            dict(s2.record(stage1=up, seg=mask_cfg.seg_id(),
-                           region=mask_cfg.region_id()),
-                 **({'truth': TRUTH_VERSION} if truth else {}), **lim)),
+        2: stage2_entries(base, stages, route, mask_cfg, limit, truth)[-1],
         3: (a1.at(stage2=s2.id).entry('stage3'), s3.id,
             dict(s3.record(stage2=s2.id), **lim))}
     if route == 'stage1':
@@ -824,8 +1186,9 @@ def run_slide_stages(
     loaded. The bench (synthetic FoVs), locate_photo (real photos) and the
     stage-1 bench share this loop.
 
-    `roles` are the tables each stage keeps (`ROLES`, or fewer for a shot
-    source with no truth); `truth` whether stage 2 places a truth window.
+    `roles` are the tables stages 1 and 3 keep (`ROLES`, or more for a shot
+    source of its own); stage 2's are each phase's (`phase_roles`). `truth`
+    is whether stage 2 places the answers.
     `shots` is not started before something has to run. `limit` stops after N
     shots (a smoke run; recorded in the entries). Hooks: `before()` once
     something is to run, before the models load; `after_stage3(shot, route,
@@ -834,10 +1197,12 @@ def run_slide_stages(
     `describe(shot, route, cs, rs)` a string to add to the progress line."""
     s1, s2, s3 = stages
     t1: Optional[Tables] = None
-    t2: Dict[str, Tables] = {}
+    #: stage 2, per route: the phases to write, by phase
+    t2: Dict[str, Dict[int, Tables]] = {}
     t3: Dict[str, Tables] = {}
     stored1: Dict[int, List[Dict[str, str]]] = {}
-    stored2: Dict[str, Dict[int, List[Dict[str, str]]]] = {}
+    #: stage 2, per route: the rows of the phases whose entries hit, by phase (a chain runs on from them)
+    stored2: Dict[str, Dict[int, Dict[int, List[Dict[str, str]]]]] = {}
     route: str
     # every entry this slide needs, and whether it is there
     for route in routes:
@@ -848,19 +1213,27 @@ def run_slide_stages(
                 t1 = Tables(e, sid, rec, roles[1])
             else:
                 stored1 = by_index(read_rows(e.path('output', sid, '.csv')))
-        e, sid, rec = ents[2]
-        if status(e, sid, rec, roles[2]) != 'hit':
-            t2[route] = Tables(e, sid, rec, roles[2])
         e3, sid3, rec3 = ents[3]
-        if status(e3, sid3, rec3, roles[3]) != 'hit':
+        stage3_runs: bool = status(e3, sid3, rec3, roles[3]) != 'hit'
+        missing: Dict[int, Tables] = {}
+        hits: Dict[int, Dict[int, List[Dict[str, str]]]] = {}
+        for i, (e, sid, rec) in enumerate(stage2_entries(base, stages, route, masks.cfg, limit, truth)):
+            held: Tuple[str, ...] = phase_roles(stage2_retrieval.retriever_class(s2.cfg.phases[i]), i == 0, truth)
+            if status(e, sid, rec, held) != 'hit':
+                missing[i] = Tables(e, sid, rec, held)
+            else:
+                hits[i] = by_index(read_rows(e.path('output', sid, '.csv')))
+        if missing:
+            t2[route] = missing
+        if missing or stage3_runs:
+            stored2[route] = hits
+        if stage3_runs:
             t3[route] = Tables(e3, sid3, rec3, roles[3])
-            if route not in t2:
-                stored2[route] = by_index(read_rows(e.path('output', sid, '.csv')))
     if t1 is None and not t2 and not t3:
         print('  every stage hit -- nothing to run', flush=True)
         return False
     print('  to run: ' + ' '.join(
-        ([f'stage1'] if t1 else []) + [f'stage2[{r}]' for r in t2]
+        ([f'stage1'] if t1 else []) + [f'stage2[{r}: phase {",".join(str(i) for i in t2[r])}]' for r in t2]
         + [f'stage3[{r}]' for r in t3]), flush=True)
     if before is not None:
         before()
@@ -917,19 +1290,21 @@ def run_slide_stages(
             got: Optional[CandidateSet] = None
             if route in t2:
                 if est is None:
-                    t2[route].add('output', shot.index, [dict(error='stage 1 failed')])
+                    for tab in t2[route].values():
+                        tab.add('output', shot.index, [dict(error='stage 1 failed')])
                 else:
                     got = run_stage2(pl, shot.img, est, shot.truth, t2[route],
-                                     shot.index)
+                                     stored2.get(route, {}), shot.index)
             d2[route] = time.perf_counter() - t
             clock['stage2'] += d2[route]
             beat.doing(f'photo {shot.index}, stage 3 [{route} route]')
             t = time.perf_counter()
             rs: Optional[LocalizationResultSet] = None
             if route in t3:
-                if got is None and route in stored2:
+                last: int = len(s2.phases) - 1
+                if got is None and route not in t2 and last in stored2.get(route, {}):
                     got = stage2_for_stage3(pl, shot.img, est,
-                                            stored2[route].get(shot.index, []))
+                                            stored2[route][last].get(shot.index, []))
                 if got is None or not len(got):
                     t3[route].add('output', shot.index, [dict(error='no candidates')])
                 else:
@@ -955,7 +1330,7 @@ def run_slide_stages(
         close()   # an early stop drops the staged render entry here
 
     tables: Optional[Tables]
-    for tables in [t1, *t2.values(), *t3.values()]:
+    for tables in [t1, *(tab for by_phase in t2.values() for tab in by_phase.values()), *t3.values()]:
         if tables is not None:
             tables.write()
             print(f'  wrote {tables.entry.dir}/*_{tables.id}', flush=True)
@@ -973,10 +1348,11 @@ def add_run_args(ap) -> None:
     """The flags that decide which entries a run writes -- slides, FoVs,
     stages, routes, masks, caches. A reader given the same flags computes the
     same addresses (`run_from_args`, `slide_supplies`, `stage_entries`)."""
-    ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
-    ap.add_argument('--split', default='val', choices=['val', 'test'],
-                    help='val: where methods are chosen; test: where the choice is confirmed')
-    ap.add_argument('--n-wsi', type=int, default=10, help='slides per dataset')
+    ap.add_argument('--datasets', nargs='+', default=['@legacy-val'],
+                    help='AccessDatasets ids: a registered dataset or a virtual one, `@<name>` (`@legacy-val`, '
+                         'where methods are chosen; `@legacy-test`, where the choice is confirmed)')
+    ap.add_argument('--n-wsi', type=int, default=10,
+                    help='slides of each dataset a --datasets id draws from: the first of its own order')
     ap.add_argument('--stage1', default='knn:gigapath', help='<method>:<recipe>')
     ap.add_argument('--stage2', default='slidewin:gigapath', help='<method>:<recipe>')
     ap.add_argument('--stage3', default='sift:default', help='<method>:<recipe>')
@@ -985,11 +1361,11 @@ def add_run_args(ap) -> None:
                          'FoV was placed at, or each in turn')
     # --fov, --max-ds, --sampler-*, --camera-*
     add_fov_args(ap)
-    ap.add_argument('--fov-mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--fov-mask-cache-job', default='Masks',
                     help='hest masks the FoVs are placed on')
     # --seg: the mask stages 1 and 2 search
     add_mask_args(ap)
-    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--mask-cache-job', default='Masks',
                     help="whose mask cache the --seg mask is read from and "
                          'written to')
     ap.add_argument('--draw-cache-job', default=None,
@@ -1036,10 +1412,13 @@ def run_from_args(args, device=None, *, batch_size=None, multi_gpu=False,
     mask_cfg = mask_cfg_from_args(args)
     s1 = stage1_of(*parse_stage(args, 1), mask_cfg, args.seg, device)
     m2, n2, c2, k2 = parse_stage(args, 2)
+    c2, k2 = as_chain(c2, k2)
     if batch_size:
-        c2 = replace(c2, encoder=replace(c2.encoder, batch_size=batch_size))
+        c2 = replace(c2, phases=tuple(
+            replace(p, encoder=replace(p.encoder, batch_size=batch_size)) if hasattr(p, 'encoder') else p
+            for p in c2.phases))
     m3, n3, c3, k3 = parse_stage(args, 3)
-    s2 = Stage(2, m2, n2, c2, k2,
+    s2 = Stage(2, m2, stage_name(m2, c2, n2), c2, k2,
                dict(device=device, multi_gpu=multi_gpu, read_workers=read_workers),
                also_id=(mask_cfg.seg_id(), mask_cfg.region_id()))
     s3 = Stage(3, m3, n3, c3, k3, dict(device=device))   # the matching runs on a CUDA device
@@ -1048,18 +1427,17 @@ def run_from_args(args, device=None, *, batch_size=None, multi_gpu=False,
 
 
 def run_slides(args) -> List[tuple]:
-    """`(dataset, name, path)` of every slide of the run: the first `--n-wsi`
-    of each dataset's recorded `--split` -- the split is shuffled when it is
-    made (`WsiSplit`), so a prefix is a random pick."""
+    """`(dataset, name, path)` of every slide of the run: of each `--datasets` id
+    (`AccessDatasets.by_source`), the first `--n-wsi` slides of each dataset it
+    draws from, in its own order -- a virtual dataset is shuffled when it is drawn,
+    so a prefix is a random pick. `dataset` is the one the slide is registered in."""
     out = []
-    for dataset in args.datasets:
-        dataset_split = f'{dataset}#{args.split}'
-        names = list_names(dataset=dataset_split)
-        if args.n_wsi > len(names):
-            raise ValueError(f'n_wsi {args.n_wsi} but {dataset_split} holds '
-                             f'{len(names)} slide(s)')
-        out += [(dataset, name, str(locate(name, dataset=dataset_split).path))
-                for name in names[:args.n_wsi]]
+    for dataset_id in args.datasets:
+        for dataset, names in by_source(dataset_id, args.n_wsi):
+            if len(names) < args.n_wsi:
+                raise ValueError(f'n_wsi {args.n_wsi} but {dataset_id} holds {len(names)} slide(s) of '
+                                 f'{dataset}')
+            out += [(dataset, name, str(locate(name, dataset=dataset).path)) for name in names]
     index: Optional[int] = getattr(args, 'slide_index', None)
     if index is not None:
         if not 0 <= index < len(out):
