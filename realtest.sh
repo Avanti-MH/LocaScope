@@ -48,7 +48,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #     SEG                         the mask stages 1 and 2 search (MASK_RECIPES)
 #
 #   stage 2 (retrieval)
-#     STAGE2_K           how many candidates stage 2 KEEPS per photo (--stage2-k;
+#     STAGE2_K           how many candidates stage 2 KEEPS per photo (--stage2-raw-topk;
 #                        the recipe's is 100). Part of stage 2's identity.
 #     STAGE2_BATCH       the encoder's batch for the whole-level encode
 #                        (--batch-size). Not identity: no cache entry changes.
@@ -89,7 +89,7 @@ EXTRA="${EXTRA:-}"
 SLIDE_ARG=""
 [ -n "$SLURM_ARRAY_TASK_ID" ] && SLIDE_ARG="--slide-index $SLURM_ARRAY_TASK_ID"
 STAGE2_K_ARG=""
-[ -n "$STAGE2_K" ] && STAGE2_K_ARG="--stage2-k $STAGE2_K"
+[ -n "$STAGE2_K" ] && STAGE2_K_ARG="--stage2-raw-topk $STAGE2_K"
 
 echo "======== real photos  task=${SLURM_ARRAY_TASK_ID:-all}  limit=$LIMIT ========"
 echo "stages $STAGE1 | $STAGE2 | $STAGE3   seg $SEG"

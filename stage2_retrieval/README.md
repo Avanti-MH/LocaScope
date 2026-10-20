@@ -27,30 +27,50 @@ legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical �
 
 ### 方法一覽
 
-#### `StageInterface.py` — 介面（設計見 `spec.md`）
+#### `Retriever.py` — 介面（設計見 `blueprint.md`）
 
-- `Candidate(region_index, lattice, row, col, rotation, score)`：只放檢索自己找到的東西。
-- `CandidateSet`：候選依分數排好（位置就是名次），加上它的座標框架——`level`、`ds`、
-  每個 region 的 `PatchGrid`（tile 大小也從它拿）。視窗大小是 query 的 tile 格，由方法吃 query 算出。下一站從自己的輸入就拿得到的
-  東西不放進來。
-- 位置只從 `CandidateSet` 的方法來：`origin_l0`（視窗讀圖的 level-0 整數起點，
-  `PatchGrid.tile_origin_l0`）、`window_l0`、`centre_l0`、`window_local`。不經過截斷的
+- 每個 stage 2 方法都是 `Retriever`：`retrieve(upstream, query, topk=None) → RetrievalOutput`。
+  第一階段方法的上游是 stage 1 的 `EstMppResult`，reranker 的上游是另一個 retriever 的 `RetrievalOutput`；
+  除此之外沒有差別。`RetrievalOutput` = 候選名單（`CandidateSet`）＋自己定義的副產物（`extras`）＋上游（`parent`）。
+- 所有參數在 config 決定（id 在建構前就固定）；名單長度是 config 的 `raw_topk`（reranker 讀的是 `topk_in`），
+  消費者呼叫時選的 `topk` 只取前綴，不進 id。
+- `EncoderPool`：encoder 依 trunk 共用（uni2 的 `cls` 與 `cls_avg` 是同一個載入的模型），trunk 或權重不同就 raise。
+- 橋接鎖（`take`）：config 的 `reuse` 宣告要用上游的 `level_features`；上游提供但 key 對不上 → `BridgeError`；
+  上游沒提供（名單從 cache 讀回）→ 下游自己做。
+
+#### `StageInterface.py` — 候選與座標框架
+
+- `Candidate(region_index, lattice, row, col, rotation, score)`：只放檢索自己找到的東西；方法專屬的欄位用子類別
+  （`RerankedCandidate`、`ShiftedCandidate`、`TokenMatchCandidate`、`VoteCandidate`）。
+- `CandidateSet`：候選依分數排好（位置就是名次），加上它的座標框架——`level`、`ds`、每個 region 的 `PatchGrid`。
+- 位置只從 `CandidateSet` 的方法來：`origin_l0`、`window_l0`、`centre_l0`、`window_local`。不經過截斷的
   level-n 座標——openslide 以 bilinear 取樣，`int(region.x / ds)` 會偏一個 level 像素以內。
-- `Retriever`、`Reranker` 兩個 Protocol；`Reranker` 還沒有實作。
 
-#### `SlidingWinSimRot.py` — canonical
+#### 第一階段 retriever（各自編碼，彼此對等）
 
-`LocaScopePipeline` 唯一呼叫的檢索器。試 4 個 cardinal 旋轉（0/90/180/270 度），
-所有旋轉、兩組格點、所有 region 的視窗一起排名。視窗相似度核心
-`SlidingWindowSimilarity` 也在這個檔案（2026-10-05 從已刪除的
-`GigaPathSlidingWinSim.py` 搬進來），window bench 與 off-grid bench 都從這裡 import。
+| 檔案 | `--stage2` | 打分 |
+|---|---|---|
+| `RetrieverSlidingWinSimRot.py` — canonical | `slidewin:<recipe>` | 逐 tile 餘弦，`mean` / `geomean` / `min` |
+| `RetrieverBagOfTiles.py` | `bagoftiles:<recipe>` | 視窗平均向量（`gap`）或四象限（`quad`） |
+| `RetrieverTileVote.py` | `tilevote:<recipe>` | query tile 找最近的 tile 投票（`exact` / `hnsw` / `ivf`） |
+| `RetrieverClusterBow.py` | `clusterbow:<recipe>` | tile 分群的直方圖交集 |
+| `RetrieverWinEmbed.py` | `winembed:<recipe>` | 學習出的視窗向量 |
 
-- **入口**：`SlidingWinSimRot(SlidingWinSimRotConfig(encoder_cfg, tile_size=256,
-  overlap=True, k=20, min_sep_tiles=1.0), device, multi_gpu=False).build(wsi, mask, feature_store=None)`，
-  encoder 由 `encoder_cfg`（`TileEncoderConfig`，含精度與 batch）自己建，和 stage 1 一樣不收外部的；然後
-  `retrieve(query, EstMppResult) → CandidateSet`：在 stage 1 的 `chosen_level` 上檢索，
-  該層的格點與特徵第一次用到時才建（cache 命中不讀圖），之後快取。
-- **步驟**（bench 自己控制尺度時用）：`build_wsi_features(mpp= | ds= | level=)`、
-  `build_query_features(query)`、`compute_sim_maps()`、`candidate_set(k)`。
-- `min_sep_tiles`：同一旋轉下，視窗起點彼此距離小於這麼多 tile 的候選只留分數高的
-  （一個強峰會從 main 和 offset 兩組格點重複出現）；不同旋轉不互相抑制。
+共用的走法（從 routed level 往細的 level 退、編碼 level 與 query、top-k 去重）在 `Context.py`
+（`SlideLevels`、`WindowSearch`、`top_candidates`）。`SlidingWindowSimilarity` 也在 `RetrieverSlidingWinSimRot.py`。
+
+#### reranker（吃上游名單的 retriever）
+
+- `RerankerScorers.py`：Dual、CSLS、Corr、CandGraph（免訓練，讀特徵）；`ColumnRanker` 是它們共用的做法
+  （讀前 `topk_in`、打分、依 config 的欄位排序、欄位當 `columns` 副產物往下傳）。
+- `RerankerEncode.py`：Shift、TokenMatch、XEnc（現場讀圖編碼）。
+- `RerankerNeural.py`：TileGT、CorrNet、Stack（載入權重）；`neural_inputs` 等訓練共用的輸入也在這裡。
+
+#### `MultiPhases.py` — 串接
+
+`MultiPhasesConfig(phases=(...))`：一個接一個，前一個的輸出是下一個的上游。`--stage2 multiphases:<recipe>`
+或 `--stage2 arm:<arm>`（arm 文法見 `ArmSpec.py`，`config_of_arm` 轉成 config）。每一段是自己的 cache entry
+（`Naming.py`，`_after-<上游 hash>`），pipeline 與 bench 同一個 config 就是同一個檔。
+
+- 網路在 `aiNNModel/models/RerankHeads.py`，訓練在 `training/RerankHead/`，評估是
+  `utilities/bench_modules/bench_stage2_retriever.py`（arm 是任何 retriever 串接）。

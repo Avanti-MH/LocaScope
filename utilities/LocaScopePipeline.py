@@ -6,10 +6,9 @@ here:
 
     Stage 1 -- mpp estimation   MppEstimator   stage1_estimation/StageInterface.py
                 estimate(query)                      -> EstMppResult
-    Stage 2 -- retrieval        Retriever, then zero or more Rerankers
-                                               stage2_retrieval/StageInterface.py
-                retrieve(query, EstMppResult)        -> CandidateSet
-                rerank(query, CandidateSet)          -> CandidateSet
+    Stage 2 -- retrieval        Retriever (a chain of them: MultiPhases)
+                                               stage2_retrieval/Retriever.py
+                retrieve(EstMppResult, query)        -> RetrievalOutput (.candidates)
     Stage 3 -- localization     Localizer      stage3_localization/StageInterface.py
                 localize(query, CandidateSet, topk)  -> LocalizationResultSet
 
@@ -41,8 +40,9 @@ A STAGE comes as a spec, or already built:
   twice; a stage not needed (its results are cached) is None.
 
 The runtime arguments of a build (`device`, `multi_gpu`, `read_workers`) are
-given to a stage only if its constructor takes them. Rerankers have no recipe
-table yet: they come as `(config, class)` or built.
+given to a stage only if its constructor takes them. A reranker is a stage-2
+retriever like any other; a retriever followed by rerankers is one stage 2, a
+`MultiPhases` (`--stage2 multiphases:<recipe>` or `--stage2 arm:<arm>`).
 
 Usage:
 
@@ -53,7 +53,7 @@ Usage:
     result = pl.run(shot_img)       # result.stage1, .stage2, .stage3
 
     r1 = pl.stage1(shot_img)        # or each stage alone, for a caller that
-    cs = pl.stage2(shot_img, r1)    # keeps what each made
+    cs = pl.stage2(shot_img, r1).candidates   # keeps what each made
     rs = pl.stage3(shot_img, cs)
 """
 
@@ -62,7 +62,7 @@ from __future__ import annotations
 import inspect
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -73,7 +73,9 @@ import stage3_localization
 from SafeSlide                          import SafeSlide                      # noqa: E402
 from TissueMask                         import TissueMask                     # noqa: E402
 from stage1_estimation.StageInterface   import EstMppResult, MppEstimator     # noqa: E402
-from stage2_retrieval.StageInterface    import CandidateSet, Reranker, Retriever  # noqa: E402
+from stage2_retrieval.MultiPhases       import MultiPhases                    # noqa: E402
+from stage2_retrieval.Retriever         import RetrievalOutput, Retriever     # noqa: E402
+from stage2_retrieval.StageInterface    import CandidateSet                   # noqa: E402
 from stage3_localization.StageInterface import Localizer, LocalizationResultSet   # noqa: E402
 
 if TYPE_CHECKING:       # annotations only
@@ -132,7 +134,6 @@ class LocaScopePipeline:
         stage1:         Optional[StageSpec] = None,   # None: not run here
         stage2:         Optional[StageSpec] = None,
         stage3:         Optional[StageSpec] = None,
-        rerankers:      Sequence[StageSpec] = (),
         topk:           int = 10,                      # candidates stage 3 verifies
         bank_cache_job: Optional[str] = None,          # stage 1's bank; None: in memory
         device:         Optional[torch.device] = None,
@@ -157,29 +158,23 @@ class LocaScopePipeline:
 
         self.mask: Optional[TissueMask] = None
         self._specs: Dict[int, Optional[StageSpec]] = {1: stage1, 2: stage2, 3: stage3}
-        self._rerank_specs: Tuple[StageSpec, ...] = tuple(rerankers)
         self._runtime: Dict[str, Any] = dict(device=device, multi_gpu=multi_gpu,
                                              read_workers=read_workers)
         # Built by build(), each from its spec; None where no spec was given.
         self.estimator: Optional[MppEstimator] = None
         self.retriever: Optional[Retriever] = None
-        self.rerankers: Tuple[Reranker, ...] = ()
         self.localizer: Optional[Localizer] = None
         self._built: bool = False
 
     # ── One-time setup ────────────────────────────────────────────────────────
     def _make(self, n: int, spec: Optional[StageSpec]) -> Optional[Any]:
         """The stage object of `spec` (see the module docstring). `n` is the
-        stage whose recipe table a "method:recipe" string is looked up in; 0
-        for a reranker, which has none."""
+        stage whose recipe table a "method:recipe" string is looked up in."""
         if spec is None:
             return None
         cfg: Any
         cls: type
         if isinstance(spec, str):
-            if n not in _PACKAGES:
-                raise ValueError(f'a reranker has no recipe table: {spec!r}; '
-                                 f'give (config, class) or a built one')
             cfg, cls = _PACKAGES[n].recipe(spec)[2:]
         elif isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], type):
             cfg, cls = spec
@@ -196,7 +191,6 @@ class LocaScopePipeline:
 
         self.estimator = self._make(1, self._specs[1])
         self.retriever = self._make(2, self._specs[2])
-        self.rerankers = tuple(self._make(0, s) for s in self._rerank_specs)
         self.localizer = self._make(3, self._specs[3])
 
         # The same mask to every stage that takes one, so stage 1's reference
@@ -207,9 +201,6 @@ class LocaScopePipeline:
                                  cache_job=self.bank_cache_job)
         if self.retriever is not None:
             self.retriever.build(self.wsi, self.mask)
-        reranker: Reranker
-        for reranker in self.rerankers:
-            reranker.build(self.wsi, self.mask)
         if self.localizer is not None:
             self.localizer.build(self.wsi)
         self._built = True
@@ -227,16 +218,17 @@ class LocaScopePipeline:
             raise RuntimeError('stage 1 was not given to this pipeline')
         return self.estimator.estimate(img)
 
-    def stage2(self, img: np.ndarray, r1: EstMppResult) -> CandidateSet:
-        """Stage 2 on stage 1's output: the retriever, then every reranker in
-        order. No candidates means no level could be searched."""
+    def stage2(self, img: np.ndarray, r1: EstMppResult,
+               cached: Optional[Callable[[int, Any], Optional[CandidateSet]]] = None) -> RetrievalOutput:
+        """Stage 2 on stage 1's output: the retriever's output (a chain's last
+        phase's, `MultiPhases`). No candidates means no level could be searched.
+        `cached(i, upstream)` is a chain's cache: a phase whose list it has is
+        not run (`MultiPhases.run`)."""
         if self.retriever is None:
             raise RuntimeError('stage 2 was not given to this pipeline')
-        cs: CandidateSet = self.retriever.retrieve(img, r1)
-        reranker: Reranker
-        for reranker in self.rerankers:
-            cs = reranker.rerank(img, cs)
-        return cs
+        if cached is not None and isinstance(self.retriever, MultiPhases):
+            return self.retriever.run(r1, img, cached)
+        return self.retriever.retrieve(r1, img)
 
     def stage3(self, img: np.ndarray, cs: CandidateSet) -> LocalizationResultSet:
         """Stage 3 on stage 2's output: the first `topk` candidates verified."""
@@ -264,7 +256,7 @@ class LocaScopePipeline:
 
         t0 = time.perf_counter()
         try:
-            cs: CandidateSet = self.stage2(img, r1)
+            cs: CandidateSet = self.stage2(img, r1).candidates
         except Exception as e:                                       # noqa: BLE001
             return LocaScopeQueryResult(
                 r1, None, None, f'stage2 failed: {type(e).__name__}: {e}',

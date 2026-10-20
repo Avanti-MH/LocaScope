@@ -19,7 +19,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
@@ -226,10 +226,10 @@ def t_record_names_what_differs():
 
 
 def t_routing_data_record_moves_with_what_makes_the_tiles():
-    """A checkpoint's data record (MppRoutingHead.Datasets.data_record): equal
+    """A checkpoint's data record (ClassifyingRoutingHead.Datasets.data_record): equal
     for the same data, and naming the field when the tile size or the
     package's DATA_VERSION moves."""
-    import training.MppRoutingHead.Datasets as D
+    import training.ClassifyingRoutingHead.Datasets as D
     a = D.data_record(256, 'hest')
     # what every routing-head checkpoint trained at 256 on hest carries (a prototype and a
     # classifier checkpoint were checked for it); a move of its configs into FOV_RECIPES must
@@ -260,6 +260,8 @@ def t_environment_names_the_libraries():
 def _factories():
     from GigaPathFunc import GigaPathEncoderConfig
     from HestSegFunc import HestSegConfig
+    from stage2_retrieval.RerankerScorers import RerankerDualConfig
+    from stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig
     return {
         'TissueMaskConfig': lambda c: c(seg=HestSegConfig()),
         'KnnEstMppConfig': lambda c: c(encoder='gigapath'),
@@ -270,7 +272,24 @@ def _factories():
             encoder='gigapath', pooling='cls', support_context='none',
             query_context='none', collapse='mean', routing_head='none',
             tile_size=256, weights='/nonexistent.pt'),
-        'SlidingWinSimRotConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        # the stage-2 retrievers (Retriever.py): an encoder, and a checkpoint for the learned ones
+        'RetrieverSlidingWinSimRotConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RetrieverBagOfTilesConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RetrieverTileVoteConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RetrieverClusterBowConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RetrieverWinEmbedConfig': lambda c: c(encoder=GigaPathEncoderConfig(), weights='/nonexistent.pt'),
+        'RerankerDualConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RerankerCslsConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RerankerCorrConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RerankerShiftConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RerankerTokenMatchConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RerankerXEncConfig': lambda c: c(encoder=GigaPathEncoderConfig()),
+        'RerankerTileGTConfig': lambda c: c(encoder=GigaPathEncoderConfig(), weights='/nonexistent.pt'),
+        'RerankerCorrNetConfig': lambda c: c(encoder=GigaPathEncoderConfig(), weights='/nonexistent.pt'),
+        'RerankerStackConfig': lambda c: c(weights='/nonexistent.pt'),
+        'MultiPhasesConfig': lambda c: c(phases=(
+            RetrieverSlidingWinSimRotConfig(encoder=GigaPathEncoderConfig()),
+            RerankerDualConfig(encoder=GigaPathEncoderConfig()))),
     }
 
 
@@ -280,7 +299,12 @@ _MODULES = ('TileEncoderFunc', 'GigaPathFunc', 'Uni2Func', 'ConchVitFunc',
             'stage1_estimation.KnnEstMpp', 'stage1_estimation.ClassifierEstMpp',
             'stage1_estimation.PrototypeEstMpp',
             'stage1_estimation.estimate_mpp_classic',
-            'stage2_retrieval.SlidingWinSimRot', 'stage3_localization.SIFT_RANSAC')
+            'stage2_retrieval.Retriever', 'stage2_retrieval.RetrieverSlidingWinSimRot',
+            'stage2_retrieval.RetrieverBagOfTiles', 'stage2_retrieval.RetrieverTileVote',
+            'stage2_retrieval.RetrieverClusterBow', 'stage2_retrieval.RetrieverWinEmbed',
+            'stage2_retrieval.RerankerScorers', 'stage2_retrieval.RerankerEncode',
+            'stage2_retrieval.RerankerNeural', 'stage2_retrieval.MultiPhases',
+            'stage3_localization.SIFT_RANSAC')
 _SUPERPATHPOINT = ('SuperPoint.Backbones', 'SuperPoint.Datasets',
                    'SuperPoint.Decoders', 'SuperPoint.EncoderBackbone',
                    'SuperPoint.Heads', 'SuperPoint.HomographicAdaptation',
@@ -362,6 +386,12 @@ _ALTERNATIVES = {
     'scorer': ('entropy',), 'bucket_frame': ('at_inherit',),
     'floor_frame': ('taken',), 'stack_kind': ('R',), 'on_incomplete': ('keep',),
     'candidates': ('random',),
+    # the second phase's vocabularies
+    'mode': ('quad', 'rank'), 'backend': ('hnsw', 'ivf'),
+    # the stage-2 retrievers' vocabularies: the column a reranker orders by, the column a graph reads,
+    # the window score
+    'order_by': ('cos_main', 'contrast', 'rot_margin', 'tilegt_rot'), 'on': ('first',),
+    'score': ('geomean', 'min'),
 }
 
 
@@ -413,6 +443,22 @@ def _perturbations(cfg, prefix=''):
                     yield sub, dataclasses.replace(cfg, **{f.name: inner}), moves
                 except (TypeError, ValueError, KeyError):
                     yield sub, None, None
+            continue
+        if CI._is_config_seq(value):
+            # a chain: change a field inside one element, keep the others; the
+            # chain's own length is changed by dropping the last one
+            for i, element in enumerate(value):
+                for sub, inner, moves in _perturbations(element, f'{path}[{i}].'):
+                    if inner is None:
+                        yield sub, None, None
+                        continue
+                    try:
+                        yield sub, dataclasses.replace(
+                            cfg, **{f.name: tuple(value[:i]) + (inner,) + tuple(value[i + 1:])}), moves
+                    except (TypeError, ValueError, KeyError):
+                        yield sub, None, None
+            if len(value) > 1:
+                yield path, dataclasses.replace(cfg, **{f.name: tuple(value[:-1])}), f.name not in skip
             continue
         for candidate in _variants(value, f.name):
             try:
@@ -521,7 +567,12 @@ _RECIPE_MODULES = {
     'stage1_estimation.PrototypeEstMpp': 'stage1_estimation/PrototypeEstMpp.py',
     'stage1_estimation.estimate_mpp_classic':
         'stage1_estimation/estimate_mpp_classic.py',
-    'stage2_retrieval.SlidingWinSimRot': 'stage2_retrieval/SlidingWinSimRot.py',
+    'stage2_retrieval.RetrieverSlidingWinSimRot': 'stage2_retrieval/RetrieverSlidingWinSimRot.py',
+    'stage2_retrieval.RetrieverBagOfTiles': 'stage2_retrieval/RetrieverBagOfTiles.py',
+    'stage2_retrieval.RetrieverTileVote': 'stage2_retrieval/RetrieverTileVote.py',
+    'stage2_retrieval.RetrieverClusterBow': 'stage2_retrieval/RetrieverClusterBow.py',
+    'stage2_retrieval.RetrieverWinEmbed': 'stage2_retrieval/RetrieverWinEmbed.py',
+    'stage2_retrieval.MultiPhases': 'stage2_retrieval/MultiPhases.py',
     'stage3_localization.SIFT_RANSAC': 'stage3_localization/SIFT_RANSAC.py',
 }
 
@@ -753,7 +804,7 @@ def t_config_flag_parsers_refuse_abbreviations():
 
 
 #: The level kinds of `Cache.TREE`, as they begin a path component.
-_TREE_KINDS = ('dataset', 'slide', 'seg', 'region', 'grid', 'plan', 'draw',
+_TREE_KINDS = ('slide', 'seg', 'region', 'grid', 'plan', 'draw',
                'render', 'stage1', 'stage2')
 
 
@@ -1031,6 +1082,79 @@ def t_an_optional_nested_config_is_rebuilt_too():
                 f'expected {value!r}')
 
 
+# ── a field that holds a chain of configs ─────────────────────────────────────
+#
+# `MultiPhasesConfig.phases` is a tuple of configs of DIFFERENT classes, in an
+# order that matters. Module level for the reason above.
+
+@CI.register('t_link_a')
+@dataclass(frozen=True)
+class _LinkA(CI.IdentifiedConfig):
+    a: int = 1
+    scratch: int = 0
+
+    BASELINE = {'a': 1}
+    NOT_IDENTITY = ('scratch',)
+
+
+@CI.register('t_link_b')
+@dataclass(frozen=True)
+class _LinkB(CI.IdentifiedConfig):
+    b: int = 2
+
+    BASELINE = {'b': 2}
+    VERSION = 3
+
+
+@CI.register('t_chain')
+@dataclass(frozen=True)
+class _Chain(CI.IdentifiedConfig):
+    links: Tuple[CI.IdentifiedConfig, ...] = ()
+    k: int = 3
+
+    BASELINE = {'links': (), 'k': 3}
+
+
+def t_a_chain_of_configs_empty_is_the_baseline():
+    assert _Chain().identity_parts() == [], _Chain().identity_parts()
+    assert _Chain(links=()).identity_id() == _Chain().identity_id()
+
+
+def t_a_chain_writes_its_classes_and_each_elements_parts():
+    parts = _Chain(links=(_LinkA(a=2), _LinkB())).identity_parts()
+    assert parts == ['links=["_LinkA","_LinkB"]', 'links[0].a=2'], parts
+
+
+def t_a_chain_is_ordered_and_its_classes_count():
+    ab, ba = _Chain(links=(_LinkA(), _LinkB())), _Chain(links=(_LinkB(), _LinkA()))
+    assert ab.identity_id() != ba.identity_id(), 'the order of a chain is identity'
+    ids = {_Chain().identity_id(), _Chain(links=(_LinkA(),)).identity_id(),
+           _Chain(links=(_LinkB(),)).identity_id()}
+    assert len(ids) == 3, 'a chain of baseline-valued links must still differ from none, and by class'
+    assert (_Chain(links=(_LinkA(a=2),)).identity_id()
+            != _Chain(links=(_LinkA(a=3),)).identity_id())
+
+
+def t_a_chain_element_not_identity_is_skipped():
+    assert (_Chain(links=(_LinkA(scratch=9),)).identity_id()
+            == _Chain(links=(_LinkA(),)).identity_id())
+    assert _Chain(links=(_LinkA(scratch=9),)).provenance() == {'links[0].scratch': 9}
+
+
+def t_a_chain_collects_its_elements_versions():
+    assert CI.versions_of(_Chain(links=(_LinkA(), _LinkB()))) == {_LinkB.__qualname__: 3}
+    assert CI.versions_of(_Chain()) == {}
+
+
+def t_json_round_trip_rebuilds_a_chain_of_different_classes():
+    chain = _Chain(links=(_LinkB(b=7), _LinkA(a=4)), k=5)
+    back = CI.config_from_json(CI.config_json(chain))
+    assert back == chain, back
+    assert [type(e).__name__ for e in back.links] == ['_LinkB', '_LinkA'], back.links
+    assert isinstance(back.links, tuple)
+    assert CI.config_from_json(CI.config_json(_Chain())) == _Chain()
+
+
 def t_a_dict_that_is_not_a_config_is_refused_loudly():
     """The decoy for the two above: the failure must be an ERROR, not a value.
     A field annotated as a plain dict cannot be a serialised config --
@@ -1126,6 +1250,12 @@ def main() -> int:
     check('json rebuilds a NESTED config',    t_json_round_trip_rebuilds_a_nested_config)
     check('Optional nested too',              t_an_optional_nested_config_is_rebuilt_too)
     check('a non-config dict is refused',     t_a_dict_that_is_not_a_config_is_refused_loudly)
+    check('a chain: empty is the baseline',   t_a_chain_of_configs_empty_is_the_baseline)
+    check('a chain writes classes and parts', t_a_chain_writes_its_classes_and_each_elements_parts)
+    check('a chain is ordered; classes count', t_a_chain_is_ordered_and_its_classes_count)
+    check('a chain element\'s NOT_IDENTITY',   t_a_chain_element_not_identity_is_skipped)
+    check('a chain collects versions',        t_a_chain_collects_its_elements_versions)
+    check('json rebuilds a chain',            t_json_round_trip_rebuilds_a_chain_of_different_classes)
     check('an unknown name lists the known',  t_registry_names_what_it_has)
     check('one name, one claimant',           t_registry_refuses_a_second_claim)
 
