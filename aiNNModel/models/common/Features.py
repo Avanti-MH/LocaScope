@@ -19,6 +19,25 @@ class LayerTokens:
     last: torch.Tensor                     # [N, T, D]
     layers: Dict[int, torch.Tensor]        # block -> [N, T, D]
 
+    def __len__(self) -> int:
+        """The tile count, as `len` of the tensor it stands in for."""
+        return len(self.last)
+
+    def to(self, device) -> 'LayerTokens':
+        """Every block on `device`; the last block, which `layers` holds too, is moved once."""
+        moved: Dict[int, torch.Tensor] = {b: t.to(device) for b, t in self.layers.items()}
+        last: torch.Tensor = next((moved[b] for b, t in self.layers.items() if t is self.last),
+                                  self.last.to(device))
+        return LayerTokens(last=last, layers=moved)
+
+
+def cat_tokens(parts: Sequence) -> 'torch.Tensor | LayerTokens':
+    """`torch.cat` along the tile axis: of tensors, or of `LayerTokens` block by block."""
+    if parts and isinstance(parts[0], LayerTokens):
+        return LayerTokens(last=torch.cat([p.last for p in parts]),
+                           layers={b: torch.cat([p.layers[b] for p in parts]) for b in parts[0].layers})
+    return torch.cat(list(parts))
+
 
 def encode_raw(encoder, patches: torch.Tensor, batch_size: int,
                device, layers: Sequence[int] = ()):

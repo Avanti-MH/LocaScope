@@ -12,7 +12,7 @@ trained head to run inference with, not several to compare, and "arm" reads as
 a comparison that is not happening. `Head` is the standard word for
 "the task-specific top of a network" and is what the task-specific registries
 that USE this class (still living with their tasks, e.g. `training/
-MppRoutingHead/Runtime.py`'s `HEAD_CHOICES`) already name their entries.
+ClassifyingRoutingHead/Runtime.py`'s `HEAD_CHOICES`) already name their entries.
 '''
 from __future__ import annotations
 
@@ -46,6 +46,21 @@ def grid_view(raw: torch.Tensor, num_prefix: int) -> torch.Tensor:
     register tokens (num_prefix > 1: those would be folded in as if they were
     patches).'''
     return raw[:, num_prefix:].float()
+
+
+def mix_grid(raw: LayerTokens, layers: tuple, norms: nn.ModuleList, weights: torch.Tensor,
+             num_prefix: int) -> torch.Tensor:
+    """The mix of encoder blocks every `encoder_layers` user reads (`Head`, `Pooling.Pooling`): each
+    block's patch grid through its own LayerNorm, summed with `weights` (a softmax, one per block),
+    `[N, L, D]`. Refuses a plain tensor and a `LayerTokens` missing a block."""
+    if not isinstance(raw, LayerTokens):
+        raise TypeError(f'this mixes encoder layers {layers}; pass '
+                        f'encode_raw(..., layers=...)\'s LayerTokens')
+    missing = [b for b in layers if b not in raw.layers]
+    if missing:
+        raise KeyError(f'LayerTokens holds blocks {sorted(raw.layers)}, not {missing}')
+    return sum(weights[k] * norm(grid_view(raw.layers[b], num_prefix))
+               for k, (b, norm) in enumerate(zip(layers, norms)))
 
 
 class Head(nn.Module):
@@ -117,16 +132,7 @@ class Head(nn.Module):
             # mixes nothing reads the last block, exactly what it got before.
             last = raw.last if isinstance(raw, LayerTokens) else raw
             return grid_view(last, num_prefix)
-        if not isinstance(raw, LayerTokens):
-            raise TypeError(f'this head mixes encoder layers {self.layers}; pass '
-                            f'encode_raw(..., layers=...)\'s LayerTokens')
-        missing = [b for b in self.layers if b not in raw.layers]
-        if missing:
-            raise KeyError(f'LayerTokens holds blocks {sorted(raw.layers)}, not '
-                           f'{missing}')
-        w = self.layer_weights
-        return sum(w[k] * norm(grid_view(raw.layers[b], num_prefix))
-                   for k, (b, norm) in enumerate(zip(self.layers, self.mix_norms)))
+        return mix_grid(raw, self.layers, self.mix_norms, self.layer_weights, num_prefix)
 
     def forward(self, raw, num_prefix: int,
                 target: torch.Tensor | None = None) -> torch.Tensor:

@@ -33,7 +33,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from Head import grid_view
+from Features import LayerTokens
+from Head import grid_view, mix_grid
 from Heads import AttentionPoolHead, HeadConfig
 
 POOLING_KINDS = ('avg', 'max', 'attn', 'passthrough', 'cls')
@@ -45,6 +46,11 @@ class PoolingConfig:
     in_dim: int = 1536
     #: AttentionPoolHead's own default, read only when kind='attn'.
     n_head: int = 8
+    #: The encoder blocks to MIX before pooling, absolute 0-based (`Heads.resolve_encoder_layers`): each
+    #: block's patch grid through its own LayerNorm, a softmax-weighted sum (`Head.mix_grid`, the
+    #: classifier's `mix_` heads' own). Empty, the default, pools the last block. A mix is a patch grid,
+    #: so `cls` takes none.
+    encoder_layers: tuple = ()
 
 
 class Pooling(nn.Module):
@@ -75,12 +81,23 @@ class Pooling(nn.Module):
         if cfg.kind not in POOLING_KINDS:
             raise ValueError(
                 f'kind must be one of {POOLING_KINDS}, got {cfg.kind!r}')
+        if cfg.encoder_layers and cfg.kind == 'cls':
+            raise ValueError(f'encoder_layers {cfg.encoder_layers} with kind cls: a mix is a grid of '
+                             f'patches and cls reads none. Use avg, max or attn')
         self.cfg = cfg
         self.attn = (AttentionPoolHead(HeadConfig(in_dim=cfg.in_dim),
                                        n_head=cfg.n_head)
                     if cfg.kind == 'attn' else None)
+        if cfg.encoder_layers:
+            self.mix_norms = nn.ModuleList(nn.LayerNorm(cfg.in_dim) for _ in cfg.encoder_layers)
+            self.mix_logits = nn.Parameter(torch.zeros(len(cfg.encoder_layers)))
 
-    def forward(self, raw: torch.Tensor, num_prefix: int) -> torch.Tensor:
+    @property
+    def layer_weights(self) -> torch.Tensor:
+        """The softmax over the mixed blocks, in `cfg.encoder_layers` order."""
+        return torch.softmax(self.mix_logits, dim=0)
+
+    def forward(self, raw: 'torch.Tensor | LayerTokens', num_prefix: int) -> torch.Tensor:
         '''`raw`: `[N, L+num_prefix, D]`, an encoder's un-reduced exit for a
         batch of tiles (support OR query -- this function does not know or
         care which). `num_prefix`: the backbone's own CLS+register count
@@ -98,14 +115,24 @@ class Pooling(nn.Module):
         `common.Head.pooled_view` -- that helper bakes the normalise+fp32
         cast in, which would make `cls` the one kind with a different
         output contract from the other four.
+
+        With `cfg.encoder_layers`, `raw` is `encode_raw(..., layers=...)`'s
+        `LayerTokens` and the grid pooled is their mix; without, a
+        `LayerTokens` is read at its last block.
         '''
+        if self.cfg.encoder_layers:
+            grid = mix_grid(raw, self.cfg.encoder_layers, self.mix_norms, self.layer_weights, num_prefix)
+        else:
+            raw = raw.last if isinstance(raw, LayerTokens) else raw
+            grid = None
         if self.cfg.kind == 'cls':
             if num_prefix == 0:
                 raise ValueError(
                     'cls pooling needs a prefix token; this encoder has '
                     'num_prefix=0 (no CLS/register tokens to take)')
             return raw[:, 0]
-        grid = grid_view(raw, num_prefix)              # [N, L, D]
+        if grid is None:
+            grid = grid_view(raw, num_prefix)          # [N, L, D]
         if self.cfg.kind == 'passthrough':
             return grid
         if self.cfg.kind == 'avg':

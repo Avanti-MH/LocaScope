@@ -694,7 +694,7 @@ def t_rings_follow_the_tokens_to_the_gpu():
     """A CPU ring mask cannot index CUDA tokens, and rings3 is the only mode
     that indexes at all -- the others are reshape and slice, which never notice.
 
-    So pooling moved onto the GPU (bench_window_retrieval's `reduce`) breaks
+    So pooling moved onto the GPU (bench_stage2_retriever's `reduce`) breaks
     exactly one of the five and leaves four working. It raises rather than
     corrupting, but it raises deep inside a run that has already read a whole
     tissue region, which is minutes and tens of GB from here.
@@ -1008,6 +1008,83 @@ def t_run_takes_a_list_or_a_uint8_batch_alike():
     assert torch.equal(a, b) and torch.equal(a, c)
 
 
+# ── checkpoint names and the layer mix (aiNNModel/models/common) ─────────────
+
+def _refused(fn, exc) -> None:
+    try:
+        fn()
+    except exc:
+        return
+    raise AssertionError(f'{fn} was accepted')
+
+
+def t_a_weights_name_reads_by_segment():
+    import fnmatch                                                  # noqa: PLC0415
+    from Checkpoints import NAME_SEP, data_tag, weight_filename, weights_name  # noqa: PLC0415
+    assert data_tag(['@pure-train'], 'Ki67') == 'pure-train_Ki67'
+    assert data_tag(['bracs/train', 'ki67_pure']) == 'bracs_train+ki67_pure'
+    name: str = weight_filename('convnext_v2', False, 'linear', 'best_unweighted',
+                                data='pure-train_Ki67', loss='ord_a')
+    assert name == 'pure-train_Ki67--convnext_v2--finetuned--linear--ord_a--best_unweighted.pt', name
+    assert name[:-len('.pt')].split(NAME_SEP) == [
+        'pure-train_Ki67', 'convnext_v2', 'finetuned', 'linear', 'ord_a', 'best_unweighted']
+    assert weight_filename('gigapath', True, 'mlp_deep', 'best', data='d') == \
+        'd--gigapath--frozen--mlp_deep--bal--best.pt', 'bal is a segment too'
+    for bad in ('', 'a--b'):
+        _refused(lambda: weights_name('d', bad, 'best'), ValueError)
+    # evaluate.py's default glob: the best file, not best_unweighted
+    assert fnmatch.fnmatch('d--gigapath--frozen--mlp_deep--bal--best.pt', '*--best.pt')
+    assert not fnmatch.fnmatch('d--gigapath--frozen--mlp_deep--bal--best_unweighted.pt', '*--best.pt')
+
+
+def _layer_tokens(n: int = 3, t: int = 5, d: int = 8):
+    from Features import LayerTokens                                # noqa: PLC0415
+    torch.manual_seed(0)
+    blocks = {1: torch.randn(n, t, d), 3: torch.randn(n, t, d)}
+    return LayerTokens(last=blocks[3], layers=blocks), d
+
+
+def t_the_pooling_mix_is_the_heads_mix():
+    """Pooling mixes with `Head.mix_grid` -- each block's patch grid through its own LayerNorm, a softmax
+    over the blocks -- and pools the mix."""
+    from Head import mix_grid                                       # noqa: PLC0415
+    from Pooling import Pooling, PoolingConfig                      # noqa: PLC0415
+    toks, d = _layer_tokens()
+    pool = Pooling(PoolingConfig(kind='avg', in_dim=d, encoder_layers=(1, 3)))
+    with torch.no_grad():
+        pool.mix_logits.copy_(torch.tensor([0.3, -0.2]))
+    w = torch.softmax(torch.tensor([0.3, -0.2]), dim=0)
+    want = (w[0] * pool.mix_norms[0](toks.layers[1][:, 1:])
+            + w[1] * pool.mix_norms[1](toks.layers[3][:, 1:]))
+    with torch.no_grad():
+        got = pool(toks, 1)
+        assert torch.allclose(got, want.mean(dim=1), atol=1e-6)
+        assert torch.allclose(mix_grid(toks, (1, 3), pool.mix_norms, pool.layer_weights, 1), want, atol=1e-6)
+
+
+def t_the_pooling_mix_refuses_what_it_cannot_read():
+    from Pooling import Pooling, PoolingConfig                      # noqa: PLC0415
+    toks, d = _layer_tokens()
+    _refused(lambda: Pooling(PoolingConfig(kind='cls', in_dim=d, encoder_layers=(1, 3))), ValueError)
+    mixing = Pooling(PoolingConfig(kind='avg', in_dim=d, encoder_layers=(1, 3)))
+    _refused(lambda: mixing(toks.last, 1), TypeError)               # a plain tensor: no blocks to mix
+    _refused(lambda: Pooling(PoolingConfig(kind='avg', in_dim=d, encoder_layers=(0, 3)))(toks, 1), KeyError)
+    plain = Pooling(PoolingConfig(kind='max', in_dim=d))
+    assert torch.equal(plain(toks, 1), plain(toks.last, 1)), 'no mix reads the last block'
+
+
+def t_layer_tokens_stand_in_for_a_tensor():
+    from Features import cat_tokens                                 # noqa: PLC0415
+    toks, _ = _layer_tokens()
+    assert len(toks) == 3
+    moved = toks.to('cpu')
+    assert moved.last is moved.layers[3], 'the last block is moved once, not twice'
+    both = cat_tokens([toks, toks])
+    assert len(both) == 6 and torch.equal(both.layers[1][3:], toks.layers[1])
+    assert torch.equal(both.last, both.layers[3])
+    assert cat_tokens([toks.last, toks.last]).shape[0] == 6
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1071,6 +1148,12 @@ def main() -> int:
     check('slot 0 is the average',            t_no_prefix_makes_slot_0_the_average)
     check('cls_avg is refused',               t_no_prefix_refuses_the_mode_that_would_duplicate)
     check('every cell is kept',               t_no_prefix_keeps_every_cell_as_a_patch)
+
+    print('checkpoint names and the layer mix')
+    check('a weights name reads by segment',  t_a_weights_name_reads_by_segment)
+    check("pooling's mix is the head's",      t_the_pooling_mix_is_the_heads_mix)
+    check('the mix refuses what it cannot read', t_the_pooling_mix_refuses_what_it_cannot_read)
+    check('LayerTokens stand in for a tensor', t_layer_tokens_stand_in_for_a_tensor)
 
     print('_vit_model_spec')
     check('the model is never the wrapper',   t_the_model_is_never_the_wrapper)

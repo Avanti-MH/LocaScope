@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import torch                                                       # noqa: E402
 
@@ -16,23 +16,51 @@ from Head import Head                                               # noqa: E402
 from Heads import HeadConfig, classifier_class, classifier_name     # noqa: E402
 
 
+#: Between the segments of a weights file's name. A segment keeps its own `_` and `-`
+#: (`mlp_deep`, `pure-train`), so the boundaries stay readable; none holds `--`.
+NAME_SEP = '--'
+
+
+def data_tag(datasets: Sequence[str], stain: Optional[str] = None) -> str:
+    '''The training data as a weights-name segment: the AccessDatasets ids without
+    their `@`, `/` as `_`, joined by `+`, and `_<stain>` when training drew one
+    stain of them only -- `['@pure-train']`, `Ki67` -> `pure-train_Ki67`;
+    `['bracs/train', 'ki67_pure']` -> `bracs_train+ki67_pure`.'''
+    tag: str = '+'.join(d.lstrip('@').replace('/', '_') for d in datasets)
+    return f'{tag}_{stain}' if stain else tag
+
+
+def weights_name(*segments: str) -> str:
+    '''`<segment>--<segment>--...pt`: every weights file's name, the training
+    data first. An empty segment, or one holding `--`, is refused -- either
+    would move every boundary after it.'''
+    for segment in segments:
+        if not segment or NAME_SEP in segment:
+            raise ValueError(f'weights-name segment {segment!r}: empty or holds {NAME_SEP!r} '
+                             f'(segments {segments})')
+    return NAME_SEP.join(segments) + '.pt'
+
+
 def weight_filename(encoder_name: str, frozen: bool, head_name: str,
-                    tag: str, loss: str = 'bal', read_tag: str = '') -> str:
-    '''`<encoder>_<frozen|finetuned>_<head>_<last|best|best_unweighted>.pt`,
-    with a `_<loss>` segment before the tag when `loss` is not `'bal'`.
+                    tag: str, *, data: str, loss: str = 'bal', read_tag: str = '') -> str:
+    '''`<data>--<encoder>--<frozen|finetuned>--<head>--<loss>[--<read_tag>]--
+    <last|best|best_unweighted>.pt` (`weights_name`), `data` from `data_tag`:
+    `pure-train_Ki67--gigapath--frozen--mix_attn_linear--ord_a--best_unweighted.pt`.
 
     The tissue-mask recipe is NOT in the name. It is recorded in
     `ckpt['args']['seg']` and evaluation refuses a mismatch, but two runs that
     differ only in it overwrite each other: at this stage the recipe is not an
     axis being compared, and a name segment would say it was.
 
-    `loss='bal'` gets NO segment, not `_bal`, so a bal checkpoint's filename
-    does not carry it; `ord_a`/`ord_b` runs get a distinct filename in the
-    SAME shared weights/ directory. `loss` is a training-time hyperparameter,
-    not an architectural choice `build_from_checkpoint` needs to rebuild the
-    model, and it is recorded in `ckpt['args']['loss']` either way.
+    `loss` is always a segment, `bal` too, so every classifier file has the
+    same segments and `ls *--ord_a--*` finds a loss; `ord_a`/`ord_b` runs get a
+    distinct filename in the SAME shared weights/ directory. `loss` is a
+    training-time hyperparameter, not an architectural choice
+    `build_from_checkpoint` needs to rebuild the model, and it is recorded in `ckpt['args']['loss']` either way.
 
-    ENCODER FIRST, because `_paths.encoder_tag(encoder, head)` already spells
+    THE DATA FIRST: the name says what a file was trained on before what it is,
+    so two trainings of one arm on two datasets never overwrite each other.
+    Then the ENCODER, because `_paths.encoder_tag(encoder, head)` already spells
     an encoder-plus-head name that way and CLAUDE.md's result paths follow it
     (`conch_vit_attn_pool`); a second ordering for the same pair of facts is a
     second convention. `encoder` is the REGISTRY name (`convnext_v2`, not
@@ -60,20 +88,19 @@ def weight_filename(encoder_name: str, frozen: bool, head_name: str,
     directly instead of re-deriving which epoch would have won under the
     other's weighting. (This function itself does not compute either number
     -- it only names the file. The formula lives in whichever training
-    package's own `val_report` calls it, currently `MppRoutingHead/
+    package's own `val_report` calls it, currently `ClassifyingRoutingHead/
     cli/train.py`'s.)
 
     `read_tag` is the training read mode
-    (`MppRoutingHead.Datasets.RenderConfig.read_tag`), one more segment after
+    (`ClassifyingRoutingHead.Datasets.RenderConfig.read_tag`), one more segment after
     the loss, and absent at its default `''`.
     '''
     if tag not in ('last', 'best', 'best_unweighted'):
         raise ValueError(
             f"tag must be 'last', 'best' or 'best_unweighted', got {tag!r}")
     kind = 'frozen' if frozen else 'finetuned'
-    loss_seg = '' if loss == 'bal' else f'{loss}_'
-    read_seg = f'{read_tag}_' if read_tag else ''
-    return f'{encoder_name}_{kind}_{head_name}_{loss_seg}{read_seg}{tag}.pt'
+    return weights_name(data, encoder_name, kind, head_name, loss,
+                        *([read_tag] if read_tag else []), tag)
 
 
 def save_checkpoint(path, *, head: Head, encoder, encoder_name: str,
@@ -173,7 +200,7 @@ def build_from_checkpoint(path, device):
 #  Prototype-routing checkpoints (training/PrototypicalRoutingHead) -- NEW
 #  functions, the two above UNCHANGED. save_checkpoint/build_from_checkpoint
 #  are shaped around ONE encoder + ONE Head (single input, single classify
-#  pass) and have real callers today (MppRoutingHead, ClassifierEstMpp) this
+#  pass) and have real callers today (ClassifyingRoutingHead, ClassifierEstMpp) this
 #  must not disturb. A prototype-routing model has FIVE trained modules
 #  (pooling, support_context, query_context, collapse, head) instead of
 #  one Head -- Stage 2's three sub-stages and Stage 3 (the routing head)
@@ -321,3 +348,34 @@ def build_prototype_from_checkpoint(path, device):
     head.eval()
 
     return pooling, support_context, query_context, collapse, head, encoder, ckpt
+
+
+def save_rerank_checkpoint(path, *, model, arch: str, pooling: str, encoder: str,
+                           epoch: int, val: Dict, run_args: Dict,
+                           extra: Optional[Dict[str, Any]] = None,
+                           optimizer_state: Optional[Dict[str, Any]] = None) -> Path:
+    '''One second-phase network (`RerankHeads`): its weights, which registry
+    name built it (`RerankChoices.RERANK_CHOICES`) and with which
+    hyper-parameters, and what features it reads (`pooling` of `encoder`).
+    `extra` holds what a user of the file needs besides the network: the
+    columns a stacker was trained on, the window shapes an embedder was cut for.
+    The encoder is frozen throughout, so there is no trunk to save.'''
+    from RerankChoices import hparams_of                            # noqa: PLC0415
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(dict(arch=arch, hparams=hparams_of(model), state=model.state_dict(),
+                    pooling=pooling, encoder=encoder, epoch=epoch, val=val,
+                    args=run_args, extra=extra or {},
+                    optimizer_state=optimizer_state), path)
+    return path
+
+
+def build_rerank_from_checkpoint(path, device):
+    '''`(model, ckpt)`: the network `save_rerank_checkpoint` saved, rebuilt from
+    its registry name and hyper-parameters, loaded and in eval mode on `device`.'''
+    from RerankChoices import build_rerank                          # noqa: PLC0415
+    ckpt = torch.load(path, map_location='cpu')
+    model = build_rerank(ckpt['arch'], ckpt['hparams']).to(device)
+    model.load_state_dict(ckpt['state'])
+    model.eval()
+    return model, ckpt
