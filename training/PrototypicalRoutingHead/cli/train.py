@@ -692,6 +692,12 @@ def save_tagged(weights_dir: Path, modules, cfgs, encoder, args, in_dim: int,
     return best
 
 
+#: `--support-native`'s default: the probability a support batch is rendered native. Half, so the
+#: head sees the deployment's support (stage 1 reads a reference tile, rotation only) and the
+#: degraded kind both.
+SUPPORT_NATIVE_DEFAULT: float = 0.5
+
+
 def _share(text: str) -> float:
     """`--support-native`'s value: a probability in [0, 1]."""
     value: float = float(text)
@@ -916,11 +922,12 @@ def main() -> int:
                     help='support positions per rung per batch')
     ap.add_argument('--n-query', type=int, default=10,
                     help='query positions per rung per batch')
-    ap.add_argument('--support-native', type=_share, nargs='?', const=1.0, default=0.0,
+    ap.add_argument('--support-native', type=_share, nargs='?', const=1.0,
+                    default=SUPPORT_NATIVE_DEFAULT,
                     help='the probability, per episode, that the SUPPORT is rendered with '
                          'routing-support-native (rotation only) rather than routing-query: '
-                         '0 (the default) never, 1 (also a bare --support-native) always, '
-                         'between them one coin per support batch. The query always renders '
+                         '0 never, 1 (also a bare --support-native) always, 0.5 (the default) '
+                         'one coin per support batch, and so on between them. The query always renders '
                          'routing-query. Val uses native support whenever this is above 0')
     ap.add_argument('--n-choices', type=int, nargs='+', default=[3, 4, 5],
                     help='way counts whose rung combinations train (minus '

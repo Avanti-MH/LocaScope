@@ -127,8 +127,8 @@ EVAL_ONLY="${EVAL_ONLY:-0}"
 # Off the default its CSVs are test_scores[_kxk]_support-<on|off>_*.
 EVAL_SUPPORT_NATIVE="${EVAL_SUPPORT_NATIVE:-checkpoint}"
 # SUPPORT_NATIVE (training): the probability, per episode, that the SUPPORT is rendered
-# routing-support-native (rotation only) rather than routing-query. Unset: 0, never (the runs
-# before it existed); 1: always; 0.5: a coin per support batch. Val then uses native support
+# routing-support-native (rotation only) rather than routing-query. Unset: train.py's default, 0.5
+# (a coin per support batch); 1: always; 0: never (the runs before it existed). Val then uses native support
 # whenever it is above 0. A run with another value writes the SAME weight files, so a run that
 # should keep the old ones goes to another OUT.
 

@@ -25,6 +25,7 @@ import os
 import random
 import sys
 from collections import Counter
+from typing import List
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, '..'))
@@ -38,7 +39,7 @@ from training.ClassifyingRoutingHead.Datasets import (                    # noqa
     ManifestRow, pick_wsi_names)
 from training.PrototypicalRoutingHead.Episodes import (          # noqa: E402
     HELD_OUT_COMBOS, batch_shape, draw, epoch_schedule, episodes_per_epoch,
-    max_feasible_k, overlaps, pool_by_rung, reuse_pairs, training_combos)
+    max_feasible_k, overlaps, pool_by_rung, reuse_pairs, support_native_flags, training_combos)
 
 _RESULTS = []
 
@@ -203,9 +204,38 @@ def t_a_capped_wsi_pick_is_random_fixed_and_a_full_cap_is_a_no_op():
     return '50 of 300: fixed per seed, spread out, not the first 50; full cap = all, same order'
 
 
+def t_support_native_flags_0_and_1_draw_nothing_and_half_is_a_fixed_coin() -> str:
+    rng: random.Random = random.Random(7)
+    state = rng.getstate()
+    assert support_native_flags(0.0, 4, deterministic=False, rng=rng) == [False] * 4
+    assert support_native_flags(1.0, 4, deterministic=False, rng=rng) == [True] * 4
+    assert support_native_flags(False, 3, deterministic=True, rng=None) == [False] * 3
+    assert support_native_flags(True, 3, deterministic=True, rng=None) == [True] * 3
+    assert rng.getstate() == state, '0 and 1 drew from the rng: a run at either would move'
+    a: List[bool] = support_native_flags(0.5, 400, deterministic=False, rng=random.Random(1))
+    b: List[bool] = support_native_flags(0.5, 400, deterministic=False, rng=random.Random(1))
+    assert a == b, 'the same seed gave other coins'
+    assert 150 < sum(a) < 250, f'{sum(a)} of 400 native at p = 0.5'
+    assert a != support_native_flags(0.5, 400, deterministic=False, rng=random.Random(2)), \
+        'the seed does nothing'
+    for kwargs in (dict(deterministic=True, rng=random.Random(1)), dict(deterministic=False, rng=None)):
+        try:
+            support_native_flags(0.5, 4, **kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f'a coin was flipped without a training rng: {kwargs}')
+    for bad in (-0.1, 1.5):
+        try:
+            support_native_flags(bad, 4, deterministic=False, rng=random.Random(1))
+        except ValueError:
+            continue
+        raise AssertionError(f'p = {bad} was accepted')
+    return '0/1 touch no rng; 0.5 is seeded, near half, and refused without a training rng'
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 
-_TESTS = [t for n, t in sorted(globals().items()) if n.startswith('t_')]
+_TESTS =[t for n, t in sorted(globals().items()) if n.startswith('t_')]
 
 
 def main() -> int:
