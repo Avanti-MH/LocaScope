@@ -7,7 +7,7 @@ every slide its FoV draw, for every --stage1 method its stage-1 entry under
 --stage-cache-job. No model and no GPU; the slide is opened only for its
 pyramid. The entries are joined with the ground truth -- where each FoV was
 placed (`FovSupply.geometry`) -- into one table, written as
-`<out>/stage1_<split>.csv`, and everything below reads that table.
+`<out>/stage1_<set>.csv` (`set_name`), and everything below reads that table.
 
     table columns (one row per (query, method[, vote rule])):
         dataset, wsi_name, x, y, h, w        -- FoV identity
@@ -41,7 +41,7 @@ placed (`FovSupply.geometry`) -- into one table, written as
                                               distribution, on voting rows
                                               (fov_stats, from the probs table)
 
-        split                                 -- val / test
+        set                                   -- the --datasets ids (`@legacy-val`)
         estimator_id                          -- the estimator's identity_id,
                                               weights included
         risk_*                              -- FoVVote.diagnose: the raw
@@ -69,7 +69,7 @@ address -- so the comparison is paired. The analysis outputs (the table, the
 vote and risk tables, the thresholds, the figures) go to --out, default
 `result/<job>/`: they are results, not reusable computation, so not the
 cache. A test run finds the thresholds its val run fitted in the same --out
-(`stage1_val_thresholds.json`).
+(`stage1_legacy-val_thresholds.json` for `@legacy-test`, `val_set_of`).
 
 Scored on `estimated_*`, NOT `chosen_*`. `chosen_ds`/`chosen_level` already
 went through the shared "snap to this WSI's own pyramid" step
@@ -93,18 +93,36 @@ THREE VIEWS, not one table:
                                     most shots decide the winner instead of
                                     every scale counting equally.
 
-native vs resampled, same reason `training/MppRoutingHead/Runtime.score`
+native vs resampled, same reason `training/ClassifyingRoutingHead/Runtime.score`
 splits it: a rung whose mpp is not on a slide's own pyramid is read one level
 finer and resampled down, which leaves a resampling signature a method could
 be scoring on instead of genuine scale. Meaningless pooled across datasets
 with different pyramid steps (BRACS 4x, Ki67 2x) -- always split by dataset
 first.
 
+FIGURES (`make_figures`, `<out>/<csv stem>_fig_<name>.png`), each titled with what it shows:
+    methods                 which method is best: accuracy and its 95% interval, best on top
+    by_rung                 where each method fails: accuracy at each true rung
+    levels_off              how wrong when wrong, in the dataset's own pyramid levels (BRACS steps x4 of ds,
+                            Ki67 x2, so one level is one level on both)
+    native_vs_resampled     whether resampling flatters a method
+    confusion_<dataset>     what each method calls each true rung
+    per_slide_<dataset>     does a method fail on one slide or everywhere
+    votes, votes_pairwise   which vote rule, and who is right when two rules differ
+    strata_<dataset>_<kind> which rule when, by how the patches look (agreement, entropy, spread, margin)
+    patch_stats_<...>       what a wrong FoV looks like, statistic by statistic, scale by scale
+    risk_flags_<...>        every risk flag: the number it is made of for the right and wrong FoVs with its
+                            threshold, or the accuracy with and without it
+    risk_coverage           what refusing the least sure FoVs buys, per rule
+`--top N` is how many voting checkpoints the figures draw: the best by their mean over the datasets, the
+same ones on every dataset (a method not scored on a dataset is simply absent from its panel); every knn
+and classic baseline is always drawn.
+
 Usage:
     python utilities/cli/metrics/analyze_stage1_metrics.py <bench_stage1_mpp flags> \\
-        --split val --fit-thresholds
+        --datasets @legacy-val --fit-thresholds
     python utilities/cli/metrics/analyze_stage1_metrics.py <bench_stage1_mpp flags> \\
-        --split test --thresholds auto
+        --datasets @legacy-test --thresholds auto
 """
 from __future__ import annotations
 
@@ -115,6 +133,7 @@ import json
 import math
 import os
 import sys
+from typing import List, Optional, Sequence
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..'))
@@ -250,7 +269,7 @@ def rows_from_cache(args) -> list:
                              key=lambda r: abs(math.log(gt_ds) - math.log(r))),
                     native=abs(math.log(gt_ds / float(lds[int(g['level'])])))
                     < math.log(1.01),
-                    gt_mpp=base_mpp * gt_ds, gt_ds=gt_ds, split=args.split,
+                    gt_mpp=base_mpp * gt_ds, gt_ds=gt_ds, set=' '.join(args.datasets),
                     estimator_id=s.id, **desc)
                 votes = table['votes'].get(index)
                 if not votes:
@@ -284,9 +303,9 @@ BAR = '=' * 78
 #: `head_recipe_of`'s own docstring for why loss changes linestyle instead
 #: of colour.
 #:
-#: Keyed by `training/MppRoutingHead/Runtime.HEAD_CHOICES`'s registered names
+#: Keyed by `training/ClassifyingRoutingHead/Runtime.HEAD_CHOICES`'s registered names
 #: (a CLASSIFIER_RECIPES name not keyed here draws in the secondary ink). Its
-#: own table: `training/MppRoutingHead/cli/evaluate.py` colours by classifier
+#: own table: `training/ClassifyingRoutingHead/cli/evaluate.py` colours by classifier
 #: and marks the reduction by shape (`CLASSIFIER_COLORS`, `head_style`), so
 #: the two reports do not use the same colour for the same head.
 HEAD_RECIPE_COLORS = {
@@ -985,19 +1004,39 @@ def check_estimators(fitted: dict, rows: list, path: str) -> None:
            for k in sorted(set(stored) | set(now)) if stored.get(k) != now.get(k)]
     if bad:
         sys.exit(f'{path} was fitted on other estimators than this file holds -- '
-                 + '; '.join(bad) + '. Rerun the val split with the same '
+                 + '; '.join(bad) + '. Rerun the val set with the same '
                  'estimators and refit')
+
+
+def is_val_set(datasets: str) -> bool:
+    """Is a row's `set` (the --datasets ids, space-separated) one a threshold may be fitted on: every id a val
+    set, named `...-val` (`@legacy-val`, `@pure-val`). An older table's `split` column says `val`."""
+    ids: List[str] = datasets.split()
+    return bool(ids) and all(i == 'val' or i.endswith('-val') for i in ids)
+
+
+def set_name(datasets: Sequence[str]) -> str:
+    """The --datasets ids as one file-name word: `@legacy-val` -> `legacy-val`, joined by `+`."""
+    return '+'.join(d.lstrip('@').replace('/', '_') for d in datasets)
+
+
+def val_set_of(datasets: Sequence[str]) -> Optional[List[str]]:
+    """The val set a test set's thresholds were fitted on: each `...-test` id as its `...-val`
+    (`@legacy-test` -> `@legacy-val`); None when an id is not a `-test` one."""
+    if not datasets or not all(d.endswith('-test') for d in datasets):
+        return None
+    return [d[:-len('-test')] + '-val' for d in datasets]
 
 
 def fit_thresholds(rows: list, source: str) -> dict:
     """Every tau of THRESHOLD_SPECS, per (kind, vote label) -- a prototype's
     near-uniform probabilities and a classifier's sharp ones are different
     scales, so one tau across both would flag one of them almost always.
-    Refuses a file with test rows in it."""
-    splits = {cell(r, 'split') for r in rows}
-    if 'test' in splits or None in splits:
-        sys.exit(f'--fit-thresholds needs a val run (bench --split val); this file '
-                 f'has split {sorted(s or "unrecorded" for s in splits)}')
+    Refuses a file with rows of anything but a val set in it (`is_val_set`)."""
+    sets = {cell(r, 'set') or cell(r, 'split') for r in rows}
+    if not all(s is not None and is_val_set(s) for s in sets):
+        sys.exit(f'--fit-thresholds needs a val run (bench --datasets @<name>-val); this file '
+                 f'has {sorted(s or "unrecorded" for s in sets)}')
     groups = collections.defaultdict(list)
     for r in rows:
         if cell(r, 'vote'):
@@ -1268,6 +1307,731 @@ def plot_dataset(view2_rows: list, dataset: str, out_path) -> None:
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+# ── figures: each one says what it shows in its title ────────────────────────
+#
+# The tables above are for looking things up; these are for reading. Every figure has one question,
+# and its title is the answer, written from the numbers (`_best_line`), so a figure can be read
+# without the caption. matplotlib is imported inside `make_figures`, as `plot_dataset` does.
+
+#: One colour per kind of method, the same in every figure (Okabe-Ito).
+KIND_COLOURS = {'classifier': '#0072B2', 'prototype': '#D55E00', 'knn': '#009E73', 'classic': '#8A8A8A'}
+RIGHT_COLOUR = '#009E73'
+WRONG_COLOUR = '#D55E00'
+#: levels off, most finer first: the estimate is too fine (small ds) ... right ... too coarse
+LEVEL_ORDER = ('<=-2', '-1', 'right', '+1', '>=+2')
+LEVEL_COLOURS = {'<=-2': '#B35806', '-1': '#E69F00', 'right': '#009E73', '+1': '#56B4E9', '>=+2': '#0B5394'}
+LEVEL_LABELS = {'<=-2': '2+ levels too fine', '-1': '1 level too fine', 'right': 'right',
+                '+1': '1 level too coarse', '>=+2': '2+ levels too coarse'}
+
+
+def short_name(method: str) -> str:
+    """A label that fits on a figure: the vote rule left off, the encoder not repeated, no `best`. A checkpoint
+    named in segments (`<data>--<encoder>--...--best`, `Checkpoints.weights_name`) also loses its data segment
+    and keeps its own `_`."""
+    parts = method.split('@', 1)[0].split('+')
+    if len(parts) >= 2 and '--' in parts[1]:
+        segments: List[str] = parts[1].split('--')[1:]
+        kept: List[str] = [s for i, s in enumerate(segments)
+                           if not (i == 0 and s == parts[0]) and not (i == len(segments) - 1 and s == 'best')]
+        return ' '.join([parts[0]] + kept + parts[2:])[:60]
+    if len(parts) >= 2 and parts[1].startswith(parts[0] + '_'):
+        parts[1] = parts[1][len(parts[0]) + 1:]
+    return ' '.join(parts).replace('_best', '').replace('_', ' ')[:60]
+
+
+def pick_methods(view3: list, kinds: dict, dataset: str, top: int) -> list:
+    """The methods one figure draws, best first: the `top` voting checkpoints by their accuracy under the
+    default rule (what the pipeline would run), then every knn and classic row (the baselines, always
+    there). Each is `dict(base, kind, acc, lo, hi, best_acc, best_rule, mae)`; `best_*` is the best rule
+    of that checkpoint, which is a choice made on the same FoVs and so a little optimistic."""
+    by_base = collections.defaultdict(list)
+    for o in view3:
+        if o['dataset'] == dataset:
+            by_base[o['method'].split('@', 1)[0]].append(o)
+    out = []
+    for base, grp in by_base.items():
+        kind = kinds.get(base, 'knn')
+        default = [o for o in grp if o['method'].endswith('@' + DEFAULT_VOTE)] or grp
+        d = default[0]
+        best = max(grp, key=lambda o: o['mean_level_accuracy'] if not math.isnan(o['mean_level_accuracy']) else -1)
+        out.append(dict(base=base, kind=kind, acc=d['mean_level_accuracy'], lo=d['ci95_lo'], hi=d['ci95_hi'],
+                        best_acc=best['mean_level_accuracy'],
+                        best_rule=best['method'].split('@', 1)[1] if '@' in best['method'] else '',
+                        mae=d['mean_log2_rung_mae']))
+    out.sort(key=lambda m: -(m['acc'] if not math.isnan(m['acc']) else -1))
+    voting = [m for m in out if m['kind'] in ('classifier', 'prototype')][:top]
+    baselines = [m for m in out if m['kind'] not in ('classifier', 'prototype')]
+    return sorted(voting + baselines, key=lambda m: -(m['acc'] if not math.isnan(m['acc']) else -1))
+
+
+def pick_shared(view3: list, kinds: dict, datasets: list, top: int) -> dict:
+    """`pick_methods` for several datasets, but with ONE set of methods: the `top` voting checkpoints by their
+    mean accuracy over the datasets they were scored on (so a checkpoint that is good on one dataset only
+    does not push out one that is good on both), and every knn and classic baseline. Each dataset lists the
+    chosen methods it has, best first on that dataset, so the panels of a figure compare the same methods."""
+    full = {d: pick_methods(view3, kinds, d, top=10 ** 6) for d in datasets}
+    scores = collections.defaultdict(list)
+    for ms in full.values():
+        for m in ms:
+            if m['kind'] in ('classifier', 'prototype') and not math.isnan(m['acc']):
+                scores[m['base']].append(m['acc'])
+    chosen = set(sorted(scores, key=lambda b: -sum(scores[b]) / len(scores[b]))[:top])
+    return {d: [m for m in ms if m['base'] in chosen or m['kind'] not in ('classifier', 'prototype')]
+            for d, ms in full.items()}
+
+
+def _best_line(picked: list, dataset: str) -> str:
+    """The sentence a methods figure is titled with: the best method, and the baselines next to it."""
+    if not picked:
+        return dataset
+    best = picked[0]
+    base = [m for m in picked if m['kind'] in ('knn', 'classic')]
+    tail = '; '.join(f'{m["base"]} {m["acc"]:.0%}' for m in base[:3])
+    return f'{dataset}: best is {short_name(best["base"])} at {best["acc"]:.0%}' + (f'   ({tail})' if tail else '')
+
+
+def ladder_step(rows: list, dataset: str) -> float:
+    """The scale factor between neighbouring true rungs of a dataset (BRACS 4, Ki67 2): what one pyramid
+    level is. An error in octaves means one level on one dataset and two on the other; divided by this
+    step it is the same thing on both."""
+    rungs = sorted({num(r, 'rung') for r in rows if cell(r, 'dataset') == dataset and num(r, 'rung')})
+    ratios = [b / a for a, b in zip(rungs, rungs[1:]) if a > 0]
+    return min(ratios) if ratios else 2.0
+
+
+def level_bucket(row: dict, step: float) -> str:
+    """Where one estimate stands against the true rung, in the dataset's own levels: `right`, or how many
+    levels too fine (`-1`, `<=-2`) or too coarse (`+1`, `>=+2`), a wrong answer counting at least one level."""
+    if is_correct(row):
+        return 'right'
+    ds, rung = num(row, 'estimated_ds'), num(row, 'rung')
+    if ds is None or rung is None or ds <= 0:
+        return 'right'
+    octaves = math.log2(ds) - math.log2(rung)
+    levels = max(1, int(round(abs(octaves) / math.log2(step))))
+    if octaves < 0:
+        return '-1' if levels == 1 else '<=-2'
+    return '+1' if levels == 1 else '>=+2'
+
+
+def _clean(ax) -> None:
+    for side in ('top', 'right'):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(colors=_INK)
+
+
+def fig_methods(picked_by_dataset: dict, out_path: str, plt) -> None:
+    """Which method is best: a dot and its 95% interval per method, best at the top. The dot is the
+    default rule (what the pipeline runs); the hollow diamond is the best rule of that checkpoint. Rows
+    whose interval overlaps the best one's are shaded -- they are not shown to be worse."""
+    datasets = list(picked_by_dataset)
+    height = 0.34 * max(len(p) for p in picked_by_dataset.values()) + 2.2
+    fig, axes = plt.subplots(1, len(datasets), figsize=(8.2 * len(datasets), height), squeeze=False)
+    for ax, dataset in zip(axes[0], datasets):
+        picked = picked_by_dataset[dataset]
+        y = list(range(len(picked)))[::-1]
+        best_lo = picked[0]['lo'] if picked and not math.isnan(picked[0]['lo']) else float('nan')
+        for yi, m in zip(y, picked):
+            tied = not math.isnan(best_lo) and not math.isnan(m['hi']) and m['hi'] >= best_lo
+            if tied:
+                ax.axhspan(yi - 0.5, yi + 0.5, color='#eef3f8', zorder=0)
+            colour = KIND_COLOURS.get(m['kind'], '#555555')
+            if not math.isnan(m['lo']):
+                ax.plot([m['lo'], m['hi']], [yi, yi], color=colour, lw=2, zorder=2)
+            ax.scatter([m['acc']], [yi], color=colour, s=46, zorder=3)
+            if m['kind'] in ('classifier', 'prototype') and m['best_acc'] > m['acc'] + 1e-9:
+                ax.scatter([m['best_acc']], [yi], facecolors='none', edgecolors=colour, marker='D', s=40,
+                           zorder=3, linewidths=1.2)
+            ax.text(1.01, yi, f'{m["acc"]:.0%}', va='center', fontsize=8, color=_INK,
+                    transform=ax.get_yaxis_transform())
+        labels = [short_name(m['base']) + ('   <- pipeline' if m['base'] == 'knn:gigapath' else '') for m in picked]
+        ax.set_yticks(y, labels, fontsize=8)
+        ax.set_xlim(0, 1.0)
+        ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ['0', '25', '50', '75', '100'])
+        ax.set_xlabel('level accuracy, mean over rungs (%)   dot: default rule, diamond: best rule')
+        ax.set_title(_best_line(picked, dataset), fontsize=10, loc='left', color=_INK)
+        ax.grid(axis='x', alpha=0.25)
+        _clean(ax)
+    handles = [plt.Line2D([], [], marker='o', color=c, ls='', label=k) for k, c in KIND_COLOURS.items()]
+    fig.legend(handles=handles, loc='lower center', ncol=4, frameon=False, fontsize=9)
+    fig.text(0.01, 0.01, 'shaded rows: the 95% interval overlaps the best method\'s, so they are not shown to be worse.',
+             fontsize=8, color=_INK)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def fig_by_rung(view2: list, picked_by_dataset: dict, out_path: str, plt) -> None:
+    """Where each method fails: accuracy at each true rung, a line per method."""
+    datasets = list(picked_by_dataset)
+    fig, axes = plt.subplots(1, len(datasets), figsize=(6.6 * len(datasets), 4.4), squeeze=False, sharey=True)
+    for ax, dataset in zip(axes[0], datasets):
+        picked = picked_by_dataset[dataset][:6] + [m for m in picked_by_dataset[dataset][6:]
+                                                   if m['kind'] in ('knn', 'classic')]
+        names = {m['base'] for m in picked}
+        for m in picked:
+            pts = sorted((r['rung'], r['level_accuracy']) for r in view2
+                         if r['dataset'] == dataset and r['method'].split('@', 1)[0] == m['base'])
+            if not pts:
+                continue
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], marker='o', ms=4, lw=1.6,
+                    color=KIND_COLOURS.get(m['kind'], '#555555'),
+                    ls='-' if m['kind'] in ('classifier', 'knn') else '--', alpha=0.9,
+                    label=short_name(m['base'])[:34])
+        rungs = sorted({r['rung'] for r in view2 if r['dataset'] == dataset and r['method'].split('@', 1)[0] in names})
+        ax.set_xscale('log', base=2)
+        ax.set_xticks(rungs, [f'{x:g}' for x in rungs])
+        ax.minorticks_off()
+        ax.set_ylim(0, 1.03)
+        ax.set_yticks([0, 0.25, 0.5, 0.75, 1], ['0', '25', '50', '75', '100'])
+        ax.set_xlabel('true rung (ds)')
+        ax.set_ylabel('% right')
+        ax.set_title(f'{dataset}: accuracy at each scale, best {len(picked)} methods and the baselines',
+                     fontsize=10, loc='left', color=_INK)
+        ax.grid(alpha=0.25)
+        ax.legend(frameon=False, fontsize=6.5, loc='lower left')
+        _clean(ax)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def fig_levels_off(rows: list, picked_by_dataset: dict, out_path: str, plt) -> None:
+    """How wrong when wrong, in the dataset's own levels: a 100% bar per method, right in the middle,
+    too fine to its left, too coarse to its right. One level off is one level on every dataset."""
+    datasets = list(picked_by_dataset)
+    height = 0.34 * max(len(p) for p in picked_by_dataset.values()) + 2.4
+    fig, axes = plt.subplots(1, len(datasets), figsize=(8.2 * len(datasets), height), squeeze=False)
+    for ax, dataset in zip(axes[0], datasets):
+        picked = picked_by_dataset[dataset]
+        step = ladder_step(rows, dataset)
+        counts = {m['base']: collections.Counter() for m in picked}
+        for r in rows:
+            if cell(r, 'dataset') != dataset:
+                continue
+            base = base_method_of(r)
+            if base in counts and (not cell(r, 'vote') or cell(r, 'vote') == DEFAULT_VOTE):
+                counts[base][level_bucket(r, step)] += 1
+        y = list(range(len(picked)))[::-1]
+        for yi, m in zip(y, picked):
+            c = counts[m['base']]
+            total = sum(c.values()) or 1
+            left = 0.0
+            for key in LEVEL_ORDER:
+                share = c[key] / total
+                ax.barh(yi, share, left=left, color=LEVEL_COLOURS[key], height=0.72, edgecolor='white', linewidth=0.5)
+                if share >= 0.06:
+                    ax.text(left + share / 2, yi, f'{100 * share:.0f}', ha='center', va='center', fontsize=7,
+                            color='white' if key in ('<=-2', '>=+2', 'right') else _INK)
+                left += share
+        ax.set_yticks(y, [short_name(m['base']) for m in picked], fontsize=8)
+        ax.set_xlim(0, 1)
+        ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ['0', '25', '50', '75', '100'])
+        ax.set_xlabel(f'% of FoVs   (one level = a x{step:g} step of ds on this dataset)')
+        ax.set_title(f'{dataset}: when a method is wrong, by how many levels', fontsize=10, loc='left', color=_INK)
+        _clean(ax)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=LEVEL_COLOURS[k]) for k in LEVEL_ORDER]
+    fig.legend(handles, [LEVEL_LABELS[k] for k in LEVEL_ORDER], loc='lower center', ncol=5, frameon=False, fontsize=8)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def fig_votes(acc: list, summary: list, out_path: str, plt) -> None:
+    """Which vote rule: for each checkpoint, a rule's accuracy minus the mean of that checkpoint over its
+    rules, so checkpoints of different strength sit on one axis. A dot per checkpoint, a diamond for the
+    mean; a rule whose dots stay above zero is better for every checkpoint, not for a few."""
+    panels = sorted({(r['dataset'], r['kind']) for r in acc})
+    n_cols = max(len({k for d, k in panels if d == dataset}) for dataset in {d for d, _ in panels})
+    datasets = sorted({d for d, _ in panels})
+    fig, axes = plt.subplots(len(datasets), n_cols, figsize=(6.4 * n_cols, 3.9 * len(datasets)), squeeze=False)
+    for ax in axes.flat:
+        ax.set_visible(False)
+    for i, dataset in enumerate(datasets):
+        for j, kind in enumerate(sorted({k for d, k in panels if d == dataset})):
+            ax = axes[i][j]
+            ax.set_visible(True)
+            grp = [r for r in acc if r['dataset'] == dataset and r['kind'] == kind
+                   and not math.isnan(r['mean_level_accuracy'])]
+            by_method = collections.defaultdict(dict)
+            for r in grp:
+                by_method[r['method']][r['vote']] = r['mean_level_accuracy']
+            delta = collections.defaultdict(list)
+            for votes in by_method.values():
+                mean = sum(votes.values()) / len(votes)
+                for vote, a in votes.items():
+                    delta[vote].append(a - mean)
+            order = sorted(delta, key=lambda v: -(sum(delta[v]) / len(delta[v])))
+            for x, vote in enumerate(order):
+                vals = delta[vote]
+                jitter = [(-0.18 + 0.36 * (k % 7) / 6) for k in range(len(vals))]
+                ax.scatter([x + jj for jj in jitter], vals, s=14, color=KIND_COLOURS.get(kind, '#555555'),
+                           alpha=0.55, zorder=2)
+                ax.scatter([x], [sum(vals) / len(vals)], marker='D', s=70, color='white',
+                           edgecolors=_INK, linewidths=1.3, zorder=3)
+            ax.axhline(0, color=_INK, lw=0.8)
+            ax.set_xticks(range(len(order)), order, rotation=35, ha='right', fontsize=7)
+            ax.set_ylabel('accuracy vs the checkpoint\'s mean rule (points)')
+            best = order[0] if order else '?'
+            ax.set_title(f'{dataset}, {kind}: best rule {best}  ({len(by_method)} checkpoints)', fontsize=9,
+                         loc='left', color=_INK)
+            ax.grid(axis='y', alpha=0.25)
+            _clean(ax)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def fig_votes_pairwise(summary: list, pairwise: list, out_path: str, plt) -> None:
+    """Who is right when two rules disagree: the best rule against each other rule, FoVs where only one
+    of the two is right, as a PERCENT of the FoVs. Right of the line: only the best rule is right. A star
+    where the sign test says the lean is not chance (with this many pairs a tiny lean gets stars too: read
+    the length, not the stars). Every panel is drawn on the same axis, so the lengths compare across them."""
+    panels = sorted({(r['dataset'], r['kind']) for r in summary})
+    datasets = sorted({d for d, _ in panels})
+    n_cols = max(len({k for d, k in panels if d == dataset}) for dataset in datasets)
+    fig, axes = plt.subplots(len(datasets), n_cols, figsize=(6.4 * n_cols, 3.9 * len(datasets)), squeeze=False)
+    for ax in axes.flat:
+        ax.set_visible(False)
+    drawn: list = []
+    for i, dataset in enumerate(datasets):
+        for j, kind in enumerate(sorted({k for d, k in panels if d == dataset})):
+            rules = [r for r in summary if r['dataset'] == dataset and r['kind'] == kind]
+            if not rules:
+                continue
+            best = max(rules, key=lambda r: r['mean_acc'] if not math.isnan(r['mean_acc']) else -1)['vote']
+            bars = []
+            for p in pairwise:
+                if p['dataset'] != dataset or p['kind'] != kind or best not in (p['vote_a'], p['vote_b']):
+                    continue
+                best_first = p['vote_a'] == best
+                other = p['vote_b'] if best_first else p['vote_a']
+                mine, theirs = (p['a_only'], p['b_only']) if best_first else (p['b_only'], p['a_only'])
+                n = p['n_fov'] or 1
+                bars.append((other, 100.0 * mine / n, 100.0 * theirs / n, p['sign_p'], p['n_disagree']))
+            bars.sort(key=lambda b: b[1] - b[2])
+            drawn.append((axes[i][j], dataset, kind, best, bars))
+    longest_right = max((b[1] for _, _, _, _, bars in drawn for b in bars), default=1.0)
+    longest_left = max((b[2] for _, _, _, _, bars in drawn for b in bars), default=1.0)
+    for ax, dataset, kind, best, bars in drawn:
+        ax.set_visible(True)
+        y = list(range(len(bars)))
+        for yi, (other, mine, theirs, pval, nd) in zip(y, bars):
+            ax.barh(yi, mine, color=RIGHT_COLOUR, height=0.7)
+            ax.barh(yi, -theirs, color=WRONG_COLOUR, height=0.7)
+            star = '***' if pval < 0.001 else '**' if pval < 0.01 else '*' if pval < 0.05 else ''
+            ax.text(mine + 0.01 * longest_right, yi, star, va='center', fontsize=9, color=_INK)
+        ax.axvline(0, color=_INK, lw=0.8)
+        ax.set_xlim(-1.15 * longest_left, 1.2 * longest_right)
+        ax.set_yticks(y, [b[0] for b in bars], fontsize=7)
+        ax.set_xlabel(f'% of FoVs where only one of the two is right   (right: only {best}; left: only the other)',
+                      fontsize=8)
+        ax.set_title(f'{dataset}, {kind}: {best} against the others   (* sign test)', fontsize=9,
+                     loc='left', color=_INK)
+        ax.grid(axis='x', alpha=0.25)
+        _clean(ax)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+#: A risk flag drawn as a distribution of the number it is made from, with its threshold:
+#: (title, rule, column, direction, tau name or a fixed value). '<' lights below the threshold, '>' above,
+#: '|>' above in absolute value.
+RISK_HISTOGRAMS = (
+    ('few_confident_decide: share of patches backing the winner', 'mean_probability', 'risk_winner_support', '<', 0.5),
+    ('weak_majority_strong_dissent: majority\'s margin', 'hard_majority', 'risk_margin_majority_p50', '<',
+     'hm_margin_majority_low'),
+    ('weak_majority_strong_dissent: dissenters\' margin', 'hard_majority', 'risk_margin_dissent_p50', '>',
+     'hm_margin_dissent_high'),
+    ('unsure_median_or_split: top-1 probability, median', 'patch_class_median', 'risk_top1_p50', '<', 'pcm_top1_low'),
+    ('weak_or_unsupported_snap: probability of the chosen level', 'median_log_rung', 'risk_winner_prob', '<',
+     'mlr_support_low'),
+    ('single_patch_veto: smallest probability a patch gives', 'sum_log_probability', 'risk_min_p_winner', '<',
+     'slp_veto'),
+    ('weight_tracks_scale: |corr(weight, e)|', 'quality_weighted', 'risk_corr_w_e', '|>', 'qw_corr_high'),
+    ('weights collapse: effective sample size', 'quality_weighted', 'risk_ess_frac', '<', 'qw_ess_low'))
+#: The flags that are only on or off: (flag, rule)
+RISK_BINARY = (('vote_tie', 'hard_majority'), ('median_split', 'patch_class_median'),
+               ('unsupported_snap', 'median_log_rung'), ('loo_unstable', 'sum_log_probability'),
+               ('weighting_flipped', 'quality_weighted'))
+#: Of a rule that has several labels, the one a risk figure draws.
+RISK_LABEL_PREFERENCE = ('patch_class_median:lower', 'quality_weighted:tissue')
+
+
+def _rule_label(rows: list, rule: str) -> str:
+    labels = sorted({cell(r, 'vote') for r in rows if rule_of(r) == rule})
+    for preferred in RISK_LABEL_PREFERENCE:
+        if preferred in labels:
+            return preferred
+    return labels[0] if labels else ''
+
+
+def fig_risk_flags(rows: list, dataset: str, kind: str, taus: dict, out_path: str, plt) -> bool:
+    """The risk flags of one kind of method on one dataset, one small picture each. A flag made from a
+    number: that number's distribution for FoVs the rule got right (green) and wrong (orange), each as a
+    share of its own group, with the threshold line and the flagged side shaded -- the picture says whether
+    the wrong FoVs sit on the flagged side. A flag that is on or off: the accuracy with and without it."""
+    sub = [r for r in rows if cell(r, 'dataset') == dataset and kind_of(r) == kind and cell(r, 'vote')]
+    if not sub:
+        return False
+    import numpy as np                                                    # noqa: PLC0415
+    n_panels = len(RISK_HISTOGRAMS) + len(RISK_BINARY)
+    n_cols = 4
+    n_rows = math.ceil(n_panels / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.4 * n_cols, 3.3 * n_rows), squeeze=False)
+    for ax in axes.flat:
+        ax.set_visible(False)
+    k = 0
+    for title, rule, column, direction, tau in RISK_HISTOGRAMS:
+        ax = axes.flat[k]
+        k += 1
+        label = _rule_label(sub, rule)
+        pts = [(num(r, column), is_correct(r)) for r in sub if cell(r, 'vote') == label and _finite(num(r, column))]
+        if not pts:
+            continue
+        ax.set_visible(True)
+        threshold = tau if isinstance(tau, float) else (taus.get(f'{kind}|{label}|{tau}') or {}).get('value')
+        vals = np.array([abs(v) if direction == '|>' else v for v, _ in pts], dtype=float)
+        right = np.array([c for _, c in pts], dtype=bool)
+        edges = np.linspace(float(vals.min()), float(vals.max()) + 1e-9, 31)
+        for flag, colour, name in ((True, RIGHT_COLOUR, 'right'), (False, WRONG_COLOUR, 'wrong')):
+            v = vals[right == flag]
+            if len(v):
+                ax.hist(v, bins=edges, weights=np.full(len(v), 1.0 / len(v)), histtype='stepfilled', alpha=0.45,
+                        color=colour, edgecolor=colour, label=f'{name} (n={len(v)})')
+        note = ''
+        if threshold is not None and _finite(threshold):
+            ax.axvline(threshold, color=_INK, ls='--', lw=1)
+            lit = vals > threshold if direction in ('>', '|>') else vals < threshold
+            if direction in ('>', '|>'):
+                ax.axvspan(threshold, float(vals.max()), color='#f3d9cc', alpha=0.35, zorder=0)
+            else:
+                ax.axvspan(float(vals.min()), threshold, color='#f3d9cc', alpha=0.35, zorder=0)
+            share_wrong = float(lit[~right].mean()) if (~right).any() else float('nan')
+            share_right = float(lit[right].mean()) if right.any() else float('nan')
+            note = f'flagged: {share_wrong:.0%} of the wrong, {share_right:.0%} of the right'
+        elif not isinstance(tau, float):
+            note = 'threshold not loaded (fit it on val)'
+        ax.set_title(f'{title}\n{label}   {note}', fontsize=7.5, loc='left', color=_INK)
+        ax.set_ylabel('share of its group', fontsize=7)
+        ax.tick_params(labelsize=7)
+        ax.legend(frameon=False, fontsize=7)
+        _clean(ax)
+    for flag, rule in RISK_BINARY:
+        ax = axes.flat[k]
+        k += 1
+        label = _rule_label(sub, rule)
+        pairs = [(flags_of(r, taus).get(flag), is_correct(r)) for r in sub if cell(r, 'vote') == label]
+        pairs = [(f, c) for f, c in pairs if f is not None]
+        if not pairs:
+            continue
+        ax.set_visible(True)
+        on = [c for f, c in pairs if f]
+        off = [c for f, c in pairs if not f]
+        acc_on = sum(on) / len(on) if on else float('nan')
+        acc_off = sum(off) / len(off) if off else float('nan')
+        ax.bar([0, 1], [acc_off if off else 0, acc_on if on else 0], color=[RIGHT_COLOUR, WRONG_COLOUR], width=0.6)
+        for x, a, n in ((0, acc_off, len(off)), (1, acc_on, len(on))):
+            ax.text(x, (a if _finite(a) else 0) + 0.02, f'{a:.0%}  n={n}' if _finite(a) else f'n={n}',
+                    ha='center', fontsize=7.5, color=_INK)
+        risk = ((1 - acc_on) / (1 - acc_off)) if on and off and acc_off < 1 else float('nan')
+        ax.set_xticks([0, 1], ['not flagged', 'flagged'], fontsize=8)
+        ax.set_ylim(0, 1.15)
+        ax.set_yticks([0, 0.5, 1], ['0', '50', '100'], fontsize=7)
+        ax.set_ylabel('% right', fontsize=7)
+        prev = len(on) / len(pairs) if pairs else float('nan')
+        ax.set_title(f'{flag}: lit on {prev:.1%} of FoVs\n{label}   flagged FoVs err x{risk:.1f}' if _finite(risk)
+                     else f'{flag}: lit on {prev:.1%} of FoVs\n{label}', fontsize=7.5, loc='left', color=_INK)
+        _clean(ax)
+    fig.suptitle(f'{dataset}, {kind}: risk flags -- is the flagged side where the wrong FoVs are?', x=0.01,
+                 ha='left', fontsize=11, color=_INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return True
+
+
+def fig_strata(strata: list, dataset: str, kind: str, out_path: str, plt) -> bool:
+    """Which rule when: accuracy of every rule inside each slice of the FoV's patch distribution (rows:
+    rules, columns: the slices of one statistic). The box marks the best rule of each column; where it
+    moves along a row of cells, the best rule depends on what the patches look like."""
+    sub = [r for r in strata if r['dataset'] == dataset and r['kind'] == kind and not r['method']]
+    if not sub:
+        return False
+    import numpy as np                                                    # noqa: PLC0415
+    stats = [c for c, _ in STRATA if any(r['stat'] == c for r in sub)]
+    rules = sorted({r['vote'] for r in sub})
+    fig, axes = plt.subplots(1, len(stats), figsize=(3.7 * len(stats), 0.5 * len(rules) + 2.6), squeeze=False)
+    for ax, stat in zip(axes[0], stats):
+        bins = [b[0] for b in dict(STRATA)[stat] if any(r['stat'] == stat and r['bin'] == b[0] for r in sub)]
+        grid = np.full((len(rules), len(bins)), np.nan)
+        counts = {}
+        for r in sub:
+            if r['stat'] == stat and r['bin'] in bins and r['vote'] in rules:
+                grid[rules.index(r['vote']), bins.index(r['bin'])] = r['accuracy']
+                counts[r['bin']] = r['n']
+        ax.imshow(grid, vmin=0, vmax=1, cmap='Blues', aspect='auto')
+        for a in range(len(rules)):
+            for b in range(len(bins)):
+                if not math.isnan(grid[a, b]):
+                    ax.text(b, a, f'{100 * grid[a, b]:.0f}', ha='center', va='center', fontsize=7,
+                            color='white' if grid[a, b] > 0.6 else _INK)
+        for b in range(len(bins)):
+            col = grid[:, b]
+            if not np.isnan(col).all():
+                best = int(np.nanargmax(col))
+                ax.add_patch(plt.Rectangle((b - 0.5, best - 0.5), 1, 1, fill=False, edgecolor='#D55E00', lw=2))
+        ax.set_xticks(range(len(bins)), [f'{b}\nn={counts.get(b, 0)}' for b in bins], fontsize=7)
+        ax.set_yticks(range(len(rules)), rules if ax is axes[0][0] else [], fontsize=7)
+        ax.set_title(stat, fontsize=8, loc='left', color=_INK)
+    fig.suptitle(f'{dataset}, {kind}: accuracy (%) of each vote rule by how the patches look; box = best rule '
+                 f'in that slice', x=0.01, ha='left', fontsize=10, color=_INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return True
+
+
+def fig_distribution(distribution: list, dataset: str, kind: str, out_path: str, plt) -> bool:
+    """What a wrong FoV looks like: the median of every patch-distribution statistic, per rung, for FoVs
+    the method got right (green) and wrong (orange). Lines that part are statistics that tell them apart."""
+    sub = [r for r in distribution if r['dataset'] == dataset and r['kind'] == kind]
+    if not sub:
+        return False
+    n_cols = 4
+    n_rows = math.ceil(len(FOV_COLUMNS) / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.2 * n_cols, 2.9 * n_rows), squeeze=False)
+    for ax, column in zip(axes.flat, FOV_COLUMNS):
+        for outcome, colour in (('right', RIGHT_COLOUR), ('wrong', WRONG_COLOUR)):
+            pts = sorted((r['rung'], r[f'{column}_p50']) for r in sub if r['outcome'] == outcome
+                         and r['rung'] is not None and _finite(r[f'{column}_p50']))
+            if pts:
+                ax.plot([p[0] for p in pts], [p[1] for p in pts], marker='o', ms=4, color=colour, label=outcome)
+        ax.set_xscale('log', base=2)
+        rungs = sorted({r['rung'] for r in sub if r['rung'] is not None})
+        ax.set_xticks(rungs, [f'{x:g}' for x in rungs], fontsize=7)
+        ax.minorticks_off()
+        ax.set_title(column, fontsize=8, loc='left', color=_INK)
+        ax.tick_params(labelsize=7)
+        ax.grid(alpha=0.25)
+        _clean(ax)
+    for ax in list(axes.flat)[len(FOV_COLUMNS):]:
+        ax.set_visible(False)
+    axes.flat[0].legend(frameon=False, fontsize=7)
+    fig.suptitle(f'{dataset}, {kind}: median of each patch statistic by true rung, right vs wrong FoVs', x=0.01,
+                 ha='left', fontsize=10, color=_INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return True
+
+
+def fig_risk_coverage(rc: list, out_path: str, plt) -> None:
+    """What refusing the least sure FoVs buys: the error left among the FoVs answered, at 25 / 50 / 75 /
+    100% coverage, per vote rule (mean over checkpoints). A lower line is a rule whose confidence can be
+    trusted to say when not to answer."""
+    panels = sorted({(r['dataset'], r['kind']) for r in rc})
+    datasets = sorted({d for d, _ in panels})
+    n_cols = max(len({k for d, k in panels if d == dataset}) for dataset in datasets)
+    fig, axes = plt.subplots(len(datasets), n_cols, figsize=(6.0 * n_cols, 3.9 * len(datasets)), squeeze=False)
+    for ax in axes.flat:
+        ax.set_visible(False)
+    rules = sorted({r['vote'] for r in rc})
+    palette = plt.get_cmap('tab10')
+    colour = {v: palette(i % 10) for i, v in enumerate(rules)}
+    for i, dataset in enumerate(datasets):
+        for j, kind in enumerate(sorted({k for d, k in panels if d == dataset})):
+            ax = axes[i][j]
+            ax.set_visible(True)
+            sub = [r for r in rc if r['dataset'] == dataset and r['kind'] == kind]
+            by_rule = collections.defaultdict(list)
+            for r in sub:
+                by_rule[r['vote']].append(r)
+            aurc = {v: sum(r['aurc'] for r in g) / len(g) for v, g in by_rule.items()}
+            for v in sorted(by_rule, key=aurc.get):
+                g = by_rule[v]
+                ys = [sum(r[f'err_at_{c}'] for r in g) / len(g) for c in (25, 50, 75, 100)]
+                ax.plot([25, 50, 75, 100], ys, marker='o', ms=3, lw=1.4, color=colour[v],
+                        label=f'{v}  AURC {aurc[v]:.3f}')
+            best = min(aurc, key=aurc.get) if aurc else '?'
+            ax.set_xticks([25, 50, 75, 100])
+            ax.set_xlabel('coverage (% of FoVs answered, most confident first)')
+            ax.set_ylabel('error among those answered')
+            ax.set_title(f'{dataset}, {kind}: lowest AURC is {best}', fontsize=9, loc='left', color=_INK)
+            ax.grid(alpha=0.25)
+            ax.legend(frameon=False, fontsize=6)
+            _clean(ax)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def fig_confusion(conf: list, picked_by_dataset: dict, dataset: str, out_path: str, plt, top: int = 6) -> bool:
+    """What each method calls each true rung: rows are the true rung, columns the rung it called, each row
+    a share of its FoVs; the diagonal is right."""
+    import numpy as np                                                    # noqa: PLC0415
+    picked = picked_by_dataset[dataset]
+    chosen = [m for m in picked if m['kind'] in ('classifier', 'prototype')][:top - 2] + \
+             [m for m in picked if m['kind'] in ('knn', 'classic')][:2]
+    rungs = sorted({c['gt_rung'] for c in conf if c['dataset'] == dataset and c['gt_rung'] is not None})
+    if not chosen or not rungs:
+        return False
+    preds = sorted({c['pred_rung'] for c in conf if c['dataset'] == dataset and c['pred_rung'] is not None}
+                   | set(rungs))
+    n_cols = min(3, len(chosen))
+    n_rows = math.ceil(len(chosen) / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.1 * n_cols, 3.7 * n_rows), squeeze=False)
+    for ax in axes.flat:
+        ax.set_visible(False)
+    for ax, m in zip(axes.flat, chosen):
+        ax.set_visible(True)
+        grid = np.zeros((len(rungs), len(preds)))
+        for c in conf:
+            label = c['method']
+            right_vote = label == m['base'] or label == m['base'] + '@' + DEFAULT_VOTE
+            if c['dataset'] == dataset and right_vote and c['gt_rung'] in rungs and c['pred_rung'] in preds:
+                grid[rungs.index(c['gt_rung']), preds.index(c['pred_rung'])] += c['n']
+        norm = grid / np.maximum(grid.sum(axis=1, keepdims=True), 1)
+        ax.imshow(norm, vmin=0, vmax=1, cmap='Blues', aspect='auto')
+        for a in range(len(rungs)):
+            for b in range(len(preds)):
+                if norm[a, b] >= 0.01:
+                    ax.text(b, a, f'{100 * norm[a, b]:.0f}', ha='center', va='center', fontsize=7,
+                            color='white' if norm[a, b] > 0.6 else _INK)
+        ax.set_xticks(range(len(preds)), [f'{p:g}' for p in preds], fontsize=7)
+        ax.set_yticks(range(len(rungs)), [f'{r:g}' for r in rungs], fontsize=7)
+        ax.set_xlabel('called rung (ds)', fontsize=7)
+        ax.set_ylabel('true rung (ds)', fontsize=7)
+        ax.set_title(f'{short_name(m["base"])[:34]}\n{m["acc"]:.0%} right', fontsize=8, loc='left', color=_INK)
+    fig.suptitle(f'{dataset}: what each method calls each true rung (% of the true rung\'s FoVs)', x=0.01,
+                 ha='left', fontsize=10, color=_INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return True
+
+
+def fig_per_slide(view1: list, picked_by_dataset: dict, dataset: str, out_path: str, plt) -> bool:
+    """Whether a method fails on one slide or everywhere: accuracy of the best method and of the pipeline's
+    current one (knn:gigapath) on every slide at every rung, slides down, rungs across."""
+    import numpy as np                                                    # noqa: PLC0415
+    picked = picked_by_dataset[dataset]
+    shown = [picked[0]] + [m for m in picked if m['base'] == 'knn:gigapath' and m is not picked[0]]
+    sub = [r for r in view1 if r['dataset'] == dataset]
+    slides = sorted({r['wsi_name'] for r in sub})
+    rungs = sorted({r['rung'] for r in sub if r['rung'] is not None})
+    if not slides or not rungs:
+        return False
+    fig, axes = plt.subplots(1, len(shown), figsize=(4.4 * len(shown) + 1.5, 0.34 * len(slides) + 2.2), squeeze=False)
+    for ax, m in zip(axes[0], shown):
+        grid = np.full((len(slides), len(rungs)), np.nan)
+        for r in sub:
+            if r['method'].split('@', 1)[0] == m['base'] and r['rung'] in rungs:
+                grid[slides.index(r['wsi_name']), rungs.index(r['rung'])] = r['level_accuracy']
+        ax.imshow(grid, vmin=0, vmax=1, cmap='Blues', aspect='auto')
+        for a in range(len(slides)):
+            for b in range(len(rungs)):
+                if not math.isnan(grid[a, b]):
+                    ax.text(b, a, f'{100 * grid[a, b]:.0f}', ha='center', va='center', fontsize=7,
+                            color='white' if grid[a, b] > 0.6 else _INK)
+        ax.set_xticks(range(len(rungs)), [f'{r:g}' for r in rungs], fontsize=7)
+        ax.set_yticks(range(len(slides)), [s[:22] for s in slides] if ax is axes[0][0] else [], fontsize=7)
+        ax.set_xlabel('true rung (ds)', fontsize=7)
+        ax.set_title(f'{short_name(m["base"])[:36]}', fontsize=8, loc='left', color=_INK)
+    fig.suptitle(f'{dataset}: % right on each slide and rung -- does a method fail on one slide or everywhere?',
+                 x=0.01, ha='left', fontsize=10, color=_INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return True
+
+
+def fig_native(view2: list, picked_by_dataset: dict, out_path: str, plt) -> None:
+    """Whether resampling flatters a method: accuracy on rungs the slide has natively (filled) and on rungs
+    read one level finer and shrunk (hollow), per method. A long line means the method may be reading the
+    resampling, not the scale."""
+    datasets = list(picked_by_dataset)
+    height = 0.3 * max(len(p) for p in picked_by_dataset.values()) + 2.0
+    fig, axes = plt.subplots(1, len(datasets), figsize=(7.6 * len(datasets), height), squeeze=False)
+    for ax, dataset in zip(axes[0], datasets):
+        picked = picked_by_dataset[dataset]
+        y = list(range(len(picked)))[::-1]
+        for yi, m in zip(y, picked):
+            rs = [r for r in view2 if r['dataset'] == dataset and r['method'].split('@', 1)[0] == m['base']]
+            nat = [r['level_accuracy_native'] for r in rs if _finite(r['level_accuracy_native'])]
+            res = [r['level_accuracy_resampled'] for r in rs if _finite(r['level_accuracy_resampled'])]
+            colour = KIND_COLOURS.get(m['kind'], '#555555')
+            if nat and res:
+                a, b = sum(nat) / len(nat), sum(res) / len(res)
+                ax.plot([a, b], [yi, yi], color='#c3c2b7', lw=1.5, zorder=1)
+            if nat:
+                ax.scatter([sum(nat) / len(nat)], [yi], color=colour, s=40, zorder=3)
+            if res:
+                ax.scatter([sum(res) / len(res)], [yi], facecolors='none', edgecolors=colour, s=44, zorder=3,
+                           linewidths=1.3)
+        ax.set_yticks(y, [short_name(m['base']) for m in picked], fontsize=8)
+        ax.set_xlim(0, 1)
+        ax.set_xticks([0, 0.25, 0.5, 0.75, 1], ['0', '25', '50', '75', '100'])
+        ax.set_xlabel('% right   filled: native rungs   hollow: resampled rungs')
+        ax.set_title(f'{dataset}: native vs resampled', fontsize=10, loc='left', color=_INK)
+        ax.grid(axis='x', alpha=0.25)
+        _clean(ax)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
+def make_figures(rows: list, view1: list, view2: list, view3: list, tables: dict, taus: dict, out_dir: str,
+                 stem: str, top: int) -> list:
+    """Every figure of this file, from the tables `main` made; the paths written. `tables` carries
+    `acc`, `summary`, `pairwise`, `strata`, `distribution`, `rc` and `conf` (a missing one leaves its
+    figures out). A missing matplotlib leaves out all of them, never the tables."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print('  [skip] matplotlib not available in this python -- no figures (the tables are unaffected)')
+        return []
+    kinds = {base_method_of(r): kind_of(r) for r in rows}
+    datasets = sorted({cell(r, 'dataset') for r in rows if cell(r, 'dataset')})
+    picked = {d: p for d, p in pick_shared(view3, kinds, datasets, top).items() if p}
+    written: list = []
+
+    def path(name: str) -> str:
+        p = os.path.join(out_dir, f'{stem}_fig_{name}.png')
+        written.append(p)
+        return p
+
+    if picked:
+        fig_methods(picked, path('methods'), plt)
+        fig_by_rung(view2, picked, path('by_rung'), plt)
+        fig_levels_off(rows, picked, path('levels_off'), plt)
+        fig_native(view2, picked, path('native_vs_resampled'), plt)
+        for d in picked:
+            tag = d.replace('/', '_')
+            if not fig_confusion(tables.get('conf', []), picked, d, path(f'confusion_{tag}'), plt):
+                written.pop()
+            if not fig_per_slide(view1, picked, d, path(f'per_slide_{tag}'), plt):
+                written.pop()
+    if tables.get('acc'):
+        fig_votes(tables['acc'], tables['summary'], path('votes'), plt)
+        fig_votes_pairwise(tables['summary'], tables['pairwise'], path('votes_pairwise'), plt)
+    if tables.get('rc'):
+        fig_risk_coverage(tables['rc'], path('risk_coverage'), plt)
+    for d in datasets:
+        for kind in sorted({kind_of(r) for r in rows if cell(r, 'vote') and cell(r, 'dataset') == d}):
+            tag = f'{d.replace("/", "_")}_{kind}'
+            if not fig_risk_flags(rows, d, kind, taus, path(f'risk_flags_{tag}'), plt):
+                written.pop()
+            if not fig_strata(tables.get('strata', []), d, kind, path(f'strata_{tag}'), plt):
+                written.pop()
+            if not fig_distribution(tables.get('distribution', []), d, kind, path(f'patch_stats_{tag}'), plt):
+                written.pop()
+    return written
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1289,13 +2053,16 @@ def main() -> int:
     ap.add_argument('--all-votes', action='store_true',
                     help='views 1-2 and the figure for every vote rule, not '
                          f'only {DEFAULT_VOTE}')
+    ap.add_argument('--top', type=int, default=12,
+                    help='the figures draw this many voting checkpoints, best first, and always every '
+                         'knn and classic baseline')
     ap.add_argument('--fit-thresholds', action='store_true',
                     help='fit every risk threshold on THIS file, which must be '
                          'a val run, and write <csv stem>_thresholds.json')
     ap.add_argument('--thresholds', default=None,
                     help="a thresholds json fitted on val, or 'auto' for the "
-                         "val file of this same recipe (<..>_test.csv -> "
-                         "<..>_val_thresholds.json)")
+                         "val set of this test set (@legacy-test -> "
+                         "stage1_legacy-val_thresholds.json)")
     args = ap.parse_args()
 
     out_dir = args.out or _paths.job_result_dir(JOB_NAME)
@@ -1303,7 +2070,7 @@ def main() -> int:
     rows = rows_from_cache(args)
     if not rows:
         sys.exit('no stage-1 entry in the cache for these flags')
-    args.csv_path = os.path.join(out_dir, f'stage1_{args.split}.csv')
+    args.csv_path = os.path.join(out_dir, f'stage1_{set_name(args.datasets)}.csv')
     write_rows(rows, args.csv_path)
     # read back, so every cell is the string the scoring parses, as from any
     # table on disk
@@ -1331,6 +2098,8 @@ def main() -> int:
 
     csv_dir = os.path.dirname(os.path.abspath(args.csv_path)) or '.'
     csv_stem = os.path.splitext(os.path.basename(args.csv_path))[0]
+    taus: dict = {}
+    tables: dict = {}                       # what the figures read besides the views
     if any(cell(r, 'vote') for r in rows):
         paired = _paired(rows)
         acc = vote_accuracy(rows)
@@ -1347,7 +2116,6 @@ def main() -> int:
                             ('vote_strata_per_method', vote_strata(rows, by_method=True)),
                             ('fov_distribution', distribution)):
             write_rows(table, os.path.join(csv_dir, f'{csv_stem}_{name}.csv'))
-        taus = {}
         if args.fit_thresholds:
             fitted = fit_thresholds(rows, args.csv_path)
             out = os.path.join(csv_dir, f'{csv_stem}_thresholds.json')
@@ -1359,8 +2127,9 @@ def main() -> int:
         elif args.thresholds:
             path = args.thresholds
             if path == 'auto':
-                path = (args.csv_path[:-len('_test.csv')] + '_val_thresholds.json'
-                        if args.csv_path.endswith('_test.csv') else '')
+                val_ids: Optional[List[str]] = val_set_of(args.datasets)
+                path = (os.path.join(csv_dir, f'stage1_{set_name(val_ids)}_thresholds.json')
+                        if val_ids else '')
             if path and os.path.exists(path):
                 with open(path) as fh:
                     fitted = json.load(fh)
@@ -1368,18 +2137,21 @@ def main() -> int:
                 taus = fitted['values']
                 print(f'\n  thresholds from {path}')
             else:
-                print(f'\n  [warn] no thresholds file ({path or "not a _test.csv"}); '
-                      f'run the val split with --fit-thresholds first')
+                print(f'\n  [warn] no thresholds file ({path or "--datasets is not a -test set"}); '
+                      f'run the val set with --fit-thresholds first')
         flags = flag_report(rows, taus)
         print_flags(flags, bool(taus))
         rc = risk_coverage(rows)
         print_risk_coverage(rc)
         print()
+        tables.update(acc=acc, summary=summary, pairwise=pairwise, strata=strata_kind, distribution=distribution,
+                      rc=rc)
         write_rows(flags, os.path.join(csv_dir, f'{csv_stem}_risk_flags.csv'))
         write_rows(rc, os.path.join(csv_dir, f'{csv_stem}_risk_coverage.csv'))
         write_rows(vote_pairwise(paired, by_method=True),
                    os.path.join(csv_dir, f'{csv_stem}_vote_pairwise_per_method.csv'))
-    write_rows(confusion(rows), os.path.join(csv_dir, f'{csv_stem}_confusion.csv'))
+    tables['conf'] = confusion(rows)
+    write_rows(tables['conf'], os.path.join(csv_dir, f'{csv_stem}_confusion.csv'))
     write_rows(view3, os.path.join(csv_dir, f'{csv_stem}_overall.csv'))
 
     print('\n' + BAR)
@@ -1389,6 +2161,12 @@ def main() -> int:
         stem = dataset.replace('/', '_')
         plot_dataset(view2, dataset,
                     os.path.join(csv_dir, f'{csv_stem}_{stem}.png'))
+
+    print('\n' + BAR)
+    print('FIGURES   (make_figures: each one is titled with what it shows)')
+    print(BAR)
+    for p in make_figures(rows, view1, view2, view3, tables, taus, csv_dir, csv_stem, args.top):
+        print(f'  {p}')
     return 0
 
 
