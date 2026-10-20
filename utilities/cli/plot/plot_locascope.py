@@ -21,13 +21,15 @@ computed from them:
     s1_level_err          chosen level - placed level
     s2_err_um             rank 1's window centre to the truth centre
     s2_rot_ok             rank 1's rotation sets the photo upright (`matching_rotation`)
-    s2_hit_rank           the truth window's place in stage 2's output: the
-                          first rank at the upright rotation whose centre is
-                          within stage 3's search (padding tiles at the
-                          FoV's own ds) of the truth window's centre; empty
-                          when stage 2 searched another level or no window
-                          is that close
-    s2_hit_rank_strict    the same within one tile
+    s2_hit_rank           the FoV's place in stage 2's output: the better of its
+                          two answers' places, the answer's window or the one of
+                          its rotation within a tile that kept its place
+                          (`BenchCommon.listed_places`, the bench's own rule);
+                          empty when stage 2 searched another level or the list
+                          holds neither
+    s2_reach_rank         the first rank at the upright rotation whose centre is
+                          within stage 3's search (padding tiles at the FoV's own
+                          ds) of the main answer's centre
     s3_rank1_err_um       rank 1's stage-3 centre to the truth centre
     s3_verified_err_um    the first accepted rank's, likewise
     s3_hit_rank           first verified rank whose centre is within the search
@@ -101,7 +103,8 @@ import Cache                                                        # noqa: E402
 from _paths import job_result_dir                                   # noqa: E402
 from AccessDatasets import list_names, locate                       # noqa: E402
 from BenchCommon import (ORACLE, matching_rotation, add_run_args, parse_run_args,  # noqa: E402
-                             run_from_args, slide_supplies, stage_entries)
+                             answers_of_row, first_place, listed_of_rows, run_from_args, slide_supplies,
+                             stage2_entries, stage_entries)
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MASK_RECIPES, MaskMaker                # noqa: E402
 
@@ -163,6 +166,11 @@ class SlideRun(_Slide):
                           f'{"; ".join(diff)}', flush=True)
                     continue
                 got[n] = {role: _read(entry, role, sid) for role in _ROLES_READ}
+            # stage 2's answers are its chain's first phase's (a reranker's entry holds none)
+            if 2 in got:
+                entry, sid, rec = stage2_entries(self.base, stages, route, mask_cfg, limit)[0]
+                if entry.status(sid, rec)[0] == 'hit':
+                    got[2].update({role: _read(entry, role, sid) for role in ('truth', 'truth_sim')})
             self.tables[route] = got
         self.rid = supply.microscope.cfg.identity_id()
         self.metas = [s.meta for s in supply.sampler]
@@ -367,14 +375,18 @@ def join(runs: List[SlideRun], stages, tol_um: float) -> pd.DataFrame:
                         row['s2_err_um'] = d * base_mpp
                         up = matching_rotation(g['rot_deg'])
                         row['s2_rot_ok'] = int(o['rotation']) == up
-                        if (int(o['level']) == int(g['level']) and t is not None
-                                and pd.notna(t.get('truth_x0'))):
-                            tx = t['truth_x0'] + t['truth_w0'] / 2.0
-                            ty = t['truth_y0'] + t['truth_h0'] / 2.0
-                            same = cands[cands['rotation'].astype(int) == up]
-                            row['s2_hit_rank'] = _first_rank(same, tx, ty, tol_l0)
-                            row['s2_hit_rank_strict'] = _first_rank(
-                                same, tx, ty, tile * float(g['ds']))
+                        found = answers_of_row(t) if t is not None else None
+                        if int(o['level']) == int(g['level']) and found is not None:
+                            listed = _ranked(cands)
+                            # stage 2's hit: the bench's own rule (`BenchCommon.listed_places`)
+                            place = first_place(listed_of_rows(r for _, r in listed.iterrows()),
+                                                found, tile * float(g['ds']))
+                            row['s2_hit_rank'] = None if place is None else int(listed.iloc[place - 1]['rank'])
+                            # stage 3's reach: a window of the upright rotation within its search of the
+                            # main answer's centre
+                            ax0, ay0, aw0, ah0 = found.main.box
+                            same = listed[listed['rotation'].astype(int) == up]
+                            row['s2_reach_rank'] = _first_rank(same, ax0 + aw0 / 2.0, ay0 + ah0 / 2.0, tol_l0)
                 if 3 in per and per[3]['output'] and i in per[3]['output']:
                     # one SiftRansacResult per verified rank
                     ranks = per[3]['output'][i]
@@ -578,11 +590,31 @@ def _cos_grid(tiles: pd.DataFrame) -> Optional[np.ndarray]:
     return grid
 
 
+def _answer(t) -> Optional[Dict[str, Any]]:
+    """THE answer of a stage-2 `truth` row, the main one (`answers_of_row`): its
+    lattice, window, level-0 box and score (NaN when stage 2 searched another level);
+    None when the row places no answer."""
+    found = answers_of_row(t)
+    if found is None:
+        return None
+    a = found.main
+    return dict(lattice=a.lattice, region=a.region, row=a.row, col=a.col, box=a.box,
+                score=t.get('truth_main_score', np.nan))
+
+
+def _answer_sims(tt: Optional[pd.DataFrame], i: int, lattice: str) -> Optional[pd.DataFrame]:
+    """The per-tile cosines of FoV `i`'s answer on `lattice` (`truth_sim`)."""
+    if tt is None:
+        return None
+    return tt[(tt['index'] == i) & (tt['lattice'] == lattice)]
+
+
 def _windows(run: SlideRun, row: pd.Series, k: int):
     """`[(label, box, rotation, level, cosines, is_truth)]`: the truth window
-    at the photo's own level, then stage 2's first `k` candidates at the
-    level it searched, each with its per-tile cosines. A truth window stage 2
-    did not search (sent to another level) has no rank, score or cosines."""
+    (THE answer, the main one: `_answer`) at the photo's own level, then stage
+    2's first `k` candidates at the level it searched, each with its per-tile
+    cosines. A truth window stage 2 did not search (sent to another level) has no
+    rank, score or cosines."""
     got = run.tables.get(row['route'], {}).get(2)
     if not got:
         return []
@@ -590,15 +622,15 @@ def _windows(run: SlideRun, row: pd.Series, k: int):
     out = []
     t = got.get('truth')
     t = t[t['index'] == i] if t is not None else None
-    if t is not None and len(t) and 'truth_x0' in t and pd.notna(t.iloc[0]['truth_x0']):
+    a = _answer(t.iloc[0]) if t is not None and len(t) else None
+    if a is not None:
         r = t.iloc[0]
         level = int(r['truth_level']) if pd.notna(r.get('truth_level')) else int(row['level'])
-        box = (r['truth_x0'], r['truth_y0'], r['truth_w0'], r['truth_h0'])
-        if pd.notna(r.get('truth_score')):
-            tt = got.get('truth_sim')
-            out.append((f'GT = {_place(row)}  {r["truth_score"]:.3f}',
+        box = a['box']
+        if pd.notna(a['score']):
+            out.append((f'GT = {_place(row)}  {a["score"]:.3f}',
                         box, int(r['truth_rotation']), level,
-                        _cos_grid(tt[tt['index'] == i] if tt is not None else None), True))
+                        _cos_grid(_answer_sims(got.get('truth_sim'), i, a['lattice'])), True))
         else:
             out.append((f'GT  L{level}  (not searched)', box,
                         int(r['truth_rotation']), level, None, True))
@@ -984,7 +1016,7 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
 
     parts = {}
     for _, row in sel[sel['route'] == args.demo_route].iterrows():
-        if pd.isna(row.get('s2_routed_level')) or pd.isna(row.get('truth_score')):
+        if pd.isna(row.get('s2_routed_level')) or pd.isna(row.get('truth_main_score')):
             continue
         run = runs[row['slide']]
         got = run.tables[row['route']].get(2) or {}
@@ -1019,12 +1051,11 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
         rank_all = _num(t.get('truth_rank_main_in_all'))
         if not part['pool'] and _num(t.get('pool_main')):
             part['pool'] = int(_num(t['pool_main']))
-        truth = _window_key(t['truth_region'], t['truth_lattice'], t['truth_row'],
-                            t['truth_col'], t['truth_rotation'])
-        tt = got.get('truth_sim')
+        a = _answer(t)                    # THE answer, the main one: the page's truth window
+        truth = _window_key(a['region'], a['lattice'], a['row'], a['col'], t['truth_rotation'])
         cos = {truth: {'cls': window(
-            truth, (t['truth_x0'], t['truth_y0'], t['truth_w0'], t['truth_h0']),
-            t['truth_rotation'], _cos_grid(tt[tt['index'] == i] if tt is not None else None))}}
+            truth, a['box'], t['truth_rotation'],
+            _cos_grid(_answer_sims(got.get('truth_sim'), i, a['lattice'])))}}
         cands = _ranked(got['output'])
         cands = cands[cands['index'] == i].sort_values('rank')
         ts = got.get('tile_sims')
@@ -1038,7 +1069,8 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
         top1 = _num(cands.iloc[0]['score']) if len(cands) else None
         others = [s for key, s in topk if key != truth]
         best_other = max(others) if others else top1
-        s = _num(t['truth_score'])
+        s = _num(a['score'])
+        d_main = _num(t['truth_main_dist_l0']) / ds if pd.notna(t.get('truth_main_dist_l0')) else 0.0
         rots = sorted({w['rot'] for key, w in part['windows'].items() if key in cos})
         imgs = {str(r): jpg(np.rot90(photo, k=r // 90), f'{safe(run.name)}_{i}_r{r}.jpg')
                 for r in rots}
@@ -1046,8 +1078,10 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
             id=f'{run.name}|L{level}|{i}', fov_id=i,
             img=imgs.get(str(int(t['truth_rotation']))) or next(iter(imgs.values()), ''),
             imgs=imgs,
-            d_main=_num(t['truth_main_dist_l0']) / ds if pd.notna(t.get('truth_main_dist_l0')) else 0.0,
-            d_overlap=_num(t['truth_dist_l0']) / ds,
+            d_main=d_main,
+            # the offset answer's; with no offset lattice the main one's, so `d_truth` is still the nearer
+            d_overlap=(_num(t['truth_offset_dist_l0']) / ds if pd.notna(t.get('truth_offset_dist_l0'))
+                       else d_main),
             truth=truth,
             arms={arm: dict(rank=rank_main if rank_main is not None else _num(row.get('s2_hit_rank')),
                             s=s, top1=top1,
