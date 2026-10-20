@@ -79,8 +79,13 @@ python utilities/test_modules/test_patching_lib.py \
   --rsize $RSIZE \
   --query "$QUERY" \
   --roi "$ROI"
+status=$?
 
 echo ""
-echo "======== done ========"
+echo "======== notes ========"
 echo "  figures -> result/\$SLURM_JOB_NAME/  (patch_grid__index.png,"
 echo "             patch_info__coords.png, and the two container figures)"
+
+echo ""
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
+exit $status

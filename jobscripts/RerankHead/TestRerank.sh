@@ -35,4 +35,6 @@ for t in $ONLY; do
   rc=$?
   [ $rc -ne 0 ] && status=$rc
 done
+echo ""
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
 exit $status

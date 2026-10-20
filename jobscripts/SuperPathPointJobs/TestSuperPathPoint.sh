@@ -664,8 +664,8 @@ for stage in $STAGES; do
 done
 
 echo ""
-echo "======== done  (exit $status) ========"
-echo "  figures -> result/\${SLURM_JOB_NAME}/homography_operations__*.png"
+echo "======== notes ========"
+echo "  figures ->result/\${SLURM_JOB_NAME}/homography_operations__*.png"
 echo ""
 echo "  Two numbers in the output are worth more than the pass/fail:"
 echo "    homography  'image warp matches point warp' prints how many times"
@@ -680,4 +680,6 @@ echo "  which nothing asserts. Read it against the measured tissue fractions"
 echo "  -- BRACS 23-38 percent, Ki67 3.5-9 -- and if it sits near 0.5 the PCA"
 echo "  found position or scanner banding rather than tissue."
 
+echo ""
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
 exit $status
