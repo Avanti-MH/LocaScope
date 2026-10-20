@@ -213,7 +213,7 @@ class FovSupply:                     # PlanSpec 抽一次 → 各 rung 的物鏡
     def __iter__(self) -> (meta, image, params)
 #   plan 必填、可以跨好幾個 rung；fov_plan_of、camera_plan 於 2026-10-06 刪除
 
-# ── training/MppRoutingHead/Datasets.py（CameraBank：只換建構方式）─────────────
+# ── training/ClassifyingRoutingHead/Datasets.py（CameraBank：只換建構方式）─────────────
 class CameraBank:
     def reader_for(dataset, wsi_name) -> SlideReader    # 每張 WSI 一個（原 _wsi_for）
     def camera_for(dataset, wsi_name, rung, *, native=False, read_level=None) -> Render
@@ -298,22 +298,22 @@ PrototypicalRoutingHead 的渲染移到 DataLoader worker；pipeline 改用 `rea
 入口
 ├─ utilities/LocaScopePipeline                    尚未改用新的讀取（pipeline 遷移時改）
 │   ├─ stage 1  mpp 估計        KnnEstMpp / ClassifierEstMpp / PrototypeEstMpp / classic
-│   ├─ stage 2a 粗檢索          SlidingWinSimRot；graph / FAISS (未實作)
-│   │                            build(ctx, level) → retrieve(query) → CandidateSet(K)
-│   ├─ stage 2b 重排序          raw cosine / transformer (未實作)，可略過
-│   │                            rerank(query, CandidateSet) → CandidateSet(K′)
+│   ├─ stage 2  檢索            Retriever（stage2_retrieval/Retriever.py）：第一階段
+│   │                            RetrieverSlidingWinSimRot / BagOfTiles / TileVote / ClusterBow / WinEmbed，
+│   │                            reranker（RerankerScorers / Encode / Neural）接在後面，MultiPhases 串接
+│   │                            retrieve(上游, query) → RetrievalOutput(.candidates = CandidateSet)
 │   └─ stage 3  定位            SiftRansacLocalizer；SuperPathPoint (未實作)
 │   每個 stage 方法在自己的 config 指定 encoder、head、pooling；不同 stage 可以用不同 encoder
 │   stage 2 的兩段式設計見 stage2_retrieval/spec.md
-├─ training/MppRoutingHead/cli/{train,evaluate}.py  啟動時套用 CpuBudget
-├─ utilities/bench_modules/bench_window_retrieval  CpuBudget、SlideReader.read_grid、特徵留在 GPU
+├─ training/ClassifyingRoutingHead/cli/{train,evaluate}.py  啟動時套用 CpuBudget
+├─ utilities/bench_modules/bench_stage2_retriever  CpuBudget、SlideReader.read_grid、特徵留在 GPU
 └─ query_sim CLI
 ```
 
 ## 三條流程
 
 ```
-訓練（MppRoutingHead / PrototypicalRoutingHead）
+訓練（ClassifyingRoutingHead / PrototypicalRoutingHead）
 ├─ CpuBudget：N 個 worker，主 process 用剩下的 thread（8 CPU、8 worker → 1）
 ├─ build_manifest → TileSampler(PlanSpec('ladder', rungs, routing_camera(tile))) → sampler cache
 └─ 每個 epoch
@@ -327,7 +327,7 @@ window bench
     ├─ FovSupply(Render, mask, SamplerConfig) → (meta, image, params) → query 特徵（GPU）
     └─ SlideReader.read_grid（N 列一塊 + worker）→ pooled_descriptors（GPU，不搬 CPU）
        → row_cosines → WindowAccumulator（GPU）
-    parts 目錄的 config_id 加上 fov_reserve，舊 FoV 的 parts 不會被續跑
+    每個 arm 只寫 stage 2 entry；評分列每張 slide 從 entry 讀出（slide_rows），不另存
 
 正式 pipeline（LocaScopePipeline）
 ├─ build：mask，三個 stage 綁定 slide（每個 stage 自己建 encoder）
@@ -362,13 +362,15 @@ config 的值只寫在一個地方：基礎模組裡的 RECIPES 表。每個 ent
 |---|---|---|
 | `MASK_RECIPES` | `utilities/TissueMaskConfig.py` | `none`、`hsv`、`hest`、`uni2_pca`（`--seg`） |
 | `SAMPLER_RECIPES` | `utilities/TileSampler.py` | `lattice`（class 預設寫出來，給 diagnostic 當起點）、`reference-bank`（stage 1 的參考庫、tile bench 的參考 store） |
-| `FOV_RECIPES` | `query_sim/FovSupply.py` | `bench`（四個 bench 共用，`--fov`）、`plain`（class 預設寫出來）、`routing-query`、`routing-support-native`（MppRoutingHead 的兩個相機模板） |
+| `FOV_RECIPES` | `query_sim/FovSupply.py` | `bench`（四個 bench 共用，`--fov`）、`plain`（class 預設寫出來）、`routing-query`、`routing-support-native`（ClassifyingRoutingHead 的兩個相機模板） |
 | `RECIPES` | `training/SuperPathPoint/common/Corpora.py` | `stageA`、`stageB-fOwn`、`stageB-cOwn` |
 | `KNN_RECIPES` | `stage1_estimation/KnnEstMpp.py` | `gigapath`、`uni2`（`--stage1 knn:<名>`） |
 | `CLASSIFIER_RECIPES` | `stage1_estimation/ClassifierEstMpp.py` | 範本 `gigapath-arcface`；一個 checkpoint 一個 entry，由使用者決定列哪些 |
 | `PROTOTYPE_RECIPES` | `stage1_estimation/PrototypeEstMpp.py` | 範本 `uni2-mean-cosine-tau` |
 | `CLASSIC_RECIPES` | `stage1_estimation/estimate_mpp_classic.py` | `default` |
-| `SLIDEWIN_RECIPES` | `stage2_retrieval/SlidingWinSimRot.py` | `gigapath`（`--stage2 slidewin:<名>`，k=100） |
+| `SLIDEWIN_RECIPES` | `stage2_retrieval/RetrieverSlidingWinSimRot.py` | `gigapath`、`uni2`、`uni2-avg`（`--stage2 slidewin:<名>`，raw_topk=1000） |
+| `BAGOFTILES_RECIPES`、`TILEVOTE_RECIPES`、`CLUSTERBOW_RECIPES`、`WINEMBED_RECIPES` | `stage2_retrieval/Retriever<方法>.py` | `--stage2 bagoftiles:<名>` 等：與 sliding window 對等的第一階段 retriever |
+| `MULTIPHASES_RECIPES` | `stage2_retrieval/MultiPhases.py` | `uni2-avg-dual`、`uni2-avg-csls`（`--stage2 multiphases:<名>`；任意串接用 `--stage2 arm:<arm>`） |
 | `SIFT_RECIPES` | `stage3_localization/SIFT_RANSAC.py` | `default`（`--stage3 sift:<名>`，topk=100） |
 
 stage 的 recipe 一個方法一張表，放在方法自己的模組；每個 stage package 的 `__init__.py` 有一張 `METHODS`
@@ -435,8 +437,13 @@ corpus 三個、routing 兩個，config 相等、id 相同；routing data record
 `Cache.TREE` 定義哪一層掛在哪一層下面，`Cache.ENTRIES` 定義每種 entry 掛在哪一層：
 
 ```
+Datasets/                                                  AccessDatasets 自己的，不跟 job name（make_dataset.py 唯一寫入）
+├── catalog/slides_<dataset key>.csv                       每張 slide 的 header：base_mpp、各層 ds 與尺寸、標籤
+└── vdataset/list_<name>.csv                               虛擬資料集 `@<name>`：dataset,name；寫一次不覆寫
+
+Masks/slide=<stem>/mask/                                   所有 trainer 和 bench 共用的 mask（--mask-cache-job 的預設）
+
 <made_by>/
-├── dataset=<key>/split/                                   WsiSplit（make_split.py 唯一寫入）
 └── slide=<stem>/
     ├── mask/                                              MaskMaker
     ├── chainstack/                                        ChainStack 讀過的 tile
@@ -469,6 +476,14 @@ corpus 三個、routing 兩個，config 相等、id 相同；routing data record
 - **stage 結果**：`bench_locascope`、`bench_stage1_mpp` 一張 slide 一個 stage 一個 entry，整張跑完才寫；
   每個表都有 `index`（FoV 在 draw 裡的列號），真值在 render 的列裡，分析端（`plot_locascope.py`、
   `analyze_stage1_metrics.py`）用同一組參數算出地址再 join。命中的 stage 不載入模型。
+- **entry 存什麼**：stage / phase 的 `output` 交出去什麼就原封不動存什麼，它是 stage 之間的介面，不刪欄。
+  其他表（truth、truth_sim、tile_sims、rerank_scores…）是為了分析與評估才存，每一欄依序問：
+  1. 只有這個 stage 算得出來（要整張分數圖或特徵：名次、cosine、reranker 的欄位）→ 存。
+  2. 要開外部 input 或跑幾何才拿得到（mask region、WSI、camera 反算：真值窗的 key 與框、pool、
+     `ref_row/ref_col`、到格點的距離）→ 為了方便，存。
+  3. 同一列算術或同一個 stage 目錄裡 join 就有（`truth_rank_all` 由兩個 in_all 名次推、`in_rank/out_rank`、
+     `first/first_rank`、rerank_scores 的框）→ 不存。
+  4. 沒有人用 → 不存。
 - **刪除**：`utilities/cli/inspect_cache_store/purge_cache.py --job J --level slide=<s> seg=<id>`
   刪整棵子樹（例如丟掉一個 mask recipe 底下的所有東西），`--entry K --id I` 刪一個 variant；
   預設只列出，`--yes` 才刪。
