@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=WindowRetrievalBench # -> log/<name>, result/<name>/
+#SBATCH --job-name=Stage2RetrieverBench # -> log/<name>, result/<name>/
 #SBATCH --partition=8gpus                 # Partition
 #SBATCH --time=24:00:00                   # Runtime (hh:mm:ss)
 #SBATCH --account=MST114560               # Account
@@ -16,8 +16,8 @@
 # SLURM parses these before the script runs -- so the name comes from the
 # command line, next to the encoder it belongs to:
 #
-#   ENCODER=conch_vit HEAD=trunk sbatch --job-name=ConchWindowRetrievalBench \
-#       jobscripts/Benchmarks/WindowRetrievalBench.sh
+#   ENCODER=conch_vit HEAD=trunk sbatch --job-name=ConchStage2RetrieverBench \
+#       jobscripts/Benchmarks/Stage2RetrieverBench.sh
 
 # ---------------- Load modules ----------------
 ml purge
@@ -32,6 +32,45 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # Runs write outside the checkout; see utilities/_paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
+# ---------------- the stage 2 retriever bench ---------------------------------
+#
+# An ARM is a retriever and then any number of rerankers, named `[encoder:]Method::pooling[+op][@K]`
+# joined by `::` (stage2_retrieval/ArmSpec.py):
+#
+#   uni2:SlidingWindow::cls_avg+mean       uni2:BagOfTiles::rings3+quad      uni2:TileVote::cls_avg+hnsw
+#   uni2:ClusterBow::cls_avg               uni2:WinEmbed::cls_avg  (weights trained on that pooling)
+#   uni2:BagOfTiles::cls_avg+gap::gigapath:CSLS::grid2x2+csls@100     retriever, then a reranker
+#
+# `+op` is a choice inside the method (a method with none has no `+`); a method that takes no pooling
+# writes `raw`; `@K` keeps the first K windows of the list. A reranker encodes for itself what its pooling
+# and encoder need. A bare pooling in ARMS (`cls_avg`) is the older shorthand for the sliding window with
+# all its window scores.
+#
+# EVERY RETRIEVER ARM HAS TWO MODES, measured on the same FoVs from the same score map:
+#
+#   ranked       NMS off: every window of the level ranked, no suppression, only the answer's own window
+#                counting -- the search itself, judged strictly
+#   listed       NMS on: the K best windows with suppression, what the next phase receives (K is the
+#                LONGEST list; the report reads recall@K for K = 30 ... 1000 off its prefixes). An answer
+#                is its window, or a window of its rotation within the suppression radius (the one that
+#                kept its place); with none it is rank pool + 1, a miss at every k.
+#
+# A reranker reorders a given list, so it has a listed mode only, and the report pairs it with the list
+# it was given. The sliding window is streamed in one pass; every other arm is an ArmEngine arm. An arm keeps
+# nothing but its stage 2 entries; its rows are read off them into the CSV, and it is redone by removing its entries.
+#
+#   ARMS="cls cls_avg uni2:BagOfTiles::cls_avg+gap uni2:BagOfTiles::rings3+quad" sbatch jobscripts/Benchmarks/Stage2RetrieverBench.sh
+#   RERANK_ON="uni2:SlidingWindow::cls+mean" RERANKERS="Dual::cls_avg+dual CSLS::grid2x2+csls" ARMS=cls \
+#       sbatch jobscripts/Benchmarks/Stage2RetrieverBench.sh        # k retrievers x h rerankers = k x h arms
+#
+# ONE RUN IS ONE ENCODER (ENCODER=uni2 and ENCODER=gigapath are two runs); a reranker may name another
+# encoder. The CSVs of several runs are reported together: MODE=report with the other runs in REPORT_ALSO.
+#
+# Runs made under the old name (WindowRetrievalBench) are untouched. Their CSV is window_retrieval.csv
+# (ranked mode only), read in the same grammar, and MODE=report finds it when the job is submitted under the
+# old name; the output directory follows the job name. Their parts cannot be resumed: the streamed arms now
+# also write listed rows, so a new run streams the level again.
+#
 # ---------------- pooling x window score, through stage 2 --------------------
 #
 # Production keeps one of GigaPath's 197 tokens (the CLS) and turns the query's
@@ -47,10 +86,10 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # is the cost this bench deliberately accepted rather than reading tile by tile
 # the way bench_offgrid_score does.
 #
-# So MODE=smoke runs one slide per dataset (--n-wsi 1: the first of each val split
-# split as MakeSplit recorded it, BRACS_310 and S1128171) and the two finest
+# So MODE=smoke runs one slide per dataset (--n-wsi 1: the first of each dataset @legacy-val
+# draws from, in its recorded order) and the two finest
 # levels: an H&E slide on a 4x pyramid and a Ki67 one on a 2x pyramid, both
-# with their masks in MppRoutingHead's cache, so the smoke segments nothing.
+# with their masks in the Masks cache, so the smoke segments nothing.
 # Levels 1 and 2 walk every code path in minutes -- level 0 adds read time and
 # memory, not logic, so it stays out of the smoke test. (It used to name
 # BRACS_1228 and S1104233 for their 1 and 23 regions; neither is the first of
@@ -98,7 +137,7 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 
 # ---------------- what a run uses ---------------------------------------------
 #
-# The values are in bench_window_retrieval.py's CONFIG block, right after its
+# The values are in bench_stage2_retriever.py's CONFIG block, right after its
 # imports (which datasets and how many slides, the encoder, the arms), and in
 # the two recipes it names: the FoV recipe (FOV, default 'bench' --
 # query_sim/FovSupply.FOV_RECIPES: the sampler, the camera, the levels) and the
@@ -108,7 +147,7 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # the recipes are what runs. An environment variable, when set, becomes the
 # matching flag and wins:
 #
-#   DATASETS  SPLIT  N_WSI  FOV  SEED  N_FOV  ROTATION  SCALE_MIN  SCALE_MAX
+#   DATASETS  N_WSI  FOV  SEED  N_FOV  ROTATION  SCALE_MIN  SCALE_MAX
 #   ARMS  SEG  MASK_CACHE_JOB  DRAW_CACHE_JOB  RENDER_CACHE_JOB  BATCH_SIZE
 #
 # and EXTRA_ARGS takes ANY flag of the bench, which is how a single field is
@@ -116,11 +155,11 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # has one (`--sampler-richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...):
 #
 #   EXTRA_ARGS="--sampler-richness-caps 0.15 0.25 0.6 0 0 0 0 --camera-noise-sigma 0" \
-#       sbatch jobscripts/Benchmarks/WindowRetrievalBench.sh
+#       sbatch jobscripts/Benchmarks/Stage2RetrieverBench.sh
 #
-# The slides and FoVs are every bench's: the first N_WSI of each DATASETS id's
-# recorded SPLIT (default val), one draw per slide across its levels. With the
-# same DATASETS, SPLIT, N_WSI and FoV flags, a FoV here is the photo
+# The slides and FoVs are every bench's: the first N_WSI of each dataset a
+# DATASETS id draws from (default @legacy-val), one draw per slide across its
+# levels. With the same DATASETS, N_WSI and FoV flags, a FoV here is the photo
 # BenchLocaScope and Stage1MppBench score; DRAW_CACHE_JOB=BenchLocaScope reads
 # their draws instead of drawing again (the same draw either way).
 #
@@ -141,8 +180,8 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # Nothing of a slide's tile features is kept: the reference is streamed one tile
 # row at a time and scored as it goes, so memory does not grow with the slide.
 #
-# The masks are read from MASK_CACHE_JOB's cache, MppRoutingHead by default
-# (it holds every #val slide); MASK_CACHE_JOB="" uses this job's own.
+# The masks are read from MASK_CACHE_JOB's cache, Masks by default (every
+# trainer and bench shares it); MASK_CACHE_JOB="" uses this job's own.
 
 # --encoder is always passed: it names the output directory (TAG) above, so the
 # script and the bench have to agree on it.
@@ -164,10 +203,14 @@ COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
 [ -n "${TIMING:-}" ] && COMMON="$COMMON --timing"
 [ "${GATES_ONLY:-0}" = "1" ] && COMMON="$COMMON --gates-only"   # the seconds-long checks, then stop
 [ -n "${ARMS:-}" ] && COMMON="$COMMON --arms $ARMS"
+[ -n "${RERANK_ON:-}" ] && COMMON="$COMMON --rerank-on $RERANK_ON"
+[ -n "${RERANKERS:-}" ] && COMMON="$COMMON --rerankers $RERANKERS"
+[ -n "${BASELINE:-}" ] && COMMON="$COMMON --baseline $BASELINE"
+[ -n "${K:-}" ] && COMMON="$COMMON --k $K"
+[ -n "${MIN_SEP_TILES:-}" ] && COMMON="$COMMON --min-sep-tiles $MIN_SEP_TILES"
 [ -n "${SEG:-}" ] && COMMON="$COMMON --seg $SEG"
-MASK_CACHE_JOB="${MASK_CACHE_JOB-MppRoutingHead}"   # "" = this job's own
+MASK_CACHE_JOB="${MASK_CACHE_JOB-Masks}"   # "" = this job's own
 [ -n "$MASK_CACHE_JOB" ] && COMMON="$COMMON --mask-cache-job $MASK_CACHE_JOB"
-[ -n "${SPLIT:-}" ] && COMMON="$COMMON --split $SPLIT"
 [ -n "${DRAW_CACHE_JOB:-}" ] && COMMON="$COMMON --draw-cache-job $DRAW_CACHE_JOB"
 [ -n "${RENDER_CACHE_JOB:-}" ] && COMMON="$COMMON --render-cache-job $RENDER_CACHE_JOB"
 [ -n "${EXTRA_ARGS:-}" ] && COMMON="$COMMON $EXTRA_ARGS"
@@ -178,40 +221,38 @@ if [ "$MODE" = "smoke" ]; then
   # still comes from CONFIG.
   ARGS="$COMMON --n-wsi 1 --max-ds 4"
   [ -z "${N_FOV:-}" ] && ARGS="$ARGS --n-fov 5"
-  OUT="$RESULT_ROOT/WindowRetrievalBench/smoke"
+  OUT="$RESULT_ROOT/${SLURM_JOB_NAME:-Stage2RetrieverBench}/smoke"
 else
   ARGS="$COMMON"
   [ -n "${N_WSI:-}" ] && ARGS="$ARGS --n-wsi $N_WSI"
   [ -n "${MAX_DS:-}" ] && ARGS="$ARGS --max-ds $MAX_DS"
-  OUT="$RESULT_ROOT/WindowRetrievalBench"
+  OUT="$RESULT_ROOT/${SLURM_JOB_NAME:-Stage2RetrieverBench}"
 fi
 
-# The recorded val/test split the slides are taken from. Written once, by its
-# one writer, under MakeSplit; an existing split is kept as it is.
-python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
-
 echo "======== mode=$MODE  encoder=$TAG ========"
-echo "out : $OUT/$TAG/window_retrieval.csv"
+echo "out : $OUT/$TAG/stage2_retriever.csv"
 echo ""
 
-BENCH=utilities/bench_modules/bench_window_retrieval.py
+BENCH=utilities/bench_modules/bench_stage2_retriever.py
 
 # MODE=report re-tabulates the finished CSV and stops: no model, no slide read,
 # no GPU. The log of this job gets the tables. Ask for a small job, since the
 # #SBATCH lines above are for the full run:
 #
-#     MODE=report sbatch --job-name=WindowRetrievalReport --gpus-per-node=0 \
+#     MODE=report sbatch --job-name=Stage2RetrieverReport --gpus-per-node=0 \
 #         --cpus-per-task=2 --mem=32G --time=00:30:00 <this script>
 #
 # PER_SLIDE=1 adds the one-slide-across-levels tables.
 if [ "$MODE" = "report" ]; then
-  python $BENCH --report-only ${PER_SLIDE:+--per-slide} "$OUT/$TAG/window_retrieval.csv"
+  CSV="$OUT/$TAG/stage2_retriever.csv"
+  [ -f "$CSV" ] || CSV="$OUT/$TAG/window_retrieval.csv"     # a run made under the old name
+  python $BENCH --report-only ${PER_SLIDE:+--per-slide} ${BASELINE:+--baseline $BASELINE} "$CSV" $REPORT_ALSO
   exit $?
 fi
 
 # SHARDS=2 runs two processes, one per card, each taking every other slide. They
-# write into the SAME parts directory (a slide belongs to one shard, so no file is
-# written twice) and neither assembles the CSV: a third, model-free call does, once
+# write into the SAME cache (a slide belongs to one shard, so no entry is
+# written twice) and neither writes the CSV: a third, model-free call does, once
 # both are done. Ask for the cards on the command line -- the #SBATCH lines above
 # are for one:
 #
@@ -224,7 +265,7 @@ if [ "$SHARDS" -le 1 ]; then
   python $BENCH $ARGS --out "$OUT/$TAG"
   status=$?
 else
-  LOG="/work/u26130998/log/${SLURM_JOB_NAME:-WindowRetrievalBench}"
+  LOG="/work/u26130998/log/${SLURM_JOB_NAME:-Stage2RetrieverBench}"
   CARDS=$(nvidia-smi -L | wc -l)
   if [ "$CARDS" -lt "$SHARDS" ]; then
     echo "SHARDS=$SHARDS but this job sees $CARDS card(s): ask for them with"
@@ -248,11 +289,11 @@ fi
 
 echo ""
 echo "======== done (exit $status) ========"
-echo "  $OUT/$TAG/window_retrieval.csv"
+echo "  $OUT/$TAG/stage2_retriever.csv"
 echo ""
-echo "  Each finished (slide, level) is saved as its own file under"
-echo "  $OUT/$TAG/parts-<id>/. If the job is killed, submit the SAME command"
-echo "  again: finished ones are skipped. The CSV above is assembled from them."
+echo "  Every arm keeps its stage 2 entries, one per phase, a slide at a time, in the cache. If the job is"
+echo "  killed, submit the SAME command again: a slide whose entries are whole is skipped. The CSV above"
+echo "  is read off those entries."
 echo ""
 echo "  Read the gates FIRST -- a failure there means no number below is worth"
 echo "  reading. Then truth_pctile per (slide, level): 0.5 = broken mapping."
@@ -266,10 +307,9 @@ echo ""
 echo "  Every metric is derived from two stored integers per (query, arm), so"
 echo "  re-tabulating costs no GPU:"
 echo ""
-echo "    python utilities/bench_modules/bench_window_retrieval.py --report-only \\"
-echo "        $OUT/$TAG/window_retrieval.csv"
+echo "    python utilities/bench_modules/bench_stage2_retriever.py --report-only \\"
+echo "        $OUT/$TAG/stage2_retriever.csv"
 echo ""
-echo "  One encoder per report. Feeding two CSVs at once is refused: every"
-echo "  table averages over rows, so the merge would print one comparison"
-echo "  where there are two."
+echo "  An arm's name carries its encoder, so the CSVs of several runs (one per encoder)"
+echo "  can be reported together: add the others after the first CSV."
 exit $status

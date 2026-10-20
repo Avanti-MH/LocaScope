@@ -46,7 +46,7 @@ _HERE = Path(__file__).resolve().parent
 #
 # ONE cache for every encoder, not one per model. Freezing happens at the FIRST
 # huggingface_hub import in the process, and that is usually not this module --
-# bench_window_retrieval reaches transformers through TissueSegFunc before any
+# bench_stage2_retriever reaches transformers through TissueSegFunc before any
 # encoder is named -- so with three different defaults the winner was whichever
 # module happened to be imported first. Agreeing on one value makes that race
 # harmless: whoever wins, the answer is the same directory. `setdefault`, so an
