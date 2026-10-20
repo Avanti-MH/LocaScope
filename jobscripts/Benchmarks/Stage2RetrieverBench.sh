@@ -183,6 +183,56 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # The masks are read from MASK_CACHE_JOB's cache, Masks by default (every
 # trainer and bench shares it); MASK_CACHE_JOB="" uses this job's own.
 
+# ---------------- RECIPE: a named set of arms ---------------------------------
+#
+#   RECIPE=full    every arm measured so far, for one encoder:
+#                    the 18 pooling arms (the CONFIG block's: cls cls_avg cls_std rings3 grid2x2 raw-M,
+#                      each with every window score),
+#                    the other first phases (BagOfTiles gap|quad on cls_avg and rings3, TileVote
+#                      exact|hnsw|ivf, ClusterBow on cls_avg and rings3), each handing on 1000 (--k),
+#                    the second phases, each reading the first 100 of one sliding window's list
+#                      (RERANK_ON <pooling>+mean@100): Dual, CSLS, Corr (contrast mnn sinkhorn), CandGraph
+#                      (prominence rot_margin nbr_support) and TokenMatch, and the chain
+#                      <pooling>+mean@100 :: Corr mnn@30 :: TokenMatch (a third phase reading 30).
+#                    A reranker's pooling is the retriever's (RERANK_POOLING: uni2 cls_avg, gigapath
+#                    cls_std, the best +mean of each), so it reuses the features the window score read
+#                    instead of encoding the slide again.
+#   (unset)        no recipe: ARMS, RERANK_ON and RERANKERS as given, or the CONFIG block's arms.
+#
+# RERUNNING A RECIPE ADDS TO WHAT IS THERE. An arm is its own entries in the cache (result/cache/<job
+# name>/...), one per phase, and a slide writes only the entries that are missing ("entries to write: N of
+# the pooling arms, M of the others"); the ones already there are read, not redone. The CSV is the rows of
+# THIS run's arms read off the entries -- so a recipe that lists the earlier arms too writes a CSV that
+# holds them all, which is why `full` lists the 18 pooling arms again. Keep the SAME job name
+# (Stage2RetrieverBench) to share the cache; give the log its own name with -o/-e. A CSV from before is
+# overwritten: copy it first (stage2_retriever.pooling18.csv is the copy of the 18-arm run).
+#
+# ARMS, RERANK_ON and RERANKERS set on the command line win over the recipe.
+RECIPE="${RECIPE:-}"
+if [ -n "$RECIPE" ]; then
+  case "$RECIPE" in
+    full)
+      case "$ENCODER" in
+        uni2)     RERANK_POOLING="${RERANK_POOLING:-cls_avg}" ;;
+        gigapath) RERANK_POOLING="${RERANK_POOLING:-cls_std}" ;;
+        *) [ -n "${RERANK_POOLING:-}" ] || { echo "RECIPE=full: no reranker pooling for encoder $ENCODER; set RERANK_POOLING"; exit 1; } ;;
+      esac
+      RP="$RERANK_POOLING"
+      E="$ENCODER"
+      : "${ARMS:=cls cls_avg cls_std rings3 grid2x2 raw-M \
+$E:BagOfTiles::cls_avg+gap $E:BagOfTiles::cls_avg+quad $E:BagOfTiles::rings3+gap $E:BagOfTiles::rings3+quad \
+$E:TileVote::cls_avg+exact $E:TileVote::cls_avg+hnsw $E:TileVote::cls_avg+ivf \
+$E:ClusterBow::cls_avg $E:ClusterBow::rings3 \
+$E:SlidingWindow::$RP+mean@100::Corr::$RP+mnn@30::TokenMatch::raw}"
+      : "${RERANK_ON:=$E:SlidingWindow::$RP+mean@100}"
+      : "${RERANKERS:=Dual::$RP+dual CSLS::$RP+csls Corr::$RP+contrast Corr::$RP+mnn Corr::$RP+sinkhorn \
+CandGraph::raw+prominence CandGraph::raw+rot_margin CandGraph::raw+nbr_support TokenMatch::raw}"
+      ;;
+    *) echo "unknown RECIPE '$RECIPE' -- one of: full"; exit 1 ;;
+  esac
+  echo "recipe $RECIPE: $(echo $ARMS | wc -w) arm texts, rerank on ${RERANK_ON:-none}, rerankers ${RERANKERS:-none}"
+fi
+
 # --encoder is always passed: it names the output directory (TAG) above, so the
 # script and the bench have to agree on it.
 COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
