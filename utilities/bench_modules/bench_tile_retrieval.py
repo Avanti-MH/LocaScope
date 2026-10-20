@@ -64,7 +64,7 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
 import Cache                                                        # noqa: E402
-from AccessDatasets import list_names, locate                        # noqa: E402
+from AccessDatasets import by_source, locate                         # noqa: E402
 from ConfigIdentity import record                                   # noqa: E402
 from Store import FeatureStore as FS, encoder_names as enc_names, feature_id  # noqa: E402
 from dump_function import RetrievalReport as RR                     # noqa: E402
@@ -457,12 +457,12 @@ def _rank_stats(sim: torch.Tensor, ans: np.ndarray):
 
 def slidewin_rows(query_meta, ref_tensors, pooled_q, pooled_r, poolings,
                   query_tensors, dmain, dovlp) -> list:
-    """The same rows bench_window_retrieval stores, for the same tables.
+    """The same rows bench_stage2_retriever stores, for the same tables.
 
     That bench asks its question of a whole FoV window through stage 2; this one
     asks it of a single tile against a store. Different systems, one metric
     vocabulary -- W/L/T against the baseline, top@f%, truth@k, gap@k -- so the
-    numbers here can be read beside the ones in log/WindowRetrievalBench rather than
+    numbers here can be read beside the ones in log/Stage2RetrieverBench rather than
     only against each other.
 
     Only the same-level pool (level_delta == 0). truth and fine are defined by
@@ -943,13 +943,13 @@ def eval_all(levels: list, poolings=POOLINGS, out_txt=None, whitens=WHITENS) -> 
 
     lines += _summary(recs, poolings, whitens)
 
-    # The same tables bench_window_retrieval prints, from the same code in
+    # The same tables bench_stage2_retriever prints, from the same code in
     # utilities/dump_function/RetrievalReport.py. Last because they are the
     # widest reading: everything above is one (slide, level) at a time.
     rows = [r for rec in recs for r in rec['rows']]
     if rows:
         lines.append(f'\n\n{"#" * 90}')
-        lines.append('# paired tables -- same metrics as log/WindowRetrievalBench')
+        lines.append('# paired tables -- same metrics as log/Stage2RetrieverBench')
         lines.append('# baseline is `cls`, which is what production keeps.')
         lines.append(f'{"#" * 90}')
         RR.report(RR.attach_baseline(rows, 'cls'), list(poolings), 'cls',
@@ -978,15 +978,15 @@ def main() -> int:
                          f'the reference pool. Pass none at all to skip the '
                          f'table -- it costs one eigh per (pooling, slot). '
                          f'Default {" ".join(WHITENS)}')
-    # The slides: the first --n-wsi of each dataset's recorded --split, the
-    # ones every other bench scores. Every native level of each.
-    ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
-    ap.add_argument('--split', default='test', choices=['val', 'test'])
-    ap.add_argument('--n-wsi', type=int, default=5, help='slides per dataset')
+    # The slides: the first --n-wsi of each dataset a --datasets id draws from,
+    # the ones every other bench scores. Every native level of each.
+    ap.add_argument('--datasets', nargs='+', default=['@legacy-test'],
+                    help='AccessDatasets ids: a registered dataset or a virtual one, `@<name>`')
+    ap.add_argument('--n-wsi', type=int, default=5, help='slides of each dataset an id draws from')
     ap.add_argument('--cache-job', default=None,
                     help="whose cache the stores are written to (dump) and read "
                          "from (eval). Default: this job")
-    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--mask-cache-job', default='Masks',
                     help="masks are read from this job's cache")
     ap.add_argument('--wsi', default=None, help='substring filter, for a small run')
     ap.add_argument('--levels', type=int, nargs='+', default=None)
@@ -1020,20 +1020,21 @@ def main() -> int:
     masks = MaskMaker(mask_cfg_from_args(args), args.mask_cache_job, device)
 
     levels = []
-    for dataset in args.datasets:
-        dataset_split = f'{dataset}#{args.split}'
-        names = list_names(dataset=dataset_split)
-        if args.n_wsi > len(names):
-            sys.exit(f'--n-wsi {args.n_wsi} but {dataset_split} holds {len(names)}')
-        for name in names[:args.n_wsi]:
-            path = str(locate(name, dataset=dataset_split).path)
-            if args.wsi and args.wsi not in path:
-                continue
-            with SafeSlide(path) as slide:
-                lds = list(slide.level_downsamples)
-            levels += [Level(path, lv, ds, args, masks, cfg)
-                       for lv, ds in enumerate(lds)
-                       if not args.levels or lv in args.levels]
+    slides = []
+    for dataset_id in args.datasets:
+        for dataset, names in by_source(dataset_id, args.n_wsi):
+            if len(names) < args.n_wsi:
+                sys.exit(f'--n-wsi {args.n_wsi} but {dataset_id} holds {len(names)} of {dataset}')
+            slides += [(dataset, name) for name in names]
+    for dataset, name in slides:
+        path = str(locate(name, dataset=dataset).path)
+        if args.wsi and args.wsi not in path:
+            continue
+        with SafeSlide(path) as slide:
+            lds = list(slide.level_downsamples)
+        levels += [Level(path, lv, ds, args, masks, cfg)
+                   for lv, ds in enumerate(lds)
+                   if not args.levels or lv in args.levels]
     if not levels:
         sys.exit('no (slide, level) pairs matched')
     print(f'cache {args.cache_job}   encoder {enc_names(cfg)[0]} '

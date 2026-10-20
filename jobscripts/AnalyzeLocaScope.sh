@@ -32,10 +32,9 @@ source jobscripts/_env.sh
 #  them equal to the bench's (a mismatch shows as "miss" / "stale" lines, never as wrong numbers).
 #
 #    sbatch jobscripts/AnalyzeLocaScope.sh
-#    TOL_UM=50 sbatch jobscripts/AnalyzeLocaScope.sh
+#    TOL_PX=8 sbatch jobscripts/AnalyzeLocaScope.sh
 # =============================================================================
-DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
-SPLIT="${SPLIT:-val}"
+DATASETS="${DATASETS:-@legacy-val}"   # @legacy-val: where methods are chosen; @legacy-test: the choice confirmed
 N_WSI="${N_WSI:-10}"
 PER_LEVEL="${PER_LEVEL:-50}"
 SEG="${SEG:-hest}"
@@ -44,12 +43,12 @@ STAGE2="${STAGE2:-slidewin:gigapath}"
 STAGE3="${STAGE3:-sift:default}"
 LIMIT="${LIMIT:-0}"
 STAGE_JOB="${STAGE_JOB:-BenchLocaScope}"   # whose cache is read
-TOL_UM="${TOL_UM:-100}"                    # the final answer is a success within this many um of the truth
+TOL_PX="${TOL_PX:-16}"                     # located = the final answer within this many px of the truth (photo pixels)
 EXTRA="${EXTRA:-}"
 
 python -u utilities/cli/metrics/analyze_locascope.py \
-  --datasets $DATASETS --split "$SPLIT" --n-wsi "$N_WSI" \
+  --datasets $DATASETS --n-wsi "$N_WSI" \
   --sampler-n-per-rung "$PER_LEVEL" \
   --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" \
   --seg "$SEG" --limit "$LIMIT" --stage-cache-job "$STAGE_JOB" \
-  --tol-um "$TOL_UM" $EXTRA
+  --tol-px "$TOL_PX" $EXTRA

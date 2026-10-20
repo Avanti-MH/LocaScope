@@ -69,8 +69,8 @@ from SafeSlide import SafeSlide                                     # noqa: E402
 from ReadGeometry import ReadSpec, coarser_level                    # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig      # noqa: E402
-from stage2_retrieval.SlidingWinSimRot import (                     # noqa: E402
-    SlidingWinSimRot, SlidingWinSimRotConfig, _sim_tensors)
+from stage2_retrieval.RetrieverSlidingWinSimRot import (            # noqa: E402
+    RetrieverSlidingWinSimRot, RetrieverSlidingWinSimRotConfig, _sim_tensors)
 from stage3_localization.SIFT_RANSAC import SIFT_RECIPES, SiftRansacLocalizer  # noqa: E402
 
 
@@ -110,9 +110,9 @@ def pick_fov(args, masks) -> None:
     (`crop_query`), since stage 3's error is exact only without rotation and
     lens. `--rung` names a level by its nominal ds, matched in log space, so
     4 finds BRACS's 4.00003."""
-    names = list_names(dataset=args.dataset, split_job=args.split_cache_job)
+    names = list_names(dataset=args.dataset)
     name = args.slide or random.Random(args.pick_seed).choice(names)
-    entry = locate(name, dataset=args.dataset, split_job=args.split_cache_job)
+    entry = locate(name, dataset=args.dataset)
     fov = FOV_RECIPES['bench']
     sampler = TileSampler.cached(
         entry.path, fov.sampler,
@@ -168,27 +168,33 @@ def run_stage1(wsi, mask, query_qc, args, device):
     return result
 
 
+def stage2_retriever(wsi, mask, args, device, feature_store=None) -> RetrieverSlidingWinSimRot:
+    """The sliding window on the test's encoder, tile and lattices, bound to the slide."""
+    return RetrieverSlidingWinSimRot(
+        RetrieverSlidingWinSimRotConfig(encoder=stage2_encoder_cfg(args), tile_size=args.tile,
+                                        overlap=args.overlap, raw_topk=1000, min_sep_tiles=1.0, score='mean'),
+        device, read_workers=CpuBudget.for_job(processes=1).apply().workers,
+        feature_store=feature_store).build(wsi, mask)
+
+
 def run_stage2(wsi, mask, query_np, estimate, args, device):
-    """Stage 2 on stage 1's output (or its ground-truth substitute). Builds
-    its own encoder, as stage 1 does."""
-    retriever = SlidingWinSimRot(
-        SlidingWinSimRotConfig(stage2_encoder_cfg(args), tile_size=args.tile,
-                                       overlap=args.overlap),
-        device, read_workers=CpuBudget.for_job(processes=1).apply().workers
-    ).build(wsi, mask)
+    """Stage 2 on stage 1's output (or its ground-truth substitute): `(retriever, its output)`. Builds its own
+    encoder, as stage 1 does."""
+    retriever = stage2_retriever(wsi, mask, args, device)
     # the routed level's features, timed alone; retrieve() reuses them
     t0 = time.perf_counter()
-    features = retriever.build_wsi_features(level=int(estimate.chosen_level))
+    level = retriever.search.level_features(int(estimate.chosen_level))
     built = time.perf_counter() - t0
-    n_tiles = sum(len(fm.features) for fm in features)
+    n_tiles = sum(len(fm.features) for fm in level.features)
     print(f'  features: {n_tiles:,} tiles in {built:.1f}s = '
           f'{n_tiles / max(built, 1e-9):.0f} tiles/s ({args.precision})', flush=True)
-    cs = retriever.retrieve(query_np, estimate)
+    out = retriever.retrieve(estimate, query_np)
+    cs = out.candidates
     best = cs.best
     x0, y0 = cs.origin_l0(best)
     print(f'  best=({x0}, {y0})  score={best.score:.4f}  rotation={best.rotation}  '
          f'region={best.region_index} {best.lattice}  level {cs.level}')
-    return retriever, cs
+    return retriever, out
 
 
 # ── --check-sims: stage 2's maps against the path they replaced ──────────────
@@ -208,16 +214,16 @@ def _old_lattice_grid(fm: FeaturesMap, lattice: str) -> torch.Tensor:
     return out
 
 
-def _old_sim_maps(retriever) -> dict:
-    '''FROZEN: SlidingWinSimRot.compute_sim_maps with features on the host,
+def _old_sim_maps(retriever, source) -> dict:
+    '''FROZEN: the sliding window's similarity maps with features on the host,
     every grid arranged per call from them, moved to the device, then
-    `_sim_tensors`.'''
+    `_sim_tensors`. `source` is the retriever's `level_features` (a GridSource).'''
     device = retriever.device
     out = {}
-    for rot, qfm in retriever.query_features_by_rot.items():
+    for rot, qfm in source.query.features.items():
         q = _old_lattice_grid(FeaturesMap(qfm.grid, qfm.features.cpu()), 'main').to(device)
         maps = []
-        for fm in retriever.wsi_features:
+        for fm in source.level.features:
             host = FeaturesMap(fm.grid, fm.features.cpu())
             main = _old_lattice_grid(host, 'main').to(device)
             ov = _old_lattice_grid(host, 'offset').to(device)
@@ -238,16 +244,18 @@ def _same_maps(a: dict, b: dict) -> Tuple[int, int]:
     return same, total
 
 
-def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
-    """Stage 2's similarity maps, every rotation x region x lattice, against
+def check_sims(retriever, out, wsi, mask, query_np, estimate, args, device) -> bool:
+    """Stage 2's similarity maps (`out`'s `tile_sims`), every rotation x region x lattice, against
     (a) the frozen path that arranges the grids from host features per call, and (b) the same retriever with its features read back
     from a FeatureMapCache. Both must be bit-identical. The decoy: the maps at
     rotation 0 against those at 180, which have the same shape and must differ
     -- so an equality here is evidence the comparison compares."""
-    new = {rot: list(maps) for rot, maps in retriever.sim_maps_by_rot.items()}
-    n_regions = len(retriever.wsi_features)
+    new = {rot: list(maps) for rot, maps in out.extras['tile_sims'].value.items()}
+    source = out.extras['level_features'].value
+    level = source.level
+    n_regions = len(level.features)
 
-    old = _old_sim_maps(retriever)
+    old = _old_sim_maps(retriever, source)
     same_old, total = _same_maps(new, old)
     decoy = sum(torch.equal(n, o) for (n, _), (o, _) in zip(new[0], old[180])
                 if n.shape == o.shape and n.numel())
@@ -265,9 +273,9 @@ def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
             store = FeatureMapCache('TestLocaScopeStages',
                                     getattr(wsi, '_filename', ''),
                                     retriever.encoder, mask_cfg_from_args(args))
-            store.save(retriever.wsi_features)
-            hit = store.load(retriever.regions, ds=retriever.ds,
-                             level=retriever.level, tile_size=retriever.tile_size,
+            store.save(level.features)
+            hit = store.load(level.regions, ds=level.ds,
+                             level=level.level, tile_size=retriever.tile_size,
                              overlap=retriever.overlap) is not None
             if not hit:
                 # a rebuild would re-encode on the miss and compare an encode
@@ -275,10 +283,11 @@ def check_sims(retriever, wsi, mask, query_np, estimate, args) -> bool:
                 print('  cache read  : store MISS -- not compared\n'
                       '  check-sims  : FAIL')
                 return False
-            retriever.build(wsi, mask, feature_store=store)
-            retriever.retrieve(query_np, estimate)
+            again = stage2_retriever(wsi, mask, args, device, feature_store=store)
+            again.encoders = retriever.encoders                   # the loaded encoder, not a second one
+            read = again.retrieve(estimate, query_np)
             cached = {rot: list(maps)
-                      for rot, maps in retriever.sim_maps_by_rot.items()}
+                      for rot, maps in read.extras['tile_sims'].value.items()}
         finally:
             Cache.RESULT_DIR = saved_root
     same_cache, total_c = _same_maps(new, cached)
@@ -333,12 +342,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stages', type=parse_stages, default=(1, 2, 3))
-    # The slide comes from a recorded split whose masks are already cached, and
+    # The slide comes from a virtual dataset whose masks are already cached, and
     # the query from a TileSampler draw on it -- the way Stage1MppBench picks
     # both -- so the test segments nothing and its ground truth is a placed FoV.
-    ap.add_argument('--dataset', default='bracs/test#val',
-                    help='<dataset>#<split>; every val slide of bracs/test and '
-                         'ki67_with_photo has a mask in the MppRoutingHead cache')
+    ap.add_argument('--dataset', default='@legacy-val',
+                    help='an AccessDatasets id; every slide of @legacy-val (bracs/test '
+                         'and ki67_with_photo) has a mask in the Masks cache')
     ap.add_argument('--slide', default=None,
                     help='a name in --dataset; default: one picked by --pick-seed')
     ap.add_argument('--rung', type=float, default=1.0,
@@ -347,13 +356,11 @@ def main() -> int:
                          'starts at 2 -- see this module\'s docstring')
     ap.add_argument('--pick-seed', type=int, default=0,
                     help='which slide (when --slide is not given) and which FoV')
-    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--mask-cache-job', default='Masks',
                     help='whose mask cache is read')
     ap.add_argument('--draw-cache-job', default='Stage1MppBench',
                     help="whose cache the FoV draw is read from; "
                          'Stage1MppBench\'s, which this test shares')
-    ap.add_argument('--split-cache-job', default=None,
-                    help='whose recorded split --dataset is read from; default MakeSplit')
     ap.add_argument('--sensor', type=int, nargs=2,
                     default=list(REAL_PHOTO_SENSOR), metavar=('W', 'H'))
     ap.add_argument('--tile',    type=int,   default=256)
@@ -428,10 +435,11 @@ def main() -> int:
         print('\n[1] SKIPPED -- using ground-truth mpp as the stage-1 substitute')
 
     if 2 in args.stages:
-        print('\n[2] SlidingWinSimRot...')
+        print('\n[2] RetrieverSlidingWinSimRot...')
         t0 = time.perf_counter()
-        retriever, retrieval_result = run_stage2(
+        retriever, retrieval_out = run_stage2(
             wsi, mask, query_np, estimate, args, device)
+        retrieval_result = retrieval_out.candidates
         timings['2. retrieval'] = time.perf_counter() - t0
         ret_err = dist_um(*retrieval_result.origin_l0(retrieval_result.best),
                           args, base_mpp)
@@ -441,7 +449,7 @@ def main() -> int:
         if args.check_sims:
             print('\n[2b] check-sims...')
             t0 = time.perf_counter()
-            ok &= check_sims(retriever, wsi, mask, query_np, estimate, args)
+            ok &= check_sims(retriever, retrieval_out, wsi, mask, query_np, estimate, args, device)
             timings['2b. check sims'] = time.perf_counter() - t0
 
     if 3 in args.stages:

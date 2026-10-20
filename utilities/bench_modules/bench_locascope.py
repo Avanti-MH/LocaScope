@@ -3,11 +3,11 @@
 three stages, every stage's output and by-products kept as cache entries.
 
     python utilities/bench_modules/bench_locascope.py \\
-        --datasets bracs/test ki67_with_photo --split val --n-wsi 10 \\
+        --datasets @legacy-val --n-wsi 10 \\
         --stage1 knn:gigapath --stage2 slidewin:gigapath --stage3 sift:default \\
         --route both
 
-SHOTS: the first --n-wsi slides of each dataset's recorded --split; per slide
+SHOTS: the first --n-wsi slides of each dataset a --datasets id draws from; per slide
 one draw over the --fov recipe's levels on the hest masks of
 --fov-mask-cache-job, photographed through `FovSupply.cached` (draw and
 render in --draw-cache-job / --render-cache-job, default this job).
@@ -68,10 +68,10 @@ import Cache                                                           # noqa: E
 from CpuBudget         import CpuBudget                                 # noqa: E402
 from TissueMaskConfig  import MASK_RECIPES, MaskMaker                   # noqa: E402
 from FovSupply         import FovSupply                                 # noqa: E402
-from BenchCommon       import (ROLES, RunClock, Shot, Stage, Truth,     # noqa: E402
+from BenchCommon       import (RunClock, Shot, Stage, Truth,            # noqa: E402
                                add_run_args, fmt_time, matching_rotation,
                                parse_run_args, require_gpu_if_allocated,
-                               query_grid_centre, run_from_args,
+                               query_grid_centre, roles_of, run_from_args,
                                run_slide_stages, slide_supplies)
 
 
@@ -99,7 +99,7 @@ def bench_slide(path: str, supply: FovSupply, stages: Tuple[Stage, Stage, Stage]
     """One slide: its synthetic FoVs through the stages, on the stage-1 route
     and the oracle's, under the address of its renders."""
     run_slide_stages(path, synthetic_shots(supply, args.workers), stages, routes,
-                     masks, supply.render_address.on(own), ROLES, own,
+                     masks, supply.render_address.on(own), roles_of(stages), own,
                      limit=args.limit, run_clock=run_clock)
 
 
@@ -135,7 +135,7 @@ def main():
     own = Cache.job_name('BenchLocaScope')
     fov_masks = MaskMaker(MASK_RECIPES['hest'], args.fov_mask_cache_job, device)
     masks = MaskMaker(mask_cfg, args.mask_cache_job, device)
-    print(f'shots      : {" ".join(args.datasets)}  #{args.split}  '
+    print(f'shots      : {" ".join(args.datasets)}  '
           f'n_wsi={args.n_wsi}  cache job {own}', flush=True)
 
     t_start = time.time()

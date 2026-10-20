@@ -65,9 +65,9 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # 40 minutes into a sweep is not.
 
 # ---------------- Parameters ----------------
-# A val slide (every one has a mask in the MppRoutingHead cache) and one FoV
+# A val slide (every one has a mask in the Masks cache) and one FoV
 # drawn on it at RUNG -- nothing is segmented. PICK_SEED picks both.
-DATASET="${DATASET:-bracs/test#val}"   # or ki67_with_photo#val
+DATASET="${DATASET:-@legacy-val}"   # both stains; written by jobscripts/MakeDataset.sh
 RUNG="${RUNG:-1}"
 PICK_SEED="${PICK_SEED:-0}"
 SENSOR="1440 1024"
@@ -86,10 +86,6 @@ FILTER_SWEEP="${FILTER_SWEEP:-0}"
 CHECK_SIMS="${CHECK_SIMS:-0}"
 # PRECISION: the stage 2 encoder, fp16 (production) or fp32.
 PRECISION="${PRECISION:-fp16}"
-
-# The recorded val/test split the slides are taken from. Written once, by its
-# one writer, under MakeSplit; an existing split is kept as it is.
-python utilities/cli/build_cache/make_split.py --cache-job MakeSplit || exit $?
 
 BASE_ARGS="
   --dataset $DATASET --rung $RUNG --pick-seed $PICK_SEED
@@ -120,3 +116,9 @@ else
   python utilities/test_modules/test_locascope_stages.py \
     --stages "$STAGES" $BASE_ARGS --overlap --filter
 fi
+status=$?
+
+echo ""
+# the last line says it all: ALL PASS, or FAILED with the exit code
+if [ $status -eq 0 ]; then echo "======== ALL PASS ========"; else echo "======== FAILED (exit $status) ========"; fi
+exit $status

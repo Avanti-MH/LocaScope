@@ -117,7 +117,7 @@ from AccessDatasets import list_names, locate                        # noqa: E40
 from SafeSlide import SafeSlide                                     # noqa: E402
 from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
 from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
-from stage2_retrieval.SlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
+from stage2_retrieval.RetrieverSlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
 from camera import Render                                           # noqa: E402
 from SlideReader import SlideReader                                 # noqa: E402
 from FovSupply import FOV_RECIPES                                   # noqa: E402
@@ -830,14 +830,14 @@ def main() -> int:
                              'given; with --plot-only these are '
                              'offgrid_scores.csv paths instead')
     parser.add_argument('--dataset', default=None,
-                        help='<dataset>#<split>: the slides are names in that '
-                             'recorded split (AccessDatasets), or with '
-                             '--wsi-index the index-th of it')
+                        help='an AccessDatasets id, registered or @<name>: the '
+                             'slides are names in it, or with --wsi-index '
+                             'the index-th of it')
     parser.add_argument('--wsi-index', type=int, default=None,
                         help='with --dataset and no slides: the slide at this '
-                             'position of the split, in its file order -- one '
+                             'position of the dataset, in its order -- one '
                              'per array task')
-    parser.add_argument('--mask-cache-job', default='MppRoutingHead',
+    parser.add_argument('--mask-cache-job', default='Masks',
                         help="masks are read from this job's cache; a slide "
                              'it lacks is segmented once and written there')
     parser.add_argument('--plot-only', action='store_true',

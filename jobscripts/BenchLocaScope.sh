@@ -24,7 +24,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # ---------------- End-to-end bench: every stage's results into the cache ----
 #
 # Synthetic FoVs (FOV recipe, PER_LEVEL per native level, the first N_WSI
-# slides of each dataset's recorded SPLIT) through stage 1, 2 and 3. Each
+# slides of each dataset a DATASETS id draws from) through stage 1, 2 and 3. Each
 # stage's tables for a slide are one cache entry under
 #   result/cache/<job>/slide=/seg=/region=/plan=/draw=/render=<gap>/
 #       stage1/  stage1=<s1|oracle>/stage2/  .../stage2=<s2>/stage3/
@@ -34,7 +34,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #
 # STAGE1/2/3 are <method>:<recipe> (KNN_RECIPES, SLIDEWIN_RECIPES,
 # SIFT_RECIPES); any recipe field is a --stageN-<field> flag in EXTRA, e.g.
-#   EXTRA="--stage2-k 20 --stage3-topk 5"
+#   EXTRA="--stage2-raw-topk 20 --stage3-topk 5"
 # ROUTE: stage1 (stage 1's level), oracle (the placed level) or both.
 #
 # ONE ARRAY TASK PER SLIDE (the datasets in order, N_WSI of each: task i is the
@@ -57,8 +57,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 MODE="${MODE:-full}"
 if [ "$MODE" = "smoke" ]; then SMOKE_WSI=1; SMOKE_PER_LEVEL=5; else SMOKE_WSI=10; SMOKE_PER_LEVEL=50; fi
 
-DATASETS="${DATASETS:-bracs/test ki67_with_photo}"
-SPLIT="${SPLIT:-val}"          # val: where methods are chosen; test: the choice confirmed
+DATASETS="${DATASETS:-@legacy-val}"   # @legacy-val: where methods are chosen; @legacy-test: the choice confirmed
 N_WSI="${N_WSI:-$SMOKE_WSI}"   # per dataset (10; 1 in smoke)
 PER_LEVEL="${PER_LEVEL:-$SMOKE_PER_LEVEL}"   # FoVs per native level per slide (50; 5 in smoke)
 SEG="${SEG:-hest}"             # the mask stages 1 and 2 search (MASK_RECIPES)
@@ -74,11 +73,11 @@ BATCH="${BATCH:-1024}"          # stage 2 encoder batch (not identity)
 SLIDE_ARG=""
 [ -n "$SLURM_ARRAY_TASK_ID" ] && SLIDE_ARG="--slide-index $SLURM_ARRAY_TASK_ID"
 
-echo "======== mode=$MODE  $DATASETS #$SPLIT  n_wsi=$N_WSI  per_level=$PER_LEVEL  limit=$LIMIT ========"
+echo "======== mode=$MODE  $DATASETS  n_wsi=$N_WSI  per_level=$PER_LEVEL  limit=$LIMIT ========"
 echo "stages $STAGE1 | $STAGE2 | $STAGE3   route $ROUTE   seg $SEG   task ${SLURM_ARRAY_TASK_ID:-all}"
 
 python utilities/bench_modules/bench_locascope.py \
-  --datasets $DATASETS --split "$SPLIT" --n-wsi "$N_WSI" \
+  --datasets $DATASETS --n-wsi "$N_WSI" \
   --sampler-n-per-rung "$PER_LEVEL" \
   --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" --route "$ROUTE" \
   --seg "$SEG" --limit "$LIMIT" \

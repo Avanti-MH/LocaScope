@@ -88,32 +88,31 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #               the hardest AND. All three reduce the SAME tensor, so they are
 #               columns of one row and cost nothing at all.
 
-# The slides are the first N_WSI of each dataset's recorded TEST split (the
-# file make_split.py wrote), in its file order -- the slides Stage1MppBench
-# scores under SPLIT=test. Every one has a mask in the MppRoutingHead cache
-# (BRACS test's first 5, all 6 of Ki67 test), so nothing is segmented. Task IDX
-# takes dataset IDX / N_WSI and slide IDX % N_WSI, so --array must be
-# 0 .. (datasets x N_WSI - 1).
-DATASETS=(${DATASETS:-bracs/test#test ki67_with_photo#test})
+# The slides are the first N_WSI of each dataset a DATASETS id draws from
+# (AccessDatasets.by_source), in its order -- the slides Stage1MppBench scores
+# on @legacy-test. Every one has a mask in the Masks cache, so nothing
+# is segmented. Task IDX takes the IDX-th of them (bracs/test's, then
+# ki67_with_photo's), so --array must be 0 .. (datasets x N_WSI - 1).
+DATASETS="${DATASETS:-@legacy-test}"
 N_WSI="${N_WSI:-5}"
-MASK_CACHE_JOB="${MASK_CACHE_JOB:-MppRoutingHead}"
+MASK_CACHE_JOB="${MASK_CACHE_JOB:-Masks}"
 
 # One slide per array task. Each writes its own result directory, so nothing
 # races on a shared CSV; merge afterwards with the awk line at the bottom.
 IDX=${SLURM_ARRAY_TASK_ID:-0}
-DS_IDX=$(( IDX / N_WSI ))
-WSI_IDX=$(( IDX % N_WSI ))
-if [ "$DS_IDX" -ge "${#DATASETS[@]}" ]; then
-  echo "[skip] array index $IDX >= ${#DATASETS[@]} datasets x $N_WSI slides"
-  exit 0
-fi
-DATASET="${DATASETS[$DS_IDX]}"
-# The name, for the result directory; the bench resolves the path itself.
-STEM=$(python -c "
+# The dataset and name, for the bench and the result directory; the bench
+# resolves the path itself.
+read -r DATASET STEM < <(python -c "
 import sys; sys.path.insert(0, 'utilities')
 from _paths import setup_import_paths; setup_import_paths()
-from AccessDatasets import list_names
-print(list_names(dataset='$DATASET')[$WSI_IDX])")
+from AccessDatasets import by_source
+pairs = [(s, n) for d in '$DATASETS'.split()
+         for s, names in by_source(d, $N_WSI) for n in names]
+print(*pairs[$IDX] if $IDX < len(pairs) else ())")
+if [ -z "$STEM" ]; then
+  echo "[skip] array index $IDX: $DATASETS holds fewer slides ($N_WSI of each dataset)"
+  exit 0
+fi
 # Resolved once: the bench puts this name in every row it stores, so the echo
 # lines below must spell the same default.
 #
@@ -127,7 +126,7 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 OUT_DIR="${OUT:-"$RESULT_ROOT"/${SLURM_JOB_NAME:-OffGridScore}}/$TAG/$STEM"
 
 echo "======== [$IDX] $STEM  encoder=$TAG ========"
-echo "wsi : $DATASET [$WSI_IDX] $STEM"
+echo "wsi : $DATASET $STEM"
 echo "out : $OUT_DIR"
 
 python utilities/bench_modules/bench_offgrid_score.py "$STEM" \

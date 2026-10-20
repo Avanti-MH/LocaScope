@@ -4,9 +4,9 @@ method's results a cache entry.
 
     python utilities/bench_modules/bench_stage1_mpp.py \\
         --stage1 knn:gigapath knn:uni2 classifier:gigapath-arcface classic:default \\
-        --datasets bracs/test ki67_with_photo --split test --n-wsi 5
+        --datasets @legacy-test --n-wsi 5
 
-FOVS: the first --n-wsi slides of each dataset's recorded --split, one draw
+FOVS: the first --n-wsi slides of each dataset a --datasets id draws from, one draw
 per slide over the --fov recipe's levels on the hest masks of
 --fov-mask-cache-job, photographed through `FovSupply.cached` -- the draws and
 photos bench_locascope uses, in --draw-cache-job / --render-cache-job (default
@@ -89,12 +89,11 @@ NO_RECIPE_METHODS = 'none'
 def add_args(ap) -> None:
     """The flags that decide which entries a run writes. The analysis takes
     the same ones and computes the same addresses."""
-    ap.add_argument('--datasets', nargs='+', default=['bracs/test', 'ki67_with_photo'])
-    ap.add_argument('--split', default='test', choices=['val', 'test'],
-                    help='the recorded split slides are taken from. FoV_Vote.md '
-                         'fixes every risk threshold on val before test is '
-                         'looked at: run val first')
-    ap.add_argument('--n-wsi', type=int, default=5, help='slides per dataset')
+    ap.add_argument('--datasets', nargs='+', default=['@legacy-test'],
+                    help='AccessDatasets ids: a registered dataset or a virtual one, `@<name>`. FoV_Vote.md '
+                         'fixes every risk threshold on a val set (a `-val` id, `@legacy-val`) before a test '
+                         'set is looked at: run val first')
+    ap.add_argument('--n-wsi', type=int, default=5, help='slides of each dataset an id draws from')
     ap.add_argument('--stage1', nargs='+', default=list(DEFAULT_METHODS),
                     help=f'<method>:<recipe>, one or more; `{NO_RECIPE_METHODS}` for none')
     ap.add_argument('--checkpoints', nargs='*', default=[],
@@ -103,11 +102,11 @@ def add_args(ap) -> None:
                          'file. Added to --stage1')
     # --fov, --max-ds, --sampler-*, --camera-*
     add_fov_args(ap)
-    ap.add_argument('--fov-mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--fov-mask-cache-job', default='Masks',
                     help='hest masks the FoVs are placed on')
     # --seg: the mask the reference banks are drawn on
     add_mask_args(ap)
-    ap.add_argument('--mask-cache-job', default='MppRoutingHead',
+    ap.add_argument('--mask-cache-job', default='Masks',
                     help="whose mask cache the --seg mask is read from and "
                          'written to')
     ap.add_argument('--draw-cache-job', default=None,
