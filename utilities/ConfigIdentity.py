@@ -33,13 +33,21 @@ The rules
    not literal. Editing a baseline renames every id of that class, which is
    what it is for; editing a default splits new from old.
 
-3. Code that changes an output without changing a config value bumps a
-   `VERSION`, and the reason goes in log/TODO.log. It lives on the config that
-   drives the code (a cache hit builds nothing, so it must be readable off the
-   config), or, for a producer with no config, on the producer's class. Versions are in the record, not the address: the stale entry
-   is caught on load and recomputed in place. The fingerprint tests pin each
-   producer's output on synthetic input to its VERSION, so a behaviour change
-   that forgets the bump fails a test.
+3. Code that changes an output without changing a config value is one of two
+   things, and only the first moves a `VERSION`:
+   - a change made to be compared (another algorithm, another formula, another
+     parameter whose effect on the numbers is the question) bumps a `VERSION`;
+   - a bug fix, code made to do what it already claimed to do, does NOT bump a
+     `VERSION` and does not move any id. The entries the bug had made wrong are
+     removed by hand (the TODO.log entry names them) and the next run computes
+     them again in place; every other entry keeps its address and its hit.
+   The reason goes in log/TODO.log either way. A `VERSION` lives on the config
+   that drives the code (a cache hit builds nothing, so it must be readable off
+   the config), or, for a producer with no config, on the producer's class.
+   Versions are in the record, not the address: the stale entry is caught on
+   load and recomputed in place. The fingerprint tests pin each producer's
+   output on synthetic input to its VERSION, so a behaviour change that forgets
+   the bump fails a test; a bug fix pins the new digest under the SAME VERSION.
 
 4. The environment -- the versions of the libraries that make pixels and
    vectors (`environment`) -- is in every record, so an upgraded conda env
@@ -115,6 +123,16 @@ def _is_config(value: Any) -> bool:
     return isinstance(value, IdentifiedConfig) and dataclasses.is_dataclass(value)
 
 
+def _is_config_seq(value: Any) -> bool:
+    """A non-empty tuple or list of configs: a field that holds a CHAIN of
+    configs (`TwoPhaseConfig.rerankers`). The elements may be different classes
+    and their order is meaningful, so each is written on its own. An empty one is
+    not: it is the field's zero point (`BASELINE` writes `()`) and takes the
+    ordinary path."""
+    return (isinstance(value, (tuple, list)) and len(value) > 0
+            and all(_is_config(v) for v in value))
+
+
 _LITERAL = (type(None), bool, int, float, str)
 _CHECKED: set = set()
 
@@ -156,8 +174,10 @@ def parts_of(cfg, exclude: tuple = ()) -> List[str]:
 
     A nested config writes `name=<class>` when its class is not the one the
     baseline names, then its own parts prefixed `name.`, each against its own
-    class's BASELINE. `exclude` drops fields by name, for an id that covers
-    part of a config (`TissueMaskConfig.region_id`)."""
+    class's BASELINE. A non-empty tuple of configs writes `name=[<classes>]`
+    (always: the classes and their order are the identity) and each element's
+    parts prefixed `name[i].`. `exclude` drops fields by name, for an id that
+    covers part of a config (`TissueMaskConfig.region_id`)."""
     baseline = _check_baseline(type(cfg))
     skip = set(getattr(cfg, 'NOT_IDENTITY', ())) | set(exclude)
     out: List[str] = []
@@ -171,6 +191,11 @@ def parts_of(cfg, exclude: tuple = ()) -> List[str]:
             if want != name:
                 out.append(f'{f.name}={enc(name)}')
             out.extend(f'{f.name}.{p}' for p in value.identity_parts())
+            continue
+        if _is_config_seq(value):
+            out.append(f'{f.name}={enc([type(v).__name__ for v in value])}')
+            for i, element in enumerate(value):
+                out.extend(f'{f.name}[{i}].{p}' for p in element.identity_parts())
             continue
         if want is not _MISSING and _canon(value) == _canon(want):
             continue
@@ -206,6 +231,9 @@ def versions_of(obj) -> Dict[str, int]:
             value = getattr(obj, f.name)
             if _is_config(value):
                 out.update(versions_of(value))
+            elif _is_config_seq(value):
+                for element in value:
+                    out.update(versions_of(element))
     return dict(sorted(out.items()))
 
 
@@ -279,8 +307,9 @@ def check_fingerprint(owner: type, got: str, pinned: Dict[int, str]) -> str:
     if want != got:
         raise AssertionError(
             f'{owner.__name__} output changed under VERSION {v} ({want} -> {got}). '
-            f'If the change is meant: bump {owner.__name__}.VERSION, say why in '
-            f'log/TODO.log, and pin {got!r} for the new version')
+            f'If the change is meant to be compared: bump {owner.__name__}.VERSION, say why in '
+            f'log/TODO.log, and pin {got!r} for the new version. If it is a bug fix: keep the '
+            f'VERSION, pin {got!r} under it, and remove the entries the bug made wrong')
     return f'{owner.__name__} v{v} {got}'
 
 
@@ -430,6 +459,10 @@ class IdentifiedConfig:
             if _is_config(value):
                 out.update({f'{f.name}.{k}': v
                             for k, v in value.provenance().items()})
+            elif _is_config_seq(value):
+                for i, element in enumerate(value):
+                    out.update({f'{f.name}[{i}].{k}': v
+                                for k, v in element.provenance().items()})
         return out
 
 
@@ -645,8 +678,30 @@ def _as_plain(cfg) -> dict:
     out = {}
     for f in dataclasses.fields(cfg):
         v = getattr(cfg, f.name)
-        out[f.name] = _as_plain(v) if _is_config(v) else v
+        if _is_config(v):
+            out[f.name] = _as_plain(v)
+        elif _is_config_seq(v):
+            # an element's class is not in the annotation (a chain of different
+            # configs), so each carries its registered name, as `config_json` does
+            out[f.name] = [_element_plain(e) for e in v]
+        else:
+            out[f.name] = v
     return out
+
+
+def _element_plain(cfg) -> dict:
+    name = getattr(type(cfg), 'REGISTERED_AS', None)
+    if name is None:
+        raise ValueError(
+            f'{type(cfg).__name__} is an element of a config tuple but is not '
+            f'registered, so it cannot be named in json. Decorate it with '
+            f'@register("...")')
+    return {'name': name, 'fields': _as_plain(cfg)}
+
+
+def _is_element_plain(value: Any) -> bool:
+    return (isinstance(value, dict) and set(value) == {'name', 'fields'}
+            and value['name'] in _REGISTRY)
 
 
 def _field_types(cls) -> dict:
@@ -706,6 +761,10 @@ def _from_plain(cls, fields: dict):
                     f'does not resolve to an IdentifiedConfig, so it cannot be '
                     f'rebuilt. Leaving it as a dict is how this failed before')
             kwargs[name] = _from_plain(nested, value)
+        elif isinstance(value, list) and value and all(
+                _is_element_plain(e) for e in value):
+            kwargs[name] = tuple(_from_plain(_REGISTRY[e['name']], e['fields'])
+                                 for e in value)
         elif isinstance(value, list):
             kwargs[name] = tuple(value)
         else:
