@@ -174,7 +174,8 @@ VOTE_CHOICES: Dict[str, Callable[..., Tuple[int, Dict[str, float]]]] = {
 
 def vote(name: str, probs: torch.Tensor, *, rungs: Optional[Sequence[float]] = None,
         weights: Optional[torch.Tensor] = None,
-        tie_rule: str = 'lower') -> Tuple[int, Dict[str, float]]:
+        tie_rule: str = 'lower',
+        patches: Optional[Sequence] = None) -> Tuple[int, Dict[str, float]]:
     '''Dispatch to one of `VOTE_CHOICES` by name. `rungs`/`weights`/
     `tie_rule` are passed through to whichever function actually reads
     them (`median_log_rung` needs `rungs`, `quality_weighted` needs
@@ -182,7 +183,26 @@ def vote(name: str, probs: torch.Tensor, *, rungs: Optional[Sequence[float]] = N
     function's own `**_` ignores whatever it does not need, so a caller
     can pass all three unconditionally without knowing which vote it
     picked cares about which.
+
+    `name` may carry the option the benches score under: `quality_weighted:<signal>` (`QUALITY_SIGNALS`: tissue,
+    agree) or `patch_class_median:<lower|upper>` (the tie rule, which wins over `tie_rule=`). The weights of a
+    signal are made here from `patches` (the very patches `probs` came from), unless `weights` is given.
+    Without them `quality_weighted` is all-ones weights, i.e. `mean_probability` under another name, so a
+    signal with no patches is an error.
     '''
+    rule, _, arg = name.partition(':')
+    if arg and rule == 'quality_weighted':
+        if arg not in QUALITY_SIGNALS:
+            raise ValueError(f'vote: {name!r}: signal not in {sorted(QUALITY_SIGNALS)}')
+        if weights is None:
+            if patches is None:
+                raise ValueError(f'vote: {name!r} needs patches= to weigh')
+            weights = QUALITY_SIGNALS[arg](probs, patches)
+        name = rule
+    elif arg and rule == 'patch_class_median':
+        if arg not in ('lower', 'upper'):
+            raise ValueError(f'vote: {name!r}: tie rule not in [\'lower\', \'upper\']')
+        tie_rule, name = arg, rule
     if name not in VOTE_CHOICES:
         raise ValueError(f'vote: {name!r} not in {sorted(VOTE_CHOICES)}')
     if name == 'median_log_rung' and rungs is None:

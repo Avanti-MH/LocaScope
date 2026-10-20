@@ -1,9 +1,9 @@
-'''Stage 1 (mpp estimation) by a trained `MppRoutingHead` classifier, in the
+'''Stage 1 (mpp estimation) by a trained `ClassifyingRoutingHead` classifier, in the
 shape `StageInterface.MppEstimator` describes.
 
     cfg = ClassifierEstMppConfig.from_checkpoint(
-        '/work/u26130998/result/MppRoutingHead/weights/'
-        'gigapath_frozen_arcface_best.pt')
+        '/work/u26130998/result/ClassifyingRoutingHead/weights/'
+        'pure-train_Ki67--gigapath--frozen--arcface--bal--best.pt')
     est = ClassifierEstMpp(cfg).build(wsi)
     result = est.estimate(query_img)   # query_img: RGB uint8 np.ndarray
 
@@ -17,7 +17,7 @@ slide a query is being routed against.
 
 WHY `build(wsi)` IS STILL A REAL STEP AND NOT A NO-OP. The classifier's label
 space (`RUNGS`, read off the checkpoint -- see below) is a RELATIVE ds
-multiplier, deliberately: `training/MppRoutingHead/Datasets.py`'s own
+multiplier, deliberately: `training/ClassifyingRoutingHead/Datasets.py`'s own
 docstring is "rung VALUE, not a per-WSI level index, so the class id means
 the same thing on BRACS (4x pyramid) and Ki67 (2x pyramid)". A query photo
 carries no `base_mpp` of its own -- it is a photograph, not a slide -- so
@@ -155,7 +155,7 @@ class ClassifierEstMppResult(EstMppResult):
     of `estimated_ds` and `cfg.rungs` (`estimated_ds = cfg.rungs[predicted_class]`):
     recovering it from `estimated_ds` needs a reverse float lookup into
     `cfg.rungs`, and a caller that wants the exact class index -- to score
-    against a ground-truth rung label the way `training/MppRoutingHead/
+    against a ground-truth rung label the way `training/ClassifyingRoutingHead/
     Runtime.score` does -- gets it directly rather than re-deriving it with a
     tolerance it would have to pick itself.
 
@@ -212,7 +212,7 @@ class ClassifierEstMpp(IdentifiedBuild):
         # The label space this head classifies into -- a ds multiplier per
         # class, RELATIVE to whichever WSI a query is eventually routed
         # against. Travels with the checkpoint (`Checkpoints.py`'s `extra`),
-        # not re-imported from `training/MppRoutingHead/Datasets.RUNGS`, so
+        # not re-imported from `training/ClassifyingRoutingHead/Datasets.RUNGS`, so
         # this stays correct even if that package's own default rung ladder
         # is later changed for a different training run.
         self.rungs = tuple(float(r) for r in self._ckpt['extra']['rungs'])
@@ -252,7 +252,8 @@ class ClassifierEstMpp(IdentifiedBuild):
         return self
 
     def estimate(self, query: np.ndarray) -> ClassifierEstMppResult:
-        return self.from_probs(self.patch_probs(query), self.cfg.vote)
+        patches: Optional[list] = self.query_patches(query) if ':' in self.cfg.vote else None
+        return self.from_probs(self.patch_probs(query), self.cfg.vote, patches=patches)
 
     @property
     def classes_ds(self) -> Tuple[float, ...]:
@@ -286,11 +287,12 @@ class ClassifierEstMpp(IdentifiedBuild):
 
     def from_probs(self, probs: torch.Tensor, vote: str, *,
                    weights: Optional[torch.Tensor] = None,
-                   tie_rule: str = 'lower') -> ClassifierEstMppResult:
+                   tie_rule: str = 'lower',
+                   patches: Optional[list] = None) -> ClassifierEstMppResult:
         '''The other half: one `FoVVote` rule over `patch_probs`, then the
         snap to this WSI's pyramid.'''
         predicted_class, vote_extra = fov_vote(vote, probs, rungs=self.rungs,
-                                               weights=weights, tie_rule=tie_rule)
+                                               weights=weights, tie_rule=tie_rule, patches=patches)
 
         base_mpp = self.wsi.base_mpp
         estimated_ds = self.rungs[predicted_class]
@@ -313,9 +315,9 @@ class ClassifierEstMpp(IdentifiedBuild):
 #: building checks every other field against the checkpoint and refuses a
 #: disagreement (`ClassifierEstMpp.__init__`).
 CLASSIFIER_RECIPES: Dict[str, ClassifierEstMppConfig] = {
-    'gigapath-arcface': ClassifierEstMppConfig(
-        encoder='gigapath', classifier='arcface', reduction='fixed',
+    'uni2-mlp-ord-b': ClassifierEstMppConfig(
+        encoder='uni2', classifier='mlp', reduction='fixed',
         tile_size=256,
-        weights='MppRoutingHead/weights/gigapath_frozen_arcface_best.pt',
-        vote='mean_probability'),
+        weights='ClassifyingRoutingHead/weights/pure-train_Ki67--uni2--frozen--mlp--ord_b--best.pt',
+        vote='quality_weighted:tissue'),
 }

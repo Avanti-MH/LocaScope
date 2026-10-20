@@ -3,7 +3,8 @@ metric-based checkpoint, in the shape `StageInterface.MppEstimator` describes.
 
     cfg = PrototypeEstMppConfig.from_checkpoint(
         '/work/u26130998/result/PrototypicalRoutingHead/weights/'
-        'uni2_frozen_cls_identity_identity_set_transformer_cosine_tau_none_6rung.pt')
+        'pure-train_Ki67--gigapath--cls--G_identity--F_identity--set_transformer--'
+        'cosine_tau--cross_off--hold_q_k5--bal--6rung.pt')
     est = PrototypeEstMpp(cfg).build(wsi)
     result = est.estimate(query_img)   # query_img: RGB uint8 np.ndarray
 
@@ -298,7 +299,8 @@ class PrototypeEstMpp(IdentifiedBuild):
                            else 0)
         self._encode_batch = encode_batch
         self._raw_of = (
-            (lambda p: encode_raw(self.encoder, p, self._encode_batch, self.device))
+            (lambda p: encode_raw(self.encoder, p, self._encode_batch, self.device,
+                                  layers=self.pooling.cfg.encoder_layers))
             if frozen else (lambda p: trunk_raw(self.encoder, p, self.device)))
 
         self.wsi = None
@@ -393,7 +395,8 @@ class PrototypeEstMpp(IdentifiedBuild):
                 for j, m in getattr(self, 'support', [])]
 
     def estimate(self, query: np.ndarray) -> PrototypeEstMppResult:
-        return self.from_probs(self.patch_probs(query), self.cfg.vote)
+        patches: Optional[list] = self.query_patches(query) if ':' in self.cfg.vote else None
+        return self.from_probs(self.patch_probs(query), self.cfg.vote, patches=patches)
 
     @property
     def classes_ds(self) -> List[float]:
@@ -430,11 +433,12 @@ class PrototypeEstMpp(IdentifiedBuild):
 
     def from_probs(self, probs: torch.Tensor, vote: str, *,
                    weights: Optional[torch.Tensor] = None,
-                   tie_rule: str = 'lower') -> PrototypeEstMppResult:
+                   tie_rule: str = 'lower',
+                   patches: Optional[list] = None) -> PrototypeEstMppResult:
         '''The other half: one `FoVVote` rule over `patch_probs`, then the
         snap to this WSI's pyramid.'''
         predicted_idx, vote_extra = fov_vote(vote, probs, rungs=self.level_ds,
-                                             weights=weights, tie_rule=tie_rule)
+                                             weights=weights, tie_rule=tie_rule, patches=patches)
 
         base_mpp = self.wsi.base_mpp
         estimated_ds = self.level_ds[predicted_idx]
@@ -457,13 +461,17 @@ class PrototypeEstMpp(IdentifiedBuild):
 #: and building refuses a field the checkpoint disagrees with
 #: (`PrototypeEstMpp.__init__`).
 PROTOTYPE_RECIPES: Dict[str, PrototypeEstMppConfig] = {
-    'uni2-mean-cosine-tau': PrototypeEstMppConfig(
+    # vote: `sum_log_probability` -- of the 8 rules, the best mean of the two datasets' level accuracy for this
+    # checkpoint on val (0.916; BRACS 0.916, Ki67 0.916; stage1_val_overall.csv, 2026-10-15), and the best
+    # worse-of-two (next: patch_class_median:lower 0.895). The runners-up on the mean (patch_class_median:lower
+    # 0.913, quality_weighted:tissue 0.911) are within the CI: a tie broken on val, not a finding.
+    'uni2-set-transformer-attn-score': PrototypeEstMppConfig(
         encoder='uni2', pooling='cls', support_context='identity',
-        query_context='identity', collapse='mean', routing_head='cosine_tau',
+        query_context='identity', collapse='set_transformer', routing_head='attn_score',
         tile_size=256,
-        weights=('PrototypicalRoutingHead/weights/uni2_frozen_cls_identity_'
-                 'identity_mean_cosine_tau_none_none-k5_best.pt'),
+        weights=('PrototypicalRoutingHead/weights/pure-train_Ki67--uni2--cls--G_identity--'
+                 'F_identity--set_transformer--attn_score--cross_off--none_k5--bal--best.pt'),
         mask_cfg=MASK_RECIPES['hest'],
         sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'], n_per_rung=5),
-        levels=None, vote='mean_probability', n_per_level=None),
+        levels=None, vote='sum_log_probability', n_per_level=None),
 }
