@@ -30,6 +30,7 @@ came from, so there is nothing to undo.
 
 import copy
 import json
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -71,6 +72,41 @@ _CC_DECIMATE_ABOVE_PX = 1 << 31
 #: precision past ~1.7e7 -- as a drift in every fraction at once, which is the
 #: kind of wrong that never raises.
 _INTEGRAL_DECIMATE_ABOVE_PX = 1 << 28
+
+
+# ── how the raster is stored ──────────────────────────────────────────────────
+#
+# A tissue mask is large flat areas: one byte per mask pixel was 400 MB for a
+# 12376 x 32370 mask and 195 GB for the 273 masks of the cache. The raster is
+# stored as its bits, deflated, and the file says so in its metadata. The array
+# that comes back is the same array either way (uint8, 0 or 1), so nothing keyed
+# on the mask -- ids, records, regions -- moves, and a file written the old way
+# (no `mask_encoding`) still loads.
+
+#: `mask_encoding` of a file whose `mask` tensor is the raster itself, uint8.
+MASK_RAW: str = 'raw'
+#: ... of a file whose `mask` tensor is `zlib.compress(np.packbits(mask))`, a
+#: 1-D uint8 of bytes; `rows` and `cols` in the metadata give the shape back.
+MASK_PACKED: str = 'packbits+zlib'
+_MASK_ZLIB_LEVEL: int = 6
+
+
+def pack_mask(mask: np.ndarray) -> Optional[np.ndarray]:
+    """The bytes of `mask` (2-D uint8, 0 or 1) as a 1-D uint8 array, or None
+    when it holds any other value: packing keeps one bit per cell, so a mask
+    with a 2 in it would come back different and is stored raw instead."""
+    if mask.size and int(mask.max()) > 1:
+        return None
+    blob: bytes = zlib.compress(np.packbits(mask.reshape(-1)).tobytes(),
+                                _MASK_ZLIB_LEVEL)
+    return np.frombuffer(blob, dtype=np.uint8).copy()
+
+
+def unpack_mask(blob: np.ndarray, rows: int, cols: int) -> np.ndarray:
+    """The `[rows, cols]` uint8 mask `pack_mask` packed."""
+    bits: np.ndarray = np.frombuffer(zlib.decompress(blob.tobytes()),
+                                     dtype=np.uint8)
+    return np.unpackbits(bits, count=rows * cols).reshape(rows, cols)
 
 
 # ── the raw mask, before any region is searched for ──────────────────────────
@@ -133,16 +169,22 @@ class SlideMask:
                     n_components=(0 if self.components is None
                                   else int(np.asarray(self.components).shape[-1])))
 
-    def save(self, path) -> Path:
+    def save(self, path, *, packed: bool = True) -> Path:
         """One safetensors file, written atomically: the mask, and the components
         when there are any. Same file rather than a sidecar because they are the
         same grid at the same instant -- a sidecar can be deleted or rebuilt on
         its own, and a sweep would then read one slide's components against
-        another's mask."""
+        another's mask.
+
+        The raster is stored packed (`MASK_PACKED`) unless `packed` is False or
+        it holds a value other than 0 and 1 (`MASK_RAW`); `load` returns the
+        same array for both."""
         mask = np.ascontiguousarray(np.asarray(self.mask).astype(np.uint8))
         if mask.ndim != 2:
             raise ValueError(f'mask must be 2-D, got shape {mask.shape}')
-        tensors = {'mask': mask}
+        blob: Optional[np.ndarray] = pack_mask(mask) if packed else None
+        encoding: str = MASK_RAW if blob is None else MASK_PACKED
+        tensors = {'mask': mask if blob is None else blob}
         if self.components is not None:
             components = np.ascontiguousarray(
                 np.asarray(self.components, dtype=np.float16))
@@ -153,6 +195,7 @@ class SlideMask:
                     f'disagreement means one of them was cropped or transposed')
             tensors['components'] = components
         metadata = {k: str(v) for k, v in self.geometry().items()}
+        metadata['mask_encoding'] = encoding
         metadata['report_json'] = json.dumps(self.report or {}, sort_keys=True,
                                              default=str)
         with atomic_file(path) as tmp:
@@ -172,6 +215,8 @@ class SlideMask:
             # safe_open rather than load_file: load_file reads every tensor,
             # 500-800 MB of components for a reader that asked for the mask.
             mask = handle.get_tensor('mask')
+            if md.get('mask_encoding', MASK_RAW) == MASK_PACKED:
+                mask = unpack_mask(mask, int(md['rows']), int(md['cols']))
             components = (handle.get_tensor('components') if with_components
                           else None)
         report = json.loads(md.get('report_json') or '{}')
