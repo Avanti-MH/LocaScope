@@ -86,10 +86,10 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # is the cost this bench deliberately accepted rather than reading tile by tile
 # the way bench_offgrid_score does.
 #
-# So MODE=smoke runs one slide per dataset (--n-wsi 1: the first of each dataset @legacy-val
+# So MODE=smoke runs one slide per dataset (--n-wsi 1: the first of each dataset DATASETS
 # draws from, in its recorded order) and the two finest
-# levels: an H&E slide on a 4x pyramid and a Ki67 one on a 2x pyramid, both
-# with their masks in the Masks cache, so the smoke segments nothing.
+# levels: an H&E slide on a 4x pyramid and a Ki67 one on a 2x pyramid; a slide with
+# no mask in the Masks cache yet is segmented first.
 # Levels 1 and 2 walk every code path in minutes -- level 0 adds read time and
 # memory, not logic, so it stays out of the smoke test. (It used to name
 # BRACS_1228 and S1104233 for their 1 and 23 regions; neither is the first of
@@ -158,7 +158,7 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 #       sbatch jobscripts/Benchmarks/Stage2RetrieverBench.sh
 #
 # The slides and FoVs are every bench's: the first N_WSI of each dataset a
-# DATASETS id draws from (default @legacy-val), one draw per slide across its
+# DATASETS id draws from (default @pure-half-test), one draw per slide across its
 # levels. With the same DATASETS, N_WSI and FoV flags, a FoV here is the photo
 # BenchLocaScope and Stage1MppBench score; DRAW_CACHE_JOB=BenchLocaScope reads
 # their draws instead of drawing again (the same draw either way).
@@ -183,58 +183,73 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # The masks are read from MASK_CACHE_JOB's cache, Masks by default (every
 # trainer and bench shares it); MASK_CACHE_JOB="" uses this job's own.
 
-# ---------------- RECIPE: a named set of arms ---------------------------------
+# ---------------- RECIPE: the two lists of arms ---------------------------------
 #
-#   RECIPE=full    every arm measured so far, for one encoder:
-#                    the 18 pooling arms (the CONFIG block's: cls cls_avg cls_std rings3 grid2x2 raw-M,
-#                      each with every window score),
-#                    the other first phases (BagOfTiles gap|quad on cls_avg and rings3, TileVote
-#                      exact|hnsw|ivf, ClusterBow on cls_avg and rings3), each handing on 1000 (--k),
-#                    the second phases, each reading the first 100 of one sliding window's list
-#                      (RERANK_ON <pooling>+mean@100): Dual, CSLS, Corr (contrast mnn sinkhorn), CandGraph
-#                      (prominence rot_margin nbr_support) and TokenMatch, and the chain
-#                      <pooling>+mean@100 :: Corr mnn@30 :: TokenMatch (a third phase reading 30).
-#                    A reranker's pooling is the retriever's (RERANK_POOLING: uni2 cls_avg, gigapath
-#                    cls_std, the best +mean of each), so it reuses the features the window score read
-#                    instead of encoding the slide again.
-#   (unset)        no recipe: ARMS, RERANK_ON and RERANKERS as given, or the CONFIG block's arms.
+#   RECIPE=slidewin   only the sliding window: the 18 pooling arms (the CONFIG block's: cls cls_avg cls_std
+#                     rings3 grid2x2 raw-M, each with every window score: mean geomean min)
+#   RECIPE=others     every other retriever and reranker, for one encoder:
+#                       the other first phases: BagOfTiles (gap|quad on cls_avg and rings3), TileVote
+#                         (exact|hnsw|ivf), ClusterBow (cls_avg and rings3), each handing on 1000 (--k);
+#                       the second phases, each reading the first 100 of one sliding window's list
+#                         (RERANK_ON <pooling>+mean@100): Dual, CSLS, Corr (contrast mnn sinkhorn), CandGraph
+#                         (prominence rot_margin nbr_support) and TokenMatch, and the chain
+#                         <pooling>+mean@100 :: Corr mnn@30 :: TokenMatch (a third phase reading 30).
+#                         A reranker's pooling is the retriever's (RERANK_POOLING: uni2 cls_avg, gigapath
+#                         cls_std, the best +mean of each), so it reuses the features the window score read
+#                         instead of encoding the slide again;
+#                       and, for gigapath, what RerankHead trained (on cls_avg, the weights are named by it):
+#                         WinEmbed::cls_avg as a first phase, and TileGT and CorrNet reading the first 500 of
+#                         the sliding window's cls_avg+mean list (the K they were trained on).
+#   RECIPE=all        the two lists together: one run, one CSV with every arm (what a rerun of the whole bench is)
+#   (unset)           no recipe: ARMS, RERANK_ON and RERANKERS as given, or the CONFIG block's arms.
+#
+# The slides are DATASETS, by default @pure-half-test (10 of each stain); DATASETS=@pure-half-val is where arms are
+# chosen.
 #
 # RERUNNING A RECIPE ADDS TO WHAT IS THERE. An arm is its own entries in the cache (result/cache/<job
 # name>/...), one per phase, and a slide writes only the entries that are missing ("entries to write: N of
 # the pooling arms, M of the others"); the ones already there are read, not redone. The CSV is the rows of
-# THIS run's arms read off the entries -- so a recipe that lists the earlier arms too writes a CSV that
-# holds them all, which is why `full` lists the 18 pooling arms again. Keep the SAME job name
-# (Stage2RetrieverBench) to share the cache; give the log its own name with -o/-e. A CSV from before is
-# overwritten: copy it first (stage2_retriever.pooling18.csv is the copy of the 18-arm run).
+# THIS run's arms read off the entries, written to <out>/<encoder>/stage2_retriever.csv and, when there is a
+# recipe, copied to stage2_retriever.<recipe>.csv beside it, so the two lists keep a CSV each (report them
+# together: MODE=report with the other CSV in REPORT_ALSO). Keep the SAME job name (Stage2RetrieverBench) to
+# share the cache. A CSV from before is overwritten: copy it first.
 #
 # ARMS, RERANK_ON and RERANKERS set on the command line win over the recipe.
 RECIPE="${RECIPE:-}"
 if [ -n "$RECIPE" ]; then
-  case "$RECIPE" in
-    full)
-      case "$ENCODER" in
-        uni2)     RERANK_POOLING="${RERANK_POOLING:-cls_avg}" ;;
-        gigapath) RERANK_POOLING="${RERANK_POOLING:-cls_std}" ;;
-        *) [ -n "${RERANK_POOLING:-}" ] || { echo "RECIPE=full: no reranker pooling for encoder $ENCODER; set RERANK_POOLING"; exit 1; } ;;
-      esac
-      RP="$RERANK_POOLING"
-      E="$ENCODER"
-      : "${ARMS:=cls cls_avg cls_std rings3 grid2x2 raw-M \
-$E:BagOfTiles::cls_avg+gap $E:BagOfTiles::cls_avg+quad $E:BagOfTiles::rings3+gap $E:BagOfTiles::rings3+quad \
+  case "$ENCODER" in
+    uni2)     RERANK_POOLING="${RERANK_POOLING:-cls_avg}" ;;
+    gigapath) RERANK_POOLING="${RERANK_POOLING:-cls_std}" ;;
+    *) [ "$RECIPE" = "slidewin" ] || [ -n "${RERANK_POOLING:-}" ] || { echo "RECIPE=$RECIPE: no reranker pooling for encoder $ENCODER; set RERANK_POOLING"; exit 1; } ;;
+  esac
+  RP="$RERANK_POOLING"
+  E="$ENCODER"
+  SLIDEWIN_ARMS="cls cls_avg cls_std rings3 grid2x2 raw-M"
+  LEARNED=""
+  [ "$ENCODER" = "gigapath" ] && LEARNED="gigapath:WinEmbed::cls_avg \
+gigapath:SlidingWindow::cls_avg+mean@500::TileGT::cls_avg+tilegt gigapath:SlidingWindow::cls_avg+mean@500::CorrNet::cls_avg"
+  OTHERS_ARMS="$E:BagOfTiles::cls_avg+gap $E:BagOfTiles::cls_avg+quad $E:BagOfTiles::rings3+gap $E:BagOfTiles::rings3+quad \
 $E:TileVote::cls_avg+exact $E:TileVote::cls_avg+hnsw $E:TileVote::cls_avg+ivf \
 $E:ClusterBow::cls_avg $E:ClusterBow::rings3 \
-$E:SlidingWindow::$RP+mean@100::Corr::$RP+mnn@30::TokenMatch::raw}"
+$E:SlidingWindow::$RP+mean@100::Corr::$RP+mnn@30::TokenMatch::raw $LEARNED"
+  case "$RECIPE" in
+    slidewin) : "${ARMS:=$SLIDEWIN_ARMS}" ;;
+    others|all)
+      [ "$RECIPE" = "all" ] && : "${ARMS:=$SLIDEWIN_ARMS $OTHERS_ARMS}"
+      : "${ARMS:=$OTHERS_ARMS}"
       : "${RERANK_ON:=$E:SlidingWindow::$RP+mean@100}"
       : "${RERANKERS:=Dual::$RP+dual CSLS::$RP+csls Corr::$RP+contrast Corr::$RP+mnn Corr::$RP+sinkhorn \
 CandGraph::raw+prominence CandGraph::raw+rot_margin CandGraph::raw+nbr_support TokenMatch::raw}"
       ;;
-    *) echo "unknown RECIPE '$RECIPE' -- one of: full"; exit 1 ;;
+    *) echo "unknown RECIPE '$RECIPE' -- one of: slidewin, others, all"; exit 1 ;;
   esac
   echo "recipe $RECIPE: $(echo $ARMS | wc -w) arm texts, rerank on ${RERANK_ON:-none}, rerankers ${RERANKERS:-none}"
 fi
 
 # --encoder is always passed: it names the output directory (TAG) above, so the
 # script and the bench have to agree on it.
+DATASETS="${DATASETS:-@pure-half-test}"   # 10 of each stain; @pure-half-val: where arms are chosen. The bench's own default is @legacy-val
+
 COMMON="--encoder $ENCODER${HEAD:+ --head $HEAD}"
 [ -n "${DATASETS:-}" ]  && COMMON="$COMMON --datasets $DATASETS"
 [ -n "${FOV:-}" ]       && COMMON="$COMMON --fov $FOV"
@@ -338,6 +353,12 @@ else
 fi
 
 echo ""
+# a recipe keeps its CSV beside the main one (the main one is the rows of whichever run was last)
+if [ -n "$RECIPE" ] && [ -f "$OUT/$TAG/stage2_retriever.csv" ]; then
+  cp "$OUT/$TAG/stage2_retriever.csv" "$OUT/$TAG/stage2_retriever.$RECIPE.csv"
+  echo "  copy for this list: $OUT/$TAG/stage2_retriever.$RECIPE.csv"
+fi
+
 echo "======== done (exit $status) ========"
 echo "  $OUT/$TAG/stage2_retriever.csv"
 echo ""
