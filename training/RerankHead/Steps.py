@@ -4,7 +4,7 @@ several lists (`FovData`), their losses averaged. The embedding (`winembed`) ran
 whole pool of windows instead and is in `Embed.py`.'''
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -54,8 +54,9 @@ def forward_list(arch: str, model: nn.Module, ni: NeuralInputs, pair: Optional[t
 
 def train_step(arch: str, model: nn.Module, opt: torch.optim.Optimizer, lists: Sequence[FovData],
                weights: Dict[str, float], temperature: float, k: int, margin: float, pos_weight: float,
-               clip: float) -> Dict[str, float]:
-    """One optimiser step on `lists`; the mean of each loss term over them."""
+               clip: float, sync: Optional[Callable[[nn.Module], None]] = None) -> Dict[str, float]:
+    """One optimiser step on `lists`; the mean of each loss term over them. `sync`, when several processes
+    train one model, averages the gradients over them before the step (`Runtime.sync_gradients`)."""
     model.train()
     opt.zero_grad(set_to_none=True)
     sums: Dict[str, float] = {}
@@ -64,13 +65,27 @@ def train_step(arch: str, model: nn.Module, opt: torch.optim.Optimizer, lists: S
             out: Dict[str, torch.Tensor] = forward_list(arch, model, d.ni, d.pair)
         out = {key: v.float() for key, v in out.items()}
         terms: Dict[str, torch.Tensor] = rerank_loss(
-            out, d.pos, d.neg, d.covers, d.rot_ok, d.loc, d.loc_mask, weights, temperature, k, margin, pos_weight)
+            out, d.pos, d.neg, d.covers, d.rot_ok, d.loc, d.loc_mask, weights, temperature, k, margin, pos_weight,
+            d.near, d.near_target)
         (terms['total'] / len(lists)).backward()
         for name, t in terms.items():
             sums[name] = sums.get(name, 0.0) + float(t.detach()) / len(lists)
+    if sync is not None:
+        sync(model)
     torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     opt.step()
     return sums
+
+
+def idle_step(model: nn.Module, opt: torch.optim.Optimizer, clip: float,
+              sync: Callable[[nn.Module], None]) -> None:
+    """The step a process takes when it has no data and the others do: it adds nothing to the averaged
+    gradient and takes the same optimiser step, so the models stay one model."""
+    model.train()
+    opt.zero_grad(set_to_none=True)
+    sync(model)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+    opt.step()
 
 
 @torch.no_grad()

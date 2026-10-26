@@ -44,13 +44,15 @@ from stage2_retrieval.RetrieverWinEmbed import WindowEmbeddings                 
 from stage2_retrieval.StageInterface import (Candidate, CandidateSet, RerankedCandidate,   # noqa: E402
                                              ShiftedCandidate)
 
-from training.RerankHead.Embed import EmbedFov, EmbedVisit, _iou_and_disjoint, embed_loss  # noqa: E402
+from training.RerankHead.Embed import EmbedFov, EmbedVisit, embed_loss, window_labels  # noqa: E402
 from training.RerankHead.Labels import (Boxes, LabelConfig, Labels, choose_subset,        # noqa: E402
                                         label_windows)
 from training.RerankHead.Losses import (bce_loss, listwise_loss, loc_loss, pool_softmax_loss,   # noqa: E402
                                         rerank_loss, rot_loss, topk_hinge_loss)
 from training.RerankHead.Metrics import first_hit_rank, recall_at                         # noqa: E402
-from training.RerankHead.Steps import build_head, forward_list, train_step                # noqa: E402
+from training.RerankHead.cli.train import prefetch                                        # noqa: E402
+from training.RerankHead.Runtime import broadcast_parameters, sync_gradients              # noqa: E402
+from training.RerankHead.Steps import build_head, forward_list, idle_step, train_step     # noqa: E402
 from training.RerankHead.Visits import FovData                                            # noqa: E402
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
@@ -292,44 +294,62 @@ def t_the_embedding_scores_are_dot_products_and_banding_is_exact() -> str:
 
 # ── the training's pieces ────────────────────────────────────────────────────
 
-def t_labels_pos_neg_and_the_rest_ignored() -> str:
+def t_labels_are_the_benchs_answers_near_windows_with_soft_targets_and_the_rest() -> str:
     tile_px: float = 512.0
-    cfg: LabelConfig = LabelConfig(pos_iou=0.5, hit_iou=0.5, loc_min_iou=0.1, fov_margin=1.2)
+    cfg: LabelConfig = LabelConfig(near_tiles=2.0, near_alpha=0.3, near_sigma=1.0, loc_min_iou=0.1, fov_margin=1.2)
     truth: np.ndarray = np.array([4000.0, 4000.0, 4000.0 + 5 * tile_px, 4000.0 + 4 * tile_px])
     fov: np.ndarray = np.array([3000.0, 3000.0, 8000.0, 8000.0])
-    where: Boxes = Boxes(truth=truth, fov=fov, rotation=0, centre=(float(truth[0] + truth[2]) / 2, float(truth[1] + truth[3]) / 2))
+    centre: Tuple[float, float] = (float(truth[0] + truth[2]) / 2, float(truth[1] + truth[3]) / 2)
+    main_key, offset_key = (0, 'main', 3, 4, 0), (0, 'offset', 3, 4, 0)
+    # the answers: the window on the truth, and one the offset lattice puts half a tile off it
+    where: Boxes = Boxes(truth=truth, fov=fov, rotation=0, centre=centre,
+                         answers=((main_key, (4000, 4000)), (offset_key, (4256, 4256))))
 
     def at(dx: float, dy: float, w: float = 5 * tile_px, h: float = 4 * tile_px) -> List[float]:
         return [truth[0] + dx, truth[1] + dy, truth[0] + dx + w, truth[1] + dy + h]
 
-    boxes: np.ndarray = np.array([at(0, 0), at(tile_px, 0), at(2 * tile_px, 0), at(50000, 0), at(0, 0),
-                                  at(0, 0, 4 * tile_px, 5 * tile_px)])
-    rot: np.ndarray = np.array([0, 0, 0, 0, 90, 90])
-    lab: Labels = label_windows(boxes, rot, where, tile_px, cfg)
-    assert lab.pos.tolist() == [True, True, False, False, False, False], lab.pos
-    assert lab.neg.tolist() == [False, False, False, True, True, True], lab.neg      # far; wrong rotation twice
-    assert lab.ignore.tolist() == [False, False, True, False, False, False], lab.ignore
-    assert abs(lab.iou[1] - 0.6666666666666666) < 1e-9 and abs(lab.iou[2] - 0.42857142857142855) < 1e-9
-    assert lab.loc_mask.tolist() == [True, True, True, False, True, True]
-    assert abs(lab.loc[1, 0] - (-1.0)) < 1e-9 and abs(lab.loc[1, 1]) < 1e-9, 'the window is a tile right of the truth'
-    assert lab.hit.tolist() == [True, True, False, False, False, False]
-    return 'pos / wrong-rotation neg / overlap ignored / far neg'
+    boxes: np.ndarray = np.array([at(0, 0), at(256, 256), at(tile_px, 0), at(2 * tile_px, 0), at(3 * tile_px, 0),
+                                  at(50000, 0), at(0, 0), at(0, 0, 4 * tile_px, 5 * tile_px), at(40, 0)])
+    rot: np.ndarray = np.array([0, 0, 0, 0, 0, 0, 90, 90, 0])
+    keys = [main_key, offset_key, (0, 'main', 3, 5, 0), (0, 'main', 3, 6, 0), (0, 'main', 3, 7, 0),
+            (0, 'main', 99, 99, 0), (0, 'main', 3, 4, 90), (0, 'main', 3, 4, 90), (1, 'main', 0, 0, 0)]
+    lab: Labels = label_windows(boxes, rot, keys, where, tile_px, cfg)
+    assert lab.pos.tolist() == [True, True, False, False, False, False, False, False, False], lab.pos
+    assert lab.near.tolist() == [False, False, True, True, False, False, False, False, True], lab.near
+    assert lab.neg.tolist() == [False, False, False, False, True, True, True, True, False], lab.neg
+    d: np.ndarray = np.array([1.0, 2.0, 40 / 512])           # tiles from the truth: 1 and 2 across, and a 40 px slip
+    want: np.ndarray = cfg.near_alpha * np.exp(-np.square(d) / 2.0)
+    assert np.allclose(lab.soft[[2, 3, 8]], want), lab.soft
+    assert lab.soft[0] == 0.0 and lab.soft[4] == 0.0, 'only near windows have a target'
+    assert lab.soft[2] > lab.soft[3], 'the nearer the window the more of the softmax it keeps'
+    assert lab.covers.tolist() == [True, True, True, True, False, False, True, True, True], 'near at any rotation'
+    assert lab.hit.tolist() == lab.pos.tolist()
+    assert lab.rot_ok.tolist() == [True] * 6 + [False, False, True]
+    # a window the suppression dropped for a neighbour of the answer's rotation: that one stands for it
+    stood: Labels = label_windows(boxes[[8]], rot[[8]], [keys[8]], where, tile_px, cfg, tol_px=2 * tile_px)
+    assert stood.pos.tolist() == [True] and not stood.near.any(), 'it starts nearer than the radius, same rotation'
+    wrong: Labels = label_windows(boxes[[6]], rot[[6]], [keys[6]], where, tile_px, cfg, tol_px=2 * tile_px)
+    assert wrong.pos.tolist() == [False], 'another rotation does not stand for it'
+    return 'answers / near with soft targets / the rest; a suppressed answer is stood for at its rotation only'
 
 
-def t_choose_subset_keeps_every_positive_and_the_hardest_negatives() -> str:
+def t_choose_subset_keeps_every_positive_the_nearest_near_windows_and_the_hardest_negatives() -> str:
     rng: np.random.Generator = np.random.default_rng(0)
     k: int = 400
     pos: np.ndarray = np.zeros(k, bool)
     pos[[7, 90]] = True
-    neg: np.ndarray = ~pos
-    neg[[3, 4, 5]] = False
-    ignore: np.ndarray = ~(pos | neg)
-    lab: Labels = Labels(iou=np.zeros(k), pos=pos, neg=neg, ignore=ignore, rot_ok=np.ones(k, bool), loc=np.zeros((k, 2)),
-                         loc_mask=ignore, hit=pos)
+    near: np.ndarray = np.zeros(k, bool)
+    near[[3, 4, 5, 6, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]] = True      # 20 of them
+    neg: np.ndarray = ~(pos | near)
+    soft: np.ndarray = np.where(near, 0.3 - 0.01 * np.arange(k), 0.0)                      # the earlier, the nearer
+    lab: Labels = Labels(iou=np.zeros(k), pos=pos, near=near, neg=neg, rot_ok=np.ones(k, bool), loc=np.zeros((k, 2)),
+                         loc_mask=neg, hit=pos, soft=soft, covers=pos | near)
     sel: np.ndarray = choose_subset(lab, 64, 1.0, rng, n_loc=2)
     assert sel.tolist() == sorted(set(sel.tolist())) and len(sel) <= 64
     assert {7, 90} <= set(sel.tolist()), 'every positive'
-    assert set(sel.tolist()) & {3, 4, 5} <= {3, 4, 5} and len(set(sel.tolist()) & {3, 4, 5}) <= 2
+    kept_near: List[int] = [i for i in sel.tolist() if near[i]]
+    assert len(kept_near) == 16 and kept_near == [3, 4, 5, 6, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], \
+        'a quarter of n_cand near windows, the nearest ones'
     hard: List[int] = [i for i in sel.tolist() if neg[i]]
     assert hard[:10] == [i for i in range(k) if neg[i]][:10], 'with hard_share 1 the negatives are the earliest ones'
     return f'{len(sel)} of {k}'
@@ -361,6 +381,166 @@ def t_losses_mean_what_they_say() -> str:
     return 'listwise, hinge, bce, rot, loc, pool; ignored window: no gradient'
 
 
+def t_near_windows_are_beaten_by_the_truth_in_the_ratio_of_their_soft_targets() -> str:
+    logit: torch.Tensor = torch.tensor([2.0, 0.0, 1.0, 1.5, -1.0])
+    pos: torch.Tensor = torch.tensor([True, False, False, False, False])
+    neg: torch.Tensor = torch.tensor([False, True, False, False, True])
+    near: torch.Tensor = torch.tensor([False, False, True, True, False])
+    target: torch.Tensor = torch.tensor([0.0, 0.0, 0.3, 0.1, 0.0])
+    log_all: float = float(torch.logsumexp(logit, 0))
+    want: float = (-(2.0 - log_all) - 0.3 * (1.0 - log_all) - 0.1 * (1.5 - log_all)) / 1.4
+    assert abs(float(listwise_loss(logit, pos, neg, 1.0, near, target)) - want) < 1e-6
+    assert abs(float(listwise_loss(logit, pos, neg | near)) - float(listwise_loss(logit, pos, neg | near, 1.0, near.new_zeros(5), target))) < 1e-9, \
+        'no near window: the plain loss'
+    assert abs(float(pool_softmax_loss(logit, pos, pos | neg | near, 1.0, near, target)) - want) < 1e-6
+    free: torch.Tensor = logit.clone().requires_grad_()
+    opt = torch.optim.Adam([free], lr=0.1)
+    for _ in range(400):
+        opt.zero_grad()
+        listwise_loss(free, pos, neg, 1.0, near, target).backward()
+        opt.step()
+    z: torch.Tensor = free.detach()
+    assert abs(float(z[0] - z[2]) - float(np.log(1.0 / 0.3))) < 0.1, 'the truth leads the nearer window by ln(1/0.3)'
+    assert abs(float(z[2] - z[3]) - float(np.log(0.3 / 0.1))) < 0.1, 'the nearer window leads the farther by ln(3)'
+    assert float(z[3]) > float(z[1]) and float(z[3]) > float(z[4]), 'a near window stays above the negatives'
+    return 'the loss is the soft-target form; its optimum puts the truth ln(1/0.3) above the nearest near window'
+
+
+def sync_worker(rank: int, world: int, port: int, out_dir: str) -> None:
+    """One of two processes (gloo, CPU) training a linear map together: three steps, the second with data on
+    rank 0 only. Saves its parameters."""
+    import torch.distributed as dist                                              # noqa: PLC0415
+    os.environ.update(MASTER_ADDR='127.0.0.1', MASTER_PORT=str(port))
+    dist.init_process_group('gloo', rank=rank, world_size=world)
+    torch.manual_seed(100 + rank)                       # each process starts from other weights
+    model: torch.nn.Module = torch.nn.Linear(3, 1)
+    broadcast_parameters(model)
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    x: torch.Tensor = torch.ones(1, 3) * (rank + 1)
+    start: torch.Tensor = torch.cat([p.detach().reshape(-1) for p in model.parameters()])
+    for step in range(3):
+        if step == 1 and rank == 1:
+            idle_step(model, opt, 1e9, lambda m: sync_gradients(m, False))
+            continue
+        opt.zero_grad()
+        model(x).sum().backward()
+        sync_gradients(model, True)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1e9)
+        opt.step()
+    torch.save(dict(start=start, end=torch.cat([p.detach().reshape(-1) for p in model.parameters()])),
+               os.path.join(out_dir, f'rank{rank}.pt'))
+    dist.destroy_process_group()
+
+
+def t_processes_that_train_together_stay_one_model_and_an_idle_one_adds_nothing() -> str:
+    import socket                                                                 # noqa: PLC0415
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        port: int = s.getsockname()[1]
+    with tempfile.TemporaryDirectory() as out_dir:
+        torch.multiprocessing.spawn(sync_worker, args=(2, port, out_dir), nprocs=2)
+        got: List[Dict[str, torch.Tensor]] = [torch.load(os.path.join(out_dir, f'rank{r}.pt')) for r in (0, 1)]
+    assert torch.equal(got[0]['start'], got[1]['start']), 'they start from rank 0\'s weights'
+    assert torch.equal(got[0]['end'], got[1]['end']), 'they end as one model'
+    # the gradient of sum(w.x + b) is x (weights) and 1 (bias): step 0 averages x = 1 and 2 -> 1.5; step 1 has only
+    # rank 0's data -> 1.0, not 0.5; step 2 averages again -> 1.5
+    start: torch.Tensor = got[0]['start']
+    want: torch.Tensor = start - 0.1 * torch.tensor([1.5 + 1.0 + 1.5] * 3 + [3.0])
+    assert torch.allclose(got[0]['end'], want, atol=1e-6), (got[0]['end'], want)
+    return 'two processes: same weights at the start and the end; a step with data on one is that one\'s gradient'
+
+
+class _FeatureMap:
+    def __init__(self, features: torch.Tensor) -> None:
+        self.features: torch.Tensor = features
+
+
+class _LevelMap:
+    """What `MemoryFeatureStore` reads of a `WsiFeaturesMap`: regions, ds, level, tile cut and the maps."""
+
+    def __init__(self, regions: List[Any], level: int, features: List[torch.Tensor]) -> None:
+        self.regions, self.ds, self.level, self.tile_size, self.overlap = regions, 4.0 ** level, level, 256, True
+        self.maps: List[_FeatureMap] = [_FeatureMap(f) for f in features]
+
+    def to(self, device: str) -> '_LevelMap':
+        return _LevelMap(self.regions, self.level, [m.features.to(device) for m in self.maps])
+
+
+def t_a_slides_levels_are_kept_on_the_host_and_found_again_only_when_they_are_the_same() -> str:
+    from types import SimpleNamespace                                             # noqa: PLC0415
+    from training.RerankHead.Visits import MemoryFeatureStore                     # noqa: PLC0415
+    store: MemoryFeatureStore = MemoryFeatureStore()
+    regions = [SimpleNamespace(x=0, y=0, w=100, h=50, index=0), SimpleNamespace(x=200, y=0, w=80, h=80, index=1)]
+    geo = dict(ds=4.0, level=1, tile_size=256, overlap=True)
+    assert store.load(regions, **geo) is None and store.misses == 1, 'nothing kept yet'
+    level = _LevelMap(regions, 1, [torch.ones(6, 8, dtype=torch.float16), torch.ones(3, 8, dtype=torch.float16)])
+    store.save(level)
+    got = store.load(regions, **geo)
+    assert got is not None and store.hits == 1 and torch.equal(got.maps[0].features, level.maps[0].features)
+    assert store.nbytes() == (6 + 3) * 8 * 2, 'fp16: two bytes a number'
+    assert store.load(regions, **{**geo, 'level': 2, 'ds': 16.0}) is None, 'another level'
+    assert store.load(regions, **{**geo, 'tile_size': 224}) is None, 'another tile cut'
+    assert store.load(regions[:1], **geo) is None, 'other regions: another mask'
+    return 'a level is kept and found again; another level, tile cut or regions is a miss'
+
+
+def t_prefetch_makes_the_items_ahead_in_order_raises_their_error_and_stops_when_asked() -> str:
+    import time                                                                   # noqa: PLC0415
+    made: List[int] = []
+
+    def numbers(n: int):
+        for i in range(n):
+            made.append(i)
+            yield i
+
+    assert list(prefetch(numbers(5), 2, 'cpu')) == [0, 1, 2, 3, 4], 'in order, all of them'
+    assert list(prefetch(numbers(3), 0, 'cpu')) == [0, 1, 2], 'depth 0: no thread, the same items'
+    if torch.cuda.is_available():                         # a card named without an index, as a single process has it
+        for named in ('cuda', 'cuda:0', torch.device('cuda')):
+            assert list(prefetch(numbers(3), 2, named)) == [0, 1, 2], named
+    made.clear()
+    stream = prefetch(numbers(50), 2, 'cpu')
+    assert next(stream) == 0
+    time.sleep(0.5)
+    assert 3 <= len(made) <= 5, f'the thread stays about `depth` ahead, not at the end: {len(made)} made'
+    stream.close()
+    time.sleep(2.0)
+    stopped: int = len(made)
+    time.sleep(1.0)
+    assert len(made) == stopped < 50, 'closing the stream stops the thread'
+
+    def breaks():
+        yield 1
+        raise ValueError('the thread failed')
+
+    try:
+        list(prefetch(breaks(), 2, 'cpu'))
+        raise AssertionError('the error was lost')
+    except ValueError as exc:
+        assert 'the thread failed' in str(exc)
+    return 'in order; about depth ahead; an error in the thread raises here; close stops it'
+
+
+def t_the_trainer_reports_host_memory_and_a_process_that_fails_leaves_at_once() -> str:
+    import subprocess                                                              # noqa: PLC0415
+    from training.RerankHead.cli import train as rh_train                          # noqa: PLC0415
+    text: str = rh_train.host_memory()
+    assert 'host RSS' in text and '/dev/shm' in text, text
+    # with several processes (torchrun sets WORLD_SIZE) an error ends the process now, with the traceback and exit 1;
+    # alone it is raised as it always was
+    code: str = ('import sys, os\n'
+                 f'sys.path[:0] = {[p for p in sys.path if p]!r}\n'
+                 'from training.RerankHead.cli import train as t\n'
+                 'def boom():\n    raise ValueError("planted")\n'
+                 't.main = boom\n'
+                 'try:\n    t.run()\nexcept ValueError:\n    print("RAISED")\n    sys.exit(0)\n')
+    for world, want_code, want_text in (('2', 1, 'planted'), ('1', 0, 'RAISED')):
+        done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+                              env={**os.environ, 'WORLD_SIZE': world})
+        assert done.returncode == want_code and want_text in done.stdout + done.stderr, (world, done.returncode, done.stderr[-300:])
+    return 'host RSS and /dev/shm in the log line; WORLD_SIZE 2: traceback and exit 1; alone: raised'
+
+
 def t_metrics() -> str:
     assert first_hit_rank(np.array([0.1, 0.9, 0.5]), np.array([False, False, True])) == 2.0
     assert first_hit_rank(np.array([0.5, 0.5]), np.array([False, True])) == 1.0, 'a tie goes to the hit'
@@ -387,8 +567,8 @@ def planted_list(n_other: int = 29, seed: int = 20) -> FovData:
     pos: torch.Tensor = torch.zeros(k, dtype=torch.bool)
     pos[0] = True
     return FovData(ni=ni, pos=pos, neg=~pos, covers=pos.clone(), rot_ok=torch.ones(k, dtype=torch.bool),
-                   loc=torch.zeros(k, 2), loc_mask=pos.clone(), pair=torch.zeros(k, k, N_PAIR),
-                   slide='s', level=0, index=0, n_total=k)
+                   loc=torch.zeros(k, 2), loc_mask=pos.clone(), near=torch.zeros(k, dtype=torch.bool),
+                   near_target=torch.zeros(k), pair=torch.zeros(k, k, N_PAIR), slide='s', level=0, index=0, n_total=k)
 
 
 def t_a_head_learns_the_planted_window() -> str:
@@ -424,14 +604,16 @@ def t_the_embedding_loss_learns_the_planted_block() -> str:
     truth: np.ndarray = np.array([4 * tile_l0, 3 * tile_l0, 9 * tile_l0, 7 * tile_l0])
     cx, cy = (truth[0] + truth[2]) / 2, (truth[1] + truth[3]) / 2
     fov_box: np.ndarray = np.array([cx - 3000, cy - 3000, cx + 3000, cy + 3000])
-    where: Boxes = Boxes(truth=truth, fov=fov_box, rotation=0, centre=(float(cx), float(cy)))
+    where: Boxes = Boxes(truth=truth, fov=fov_box, rotation=0, centre=(float(cx), float(cy)),
+                         answers=(((0, 'main', 3, 4, 0), (int(truth[0]), int(truth[1]))),))
     fov: EmbedFov = EmbedFov(queries=queries, where=where, slide='s', level=0, index=0)
+    cfg: LabelConfig = LabelConfig()
     model = build_rerank('winembed', dict(in_dim=f_dim, dim=24, shapes=((4, 5), (5, 4))))
     opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
-    first: float = float(embed_loss(model, visit, [fov], 0.5, 0.1))
+    first: float = float(embed_loss(model, visit, [fov], cfg, 0.1))
     for _ in range(80):
         opt.zero_grad()
-        loss: torch.Tensor = embed_loss(model, visit, [fov], 0.5, 0.1)
+        loss: torch.Tensor = embed_loss(model, visit, [fov], cfg, 0.1)
         loss.backward()
         opt.step()
     assert float(loss) < 0.5 * first, (first, float(loss))
@@ -439,25 +621,35 @@ def t_the_embedding_loss_learns_the_planted_block() -> str:
         w = model.eval().windows(main, (4, 5))
         top = (w @ model.query(block)).reshape(-1).argmax().item()
     row, col = divmod(top, int(w.shape[1]))
-    assert abs(row - 3) <= 1 and abs(col - 4) <= 1, (row, col)      # a window that covers the truth: a positive
-    return f'loss {first:.2f} -> {float(loss):.3f}; the best window of the pool covers the planted block'
+    assert (row, col) == (3, 4), (row, col)                         # the answer itself, not a window near it
+    return f'loss {first:.2f} -> {float(loss):.3f}; the best window of the pool is the planted block'
 
 
-def t_embed_geometry_matches_the_box_code() -> str:
-    from stage2_retrieval.Context import intersection, iou_matrix                  # noqa: PLC0415
-    xs, ys = torch.arange(7, dtype=torch.float64) * 300.0, torch.arange(6, dtype=torch.float64) * 300.0
-    truth: np.ndarray = np.array([700.0, 500.0, 2300.0, 1700.0])
-    fov: np.ndarray = np.array([400.0, 300.0, 2600.0, 2000.0])
-    w, h = 1200.0, 900.0
-    iou, disjoint = _iou_and_disjoint(xs[None, :], ys[:, None], w, h, truth, fov)
-    boxes: np.ndarray = np.array([[x, y, x + w, y + h] for y in ys.tolist() for x in xs.tolist()])
-    want_iou: np.ndarray = iou_matrix(boxes, truth[None, :])[:, 0].reshape(6, 7)
-    want_dis: np.ndarray = (intersection(boxes, fov[None, :])[:, 0] <= 0).reshape(6, 7)
-    assert np.allclose(iou.numpy(), want_iou) and (disjoint.numpy() == want_dis).all()
-    return 'IoU and disjointness by broadcasting == the box functions'
+def t_the_embedding_pool_labels_are_the_list_labels_by_broadcasting() -> str:
+    tile_l0: float = 300.0
+    xs, ys = torch.arange(9, dtype=torch.float64) * tile_l0, torch.arange(8, dtype=torch.float64) * tile_l0
+    rows_q, cols_q = 3, 4
+    w, h = cols_q * tile_l0, rows_q * tile_l0
+    truth: np.ndarray = np.array([2 * tile_l0 + 70, 3 * tile_l0 - 40, 2 * tile_l0 + 70 + w, 3 * tile_l0 - 40 + h])
+    centre: Tuple[float, float] = (float(truth[0] + truth[2]) / 2, float(truth[1] + truth[3]) / 2)
+    answers = (((0, 'main', 3, 2, 0), (int(2 * tile_l0), int(3 * tile_l0))),)
+    cfg: LabelConfig = LabelConfig()
+    for rotation in (0, 90):
+        where: Boxes = Boxes(truth=truth, fov=truth, rotation=0, centre=centre, answers=answers)
+        pos, near, target = window_labels(xs, ys, w, h, (0, 'main'), rotation, where, tile_l0, cfg)
+        boxes: np.ndarray = np.array([[x, y, x + w, y + h] for y in ys.tolist() for x in xs.tolist()])
+        keys = [(0, 'main', r, c, rotation) for r in range(8) for c in range(9)]
+        lab: Labels = label_windows(boxes, np.full(len(boxes), rotation), keys, where, tile_l0, cfg)
+        assert (pos.numpy().reshape(-1) == lab.pos).all() and (near.numpy().reshape(-1) == lab.near).all()
+        assert np.allclose(target.numpy().reshape(-1), lab.soft)
+        assert bool(pos.any()) == (rotation == 0) and bool(near.any()) == (rotation == 0), \
+            'only the right rotation holds answers and near windows'
+    return 'pos, near and the soft target by broadcasting == the list labels, at the right and at a wrong rotation'
 
 
-_TESTS = [t for n, t in sorted(globals().items(), key=lambda kv: kv[0])
+
+
+_TESTS =[t for n, t in sorted(globals().items(), key=lambda kv: kv[0])
           if n.startswith('t_')]
 
 

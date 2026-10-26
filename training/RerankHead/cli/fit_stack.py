@@ -16,8 +16,8 @@ stacker only ever sees how a candidate compares with the others of its own query
 WHICH SLIDES. The learned scorers in the recipe were trained on the training slides
 (`train.py`), where their scores are better than they will be anywhere else; a
 stacker fitted there would trust them too much. So it is fitted on the held-out
-slides (`--fit-datasets @legacy-val`, which the benches use to choose), a third of
-them (by slide) kept to pick the epoch. Confirm on `@legacy-test`, which nothing
+slides (`--fit-datasets @pure-half-val`, which the benches use to choose), a third of
+them (by slide) kept to pick the epoch. Confirm on `@pure-half-test`, which nothing
 here reads.
 
 Loss: the listwise loss and the top-k hinge of `Losses.py`. Weights:
@@ -96,8 +96,10 @@ def collect(res: FovResult, columns: Sequence[str], label_cfg: LabelConfig,
     cands = res.cs
     table: ScoreTable = chain_table(res, columns)
     boxes: np.ndarray = window_boxes(cands, shape_fn(res.source))
-    lab = label_windows(boxes, np.array([c.rotation for c in cands.candidates]), res.where,
-                        float(res.cs.grids[0].tile_size) * float(cands.ds), label_cfg)
+    tile_px: float = float(res.cs.grids[0].tile_size) * float(cands.ds)
+    first_phase = res.retriever.cfg.phases[0] if hasattr(res.retriever.cfg, 'phases') else res.retriever.cfg
+    lab = label_windows(boxes, np.array([c.rotation for c in cands.candidates]), [c.key() for c in cands.candidates],
+                        res.where, tile_px, label_cfg, tol_px=float(getattr(first_phase, 'min_sep_tiles', 1.0)) * tile_px)
     if not lab.pos.any():
         return None
     return StackSample(feats=stack_features(table, list(columns)).to(device),
@@ -117,14 +119,13 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--arm', required=True, help='the chain whose rerankers write the columns (ArmSpec grammar)')
     ap.add_argument('--columns', nargs='+', required=True)
-    ap.add_argument('--fit-datasets', nargs='+', default=['@legacy-val'])
+    ap.add_argument('--fit-datasets', nargs='+', default=['@pure-half-val'])
     ap.add_argument('--n-wsi', type=int, default=10, help='slides of each dataset a --fit-datasets id draws from')
     ap.add_argument('--fov-per-visit', type=int, default=32)
     add_fov_args(ap)
     ap.add_argument('--fov-seed', type=int, default=2000)
     ap.add_argument('--mask-cache-job', default='Masks')
-    ap.add_argument('--pos-iou', type=float, default=0.5)
-    ap.add_argument('--hit-iou', type=float, default=0.5)
+    ap.add_argument('--near-tiles', type=float, default=2.0, help='see train.py (Labels.py)')
     ap.add_argument('--hidden', type=int, default=64)
     ap.add_argument('--dropout', type=float, default=0.1)
     ap.add_argument('--epochs', type=int, default=200)
@@ -145,7 +146,7 @@ def main() -> int:
 
     fov = fov_from_args(args)
     fov = replace(fov, sampler=replace(fov.sampler, seed=args.fov_seed))
-    label_cfg: LabelConfig = LabelConfig(pos_iou=args.pos_iou, hit_iou=args.hit_iou, loc_min_iou=0.1, fov_margin=1.2)
+    label_cfg: LabelConfig = LabelConfig(near_tiles=args.near_tiles)
     arm = parse_arm(args.arm)
     cfg = config_of_arm(arm)
     pooling: str = cfg.phases[0].encoder.pooling
@@ -160,7 +161,7 @@ def main() -> int:
 
     samples: List[StackSample] = []
     t0: float = time.perf_counter()
-    make = lambda: MultiPhases(cfg, device, read_workers=budget.workers)         # noqa: E731
+    make = lambda slide: MultiPhases(cfg, device, read_workers=budget.workers)   # noqa: E731, ARG005
     for res in fov_stream(slides, make, fov, args.mask_cache_job, device, label_cfg, args.fov_per_visit,
                           args.fov_seed, 0, workers=budget.workers):
         s: Optional[StackSample] = collect(res, args.columns, label_cfg, device)

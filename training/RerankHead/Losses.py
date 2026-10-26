@@ -1,9 +1,9 @@
 '''The losses of the second phase. All take one query's candidates (a "list"),
-logits `[K]` and boolean masks `[K]`; a window that is neither `pos` nor `neg`
-(the label table in `Labels.py`) is in no ranking term.
+logits `[K]` and boolean masks `[K]` (the label table in `Labels.py`).
 
-    listwise_loss     -log of the share of the softmax a positive gets, over the
-                      positives and negatives together
+    listwise_loss     -log of the share of the softmax the answers get, over the answers, the
+                      negatives and the near windows; each near window also has the share its soft
+                      target says (the truth beats it by more the farther it is)
     topk_hinge_loss   a positive must beat the k-th best negative by a margin:
                       recall@k itself, as a hinge
     bce_loss          each positive/negative alone, positives weighted up
@@ -17,20 +17,29 @@ logits `[K]` and boolean masks `[K]`; a window that is neither `pos` nor `neg`
 '''
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
 
 
-def listwise_loss(logit: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,
-                  temperature: float = 1.0) -> torch.Tensor:
-    """`-log( sum_pos exp(l/T) / sum_(pos+neg) exp(l/T) )`; 0 with no positive."""
+def listwise_loss(logit: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor, temperature: float = 1.0,
+                  near: Optional[torch.Tensor] = None, near_target: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """`-log( sum_pos exp(l/T) / sum_all exp(l/T) )` over the positives, negatives and near windows; 0 with no
+    positive. With near windows each adds `-t_i log( exp(l_i/T) / sum_all )` (`near_target` `t`, the soft target
+    against the answers' 1), and the sum is divided by `1 + sum t`: the answers as a group must hold the most
+    mass, each near window the share its target says. With none it is the plain multi-positive loss."""
     if not bool(pos.any()):
         return logit.sum() * 0.0
     z: torch.Tensor = logit / temperature
-    keep: torch.Tensor = pos | neg
-    return -(torch.logsumexp(z[pos], dim=0) - torch.logsumexp(z[keep], dim=0))
+    use_near: bool = near is not None and near_target is not None and bool(near.any())
+    keep: torch.Tensor = pos | neg | near if use_near else pos | neg
+    log_all: torch.Tensor = torch.logsumexp(z[keep], dim=0)
+    total: torch.Tensor = -(torch.logsumexp(z[pos], dim=0) - log_all)
+    if not use_near:
+        return total
+    t: torch.Tensor = near_target[near]
+    return (total - (t * (z[near] - log_all)).sum()) / (1.0 + t.sum())
 
 
 def topk_hinge_loss(logit: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor, k: int,
@@ -70,23 +79,31 @@ def loc_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> to
     return F.smooth_l1_loss(pred[mask], target[mask])
 
 
-def pool_softmax_loss(logit: torch.Tensor, pos: torch.Tensor, keep: torch.Tensor,
-                      temperature: float) -> torch.Tensor:
-    """`listwise_loss` for a pool too long to hold masks for twice: `logit`, `pos`,
-    `keep` are flat over the pool, `keep` = positives and negatives."""
+def pool_softmax_loss(logit: torch.Tensor, pos: torch.Tensor, keep: torch.Tensor, temperature: float,
+                      near: Optional[torch.Tensor] = None, near_target: Optional[torch.Tensor] = None
+                      ) -> torch.Tensor:
+    """`listwise_loss` for a pool too long to hold masks for twice: `logit`, `pos`, `keep` (every window of the
+    softmax) and, if given, `near` and `near_target` are flat over the pool."""
     if not bool(pos.any()):
         return logit.sum() * 0.0
     z: torch.Tensor = logit / temperature
-    return -(torch.logsumexp(z[pos], dim=0) - torch.logsumexp(z[keep], dim=0))
+    log_all: torch.Tensor = torch.logsumexp(z[keep], dim=0)
+    total: torch.Tensor = -(torch.logsumexp(z[pos], dim=0) - log_all)
+    if near is None or near_target is None or not bool(near.any()):
+        return total
+    t: torch.Tensor = near_target[near]
+    return (total - (t * (z[near] - log_all)).sum()) / (1.0 + t.sum())
 
 
 def rerank_loss(out: Dict[str, torch.Tensor], pos: torch.Tensor, neg: torch.Tensor, covers: torch.Tensor,
                 rot_ok: torch.Tensor, loc: torch.Tensor, loc_mask: torch.Tensor, weights: Dict[str, float],
-                temperature: float, k: int, margin: float,
-                pos_weight: float) -> Dict[str, torch.Tensor]:
+                temperature: float, k: int, margin: float, pos_weight: float,
+                near: Optional[torch.Tensor] = None,
+                near_target: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
     """The terms of one list and their weighted `total`. `out` is the network's
-    (`logit`, and `rot`, `loc` when it has them); a term with weight 0 is skipped."""
-    terms: Dict[str, torch.Tensor] = {'list': listwise_loss(out['logit'], pos, neg, temperature)}
+    (`logit`, and `rot`, `loc` when it has them); a term with weight 0 is skipped. The near windows are in the
+    listwise term only (the hinge and the BCE see positives and negatives)."""
+    terms: Dict[str, torch.Tensor] = {'list': listwise_loss(out['logit'], pos, neg, temperature, near, near_target)}
     if weights.get('topk', 0.0):
         terms['topk'] = topk_hinge_loss(out['logit'], pos, neg, k, margin)
     if weights.get('bce', 0.0):
