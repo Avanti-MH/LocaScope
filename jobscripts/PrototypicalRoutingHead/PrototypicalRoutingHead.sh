@@ -19,10 +19,10 @@ conda activate locascope
 source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  training/PrototypicalRoutingHead -- ONE JOB, 13 TRAINING RUNS, then test:
+#  training/PrototypicalRoutingHead -- ONE JOB, 14 TRAINING RUNS, then test:
 #
 #    [1]  the BASELINE and one run per mechanism, each the baseline with that
-#         ONE thing changed (RUNS below), so each run answers one question   13
+#         ONE thing changed (RUNS below), so each run answers one question   14
 #    [2]  cli/evaluate.py on the test set: the original table AND the K x K
 #
 #  ONLY="1 8" runs those runs of RUNS only (1-based, the [n/N] of the log).
@@ -46,7 +46,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  the same config and the same files, so both packages train on the same
 #  positions rather than on two draws that should agree.
 #
-#  FOUR CARDS. PARALLEL=4 (the default) deals the 13 runs out to four queues,
+#  FOUR CARDS. PARALLEL=4 (the default) deals the 14 runs out to four queues,
 #  one per card, running at once; each gets a quarter of the job's cpus
 #  (CpuBudget) and renders in that many threads. Training is one process per
 #  run, so no run is split across cards -- four runs are simply in flight
@@ -70,7 +70,7 @@ N_PER_RUNG="${N_PER_RUNG:-100}"
 N_SUPPORT="${N_SUPPORT:-5}"
 N_QUERY="${N_QUERY:-10}"
 N_CHOICES="${N_CHOICES:-3 4 5}"
-BASE_REUSE="${BASE_REUSE:-hold_q}"   # the baseline episode reuse; the reuse run trains none
+BASE_REUSE="${BASE_REUSE:-none}"   # the baseline episode reuse; the two reuse runs train hold_q and hold_s
 REUSE_K_GIVEN="${REUSE_K-__unset__}"
 REUSE_K="${REUSE_K:-5}"
 VAL_REUSE_K="${VAL_REUSE_K:-4}"
@@ -193,11 +193,23 @@ RUNS=(
     "pool-avg|$LOSS|$BASE_REUSE||avg|$BASE_SPEC"
     "pool-attn|$LOSS|$BASE_REUSE||attn|$BASE_SPEC"
     "pool-attn+mix|$LOSS|$BASE_REUSE||attn+mix|$BASE_SPEC"
-    "reuse-none|$LOSS|none||$POOLING|$BASE_SPEC"
+    "reuse-hold_q|$LOSS|hold_q||$POOLING|$BASE_SPEC"
+    "reuse-hold_s|$LOSS|hold_s||$POOLING|$BASE_SPEC"
     "cross-on|$LOSS|$BASE_REUSE|$CROSS_DOMAIN|$POOLING|$BASE_SPEC"
     "loss-$ORD_LOSS|$ORD_LOSS|$BASE_REUSE||$POOLING|$BASE_SPEC"
     "matching-net|$B|off:bilstm:attnlstm:cosine_logsumexp"
     "encoder-uni2|$B|$BASE_SPEC|uni2"
+    # 15-17: the mechanisms that helped in 1-14 TOGETHER (uni2, --cross-domain, attn pooling, the learned score or the
+    # matching-net), not one thing changed from the baseline. Run as  ONLY="15 16 17" EPOCHS=40 sbatch ...  under the job's
+    # own name: the weights land beside 1-14's (their names differ), and the test scoring takes only the new ones.
+    "combo-attn_score|$LOSS|$BASE_REUSE|$CROSS_DOMAIN|attn|set_transformer:identity:identity:attn_score|uni2"
+    "combo-shared_mlp|$LOSS|$BASE_REUSE|$CROSS_DOMAIN|attn|shared_mlp:identity:identity:attn_score|uni2"
+    "combo-matching-net|$LOSS|$BASE_REUSE|$CROSS_DOMAIN|attn|off:bilstm:attnlstm:cosine_logsumexp|uni2"
+    # 18-20: the same three WITHOUT --cross-domain (both sides of an episode are the training stain): what the cross-domain
+    # pool is worth in the combination. ONLY="18 19 20" EPOCHS=40.
+    "combo-nocross-attn_score|$LOSS|$BASE_REUSE||attn|set_transformer:identity:identity:attn_score|uni2"
+    "combo-nocross-shared_mlp|$LOSS|$BASE_REUSE||attn|shared_mlp:identity:identity:attn_score|uni2"
+    "combo-nocross-matching-net|$LOSS|$BASE_REUSE||attn|off:bilstm:attnlstm:cosine_logsumexp|uni2"
 )
 # CROSS_DOMAIN= drops the cross-domain run rather than training a second baseline
 if [ -z "$CROSS_DOMAIN" ]; then
@@ -209,6 +221,13 @@ if [ -n "${ONLY:-}" ]; then
     PICKED=()
     for n in $ONLY; do PICKED+=("${RUNS[$((n - 1))]}"); done
     RUNS=("${PICKED[@]}")
+fi
+# With ONLY, the test scoring takes the checkpoints this job writes, not every one in $OUT/weights (the CSVs keep the
+# other rows: evaluate.py replaces only the rows of the checkpoints it scores).
+STARTED=""
+if [ -n "${ONLY:-}" ] && [ "$EVAL_ONLY" != "1" ]; then
+    STARTED="$OUT/.started.${SLURM_JOB_ID:-local}"
+    touch "$STARTED"
 fi
 
 echo "======== PrototypicalRoutingHead ========"
@@ -378,7 +397,15 @@ fi
 # ---------------- evaluate.py: TEST set, every checkpoint ----------------
 echo ""
 echo "======== evaluate.py (test set $TEST_DATASET) ========"
+WEIGHTS_ARG=""
+if [ -n "$STARTED" ]; then
+    NEW_WEIGHTS=$(find "$OUT/weights" -name '*.pt' -newer "$STARTED" | sort)
+    echo "  only the checkpoints written by this job: $(echo "$NEW_WEIGHTS" | grep -c .)"
+    WEIGHTS_ARG="--weights $(echo $NEW_WEIGHTS)"
+    rm -f "$STARTED"
+fi
 python training/PrototypicalRoutingHead/cli/evaluate.py \
+    $WEIGHTS_ARG \
     --test-dataset "$TEST_DATASET" \
     --seg "$SEG" \
     --mask-cache-job "$MASK_CACHE_JOB" \

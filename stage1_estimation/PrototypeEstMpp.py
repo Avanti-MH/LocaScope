@@ -461,16 +461,20 @@ class PrototypeEstMpp(IdentifiedBuild):
 #: and building refuses a field the checkpoint disagrees with
 #: (`PrototypeEstMpp.__init__`).
 PROTOTYPE_RECIPES: Dict[str, PrototypeEstMppConfig] = {
-    # vote: `sum_log_probability` -- of the 8 rules, the best mean of the two datasets' level accuracy for this
-    # checkpoint on val (0.916; BRACS 0.916, Ki67 0.916; stage1_val_overall.csv, 2026-10-15), and the best
-    # worse-of-two (next: patch_class_median:lower 0.895). The runners-up on the mean (patch_class_median:lower
-    # 0.913, quality_weighted:tissue 0.911) are within the CI: a tie broken on val, not a finding.
-    'uni2-set-transformer-attn-score': PrototypeEstMppConfig(
-        encoder='uni2', pooling='cls', support_context='identity',
+    # The best of PrototypicalRoutingHead's combinations (job 614352, 2026-10-26): uni2, `attn` pooling, set_transformer +
+    # attn_score, trained with --cross-domain (Ki67 on one side, HE on the other), 40 epochs; test K x K 0.8916 (Ki67 0.9095,
+    # BRACS 0.8736). The same combination WITHOUT --cross-domain (`...cross_off...`, job 614553) is what to set this against,
+    # on Ki67 above all.
+    # vote: `sum_log_probability` -- picked on val for the checkpoint this recipe replaced (uni2, `cls`, cross off, 20 epochs:
+    # of the 8 rules the best mean of the two datasets' level accuracy, 0.916, and the best worse-of-two; the runners-up
+    # patch_class_median:lower 0.913 and quality_weighted:tissue 0.911 are within the CI: a tie broken on val, not a
+    # finding) and NOT picked again for this one.
+    'uni2-attn-set-transformer-attn-score-cross-on': PrototypeEstMppConfig(
+        encoder='uni2', pooling='attn', support_context='identity',
         query_context='identity', collapse='set_transformer', routing_head='attn_score',
         tile_size=256,
-        weights=('PrototypicalRoutingHead/weights/pure-train_Ki67--uni2--cls--G_identity--'
-                 'F_identity--set_transformer--attn_score--cross_off--none_k5--bal--best.pt'),
+        weights=('PrototypicalRoutingHead/weights/pure-train_Ki67--uni2--attn--G_identity--'
+                 'F_identity--set_transformer--attn_score--cross_on--none_k5--bal--6rung.pt'),
         mask_cfg=MASK_RECIPES['hest'],
         sampler_cfg=replace(SAMPLER_RECIPES['reference-bank'], n_per_rung=5),
         levels=None, vote='sum_log_probability', n_per_level=None),

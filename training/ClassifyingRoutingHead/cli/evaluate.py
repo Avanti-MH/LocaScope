@@ -159,6 +159,12 @@ def main() -> int:
         t_ckpt = time.time()
         head, encoder, ckpt = build_from_checkpoint(path, device)
         frozen = bool(ckpt['frozen'])
+        # The checkpoints come in the order of their names, so an encoder's are together: once the encoder is
+        # another, the raw tokens kept for the last one are never read again. They are the test tiles' whole token
+        # tensors (some GB per encoder and per set of blocks), and kept until the end they filled the host and
+        # made the DataLoader's fork fail ("Cannot allocate memory") partway through.
+        for stale_key in [k for k in raw_caches if k[0] is not None and k[0][0] != ckpt['encoder']]:
+            del raw_caches[stale_key]
         # num_prefix is 0 for the fine-tuned route because its spatial exit has
         # already dropped the prefix -- see `Features.trunk_raw`.
         num_prefix = 0 if not frozen else int(encoder.model_spec.num_prefix)
