@@ -7,6 +7,7 @@
     python utilities/cli/build_cache/make_dataset.py --recipe pure-half           # @pure-val in two: @pure-half-val, @pure-half-test
     python utilities/cli/build_cache/make_dataset.py --catalog --recipe pure         # the catalog first, then that
     python utilities/cli/build_cache/make_dataset.py --list                       # what is written, checked
+    python utilities/cli/build_cache/make_dataset.py --bracs-prune                # what slimming BRACS deletes
 
 Both live in AccessDatasets' own cache, `result/cache/<DATASETS_JOB>/`, whatever this job is called: every job
 reads the same catalog and the same `@val`.
@@ -24,18 +25,22 @@ is read and reviewed like any other code, and its record says which recipe made 
 from __future__ import annotations
 
 import argparse
+import glob
 import os
+import random
+import re
 import sys
 from itertools import combinations
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Sequence, Tuple
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from _paths import setup_import_paths                                  # noqa: E402
+from _paths import DATASETS_DIR, setup_import_paths                    # noqa: E402
 setup_import_paths()
 
-from AccessDatasets import (DATASETS_JOB, Selection, SlideInfo, build_catalog, dataset_ids,  # noqa: E402
-                            save_virtual, select, vdataset_entry, virtual_ids, virtual_record)
+from AccessDatasets import (DATASETS_JOB, Member, Selection, SlideInfo, build_catalog,  # noqa: E402
+                            dataset_ids, locate, save_virtual, select, vdataset_entry, virtual_ids,
+                            virtual_record)
 import AccessDatasets                                               # noqa: E402
 
 
@@ -47,20 +52,79 @@ def native_32(slide: SlideInfo) -> bool:
     return slide.native_at((1.0, 4.0, 16.0, 32.0))
 
 
+#: BRACS's seven lesion types, the `type` label its layout gives each slide.
+BRACS_TYPES: Tuple[str, ...] = ('Type_N', 'Type_PB', 'Type_UDH', 'Type_FEA', 'Type_ADH', 'Type_DCIS', 'Type_IC')
+
+#: BRACS slides kept on disk per type, every one native at ds 1, 4, 16 and 32; the rest is deleted
+#: (`--bracs-prune` lists them). BRACS train holds 20 Type_N native slides and gives one to test, so it keeps 19.
+BRACS_KEEP_TRAIN: int = 20
+BRACS_KEEP_TEST: int = 5
+
+#: BRACS test holds 4 Type_N slides native at ds 1-32; this one of BRACS train is its fifth.
+BRACS_TRAIN_TO_TEST: Tuple[str, str] = ('bracs/train', 'BRACS_1003675')
+
+
+def _per_type(counts: Sequence[int]) -> Dict[str, int]:
+    return dict(zip(BRACS_TYPES, counts))
+
+
+#: The BRACS slides of each @pure set, per type (N, PB, UDH, FEA, ADH, DCIS, IC).
+PURE_TRAIN_HE: Dict[str, int] = _per_type((14, 15, 14, 14, 14, 14, 15))       # 100
+PURE_VAL_HE: Dict[str, int] = _per_type((3, 3, 3, 3, 3, 3, 2))                # 20
+PURE_TEST_HE: Dict[str, int] = _per_type((2, 3, 2, 2, 2, 2, 3))               # 16
+PURE_HALF_VAL_HE: Dict[str, int] = _per_type((2, 1, 2, 1, 2, 1, 1))           # 10 of PURE_VAL_HE
+PURE_HALF_TEST_HE: Dict[str, int] = _per_type((1, 2, 1, 2, 1, 2, 1))          # the other 10
+
+
+def by_type(sel: Selection, *parts: Dict[str, int], seed: int, at_most: bool = False) -> Tuple[Selection, ...]:
+    """Disjoint parts of the BRACS slides of `sel`, each holding `part[type]` slides of every type: each type's
+    slides sorted, shuffled by `seed` and cut in the order the parts are given. Asking a type for more than it
+    holds is an error, unless `at_most` (then it gives what it has)."""
+    picked: List[List[Member]] = [[] for _ in parts]
+    for t in BRACS_TYPES:
+        pool: List[Member] = sorted(sel.where(lambda s, t=t: s.labels.get('type') == t, label=t).members)
+        random.Random(seed).shuffle(pool)
+        wanted: int = sum(p.get(t, 0) for p in parts)
+        if wanted > len(pool) and not at_most:
+            raise ValueError(f'{t}: {wanted} asked, {len(pool)} in {sel.how}')
+        at: int = 0
+        for i, part in enumerate(parts):
+            picked[i] += pool[at:at + part.get(t, 0)]
+            at += part.get(t, 0)
+    return tuple(Selection(members, f'{sel.how} by_type({[parts[i][t] for t in BRACS_TYPES]}, seed={seed})'
+                                    f'{"[" + str(i) + "]" if len(parts) > 1 else ""}')
+                 for i, members in enumerate(picked))
+
+
+def bracs_kept() -> Tuple[Selection, Selection]:
+    """The BRACS slides kept on disk, `(train, test)`: `BRACS_KEEP_TRAIN` of each type of BRACS train and
+    `BRACS_KEEP_TEST` of BRACS test, every one native at ds 1, 4, 16 and 32, drawn by seed 0; BRACS test's
+    Type_N is short of native slides and takes `BRACS_TRAIN_TO_TEST` from train. Drawn again once the rest is
+    deleted, it is the same slides: each type then holds exactly what it keeps."""
+    moved: Selection = Selection([BRACS_TRAIN_TO_TEST], f'{BRACS_TRAIN_TO_TEST[1]}')
+    keep_train: Dict[str, int] = dict.fromkeys(BRACS_TYPES, BRACS_KEEP_TRAIN)
+    keep_test: Dict[str, int] = dict.fromkeys(BRACS_TYPES, BRACS_KEEP_TEST)
+    (train,) = by_type(select(dataset='bracs/train', where=native_32, label='native 1 4 16 32') - moved,
+                       keep_train, seed=0, at_most=True)
+    (test,) = by_type(select(dataset='bracs/test', where=native_32, label='native 1 4 16 32'),
+                      keep_test, seed=0, at_most=True)
+    return train, test | moved
+
+
 def pure() -> Dict[str, Selection]:
     """Train 200 and val 40, half of each stain, apart, from the slides no test touches (Ki67_pure, BRACS
     train); test 32, half of each stain, from the slides the pipeline is judged on (Ki67_with_photo, BRACS
-    test). Every slide is native at ds 1, 4, 16 and 32 (`native_32`). Each set is shuffled once more as a
-    whole, so a prefix of it holds both stains."""
+    test). Every slide is native at ds 1, 4, 16 and 32 (`native_32`). BRACS's slides come from those kept on
+    disk (`bracs_kept`), as even across its seven types as the counts allow (`PURE_*_HE`). Each set is shuffled
+    once more as a whole, so a prefix of it holds both stains."""
     pool: List[str] = ['ki67_pure', 'bracs/train']
     val_ki67, train_ki67 = select(dataset=pool, stain='Ki67', where=native_32,
                                   label='native 1 4 16 32').split(20, 100, seed=0)
-    val_he, train_he = select(dataset=pool, stain='HE', where=native_32,
-                              label='native 1 4 16 32').split(20, 100, seed=0)
     test_ki67: Selection = select(dataset='ki67_with_photo', where=native_32,
                                   label='native 1 4 16 32').sample(16, seed=0)
-    test_he: Selection = select(dataset='bracs/test', where=native_32,
-                                label='native 1 4 16 32').sample(16, seed=0)
+    kept_train, kept_test = bracs_kept()
+    val_he, train_he = by_type(kept_train, PURE_VAL_HE, PURE_TRAIN_HE, seed=0)
+    (test_he,) = by_type(kept_test, PURE_TEST_HE, seed=0)
     return {'@pure-train': (train_ki67 | train_he).sample(200, seed=0),
             '@pure-val': (val_ki67 | val_he).sample(40, seed=0),
             '@pure-test': (test_ki67 | test_he).sample(32, seed=0)}
@@ -81,9 +145,10 @@ def legacy() -> Dict[str, Selection]:
 def pure_half() -> Dict[str, Selection]:
     """@pure-val cut in two, 10 of each stain apart: @pure-half-val is where methods and thresholds are chosen,
     @pure-half-test a test that keeps its ground truth -- a simulated stand-in for a real test set, which has
-    none. Each set is shuffled once more as a whole, so a prefix of it holds both stains."""
+    none. BRACS's are cut by type (`PURE_HALF_*_HE`). Each set is shuffled once more as a whole, so a prefix of
+    it holds both stains."""
     val_ki67, test_ki67 = select(dataset='@pure-val', stain='Ki67').split(10, 'rest', seed=0)
-    val_he, test_he = select(dataset='@pure-val', stain='HE').split(10, 'rest', seed=0)
+    val_he, test_he = by_type(select(dataset='@pure-val', stain='HE'), PURE_HALF_VAL_HE, PURE_HALF_TEST_HE, seed=0)
     return {'@pure-half-val': (val_ki67 | val_he).sample(20, seed=0),
             '@pure-half-test': (test_ki67 | test_he).sample(20, seed=0)}
 
@@ -137,6 +202,36 @@ def list_virtual() -> int:
     return worst
 
 
+#: BRACS's RoI images, `<split>/<k>_<type>/<slide>_<type>_<n>.png`; the slide is the name's `BRACS_<id>`.
+BRACS_ROI_ROOT: str = os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it/BRACS_RoI/latest_version')
+
+
+def bracs_prune() -> int:
+    """List what slimming BRACS deletes, and delete nothing: every BRACS slide not in `bracs_kept`, every RoI of
+    such a slide, and every RoI of BRACS val (whose slides are not here at all). Written as one absolute path a
+    line next to the virtual datasets, in `bracs_prune/`: `keep_wsi.txt`, `delete_wsi.txt`, `delete_roi.txt`."""
+    kept_train, kept_test = bracs_kept()
+    kept: set = set((kept_train | kept_test).names())
+    wsi: Dict[str, str] = {n: locate(n, dataset=d).path for d in ('bracs/train', 'bracs/test')
+                           for _, n in select(dataset=d)}
+    rois: List[str] = sorted(glob.glob(os.path.join(BRACS_ROI_ROOT, '*', '*', '*.png')))
+    slide_of: Dict[str, str] = {p: re.match(r'(BRACS_\d+)_', os.path.basename(p)).group(1) for p in rois}
+    lists: Dict[str, List[str]] = {
+        'keep_wsi': sorted(wsi[n] for n in kept),
+        'delete_wsi': sorted(p for n, p in wsi.items() if n not in kept),
+        'delete_roi': [p for p in rois
+                       if slide_of[p] not in kept or os.path.relpath(p, BRACS_ROI_ROOT).split(os.sep)[0] == 'val']}
+    out_dir: str = os.path.join(os.path.dirname(vdataset_entry().dir), 'bracs_prune')
+    os.makedirs(out_dir, exist_ok=True)
+    for role, paths in lists.items():
+        out: str = os.path.join(out_dir, f'{role}.txt')
+        with open(out, 'w') as handle:
+            handle.writelines(p + '\n' for p in paths)
+        gib: float = sum(os.path.getsize(p) for p in paths) / 1024 ** 3
+        print(f'{role:11s} {len(paths):5d} files {gib:7.1f} GiB  {out}', flush=True)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--catalog', action='store_true',
@@ -146,18 +241,23 @@ def main() -> int:
     mode.add_argument('--recipe', nargs='+', choices=sorted(DATASET_DRAWS), metavar='NAME',
                       help=f'write the virtual datasets of these recipes ({", ".join(sorted(DATASET_DRAWS))})')
     mode.add_argument('--list', action='store_true', help='the virtual datasets written, each checked')
+    mode.add_argument('--bracs-prune', action='store_true',
+                      help='list the BRACS slides and RoIs slimming deletes (bracs_kept), deleting nothing')
     ap.add_argument('--datasets', nargs='+', choices=dataset_ids(), default=None,
                     help='--catalog: these datasets only (default every registered one)')
     ap.add_argument('--refresh', action='store_true', help='--catalog: read every header again')
     args = ap.parse_args()
-    if not (args.catalog or args.recipe or args.list):
-        ap.error('say what to do: --catalog, --recipe NAME, --list (--catalog and --recipe go together)')
+    if not (args.catalog or args.recipe or args.list or args.bracs_prune):
+        ap.error('say what to do: --catalog, --recipe NAME, --list, --bracs-prune (--catalog and --recipe go '
+                 'together)')
 
     print(f'AccessDatasets cache: result/cache/{DATASETS_JOB}/', flush=True)
     if args.catalog:
         build_catalog(args.datasets, refresh=args.refresh)
     if args.list:
         return list_virtual()
+    if args.bracs_prune:
+        return bracs_prune()
     return max(run_recipe(name) for name in args.recipe) if args.recipe else 0
 
 

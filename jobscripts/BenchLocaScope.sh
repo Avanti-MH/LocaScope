@@ -57,7 +57,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 MODE="${MODE:-full}"
 if [ "$MODE" = "smoke" ]; then SMOKE_WSI=1; SMOKE_PER_LEVEL=5; else SMOKE_WSI=10; SMOKE_PER_LEVEL=50; fi
 
-DATASETS="${DATASETS:-@legacy-val}"   # @legacy-val: where methods are chosen; @legacy-test: the choice confirmed
+DATASETS="${DATASETS:-@pure-half-test}"   # @pure-half-val: where methods are chosen; @pure-half-test: the choice confirmed
 N_WSI="${N_WSI:-$SMOKE_WSI}"   # per dataset (10; 1 in smoke)
 PER_LEVEL="${PER_LEVEL:-$SMOKE_PER_LEVEL}"   # FoVs per native level per slide (50; 5 in smoke)
 SEG="${SEG:-hest}"             # the mask stages 1 and 2 search (MASK_RECIPES)

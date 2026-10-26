@@ -34,7 +34,7 @@ source jobscripts/_env.sh
 #    sbatch jobscripts/AnalyzeLocaScope.sh
 #    TOL_PX=8 sbatch jobscripts/AnalyzeLocaScope.sh
 # =============================================================================
-DATASETS="${DATASETS:-@legacy-val}"   # @legacy-val: where methods are chosen; @legacy-test: the choice confirmed
+DATASETS="${DATASETS:-@pure-half-test}"   # @pure-half-val: where methods are chosen; @pure-half-test: the choice confirmed
 N_WSI="${N_WSI:-10}"
 PER_LEVEL="${PER_LEVEL:-50}"
 SEG="${SEG:-hest}"

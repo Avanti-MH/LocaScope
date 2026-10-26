@@ -24,8 +24,8 @@ source jobscripts/_env.sh
 #  training/RerankHead/cli/fit_stack.py -- the stacker (S7) over the columns the
 #  rerankers of an arm wrote. Run it AFTER the heads are trained (RerankHead.sh): the
 #  arm's learned rerankers read their weights. It is fitted on the held-out slides, not
-#  the training ones (see the script's docstring), so confirm on `@legacy-test` in
-#  the stage 2 retriever bench (DATASETS=@legacy-test).
+#  the training ones (see the script's docstring), so confirm on `@pure-half-test` in
+#  the stage 2 retriever bench (DATASETS=@pure-half-test).
 #
 #    sbatch jobscripts/RerankHead/FitStack.sh
 #    COLUMNS="first dual csls" ARM='uni2:SlidingWindow::cls_avg+mean@500::Dual::cls_avg+dual::CSLS::cls_avg+csls' \

@@ -35,15 +35,15 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # different methods at once never touch the same file.
 # The reference banks are draw entries of the same job, their features beside
 # them. The analysis takes the same flags, joins the ground truth and writes
-# result/<job>/stage1_<set>.csv (`legacy-test` for @legacy-test) and its tables.
+# result/<job>/stage1_<set>.csv (`pure-half-test` for @pure-half-test) and its tables.
 #
 # FoV_Vote.md fixes every risk threshold on val before test is looked at:
-#   DATASETS=@legacy-val sbatch jobscripts/Benchmarks/Stage1MppBench.sh     fits them
+#   DATASETS=@pure-half-val sbatch jobscripts/Benchmarks/Stage1MppBench.sh  fits them
 #   sbatch jobscripts/Benchmarks/Stage1MppBench.sh               reads them back
 # Smoke: LIMIT=5 N_WSI=1 (the first 5 FoVs of each slide; recorded in the
 # entries, so a full run does not take them for its own).
 
-DATASETS="${DATASETS:-@legacy-test}"   # ran 2026-10-10: the val split, now @legacy-val
+DATASETS="${DATASETS:-@pure-half-test}"   # ran 2026-10-10 on @legacy-val, the val split then
 N_WSI="${N_WSI:-5}"            # per dataset; val and test must match.  ran 2026-10-10: N_WSI=10
 FOV="${FOV:-bench}"            # query_sim/FovSupply.FOV_RECIPES
 PER_LEVEL="${PER_LEVEL:-}"     # replaces the recipe's n_per_rung when set
