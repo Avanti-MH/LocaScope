@@ -20,7 +20,7 @@ source jobscripts/_env.sh
 # ---------------- Offline figures from a cached run ----------------
 #
 # Reads the cache of a BenchLocaScope run (synthetic FoVs, with truth), or with
-# REAL=1 of a realtest.sh run (real photos, no truth). The stage flags MUST be
+# REAL=1 of a RealTest.sh run (real photos, no truth). The stage flags MUST be
 # the run's: they give the addresses of its entries, and an entry the flags do
 # not name is a miss ("stage N: miss"). Writes <out>/joined.csv (every photo),
 # selected.csv, figures/stats/, figures/fov/ and, with EXPORT=demo, demo/.
@@ -28,7 +28,7 @@ source jobscripts/_env.sh
 # VARIABLES, by what they belong to:
 #
 #   which cache
-#     REAL               1: the real photos of a realtest.sh run (job RealTest);
+#     REAL               1: the real photos of a RealTest.sh run (job RealTest);
 #                        no truth, so `gt`, the truth footprint, PLOT and EXPORT
 #                        are left out and the answer is marked on `result`
 #     STAGE_JOB          the run's job name (BenchLocaScope; RealTest with REAL=1)
@@ -42,7 +42,7 @@ source jobscripts/_env.sh
 #                        empty = the recipe's
 #     STAGE3_TOPK        the run's --stage3-topk (how many of stage 2's
 #                        candidates stage 3 verified); empty = the recipe's (100).
-#                        realtest.sh runs 100 unless told otherwise and prints the
+#                        RealTest.sh runs 100 unless told otherwise and prints the
 #                        value to copy when it ends.
 #
 #   what to draw

@@ -64,8 +64,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #   anything else
 #     EXTRA              flags passed to locate_photo.py as they are
 #
-# To run one slide only:  sbatch --array=5 realtest.sh
-# A smoke run:            LIMIT=3 sbatch --array=4 realtest.sh
+# To run one slide only:  sbatch --array=5 jobscripts/RealTest.sh
+# A smoke run:            LIMIT=3 sbatch --array=4 jobscripts/RealTest.sh
 # Bad nodes:              sbatch --exclude=25a-hgpn001,25a-hgpn003,25a-hgpn006 ...
 
 # which photos
