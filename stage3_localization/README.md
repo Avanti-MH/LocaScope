@@ -29,13 +29,21 @@ legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical �
 
 #### `SIFT_RANSAC.py` — canonical，唯一實作
 
-`LocaScopePipeline` 唯一呼叫的定位器（`utilities/LocaScopePipeline.py`）。把
-retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC homography
-細化到 sub-pixel。
+stage 3 目前唯一註冊的方法（`stage3_localization/__init__.py` 的 `METHODS` 只有 `sift`；
+`--stage3 sift:default`），`LocaScopePipeline`（`utilities/LocaScopePipeline.py`）由此建出定位器。
+把 retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC homography
+細化到 sub-pixel。`StageInterface.py` 定義所有定位器共有的介面：`Localizer` protocol、
+`LocalizationResult`（一個驗證過的候選）、`LocalizationResultSet`（`.best` = confidence 最大者，
+平手取名次較前的）。
 
-- **入口**：`SiftRansacLocalizer(min_inliers=10, padding=2).build(wsi)`，然後
-  `localize(query, CandidateSet, rank=0) → SiftRansacResult`：吃 stage 2 的輸出，用自己
-  `build` 建的 `SlideReader` 讀圖，不向 retriever 借。
+- **入口**：`SiftRansacLocalizer(SIFT_RECIPES['default'], device=None).build(wsi)`。設定是
+  `SiftRansacConfig`（`min_inliers=10, padding=2, ratio=0.75, ransac_px=5.0, topk, workers`；
+  `default` 這個 recipe 的 `topk=100, workers=8`，`workers` 不進 identity）。然後
+  `localize(query, CandidateSet, topk) → LocalizationResultSet`：驗證 stage 2 名次最前的 `topk`
+  個候選，query 的 SIFT 只算一次，各候選的 crop／配對／擬合各用一條 thread。要單獨跑一個候選
+  （畫圖、`test_locascope_stages`）用 `localize_one(query, cs, rank=0) → SiftRansacResult`。
+  用自己 `build` 建的 `SlideReader` 讀圖，不向 retriever 借。`device` 是 CUDA 時配對在 GPU 上
+  做（`knn_ratio_matches`），否則用 OpenCV BFMatcher；配對結果相同。
 - **三步**（畫圖時可逐步跑，先 `prepare(query, cs, rank)`）：
   1. `read_wsi_crop(padding)` — 候選視窗 `±padding` tile，夾在它的 region 內，在候選集的
      level 上讀；`crop_origin_l0` 是這次讀圖真正的 level-0 整數起點
@@ -43,8 +51,12 @@ retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC
   3. `estimate_homography()` — RANSAC H（query px → crop px）；crop 的像素 (u, v) 在 level-0
      的 `crop_origin_l0 + (u, v) * ds`，所以 query 的 (0, 0) 和中心經 H 後直接得到 level-0
      位置，保留小數。inlier 不足或 H 退化時 fallback 回候選視窗本身的位置。
-- **Output** `SiftRansacResult`：`x0/y0`、`center_x0/y0`（level-0，float）、`H`、
-  `inlier_count`、`match_count`、`success`、`rank`、`candidate`、`ds`、`level`。
+- **Output** `SiftRansacResult`（`LocalizationResult` 的子類）：`x0/y0`、`center_x0/y0`（level-0，
+  float）、`confidence`（接受的擬合為 `inlier_count / match_count`，失敗為 0.0）、`H`、
+  `inlier_count`、`match_count`、`success`、`rank`、`candidate`、`ds`、`level`、`crop_l0`
+  （crop 的 level-0 框）、`pairs`（每個過 ratio test 的配對：query 像素、crop 配對點的 level-0
+  位置、描述子距離、是否為 inlier）。擬合失敗時位置退回候選視窗本身、`confidence` 為 0，
+  呼叫端不必另外判斷成功與否。
   中心點優先於左上角：query 繞自己中心旋轉，中心不受旋轉影響。
 - **2026-10-05 前的記帳**把 crop 原點記成 `int(region.x / ds) + x0`，截掉 region 原點的
   小數；openslide 以 bilinear 取樣，所以回報位置偏 `-frac(region.x / ds) * ds` 個 level-0

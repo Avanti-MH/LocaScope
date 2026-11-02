@@ -57,7 +57,7 @@ flowchart LR
     GV["指定位置<br/>manifest / 候選"]
   end
 
-  subgraph B["B 讀取（唯一）：SlideReader ← 原 GridReader"]
+  subgraph B["B 讀取（唯一）：SlideReader"]
     RD["read(x, y, spec, ds, stack, level)<br/>單點"]
     RG["read_grid(regions, grids, ds, tile)<br/>區塊 + worker"]
     PR["_read(rect_l0, level, read_wh, out_wh)<br/>唯一的 IO + 縮放"]
@@ -103,9 +103,9 @@ flowchart LR
                                 │ sampler 預留範圍     │ 讀取器照著讀
                                 ▼                    ▼
 A 位置                          B 讀取（唯一）                     C 畫成照片（可選）          D 下游
-TissueMask ─► TileSampler ──┐   SlideReader  ← 原 GridReader      Render  ← 原 Camera
-              (隨機、有界)   │   [吸收 QueryFromWSI、               [只剩效果 + GT]
-FovSupply（串接，見下）─────┼─►  Render.py 的讀取]                 ├─ capture(pos)          ┌► TileEncoder（GPU）
+TissueMask ─► TileSampler ──┐   SlideReader                       Render  ← 原 Camera
+              (隨機、有界)   │                                     [只剩效果 + GT]
+FovSupply（串接，見下）─────┼─►                                   ├─ capture(pos)          ┌► TileEncoder（GPU）
 PatchGrid（有序格點）────────┤   ├─ read(pos, spec, ds,            │    = 效果(reader.read)  │   → head / KNN /
 指定位置（manifest、候選）───┘   │        margin, stack)  單點      ├─ at(ds)  換物鏡        │     retrieval
                                 ├─ read_grid(region, grid, ds)    ├─ output_to_level0  GT  │
@@ -139,7 +139,7 @@ class ReadSpec:                      # 原 CameraSpec，欄位與行為不變
 #   levels_up_to 到 max_ds 為止的層                  is_native 這層就是這個 ds
 # level_px / FovGeometry / ReadRect / reserve_margin
 
-# ── utilities/SlideReader.py（原 GridReader.py，大改）───────────────────────
+# ── utilities/SlideReader.py ──────────────────────────────────────────────
 @dataclass(frozen=True)
 class ReadPlan:                      # 一次讀取的全部決定，不碰 IO
     rect: ReadRect                   # level-0 範圍（原點 + 要落在 slide 內的範圍）
@@ -165,7 +165,7 @@ class SlideReader:
         # TileSampler 抽出的每個 sample，用它自己的 ds 和 stack 讀；越界直接報錯
     def read_grid(self, regions, grids, ds, *, tile, offset=True, block_rows=8,
                   level=None) -> GridRead           # 可迭代出 GridBlock
-        # 原 GridReader：整數 ds → N 列一塊；非整數 ds → 每個 region 只讀一次再切，
+        # 整數 ds → N 列一塊；非整數 ds → 每個 region 只讀一次再切，
         # 不同 region 分給不同 worker 平行讀；ds 必須是某一層自己的 ds
         # workers > 0：DataLoader，每個 worker 各自開 SafeSlide
     def _read(self, plan: ReadPlan) -> np.ndarray      # 唯一的 read_region_rgb + resample
@@ -174,7 +174,7 @@ class GridRead:                      # read_grid 的回傳值
     __iter__ -> GridBlock；__len__（block 數）；n_tiles；one_read_per_region
 
 @dataclass
-class GridBlock:                     # 原 GridReader.GridBlock，不變
+class GridBlock:
     region: int; row0: int; cols: int; main_rows: int; offset_rows: int
     main: torch.Tensor               # uint8 [main_rows * cols, tile, tile, 3]
     offset: Optional[torch.Tensor]
@@ -219,7 +219,7 @@ class CameraBank:
     def camera_for(dataset, wsi_name, rung, *, native=False, read_level=None) -> Render
 ```
 
-呼叫端的寫法（取代 `read_tiles` / `Sample.materialise` / `QueryFromWSI.crop`）：
+呼叫端的寫法：
 
 ```python
 reader = SlideReader(wsi, resize='area')
@@ -244,8 +244,8 @@ Stage 1 bench      TileSampler.cached ladder → FovSupply(sampler=) → 完整 
 BenchLocaScope     FovSupply → reader.read                → 完整    → pipeline
 window bench 參考  格點    → reader.read_grid            → 無      → encoder → 分數
 pre-tile（Corpus） 隨機    → reader.read（邊距、area）     → 無      → HA / 訓練
-pipeline 參考      格點    → reader.read_grid            → 無      → retrieval   ← pipeline 遷移時改
-stage 3           候選    → reader.read（臨時 ReadSpec） → 無      → SIFT        ← 之後改
+pipeline 參考      格點    → reader.read_grid            → 無      → retrieval
+stage 3           候選    → reader.read（臨時 ReadSpec） → 無      → SIFT
 真實照片           —                                     —         → 切 tile → stage 1/2/3
 ```
 
@@ -256,17 +256,12 @@ stage 3           候選    → reader.read（臨時 ReadSpec） → 無      �
 
 | 動作 | 對象 |
 |---|---|
-| 刪除 | `query_sim/source/`（QueryFromWSI）、`query_sim/QueryFromWSI.py`、`utilities/Render.py`、`utilities/GridReader.py`、`utilities/SlideContext.py`、`diag_render_reads.py` + `DiagRenderReads.sh`、`test_grid_reader.py`、`test_read_equivalence.py`、`test_generator.py` 的 equiv 段、`CameraTest.sh` |
 | 新增 | `utilities/SlideReader.py`、`test_slide_reader.py`（read + grid） |
 | 大改 | `Camera` → `Render`：不自己讀圖，向 SlideReader 拿原始像素，只負責效果、可重現性和 GT |
 | 改名 | `CameraSpec` → `ReadSpec`；`camera_spec` → `render_spec`；`Corpora.pretile_camera` → `pretile_spec` |
-| 合併 | `CameraTest.sh` 併入 `TestReadPath.sh`；`diag_read_exp.py` 改成讀取路徑的速度量測 |
-| 小改（呼叫端） | 訓練 CameraBank、KnnEstMpp、PrototypeEstMpp、extract_pretiles、ChainStack、FewShotEoMT、generator、multi_batch、demo、各 bench、diag、相關測試 |
 | 不動 | TileSampler（只拿掉 degrade 的再匯出）、DsLadder、PatchGrid、TissueMask、ReadGeometry 的規則、augment、TileEncoder、CpuBudget、Store |
-| 之後才改 | SlideWinSift 改用 SlideReader（WsiTissuesContainer、WsiTileLoader 已於 2026-10-06 淘汰）；A 的命名（TileSampler、SampleMeta、FovSupply） |
 
-讀取模組從 Camera、QueryFromWSI、轉接檔、Render.py、GridReader、SlideContext 六個減為 Render、SlideReader 兩個。
-被刪掉的檔案在本次 session 的 scratchpad 有備份（`removed_2026-10-03/`），scratchpad 不是永久的。
+讀取模組現在只有 `Render`、`SlideReader` 兩個。
 
 ### 為什麼 read_grid 不能用 read 迴圈做
 
@@ -282,7 +277,7 @@ stage 3           候選    → reader.read（臨時 ReadSpec） → 無      �
 | 加速 | 量到的效果 | 新架構中的位置 |
 |---|---|---|
 | CPU 預算 | bench 7 倍、訓練 encode 3 倍 | `CpuBudget`（不動）；`SlideReader(workers=...)` 的數量從這裡取 |
-| 整塊讀取 + worker | 約 270 → 1060 tiles/s | `SlideReader.read_grid`（原 GridReader 演算法原封不動） |
+| 整塊讀取 + worker | 約 270 → 1060 tiles/s | `SlideReader.read_grid` |
 | 非整數 ds 整區讀一次 | 相位一致 | 同上；不同 region 分給不同 worker 平行讀。單一大 region 只能一次讀完（相位），是 BRACS_1228 L1 只有 313 tiles/s 的原因 |
 | 不旋轉只讀矩形加邊距 | 讀取面積少約 2.1 倍 | `Render.spec.rotates` 由 `rotates_for(cfg)` 決定，`SlideReader.plan` 照著讀 |
 | handle 共用 | 不重複開檔 | 每張 WSI（每個 process）一個 `SlideReader`；`Render.at(ds)` 共用它 |
@@ -290,16 +285,19 @@ stage 3           候選    → reader.read（臨時 ReadSpec） → 無      �
 | 擴增優化版本、fp16 encoder、各種 cache | — | 不動 |
 
 統一之後順便可以加速、但**這一輪不做**的：Stage 1 參考庫和 pre-tile 改成平行讀取；
-PrototypicalRoutingHead 的渲染移到 DataLoader worker；pipeline 改用 `read_grid`（原型量到 362 → 118 s）。
+PrototypicalRoutingHead 的渲染移到 DataLoader worker。pipeline 改用 `read_grid`（原型量到 362 → 118 s）後來已做：
+stage 2 的特徵經 `stage2_retrieval/Context.py` 用 `read_grid`，stage 3 用 `SlideReader.read`。
 
 ## 入口與 stage
 
 ```
 入口
-├─ utilities/LocaScopePipeline                    尚未改用新的讀取（pipeline 遷移時改）
+├─ utilities/LocaScopePipeline                    stage 2 經 Context.py 用 SlideReader.read_grid，stage 3 用 SlideReader.read
 │   ├─ stage 1  mpp 估計        KnnEstMpp / ClassifierEstMpp / PrototypeEstMpp / classic
 │   ├─ stage 2  檢索            Retriever（stage2_retrieval/Retriever.py）：第一階段
 │   │                            RetrieverSlidingWinSimRot / BagOfTiles / TileVote / ClusterBow / WinEmbed，
+│   │                            以及學出來的 GloRet / LogLoRet（RetrieverGloRet.py、aiNNModel/models/GloRet.py，
+│   │                            訓練在 training/GloRet/，arm 名 `GloRet-<ContextEn>-<GlobalEn>`，設計見 stage2_retrieval/proposal.md），
 │   │                            reranker（RerankerScorers / Encode / Neural）接在後面，MultiPhases 串接
 │   │                            retrieve(上游, query) → RetrievalOutput(.candidates = CandidateSet)
 │   └─ stage 3  定位            SiftRansacLocalizer；SuperPathPoint (未實作)
@@ -336,7 +334,7 @@ window bench
 └─ 每張照片：stage 1 → stage 2（4 個旋轉）→ stage 3（SlideReader 讀候選窗的 crop，level-0 記帳）
 ```
 
-## 量測依據（`diag_render_reads.py`，2026-10-03 已刪除；之後的量測用 `diag_read_exp.py`）
+## 量測依據（2026-10-03 的量測；之後的量測用 `diag_read_exp.py`）
 
 | 流程 | 改前 | 改後原型 | 數字是否不變 |
 |---|---|---|---|
@@ -362,11 +360,11 @@ config 的值只寫在一個地方：基礎模組裡的 RECIPES 表。每個 ent
 |---|---|---|
 | `MASK_RECIPES` | `utilities/TissueMaskConfig.py` | `none`、`hsv`、`hest`、`uni2_pca`（`--seg`） |
 | `SAMPLER_RECIPES` | `utilities/TileSampler.py` | `lattice`（class 預設寫出來，給 diagnostic 當起點）、`reference-bank`（stage 1 的參考庫、tile bench 的參考 store） |
-| `FOV_RECIPES` | `query_sim/FovSupply.py` | `bench`（四個 bench 共用，`--fov`）、`plain`（class 預設寫出來）、`routing-query`、`routing-support-native`（ClassifyingRoutingHead 的兩個相機模板） |
+| `FOV_RECIPES` | `query_sim/FovSupply.py` | `bench`（四個 bench 共用，`--fov`）、`bench-real`（`bench` 但 gap 取自 ki67_with_photo 的真實顯微鏡照片：較暗、無暗角、較銳利、放大 1.12 倍）、`plain`（class 預設寫出來）、`routing-query`、`routing-support-native`（ClassifyingRoutingHead 的兩個相機模板） |
 | `RECIPES` | `training/SuperPathPoint/common/Corpora.py` | `stageA`、`stageB-fOwn`、`stageB-cOwn` |
 | `KNN_RECIPES` | `stage1_estimation/KnnEstMpp.py` | `gigapath`、`uni2`（`--stage1 knn:<名>`） |
-| `CLASSIFIER_RECIPES` | `stage1_estimation/ClassifierEstMpp.py` | 範本 `gigapath-arcface`；一個 checkpoint 一個 entry，由使用者決定列哪些 |
-| `PROTOTYPE_RECIPES` | `stage1_estimation/PrototypeEstMpp.py` | 範本 `uni2-mean-cosine-tau` |
+| `CLASSIFIER_RECIPES` | `stage1_estimation/ClassifierEstMpp.py` | `uni2-mlp-ord-b`；一個 checkpoint 一個 entry，由使用者決定列哪些 |
+| `PROTOTYPE_RECIPES` | `stage1_estimation/PrototypeEstMpp.py` | `uni2-attn-set-transformer-attn-score-cross-on` |
 | `CLASSIC_RECIPES` | `stage1_estimation/estimate_mpp_classic.py` | `default` |
 | `SLIDEWIN_RECIPES` | `stage2_retrieval/RetrieverSlidingWinSimRot.py` | `gigapath`、`uni2`、`uni2-avg`（`--stage2 slidewin:<名>`，raw_topk=1000） |
 | `BAGOFTILES_RECIPES`、`TILEVOTE_RECIPES`、`CLUSTERBOW_RECIPES`、`WINEMBED_RECIPES` | `stage2_retrieval/Retriever<方法>.py` | `--stage2 bagoftiles:<名>` 等：與 sliding window 對等的第一階段 retriever |
@@ -449,6 +447,10 @@ Masks/slide=<stem>/mask/                                   所有 trainer 和 be
     ├── chainstack/                                        ChainStack 讀過的 tile
     └── seg=<seg_id>/region=<region_id>/
         ├── grid=t<tile>-o<0|1>/features/                  FeatureMapCache（stage 2 的整層特徵）
+        ├── photos=<photo_set_id>/                         一組真實照片（locate_photo；沒有 plan/draw/render 這條合成的鏈）
+        │   ├── shots/
+        │   ├── stage1/ 與 stage1=<s1>/
+        │   └── stage1=<s1>/stage2/ 與 stage2=<s2>/stage3/   往下與下面的合成鏈相同
         └── plan=<PlanSpec.key()>/
             ├── draw/                                      TileSampler.cached（index_<sampler>.csv）
             └── draw=<sampler>/

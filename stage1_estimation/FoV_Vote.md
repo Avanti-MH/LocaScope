@@ -24,7 +24,15 @@
 
 ## 1. Mean probability
 
-目前 `ClassifierEstMpp` 使用的方法。
+`ClassifierEstMpp`／`PrototypeEstMpp` 的 `vote` 欄位預設值（兩者的 recipe 另有指定，見下方「實作對照」）。
+
+> **實作對照（2026-11-02 核對）：** 六種都已在 `FoVVote.py` 實作，key 見 `VOTE_CHOICES`：
+> `mean_probability`、`hard_majority`、`patch_class_median`（可帶 `:lower`／`:upper` 指定平手規則）、
+> `median_log_rung`、`sum_log_probability`、`quality_weighted`（帶訊號：`quality_weighted:tissue`、
+> `quality_weighted:agree`，見 `QUALITY_SIGNALS`）。估計器以 `cfg.vote` 選用，`vote_extra`
+> 收該函式回報的診斷值。目前 recipe：`CLASSIFIER_RECIPES['uni2-mlp-ord-b']` 用
+> `quality_weighted:tissue`、`PROTOTYPE_RECIPES['uni2-attn-set-transformer-attn-score-cross-on']`
+> 用 `sum_log_probability`。以下為當初的比較設計與分析，未逐段同步。
 
 ### 公式與做法
 

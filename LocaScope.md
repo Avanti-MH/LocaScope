@@ -10,13 +10,16 @@
 > | `LocaScopeResult` | `LocaScopeQueryResult` |
 > | `TissuesRegionsMask.from_wsi(wsi, ds=seg_ds).filter_regions(r)` | `TissueMaskConfig.build(wsi)`（recipe 由 `mask_cfg` 決定；cache 走 `MaskMaker`） |
 > | `mask.filter_patchable(tile_size, ds)` | `mask.patchable(side_l0)`，回傳 view，不改原 mask |
-> | `.find_best()` → `SlideWinSimResult` | `retriever.retrieve(query, EstMppResult)` → `CandidateSet`（`stage2_retrieval/StageInterface.py`） |
-> | `SiftRansacLocalizer(container, query, location).read_wsi_crop()...` | `SiftRansacLocalizer(...).build(wsi).localize(query, CandidateSet)`，位置以 level-0 記帳 |
+> | `GigaPathSlidingWinSim(...)`（已移除） | sliding window 是 stage 2 的一種 retriever：`--stage2 slidewin:gigapath`（`stage2_retrieval/RetrieverSlidingWinSimRot.py`）；stage 1 同理，`--stage1 knn:gigapath` 等 |
+> | `.find_best()` → `SlideWinSimResult` | `retriever.retrieve(EstMppResult, query)` → `RetrievalOutput`，其 `.candidates` 是 `CandidateSet`（`stage2_retrieval/Retriever.py`、`StageInterface.py`）；retriever 之後可接 reranker，合成一個 `MultiPhases` |
+> | `SiftRansacLocalizer(container, query, location).read_wsi_crop()...` | `SiftRansacLocalizer(...).build(wsi).localize(query, CandidateSet, topk)` → `LocalizationResultSet`，位置以 level-0 記帳 |
 > | `retrieval.best_x0` 等像素欄位 | `cs.origin_l0(cs.best)`、`cs.centre_l0(...)`：由候選集換算，不另存 |
 >
-> 實作另外多了本文件沒有的 level routing、per-level retriever cache、
-> `unusable_level`，以及三個 stage 各自 try/except。下面保留為當初的設計
-> 紀錄，不再同步更新；開放問題的現況見 `log/TODO.log`。
+> 實作另外多了本文件沒有的：每個 stage 以 spec（`"method:recipe"`）或已建好的物件傳入、
+> 整條 pipeline 共用同一個 mask（`build()` 時綁定）、三個 stage 各自 try/except 並保留前面
+> stage 的結果。pyramid level 不在 pipeline 裡選：stage 2 搜哪一層、routed 那一層放不下 query
+> 時怎麼辦，是 retriever 自己的事（`CandidateSet.level`、`irretrievable_lvl`、`alter_lvl`）。
+> 下面保留為當初的設計紀錄，不再同步更新；開放問題的現況見 `log/TODO.log`。
 
 ## Pipeline
 
