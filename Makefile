@@ -1,4 +1,4 @@
-.PHONY: help merge-logs clean clean-results clean-logs clean-pycache clean-job clean-smoke list-jobs list-smoke lint
+.PHONY: help merge-logs clean clean-results clean-logs clean-pycache clean-job clean-smoke list-jobs list-smoke lint wandb-plan wandb-prune
 
 # =============================================================================
 #  HOW TO USE THIS MAKEFILE
@@ -14,6 +14,9 @@
 #   make clean-logs       every SLURM log at the top of log/
 #   make clean-pycache    __pycache__ under the checkout (not result/cache/)
 #   make clean            clean-results + clean-logs + clean-pycache
+#   make wandb-plan WANDB_PROJECTS="a b"   which runs of those wandb projects stay (the newest of each arm) and
+#                         which would go; changes nothing. Without WANDB_PROJECTS: the projects of your entity
+#   make wandb-prune WANDB_PROJECTS="a b"  delete those runs ON THE WANDB SERVER (asks you to type their number)
 #   make lint             ruff check, read-only
 #
 # RULES
@@ -123,11 +126,39 @@ clean-smoke:
 	  done; \
 	done; true
 
+# ---- wandb ------------------------------------------------------------------
+# An arm is a run name inside a project; of each the newest KEEP runs stay (utilities/cli/wandb_prune.py). The plan
+# changes nothing and reaches wandb over the network only to read; wandb-prune deletes on the server, for good,
+# after you type the number of runs. Both need the environment that has wandb (conda activate locascope).
+# Claude never runs wandb-prune: the user does.
+#
+#   make wandb-plan                                         the projects of your entity
+#   make wandb-plan  WANDB_PROJECTS="prototypical-routing-head"
+#   make wandb-prune WANDB_PROJECTS="prototypical-routing-head classifying-routing-head rerank-head" WANDB_DROP="mpp-routing-head gloret"
+#   (WANDB_PROJECTS: the newest formal run of each arm stays, smoke / test runs go; WANDB_DROP: every run goes;
+#    FORMAL= (empty) keeps the smoke runs in the arms)
+WANDB_PROJECTS ?=
+WANDB_DROP ?=
+FORMAL ?= --formal-only --finished-only
+WANDB_STRIP ?= prototypical-routing-head
+WANDB_SINCE ?= 2026-10-20
+WANDB_SINCE_PROJECTS ?= prototypical-routing-head
+KEEP ?= 1
+PREFER ?= newest
+PYTHON ?= python
+
+wandb-plan:
+	$(PYTHON) utilities/cli/wandb_prune.py --projects $(WANDB_PROJECTS) --drop-projects $(WANDB_DROP) $(FORMAL) --strip-prefix $(WANDB_STRIP) --since $(WANDB_SINCE) --since-projects $(WANDB_SINCE_PROJECTS) --keep $(KEEP) --prefer $(PREFER)
+
+wandb-prune:
+	@test -n "$(WANDB_PROJECTS)$(WANDB_DROP)" || { echo 'usage: make wandb-prune WANDB_PROJECTS="a b" [WANDB_DROP="c"]'; exit 1; }
+	$(PYTHON) utilities/cli/wandb_prune.py --projects $(WANDB_PROJECTS) --drop-projects $(WANDB_DROP) $(FORMAL) --strip-prefix $(WANDB_STRIP) --since $(WANDB_SINCE) --since-projects $(WANDB_SINCE_PROJECTS) --keep $(KEEP) --prefer $(PREFER) --delete
+
 help:
 	sed -n '/^#   make help/,/^#   make lint/p' $(firstword $(MAKEFILE_LIST)) | sed 's/^#   //'
 
 # ---- merge the per-task logs of an array job into one ------------------------
-# An array job (BenchLocaScope.sh, realtest.sh) writes one log per task, log/<job>_<n>. This
+# An array job (BenchLocaScope.sh, RealTest.sh) writes one log per task, log/<job>_<n>. This
 # appends them, in task order, each under a "######## <file>" header, to log/<job>.merged, and
 # only if that succeeded removes the pieces. Appending keeps the earlier runs of the job; the
 # pieces of a job still running are not finished, so merge after it ends.
