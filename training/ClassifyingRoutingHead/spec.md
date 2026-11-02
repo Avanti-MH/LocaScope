@@ -1,22 +1,28 @@
 # ClassifyingRoutingHead — spec
 
+> **2026-11-02 核對（只列程式碼裡查得到的；正文是 2026-09 的設計與當時的狀態，沒有逐段改）：**
+> - 套件現在是 `Datasets.py`、`Runtime.py`、`cli/{train,evaluate}.py`。通用的 head／checkpoint 元件在 `aiNNModel/models/`
+>   （`Heads.py`、`common/Head.py`、`common/Checkpoints.py`），`stage1_estimation/ClassifierEstMpp.py` 直接用它們
+>   （`Runtime.py` 開頭的 docstring 說明了這個分法）。
+> - 「No rendered corpus on disk」一節是現況：`Datasets.py` 現在只有 manifest（位置）＋ `iterate_epoch` ＋
+>   `render_row`，val／test 與訓練走同一條迴圈。「Caching」「Status (2026-09-16)」「Splits, and what may look at which」「The manifest cache is keyed by a hash」四節（寫的是已刪除的做法）已在 2026-11-02 刪掉。
+> - 程式裡已找不到的名稱：`write_manifest`/`read_manifest`。「Files」一節對 `Datasets.py` 的描述已照現況改過。`_CameraBank`、`_render_row` 現在叫 `CameraBank`、`render_row`；
+>   `RoutingHeadDataset`、`collate_routing_batch`、`iterate_epoch` 還在。
+> - val／test 集是 `utilities/cli/build_cache/make_dataset.py` 寫下的虛擬 dataset（`@pure-train`、`@legacy-val`、`@legacy-test`），
+>   不是由 `--seed` 現算（`cli/train.py`、`cli/evaluate.py` 的 docstring）。
+> - 權重檔名以 `--` 分段、含資料來源與 loss，見「Weight files」一節（已改成現況）。
+
 Trains a classifier head that routes an unknown tile/photo to the DsLadder
 rung (equivalently, the mpp) it was taken at. Sits next to `KnnEstMpp`
 (stage 1's production estimator) as a candidate that has to beat it on the
 stage 1 bench (`bench_stage1_mpp.py`, `analyze_stage1_metrics.py`) before it
 can replace it.
 
-Ultimate goal (not this package): a model that, given a handful of prototype
-tiles each labelled with their own mpp/ds, tells an unknown tile which
-prototype it is closest to in SCALE and can hand back an mpp/ds number, not
-just a class id — Prototypical / Relation / Siamese-networks territory. That
-line is not started as code; the design is being worked out in discussion
-with AI (2026-09-18: how a prototype is generated -- per-WSI support tiles
-through a learned embedding, averaged per rung -- and how it is used --
-nearest-prototype classification, `StageInterface.MppEstimator`-shaped so it
-can sit beside `KnnEstMpp`/`ClassifierEstMpp` on the same `stage1_compare`
-scorecard). This package is the classifier-head baseline that any of those
-has to beat, not a step towards them.
+Beyond this package: a model that, given a handful of prototype tiles each
+labelled with their own mpp/ds, tells an unknown tile which prototype it is
+closest to in SCALE. That line is built as `training/PrototypicalRoutingHead/`
+and `stage1_estimation/PrototypeEstMpp.py`. This package is the
+classifier-head baseline that it has to beat, not a step towards it.
 
 ## 詞彙
 
@@ -39,15 +45,15 @@ has to beat, not a step towards them.
 | 最大縮小倍數 | `max_resample_factor` | 候選層需要的縮小倍數（rung ÷ 該層 ds）超過它就不列入；控制讀取成本（讀取邊長 = tile × 倍數）。預設不設 |
 | 重新取樣比例 | `resampled_share` | 只用於 `mixed`：走 resampled 的比例，預設 0.5 |
 | 讀取模式標籤 | read tag | 讀取模式寫成一個字串，用在權重與 resume 檔名、wandb run 名稱、CSV 的 `read_level` 欄、評估標籤：`resampled-finer`、`resampled-finer-x8`、`mixed-l0-p0.3`。預設模式為空字串，CSV 寫 `pyramid`。四個預設值固定不改，舊的檔名與 resume 檔才繼續代表 pyramid |
-| 原生 / 重新取樣（tile） | native / resampled (tile) | 一張 tile 是否直接讀自目標 mpp 的金字塔層（`QueryFromWSI.reads_natively`），CSV 的 `n_native`、`level_accuracy_resampled`、`native` 欄。與 Camera 風格參數 `native`（'routing-support-native' recipe）無關，也與讀取模式不同：讀取模式描述模型怎麼訓練，這個描述一張 tile 怎麼讀出來 |
+| 原生 / 重新取樣（tile） | native / resampled (tile) | 一張 tile 是否直接讀自目標 mpp 的金字塔層（`Camera.reads_natively`），CSV 的 `n_native`、`level_accuracy_resampled`、`native` 欄。與 Camera 風格參數 `native`（'routing-support-native' recipe）無關，也與讀取模式不同：讀取模式描述模型怎麼訓練，這個描述一張 tile 怎麼讀出來 |
 | head 名稱 | head name | `[mix_]` + `[attn_ / clsattn_ / 無]` + 分類器名；沒有前綴即 `fixed`、只用最後一層。名稱只是 `HEAD_CHOICES` 的 key，`Runtime.head_parts` 從登記內容讀回各部分 |
 
 ## Task
 
 6-way classification over `DsLadder.DEFAULT_RUNGS = (1, 2, 4, 8, 16, 32)`.
 Not mpp regression — argmax already IS the answer (`rung * wsi.base_mpp`).
-Not ordinal regression — that is on the deferred list with Prototypical /
-Relation / Siamese, for the same "still reading" reason.
+Not ordinal regression — that is on the deferred list with Relation /
+Siamese, for the same "still reading" reason.
 
 ## Two baselines
 
@@ -65,9 +71,9 @@ nothing to gain from adding that step here.
 | # | Head | Baseline | Trained? | Status / why |
 |---|---|---|---|---|
 | 2-1 | Linear (on frozen features) | 2 | head only | **main line** — matches the shape ConvNeXt V2's own released head reduces to (`NormMlpClassifierHead` with `hidden_size` unset, i.e. Norm + one Linear, no hidden layer) and the standard linear-probe convention (SimCLR/CLIP) for measuring representation quality without letting head capacity mask it |
-| 2-2 | NCM (nearest class mean, cosine) | 2 | no training — one averaging pass | free second arm, floor for "how separable are the frozen features already" |
-| 2-3 | ArcFace-margin head (`ArcFaceHead`, arm `arcface`) | 2 | head only | **implemented.** Weight rows and features both L2-normalised, so each row is a learned prototype direction and the logit is `s*cos(theta)` — the SAME geometry as 2-2, with the prototypes learned rather than averaged, which is what makes 2-2/2-3 a pair worth running together. ArcFace over CosFace was the user's call; `s=64`, `m=0.5`, the paper's own values. `s` and `m` are CONSTANTS, not parameters: the margin's only effect is to raise the training loss (`dL/dm > 0` everywhere), so learning it drives it to zero unless a counter-reward term is added whose weight is then the hyperparameter (AdaptiveFace) — and `s`, having no such contradiction, instead drifts up until it saturates. Sweep them, do not learn them. Caveat to read the result with: on baseline 2 the encoder is frozen, so the margin cannot compact the feature clusters the way it does in ArcFace's own setting — what remains is the re-weighting of samples near a boundary, which is aimed at this task's actual failure mode (adjacent rungs on a 2x pyramid, CLAUDE.md "Pyramid spacing"). A `3-4` twin on the fine-tuned trunk, where the margin COULD reshape features, is the obvious follow-up and is deliberately not implemented yet |
-| 2-4 | Gaussian / Mahalanobis classifier | 2 | fits mean+covariance, no deep training | named, not yet detailed — NCM's covariance-aware generalisation |
+| 2-2 | NCM (nearest class mean, cosine) | 2 | no training — one averaging pass | free second arm, floor for "how separable are the frozen features already". **Not built** (still absent as of 2026-11-02; `Runtime.py` notes it too). Not blocked on design but on plumbing: it fits statistics in one pass, so it needs a fit-once path beside `train()`'s `backward()`/`step()`, and because training photos are rendered fresh every epoch the accumulation has to stream (per-class sums and counts) rather than hold a feature matrix |
+| 2-3 | ArcFace-margin head (`ArcFaceHead`, arm `arcface`) | 2 | head only | **implemented.** Weight rows and features both L2-normalised, so each row is a learned prototype direction and the logit is `s*cos(theta)` — the SAME geometry as 2-2, with the prototypes learned rather than averaged, which is what makes 2-2/2-3 a pair worth running together. ArcFace over CosFace was the user's call; `s=64`, `m=0.5`, the paper's own values. `s` and `m` are CONSTANTS, not parameters: the margin's only effect is to raise the training loss (`dL/dm > 0` everywhere), so learning it drives it to zero unless a counter-reward term is added whose weight is then the hyperparameter (AdaptiveFace) — and `s`, having no such contradiction, instead drifts up until it saturates. Sweep them, do not learn them. Caveat to read the result with: on baseline 2 the encoder is frozen, so the margin cannot compact the feature clusters the way it does in ArcFace's own setting — what remains is the re-weighting of samples near a boundary, which is aimed at this task's actual failure mode (adjacent rungs on a 2x pyramid) |
+| 2-4 | Gaussian / Mahalanobis classifier | 2 | fits mean+covariance, no deep training | named, not yet detailed — NCM's covariance-aware generalisation. **Not built**, same plumbing reason as 2-2 (the stream also accumulates `sum(x x^T)`). At D=1536 it has exactly one viable form: a POOLED covariance with shrinkage toward `(tr/D)*I`, i.e. LDA — a per-class covariance is 2.4M parameters six times over, far past what the sample count supports, and inverting a badly estimated one amplifies precisely the noise directions. With equal priors and a shared covariance `-d^2` collapses to a LINEAR classifier, so 2-4 against 2-1 is the same decision family: boundary computed from statistics vs learned by SGD |
 | 2-5 | MLP (Linear→GELU→Dropout→Linear) on frozen features | 2 | head only | **observation arm**, parallel to 3-2 — same question (does extra head capacity help or hurt), asked on the frozen-feature side instead of the fine-tuned side |
 | 3-1 | trunk (fine-tuned) → Linear | 3 | trunk + head | **main line** — matches the checkpoint's own validated head shape; more head capacity does not help bridge the natural→pathology domain gap (that is what fine-tuning the trunk itself already does) and this dataset's scale (10-50k tiles fine-tuning a 28M-param trunk, not training it from scratch) argues for fewer trainable head params, not more |
 | 3-2 | trunk (fine-tuned) → MLP → Linear | 3 | trunk + head | **observation arm**, not a default — exists to empirically check the 3-1 reasoning rather than assert it: does an extra projection layer actually hurt cross-dataset generalisation (train=ki67_pure, eval=bracs/test+ki67_with_photo) the way the capacity argument predicts, or not |
@@ -75,7 +81,6 @@ nothing to gain from adding that step here.
 | 2-7 | AttentionPoolHead → MLP depth 2 (`attn_mlp_deep`, `attn_mlp_deep_wide`) | 2 and 3 | head only (2) / trunk+head (3) | the pool under the classifier that leads on the CLS view. `attn_linear` alone could not separate "the pool does not help" from "the pool was paired with the weakest classifier" |
 | 2-8 | CLS + AttentionPoolHead → MLP depth 2 (`clsattn_mlp_deep`) | 2 | head only | keeps the encoder's own summary and adds a task-specific one, so it should not lose to `mlp_deep` unless the two halves are scaled wrongly (each is L2-normalised before the concatenation for that reason) |
 | 2-9 | multi-layer mix → `attn` / `clsattn` → MLP depth 2 (`mix_attn_mlp_deep`, `mix_clsattn_mlp_deep`) | 2 | head only | asks whether scale is better read from earlier blocks, which keep more texture than the last one. The learned layer weights are themselves a result |
-| — | Prototypical Networks | independent | yes (episodic) | **deferred — design in discussion with AI, not yet code** |
 | — | Relation Networks | independent | yes | **deferred**, same reason |
 | — | Siamese / Triplet | independent | yes | **deferred**, same reason |
 | — | Ordinal regression head | stacks on any encoder | yes | **deferred**, same reason |
@@ -86,13 +91,13 @@ Motivated by `test_scores_best.csv`'s own native/resampled split on bracs/test
 (BRACS's 4x pyramid: rungs 1/4/16 native, 2/8/32 resampled). The gap is
 encoder-dependent, not universal:
 
-| weights | native | resampled | gap |
+| encoder, frozen, head | native | resampled | gap |
 |---|---|---|---|
-| `uni2_frozen_mlp_wide_best.pt` | 0.667 | 0.669 | 0.002 |
-| `uni2_frozen_arcface_best.pt` | 0.411 | 0.414 | 0.003 |
-| `gigapath_frozen_mlp_best.pt` | 0.624 | 0.388 | 0.236 |
-| `gigapath_frozen_linear_best.pt` | 0.603 | 0.279 | 0.324 |
-| `gigapath_frozen_arcface_best.pt` | 0.581 | 0.169 | 0.412 |
+| uni2, `mlp_wide` | 0.667 | 0.669 | 0.002 |
+| uni2, `arcface` | 0.411 | 0.414 | 0.003 |
+| gigapath, `mlp` | 0.624 | 0.388 | 0.236 |
+| gigapath, `linear` | 0.603 | 0.279 | 0.324 |
+| gigapath, `arcface` | 0.581 | 0.169 | 0.412 |
 
 Training is 100% `ki67_pure`, whose 2x pyramid makes every rung native — so
 no run has ever backpropagated through a resampled tile. A per-rung
@@ -199,7 +204,7 @@ natural-image CNN prior instead of a pathology-ViT prior). It cannot be what
 baseline 3 fine-tunes through. Baseline 3's trainable module builds its own
 `nn.Module` from `timm.create_model(ConvNeXtV2EncoderConfig().model.arch,
 pretrained=True, num_classes=0, global_pool='avg')` directly (see
-`Models.py`), reusing the config only for the checkpoint name and the
+`aiNNModel/ConvNeXtV2Func.py`'s docstring), reusing the config only for the checkpoint name and the
 `TransformConfig` (so preprocessing matches the frozen arm), and trains with
 an ordinary grad-enabled forward pass.
 
@@ -221,9 +226,7 @@ session log): Ki67_with_photo already plays that role.
 Ki67_with_photo's real photographed FoV companions (`entry.related['photos']`)
 are NOT used, on both eval legs: there is no trustworthy mpp ground truth for
 them. Every leg (train AND both eval legs) is rendered through `Camera`
-(`query_sim/camera.py`, CLAUDE.md's own "central abstraction" — NOT the raw
-`QueryFromWSI`+`simulate_microscope_photo` pair the first draft of this
-package used), so the eval numbers measure cross-DATASET generalisation, not a
+(`query_sim/camera.py`, the central abstraction), so the eval numbers measure cross-DATASET generalisation, not a
 photo-vs-tile domain gap on top of it. Train and eval differ in whether that
 render is reproducible (see "Camera: train vs eval" below) — that difference
 is deliberate, not an inconsistency.
@@ -239,7 +242,7 @@ and the encoder's input — one number, three roles that must agree. It renders
 | `TileSampler` (via `DsLadder.plan`) | `footprint_l0 = tile_size * rung` |
 | `Render` | `rect_w_l0 = output_w * ds = tile_size * rung` |
 
-**What this replaced, and why.** The first draft rendered CLAUDE.md's
+**What this replaced, and why.** The first draft rendered a
 real-photo frame (1440x1024, 45:32, 1.475 MPixels) and cut it into 256 patches
 with `QueryPatchContainer`. That made the two windows above disagree by
 **5.6x**: `build_manifest` asked `TileSampler` to certify a `256*rung` window
@@ -263,7 +266,7 @@ severity:
 **What it is not.** Not a claim that a 256-px photograph is realistic. The
 encoder never consumes a frame — a 1440x1024 photograph reaches it only as 20
 separate 256 patches — so rendering the tile directly is the same input by a
-shorter route. CLAUDE.md's 1440x1024 spec still governs anything that compares
+shorter route. The 1440x1024 photo spec still governs anything that compares
 against real photographs as *frames*; this package's unit of comparison is the
 patch.
 
@@ -364,9 +367,7 @@ beyond that.
 
 Each drawn position → **one** rendered patch (`Render(reader, (tile, tile), cfg,
 ds=rung).capture(x, y)` —
-see "The camera's sensor is ONE TILE" above, and see below for why `Camera`
-and not the raw `QueryFromWSI`+`simulate_microscope_photo` pair the first
-draft used) carrying that position's rung label. Nothing is cut up afterwards:
+see "The camera's sensor is ONE TILE" above) carrying that position's rung label. Nothing is cut up afterwards:
 the sensor is already the tile.
 
 The constraint this satisfies: the encoder must see the query at the
@@ -374,66 +375,6 @@ reference tiles' own effective scale, so a whole frame must never be encoded
 as one vector. Rendering at tile size reaches that
 from the other direction: instead of rendering a frame and splitting it, the
 frame is never rendered.
-
-### Caching — train never persists, eval always does
-
-Not `FeatureStore` (`utilities/FeatureStore.py`) — that module's schema
-(`x, y, region, grid_rc` per WSI per level) is built for a dense per-level
-grid over ONE WSI, read back by coordinate; training data here is a flat,
-order-independent pool of labelled patches, and forcing it through the grid
-schema would mean one degenerate "store" per WSI per rung for no benefit
-anything downstream reads.
-
-**Manifest** (`build_manifest`, unchanged from the first draft): position
-identity only — no pixels, no `Camera` involved at all (`TileSampler`'s own
-seed, a different thing from `Camera`'s). `(dataset_id, wsi_name, x, y,
-rung)` rows, one CSV per (dataset, split). Cheap to build, so it is rebuilt
-whenever the sampler recipe changes rather than invalidated by hand — this
-part is identical for train and eval.
-
-**Train — no persisted cache past the manifest.** `RoutingHeadDataset`
-(a `torch.utils.data.Dataset`) reads manifest rows and renders ON EVERY
-ACCESS via a lazily-built, per-worker `Camera` (see above) — `Camera.
-capture(x, y)`, no `rng`, so every epoch (every access, really) gets fresh
-augmentation. `DataLoader(num_workers=N, collate_fn=collate_routing_batch)`
-is what hides the WSI-read + augmentation latency behind GPU compute — the
-lever that makes NOT caching affordable. Baseline 2's per-step saving still
-holds WITHIN one batch (augment once, encode once with the frozen encoder,
-feed every 2-x head that batch) — it just cannot extend ACROSS epochs the
-way the first (pre-augmentation-aware) draft of this design assumed, because
-the input itself is different every epoch by design.
-
-**Eval — materialised and cached, same shape the first draft had, rebuilt on
-`Camera`.** `materialise_eval_corpus` renders every eval-manifest row through
-`Camera.capture(x, y, rng=derived_from((dataset, wsi_name, x, y, rung)))` —
-deterministic regardless of which `DataLoader` worker handles it or in what
-order — and writes the same uint8 patch shards the first draft's
-`materialise_patches` did. `encode_eval_features` then runs a frozen encoder
-once over those shards and caches the RAW, UN-REDUCED output — `.tokens()`
-for GigaPath/UNI2 (`[N, 197, 1536]`, CLS + 196 patches) or `.spatial()` for
-ConvNeXt V2 flattened to `[N, 49, 768]` — NOT the already-pooled `[N, D]`
-vector, so every 2-x head can derive its own view from ONE cached tensor:
-`LinearHead`/`MlpHead`/`NCM`/etc. read `tokens[:, 0]` (CLS) or
-`spatial.mean(dim=1)` (ConvNeXt's GAP); `AttentionPoolHead` reads
-`tokens[:, 1:]` (patches, CLS excluded — GigaPath's `num_prefix=1` makes this
-right, but UNI2's `num_prefix=9` means the SAME slice would silently fold 8
-register tokens in as if they were patches; the real code must read
-`model_spec.num_prefix` per encoder, not hardcode `[:, 1:]`) or the full
-`spatial` grid. Caching the pooled vector separately would duplicate data
-that already sits inside the raw tensor — one cached tensor, multiple cheap
-views. `.tokens()`/`.spatial()` return fp32 and are NOT L2-normalised (their
-own docstrings say so) — the view-derivation step must cast to fp16 before
-caching and must call `F.normalize` itself when deriving the CLS/GAP view,
-since `.features()`'s automatic normalisation is bypassed by reading the raw
-exit instead.
-
-Baseline 3 (trainable) reads eval's cached pixel shards for scoring, and
-`RoutingHeadDataset` for training — never a feature cache either way, the
-trunk is not frozen. Its three ConvNeXt siblings (3-1 Linear / 3-2 MLP / 3-3
-AttentionPool) do NOT share a trunk forward pass the way baseline 2's heads
-share one encoder pass: each fine-tunes its OWN trunk copy (the trunk's
-weights move differently under each head's gradient), so they are three
-independent training runs, not one loop over three heads.
 
 ### Handle count: WSI-batching, not LRU eviction (2026-09-15)
 
@@ -507,9 +448,12 @@ already uses for every registered encoder (`ModelConfig.dtype = 'fp16'`).
 helper mirror `ConfigIdentity.ModelConfig.dtype`/`torch_dtype()` exactly —
 duplicated rather than imported, because a head has no `arch`/`source`/
 `weights` identity to hang a `ModelConfig` off, but the two must never
-disagree about what `'fp16'` means. (Every trained parameter in `cli/train.py`
-is hardcoded fp32 regardless of this default — see the 2026-09-16 status
-entries below.)
+disagree about what `'fp16'` means. (Every head `cli/train.py` trains is built
+with `dtype='fp32'` regardless of this default: Adam on fp16 weights ends in
+NaN, mechanism in `HeadConfig.dtype`'s docstring. `--dtype` only sets the
+FROZEN encoder's inference precision in baseline 2; a fine-tuned trunk is
+always fp32, and a checkpoint is rebuilt at the dtype it was trained at, not
+the registry default -- `aiNNModel/models/common/Checkpoints.py`.)
 
 ## Encoders available (measured against the installed `timm==1.0.28` /
 `aiNNModel` registry, 2026-09-14 — see session log for the full survey)
@@ -554,11 +498,8 @@ aiNNModel/models/           generic encoder+head plumbing, shared by any task
 
 training/ClassifyingRoutingHead/
     spec.md              this file
-    Datasets.py           split_wsi_names/write_wsi_split (the WSI-level
-                            val/test split, recorded not re-derived);
-                            build_manifest/write_manifest/read_manifest
-                            (positions — the ONLY thing persisted);
-                            RenderConfig + _CameraBank + _render_row (one row
+    Datasets.py           build_manifest (positions);
+                            RenderConfig + CameraBank + render_row (one row
                             renders one patch, the camera's sensor IS the tile);
                             RoutingHeadDataset + collate_routing_batch;
                             group_by_wsi + iterate_epoch (WSI-batched epoch
@@ -588,53 +529,9 @@ query_sim/camera.py    Camera.capture/capture_with_gt gain an optional `rng`
 query_sim/config.py    DomainGapConfig gains vignette_p / distortion_p
 query_sim/pipeline.py  _coin/_maybe — no draw at p=1.0, so every existing
                         corpus reproduces byte-identically
-query_sim/source/wsi_query.py
-                       QueryFromWSI.reads_natively — whether this rung came off
+query_sim/camera.py    Camera.reads_natively — whether this rung came off
                         a pyramid level or was LANCZOS-resampled down
 ```
-
-### Splits, and what may look at which (settled 2026-09-16)
-
-| split | slides | positions | who reads it |
-|---|---|---|---|
-| train | ki67_pure, all 126 | 100/rung | `cli/train.py` |
-| val | `--val-n-wsi` (10) from EACH eval dataset | 20/rung | `cli/train.py`, every epoch |
-| test | `--n-wsi` (5) of what is left, per dataset | 50/rung | `cli/evaluate.py` only |
-
-Test is FEWER slides and DEEPER on each (5 x 6 x 50 = 1500 positions per
-dataset) than val, which is the other way round (10 slides, 20/rung). The five
-are the first five of the recorded test order, which `split_wsi_names` already
-shuffled before splitting -- a prefix of a shuffled list is a sample, and it is
-the same sample every run without a second seed to keep in step with the first.
-Which five were used is readable off the manifest's `wsi_name` column.
-
-### The manifest cache is keyed by a hash, not by a name
-
-```
-ki67_pure/train_3f9a1c2b.csv     the positions
-ki67_pure/train_3f9a1c2b.json    what the eight characters stand for
-```
-
-A manifest is reused whenever it exists, so its filename has to be a complete
-key or it is a trap: a re-run with a changed `--n-per-rung` would silently
-score the old manifest — the flag appearing to have done nothing, and the
-number it produces being real but not the one that was asked for.
-
-The first attempt put the two flags that happened to be on the command line
-into the name (`test_w5_r50.csv`) and was worse than either alternative,
-because `--tile` and `--seed` are just as much part of what the positions are
-and it looked like it was protecting you. `manifest_parts` now lists all
-eleven facts the content depends on and `ConfigIdentity.short_id` hashes them,
-the same idiom the feature stores use for `StoreMeta.encoder_id`.
-
-The sidecar JSON is what keeps that hash from being the opaque kind CLAUDE.md
-objects to: `ls` shows eight characters, and the file beside it says exactly
-which eleven facts they stand for. Two of those eleven are recorded by NAME
-rather than by value — `richness=RichnessConfig()` and `overlap=OverlapConfig()`
-— because this package only ever uses the defaults and spelling out seven
-buckets' floors and caps would be a second copy of a contract that lives in
-`TileSampler`. That is a stated limit: a caller passing a non-default one has
-to grow that line.
 
 ### The native/resampled split only means anything inside one dataset
 
@@ -682,11 +579,10 @@ returns `(row, patch, label, native)` and `collate_routing_batch` keeps `rows`
 as a plain list, since it is identity rather than a quantity.
 
 The split is at WSI level, so no position from one slide can land on both
-sides. `split_wsi_names` sorts before its seeded shuffle (`list_names` returns
-registry order, which nobody controls) and `write_wsi_split` records the answer
-in the recorded split; `evaluate.py` READS it rather than re-deriving the
-split, because a split recomputed from `--seed` is one library version away
-from quietly putting val slides into test.
+sides. Val and test are the virtual datasets `utilities/cli/build_cache/make_dataset.py`
+writes (`@legacy-val`, `@legacy-test`); `train.py` and `evaluate.py` READ them
+rather than re-deriving a split from `--seed`, because a split recomputed from
+a seed is one library version away from quietly putting val slides into test.
 
 Val spans both eval datasets deliberately: selecting on it selects for
 cross-dataset generalisation, which is the thing this package exists to
@@ -700,14 +596,17 @@ epoch happened to be.
 ### Weight files
 
 ```
-<run>/weights/<encoder>_<frozen|finetuned>_<head>_<last|best>.pt
-              gigapath_frozen_arcface_best.pt
-              convnext_v2_finetuned_linear_best.pt
+<run>/weights/<data>--<encoder>--<frozen|finetuned>--<head>--<loss>[--<read_tag>]--<last|best|best_unweighted>.pt
+              pure-train_Ki67--gigapath--frozen--mix_attn_linear--ord_a--best_unweighted.pt
 ```
 
-- **Encoder first**, because `_paths.encoder_tag(encoder, head)` already spells
-  an encoder-plus-head name that way and CLAUDE.md's result paths follow it
-  (`conch_vit_attn_pool`). A second ordering for the same pair of facts would
+- **Data first**, then the encoder: two trainings of one arm on two datasets
+  never overwrite each other. `weight_filename` and `data_tag` in
+  `aiNNModel/models/common/Checkpoints.py` are the definition; `loss` is always
+  a segment, `bal` too.
+- **Encoder before head**, because `_paths.encoder_tag(encoder, head)` already
+  spells an encoder-plus-head name that way and the result paths follow
+  it (`conch_vit_attn_pool`). A second ordering for the same pair of facts would
   be a second convention.
 - **`encoder` is the registry name** (`convnext_v2`, never `ConvNeXt`) — the
   same rule that governs `--encoders`.
@@ -719,9 +618,12 @@ epoch happened to be.
   together and a mismatched pair of files is a failure mode worth making
   impossible. It also keeps a future FROZEN `convnext_v2` baseline-2 head from
   colliding with baseline 3's fine-tuned one.
-- **Two tags, not one file per epoch.** With several heads and ten epochs,
-  per-epoch checkpoints are tens of GB nobody opens; the only two ever asked
-  for are "the one that scored best" and "the one training ended on".
+- **Three tags, not one file per epoch.** With several heads and ten epochs,
+  per-epoch checkpoints are tens of GB nobody opens; the only ones ever asked
+  for are "the one training ended on" (`last`) and "the one that scored best",
+  which comes in two selections: `best` on the n-weighted val accuracy over both
+  eval datasets, `best_unweighted` on the plain mean of the two per-dataset numbers
+  (`cli/train.py`'s `save_tagged`).
 
 A checkpoint carries enough to REBUILD the model, not merely to reload into one
 the reader guessed correctly: encoder name, frozen flag, head name, reduction
@@ -765,133 +667,3 @@ epochs and a test number reproducible across runs.
 The manifest is still written, and is the exception that proves the rule: it
 holds positions and no pixels, rebuilding it means HSV segmentation over 126
 slides, and nothing about it can freeze an augmentation.
-
-## Status (2026-09-16)
-
-Done: `aiNNModel/ConvNeXtV2Func.py` (registered as `convnext_v2`).
-`AccessDatasets.list_names(dataset=)`. `Models.py` — `HeadConfig`/
-`torch_dtype`, `LinearHead`, `MlpHead`, `ArcFaceHead` (2-3),
-`AttentionPoolHead`. `cli/train.py` — `ARMS`/`Arm`/`arms_for`, both
-baselines, one `scores.csv`. `query_sim/camera.py` — `Camera.capture`/
-`capture_with_gt` gained the optional `rng` parameter (additive, every
-existing caller unaffected — verified by reading all nine, not just by the
-diff being small). `Datasets.py` — `build_manifest`/`write_manifest`/
-`read_manifest` (position identity, unchanged in spirit from the first
-draft); `_CameraBank`/`RoutingHeadDataset`/`collate_routing_batch` (train,
-live Camera render per access via a per-worker-lazy `_CameraBank`, no
-persisted cache); `group_by_wsi`/`iterate_epoch` (WSI-batched epoch loop,
-bounds handle count structurally — see "Handle count" above);
-`materialise_eval_corpus`/`load_patch_shards`/
-`encode_eval_features`/`load_eval_features`/`pooled_view`/`grid_view` (eval,
-deterministic Camera render + cached raw `tokens()`/`spatial()`, `num_prefix`
--aware view derivation). `Runtime.py` and `cli/evaluate.py`; the val/test
-split, checkpointing, and the removal of every rendered-corpus cache.
-`Runtime.wandb_init`/`wandb_log`/`wandb_finish`/`wandb_epoch_metrics` and the
-matching `--wandb-project`/`--wandb-mode`/`--run-name` in `cli/train.py` — same
-optional-dependency idiom as `SuperPathPoint/SuperPoint/Trainer.py`, one run
-per MODEL (per encoder in baseline 2, per arm in baseline 3, since that is the
-boundary each already trains at), logging exactly the rows that become
-`val_scores.csv` rather than a second computation of the same numbers.
-`--wandb-mode` defaults to `WANDB_MODE` (`jobscripts/_env.sh`), so a smoke run
-goes offline via the environment, matching the other two training loops.
-This package had NO wandb code before 2026-09-16 — a request to turn wandb off
-during a smoke run had nothing here to act on, which is what the request
-actually meant until this landed.
-
-**The fp16-head NaN regressed on the first full run (2026-09-16), after
-already being "fixed."** `HeadConfig.dtype`'s dataclass default was changed to
-`'fp32'`, but both `cli/train.py` construction sites still called
-`HeadConfig(..., dtype=args.dtype)` and `--dtype`'s own CLI default was still
-`'fp16'` — an explicit keyword always wins over a dataclass default, so the
-smoke run (which happened not to exercise that path the same way) looked
-fixed while the full run reproduced `loss ... nan` on every arm. Fixed at the
-actual call sites: both `HeadConfig(...)` constructions now hardcode
-`dtype='fp32'`, and `--dtype` is repointed to the one thing it can safely mean
-— baseline 2's FROZEN encoder's inference precision — with its help text
-saying so explicitly. `Models.py`'s `HeadConfig` docstring now says up front
-that the dataclass default alone fixes nothing if a caller forwards a CLI
-flag on top of it.
-
-**That repointing crashed the very next run**: `encoder_config(encoder_name,
-dtype=args.dtype)` raised `TypeError: __init__() got an unexpected keyword
-argument 'dtype'`. `dtype` is not a top-level field of `TileEncoderConfig` —
-it lives on the nested `ModelConfig`, and `TileEncoder.variant(dtype=...)`'s
-nested-replace only exists for an already-built `TileEncoder` instance, not
-for `encoder_config`/`config_from`'s plain `cls(**over)`. Fixed to build the
-config first and `dataclasses.replace` the nested `model` field directly —
-the exact pattern `run_baseline3` already used for the trunk, now used
-symmetrically for baseline 2's frozen encoder.
-
-**A fourth precision bug, found on review rather than by a failed run:**
-`Runtime.build_from_checkpoint` built the encoder at its registry's own
-default dtype and then, for a fine-tuned checkpoint, called
-`encoder.model.load_state_dict(ckpt['trunk_state'])` on top of it.
-`ConvNeXtV2EncoderConfig`'s own default is `dtype='fp16'`, while
-`run_baseline3` trains the trunk at `fp32` — so every baseline-3 test-set
-score `cli/evaluate.py` had ever produced would have been scoring a trunk
-silently downcast to fp16 on load (`Tensor.copy_`, which `load_state_dict`
-uses internally, casts on a dtype mismatch with no error and no warning).
-Fixed by forcing `dtype='fp32'` unconditionally for a fine-tuned checkpoint
-(never anything read back from `args` — a fine-tuned trunk here is always
-fp32, full stop) and, for a frozen checkpoint, by building at the exact
-`--dtype` training used (`ckpt['args']['dtype']`) rather than the registry
-default, for exactness even though that particular gap's measured effect is
-negligible (cos=0.99995, and `tokens()`/`spatial()` always cast their output
-back to fp32 regardless of the internal compute dtype).
-
-**`QueryFromWSI.reads_natively` was too strict to mean what it claims,** found
-from the FIRST full run's real val numbers: BRACS's own docstring ("four
-levels: ds 1, 4, 16, 32") turned out not to hold literally across its slides
-(measured level_downsamples include a 4th level near 64 on some, near 32 on
-others, and one held-out slide with only three levels at all) — but the
-larger issue was `reads_natively`'s own arithmetic. It compared
-`(self._read_w, self._read_h) == (self.output_w, self.output_h)`, and
-`_read_w = int(w_um / self.chosen_mpp)` TRUNCATES; a measured level downsample
-is essentially never a bit-exact integer (the reason `utilities/SafeSlide.py`
-already carries `_LEVEL_REL_TOL = 1e-3` for the identical problem). A level at
-ds=4.0000226 — six PARTS PER MILLION off the target — truncated `256*4/
-4.0000226 = 255.9985` down to 255, one pixel short of 256, and got called
-"resampled": indistinguishable, under the old code, from the genuinely
-2x-different case one rung over. Effect on the numbers: bracs/test's val
-showed `n_native=220` (≈ rung 1 alone) against `n_resampled=870` (rungs
-2/4/8/16/32 all lumped in), which is why the observed "resampled accuracy" was
-so low — it was mostly measuring the ALREADY-DIAGNOSED class-imbalance problem
-(rung 16/32 have almost no training supply) rather than anything about
-LANCZOS. Fixed by comparing `chosen_mpp` to the requested `mpp` with the same
-`1e-3` relative tolerance instead of a post-truncation pixel count. Re-derived
-by hand against the run's own printed diffs: rung 4 and 16 become native on
-essentially every BRACS slide (diffs of 1e-5–1e-4), rung 32 becomes a genuine
-per-slide split (native on the ~6/10 slides whose 4th level lands near 32,
-resampled on the rest), and rungs 2/8 stay resampled (diff ≈ 1.0, a real 2x).
-A currently-running job does not pick this up until restarted (Python modules
-load once); `cli/evaluate.py`, invoked as a fresh process after training
-finishes, does.
-
-**Class-weighted loss, added to fix the SAME class-imbalance problem at its
-actual source rather than only diagnose it.** `Datasets.class_weights(rows,
-device)` computes sklearn's 'balanced' weights (`w_c = N / (K * n_c)`) from
-the training manifest's own rung counts, once per run and reused every epoch;
-`cli/train.py` passes it to every `F.cross_entropy(..., weight=...)` call in
-both baselines. `--class-weight {balanced,none}`, default `balanced`; `none`
-restores the old unweighted behaviour for comparison. Val/test scoring is
-unaffected — `Runtime.predict` never computes a loss, only accuracy, so
-nothing there needed to change.
-
-Every touched file `py_compile`s clean; NOT run
-(no `python` execution on the login node — see `who-runs-commands` — so the
-actual `Camera`/encoder/DataLoader-worker wiring is unverified at runtime).
-
-Not yet written: the jobscript (`jobscripts/ClassifyingRoutingHeadJobs/Train.sh`), and
-arms **2-2 (NCM)** and **2-4 (Mahalanobis)**. Those two are not blocked on
-design but on plumbing: neither is trained by gradient descent — they fit
-statistics in one pass (per-class means; means plus a pooled covariance) — so
-they need a fit-once path beside `train()`'s `backward()`/`step()`, and
-because training photos are rendered fresh every epoch that accumulation has
-to stream (per-class sums and counts, plus `sum(x x^T)` for 2-4) rather than
-hold a feature matrix. 2-4 has exactly one viable form at D=1536: a POOLED
-covariance with shrinkage toward `(tr/D)*I`, i.e. LDA — per-class covariance
-is 2.4M parameters six times over, far past what the sample count supports,
-and inverting a badly estimated one amplifies precisely the noise directions.
-Worth noting where that lands it: with equal priors and a shared covariance,
-`-d^2` collapses to a LINEAR classifier, so 2-4 against 2-1 is "the same
-decision family, boundary computed from statistics vs learned by SGD".

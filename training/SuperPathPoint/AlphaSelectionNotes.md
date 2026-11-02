@@ -218,7 +218,7 @@ excess 在峰值,同時 decoy 的 excess 維持接近 0。**
    分位數擋掉「tau 低於 q0.5/q0.9」的 alpha（假死),再用 decoy_rate 或
    decoy-excess 擋掉「已經在製造假活」的 alpha,剩下的候選裡才談 gap 或
    excess 最大化。
-4. `classic_region` 的前車之鑑（`ClaudeRules.md`）:固定門檻在不同 WSI/不同
+4. `classic_region` 的前車之鑑:固定門檻在不同 WSI/不同
    位置差 2 倍,特徵被整個拿掉,不是重新校準——好 alpha 或許要找的是「所有
    rung 都還算不錯的穩定平原」,不是單一尖銳峰值,以換取跨資料集的穩健性。
 

@@ -1,8 +1,16 @@
 # PrototypicalRoutingHead — spec
 
+> **2026-11-02 核對（正文是 2026-09 的設計，沒有逐段改；現況見 `plan.md`）：** 主線已實作並接進 stage 1
+> （`stage1_estimation/PrototypeEstMpp.py`）。Stage 2／3 的 registry 在 `aiNNModel/models/PrototypeChoices.py`，不在訓練套件裡；
+> Stage 2 的 generator 類別都在 `PrototypeGenerators.py`；通用 checkpoint 在 `aiNNModel/models/common/Checkpoints.py`、
+> `common/Head.py`。Matching Net 不是檔案也不是 registry 的名字，是一個組合
+> （`--support-context bilstm --query-context attnlstm --collapse off --routing-head cosine_logsumexp`）。
+> Stage 4 的 baseline 入口 2026-09-22 已刪（見 `plan.md`）。正文裡的 `generator_cfg`、`training_arch`
+> 是設計時的名稱，程式裡找不到；`ClassifyingRoutingHead/Datasets.py` 的 `_CameraBank`／`_render_row` 現在叫 `CameraBank`／`render_row`。
+
 Same task as `training/ClassifyingRoutingHead`: route an unknown tile/photo to the
 `DsLadder` rung (equivalently, the mpp) it was taken at. Different mechanism —
-this is the "ultimate goal" `ClassifyingRoutingHead/spec.md` names and defers: given a
+this is the line `ClassifyingRoutingHead/spec.md` points to: given a
 handful of prototype tiles each labelled with their own scale, tell an unknown
 tile which one it is closest to, so that a NEW WSI (a new `base_mpp`, a new
 scanner) needs a fresh set of prototypes, not a fresh training run.
@@ -45,6 +53,27 @@ construction" under Stage 4) — the model never sees the full 6-way task
 during that training. `stage1_compare` scoring is still the full 6-way
 task; see Stage 4 for why training on a strict subset of it is deliberate,
 not a simplification of it.
+
+## 詞彙
+
+CSV 欄位、checkpoint 的 key、CLI 參數都照這張表的名字。「arm」在這個專案有自己的意思，跟
+`ClassifyingRoutingHead`（2026-09-17 把 `arm` 改名成 `head`／`baseline`）不同。
+
+| 中文 | English | 定義 |
+|---|---|---|
+| 支持集 | support | 用來產生 prototype 的 tile，每個 rung 若干張，標了自己的 rung |
+| 查詢 | query | 要被分類的 tile；support 與 query 過同一個 `Pooling`、同一組權重 |
+| 原型 | prototype | 一個 rung 的 support 經 Stage 2 縮成的向量（Matching Net 組合沒有這一步） |
+| episode | episode | 一次抽樣：一組 support 加一組 query，來自 N 個 rung；訓練的單位 |
+| N-way | N-way | 一個 episode 裡有幾個 rung。訓練只用 3、4、5；完整的 6-way 是部署任務，訓練從不練 |
+| rung 組合 | combo | 一個 episode 用到的 rung 子集；`Episodes.HELD_OUT_COMBOS` 是保留給驗證的組合，其中含完整 6-way |
+| 池化 | pooling | 把 tile 的 raw 輸出縮成一個向量：`cls`（預設）／`avg`／`max`／`attn`；passthrough 被拒絕（collapse 需要每個 tile 一個向量）；`aiNNModel/models/Pooling.py` |
+| G／F／collapse | G／F／collapse | Stage 2 的三個獨立子階段：G 是 support 的 context、F 是 query 的 context、collapse 把 support 縮成 prototype 或關掉（`off`） |
+| 路由頭 | routing head | Stage 3，拿 query 與 prototype 算每個 rung 的 logit：`cosine_tau`、`cosine_logsumexp`、`attn_score` |
+| 主線／觀察臂 | main line／arm | 在 Stage 2／3 裡，「arm」是一個可選的實作；主線先單獨建、先打分，觀察臂之後一次加一個 |
+| 訓練方式 | `training_framework` | Stage 4 的三選一：`metric_based`／baseline／optimization-based。欄位名不叫 `arm`、不叫 `training_arch`（理由見 Open design decisions 7） |
+| 重用模式 | `--episode-reuse` | `none`、`hold_s`（固定 support、換 K 批 query）、`hold_q`（固定 query、換 K 批 support）；K 是 `--reuse-k` |
+| 原生／重新取樣 | native／resampled | 一張 tile 是否直接讀自該 rung 的金字塔層（`Camera.reads_natively`）；`--support-native` 控制 support 取原生的比例 |
 
 ## Architecture — four stages, each a real decision point
 
@@ -339,8 +368,7 @@ computed from it:
 
 Current lean: **build Reptile first.** It needs no second-order gradients
 and no functional-parameter machinery at all, which matters given this
-codebase's fp16-under-Adam NaN history (`ClassifyingRoutingHead spec.md`'s Status
-section) -- the fastest path to a real answer on whether optimization-based
+codebase's fp16-under-Adam NaN history (`HeadConfig.dtype`'s docstring in `aiNNModel/models/Heads.py`) -- the fastest path to a real answer on whether optimization-based
 training helps here at all, with FOMAML as the next step up in fidelity if
 Reptile's result looks worth sharpening, and full MAML last. Not yet a
 final decision.
@@ -360,11 +388,10 @@ final decision.
    checkpoint` lazily imports `Pooling`/`SetTransformerPrototype`/
    `PrototypeRoutingHeads` from `aiNNModel/models/` (never from a training
    package — see decision 4 below for why that direction matters).
-2. **Stage 2/3 shared cross-attention module's home.** One class, used as
-   Stage 2's Matching Net AND Stage 3's Learnable Arm 2 — goes in
-   `aiNNModel/models/` (it is encoder/head plumbing, not training logic) as
-   its own file, tentatively `aiNNModel/models/CrossAttentionMatch.py`. Not
-   yet built (plan.md step 5).
+2. **Stage 2/3 shared cross-attention module — SUPERSEDED.** The one class meant to serve Stage 2's Matching Net AND
+   Stage 3's Learnable Arm 2 was never built as its own file. Matching Net became a composition of `ContextEncoders.py`
+   (`bilstm` support context, `attnlstm` query context) with `cosine_logsumexp`; the learned cross-attention route is
+   `PrototypeRoutingHeads.AttnScoreHead`.
 3. **Set Transformer's own home — RESOLVED, built.** `aiNNModel/models/
    PrototypeGenerators.py` (merged there 2026-09-21 with the other Stage 2
    arms, decision 8), same reasoning as 2.
@@ -373,76 +400,31 @@ final decision.
    decision 1's checkpoint code needed to rebuild it: `Checkpoints.py`
    lives in the GENERIC layer (`aiNNModel/models/common/`), and having it
    import a class from a TASK-SPECIFIC training package would invert the
-   dependency direction CLAUDE.md's repo-layout section establishes — the
+   dependency direction — the
    generic layer is what task packages depend on, never the reverse.
    `Pooling` is encoder/head plumbing exactly like `SetTransformerPrototype`
    (nothing about Avg/Max/Attn/passthrough is specific to this one task), so
    it belongs where that already lives, not where it happened to be written
    first.
-5. **Multi-arm training infrastructure — RESOLVED, built 2026-09-20.** The
-   eventual shape (user's own framing): three INDEPENDENT axes stacked
-   together — Stage 4 training regime (baseline / metric-based /
-   optimization-based) × Stage 2 generator (Set Transformer / shared MLP /
-   Matching Net) × Stage 3 routing head (Cosine+τ / cross-attention). Built
-   the SEAM, not the cross product — none of the non-main-line arms exist
-   yet (plan.md step 5 is still "one at a time"), so there is nothing to
-   select between besides today's one entry per axis. Concretely:
-   - `Runtime.py` (new): `GENERATOR_CHOICES`/`ROUTING_HEAD_CHOICES` — see
-     the file's own docstring for why each entry is a BUILDER FUNCTION
-     rather than a `(class, config_class)` tuple `ClassifyingRoutingHead.
-     HEAD_CHOICES`-style: a future arm's config shape (Matching Net's own
-     W_q/W_k dims) is not yet known, and forcing one shape now would be
-     guessing it before a second entry exists to test it against.
-     `ROUTING_HEAD_CHOICES` still has one entry (`cosine_tau`).
-     `GENERATOR_CHOICES` gained three MORE (2026-09-20, plan.md step 5.1
-     moved first — none of `mean`/`median`/`shared_mlp` needs
-     `CrossAttentionMatch.py` to exist, unlike Matching Net):
-     - `mean`/`median` (`aiNNModel/models/PrototypeGenerators.py` --
-       merged there 2026-09-21 with the other Stage 2 arms, all THREE
-       generator files consolidated into one, matching how
-       `PrototypeRoutingHeads.py` already puts every Stage 3 arm in one
-       file rather than one per file) — the zero-parameter floor for this
-       axis (Stage 4's own floor, `cli/train_baseline.py`, was deleted
-       2026-09-22, its inference-time positioning never settled).
-     - `shared_mlp` (same file) — Deep Sets
-       (Zaheer et al. 2017): the same small MLP applied to each support
-       member independently, no cross-member interaction, then mean-pooled.
-       The direct comparison point for "does `set_transformer`'s
-       cross-member self-attention buy anything over a per-member learned
-       transform". Built with comparable depth (2) and BOTH an outer and
-       inner residual, deliberately NOT narrower (`width_mult=1.0`, not
-       0.5) — see that file's own docstring: a narrower/non-residual MLP
-       would confound "less capacity"/"no residual anchoring" with "no
-       attention", muddying the one axis this arm exists to isolate. A
-       narrower variant is a legitimate SECOND question, a separate
-       registry entry once this one has a real number.
-   - `cli/train.py` gained `--generator`/`--routing-head`, resolved through
-     that registry; checkpoint filenames and `extra` now record both
-     choices, so a second arm's checkpoint is at least identifiable on disk
-     before `build_prototype_from_checkpoint` is made registry-aware (real
-     work for whenever that second arm exists, not done now).
-   - `cli/train_baseline.py` did NOT read this registry as of 2026-09-20 --
-     ITS OWN Stage-3 choice went through `Heads._CLASSIFIER_REGISTRY`
-     instead, because `common.Head.Head`'s classifier shape (`features`
-     alone) and a routing head's shape (`query, prototypes` explicit) are
-     not interchangeable through `Head`'s own `classifier(cfg)`
-     construction contract. SUPERSEDED 2026-09-21 (Open design decisions,
-     7): that file stopped going through `common.Head.Head` at all, so the
-     shape mismatch that justified two separate registries no longer
-     applies to it -- it now reads `Runtime.ROUTING_HEAD_CHOICES` directly,
-     the SAME registry `cli/train.py` uses. `Heads._CLASSIFIER_REGISTRY`
-     lost its `'prototype_cosine'` entry once nothing built through `Head`
-     needed it any more.
-   - Stage 4 (training regime) stays THREE SEPARATE CLI scripts, not one
-     merged entry point — their data flow shapes genuinely differ (one
-     encoder pass / episodic support-query / episodic + inner-loop
-     gradients) and their CLI argument sets barely overlap
-     (`n_support`/`n_query`/`--episode-reuse` mean nothing to the baseline arm).
-     Same principle `ClassifyingRoutingHead/cli/train.py`'s own `run_baseline2`/
-     `run_baseline3` split uses (one file, two functions, because the two
-     shapes differ) — this project just needed the split one level up, at
-     the file boundary, because even the CLI surface diverges, not only the
-     inner loop.
+5. **Multi-arm training infrastructure — RESOLVED, built 2026-09-20; the shape has changed since.** The eventual shape
+   (user's own framing): three INDEPENDENT axes stacked together — Stage 4 training regime (baseline / metric-based /
+   optimization-based) × Stage 2 (pool → G → F → collapse) × Stage 3 routing head. Built the SEAM, not the cross product.
+   - The four registries (`SUPPORT_CONTEXT_CHOICES`/`QUERY_CONTEXT_CHOICES`/`COLLAPSE_CHOICES`/`ROUTING_HEAD_CHOICES`) are
+     in `aiNNModel/models/PrototypeChoices.py`; `Runtime.py` re-exports them, and `cli/train.py` resolves `--support-context`/
+     `--query-context`/`--collapse`/`--routing-head` through them. The checkpoint records the four names. Each entry is a
+     BUILDER FUNCTION, not a `(class, config_class)` tuple `ClassifyingRoutingHead.HEAD_CHOICES`-style: what config shape
+     an arm needs is not known before a second entry exists to test it against.
+   - `COLLAPSE_CHOICES`: `set_transformer` (main line), `mean` (the zero-parameter floor; `median` was cut from the
+     comparison surface), `shared_mlp`, `attn_pool`, `off`. `shared_mlp` is Deep Sets (Zaheer et al. 2017): the same small
+     MLP applied to each support member independently, then mean-pooled — the direct comparison point for "does
+     `set_transformer`'s cross-member self-attention buy anything over a per-member learned transform". Built with
+     comparable depth (2) and BOTH an outer and inner residual, deliberately NOT narrower (`width_mult=1.0`, not 0.5) —
+     see its docstring: a narrower/non-residual MLP would confound "less capacity"/"no residual anchoring" with "no
+     attention", muddying the one axis this arm exists to isolate. A narrower variant is a legitimate SECOND question, a
+     separate registry entry once this one has a real number.
+   - Stage 4 regimes would be SEPARATE CLI scripts, not one merged entry point: their data flow shapes genuinely differ
+     (one encoder pass / episodic support-query / episodic + inner-loop gradients) and their CLI argument sets barely
+     overlap. Only `cli/train.py` (metric-based) exists; the baseline entry was deleted 2026-09-22 (see `plan.md`).
    - `cli/train.py` imports `training.PrototypicalRoutingHead.Runtime`
      despite `training/ClassifyingRoutingHead/Runtime.py` sharing the bare name
      `Runtime.py` — RESOLVED by construction: `training/`,
@@ -478,7 +460,7 @@ final decision.
      stays identical epoch to epoch — same reasoning `ClassifyingRoutingHead.
      predict`'s own `epoch_seed=0` gives.
    - The scoring formula (`score`/`rescore`) is kept in sync with
-     `ClassifyingRoutingHead/cli/train.py`'s and `cli/train_baseline.py`'s own —
+     `ClassifyingRoutingHead/cli/train.py`'s own —
      these were ADDED to this package's own `Runtime.py` (a duplicate of
      `ClassifyingRoutingHead/Runtime.py`'s same-named functions, same bare-name-
      collision reasoning as decision 5's wandb section), not written a
@@ -504,160 +486,77 @@ final decision.
      drew), so there is no tile-count skew here for rung-averaging to
      correct (that skew is `RICHNESS`'s own coarse-rung TRAINING
      shortfall, with no equivalent at the per-episode level).
-   - CHECKPOINT SELECTION reads TWO scalars derived directly from `combo_
-     report`'s own rows, not a blended summary: `_best.pt` on `_deployment
-     _accuracy` (the full 6-way combo's own accuracy, n-weighted across
-     the two eval datasets — the actual deployment task, never rehearsed
-     by training, so the checkpoint most representative of "does it do
-     the job" rather than of the easier compositional-generalisation
-     probes); `_best_diagnostic.pt` (renamed from `_best_unweighted.pt`)
-     on `_diagnostic_accuracy` (the plain mean across every combo AND
-     dataset — a broader signal, kept as a SEPARATE file specifically so
-     a checkpoint that only excels at the deployment-scale probe is
-     visible as a difference between the two saved checkpoints, not
-     hidden inside one blended number). Via a new `save_tagged`/`_prototype
-     _weight_filename` pair in `cli/train.py` itself — the prototype-
-     checkpoint format (`save_prototype_checkpoint`, three modules) has no
-     `weight_filename`-equivalent of its own yet, so this is a LOCAL
-     naming convention (`<encoder>_frozen_<pooling>_<generator>_
-     <routing_head>_<tag>.pt`), not a reuse of `Checkpoints.weight_
-     filename` (shaped for one `Head`).
-   - Still NOT solved: the actual GENERALISATION QUALITY question (does
-     the model do well on held-out combos/WSIs) has no answer yet — this
-     decision built the MEASUREMENT, not a result. `evaluate.py` (test
-     split, spec.md's Files section) is still not built either.
-7. **Pooling/RoutingHead unified across Stage 4 arms; `arm`→
-   `training_framework` — RESOLVED, built 2026-09-21.** User's own framing,
-   settled after several rounds: Pooling/Generator/RoutingHead are
-   properties of the MODEL, independent of Stage 4 (which regime trained
-   it) — a generator's absence in the BASELINE arm is not a limitation to
-   work around, it is Chen et al.'s own definition of "Baseline" (no
-   support set at training time, so nothing for a generator to act on).
-   - `cli/train_baseline.py` gained `--pooling`/`--routing-head`, reading
-     the SAME `Pooling`/`Runtime.ROUTING_HEAD_CHOICES` `cli/train.py`
-     already uses — no `--generator`, and none is planned for this arm.
-   - This meant leaving `common.Head.Head`/`Heads._CLASSIFIER_REGISTRY`:
-     `Head`'s classifier contract (`classifier(cfg)`, one positional arg)
-     cannot carry a `--routing-head` CHOICE through construction.
-     `LearnedPrototypeClassifier` (`aiNNModel/models/
-     PrototypeRoutingHeads.py`) is now `routing_head`-injected instead of
-     hardcoding `CosineTauHead` — it wraps WHICHEVER `ROUTING_HEAD_CHOICES`
-     entry was chosen around its own learned weight matrix, rather than
-     duplicating a distance function. `Heads._CLASSIFIER_REGISTRY` lost its
-     `'prototype_cosine'` entry (dead once nothing built through `Head`
-     needed it) and the import that supported it.
-   - `Checkpoints.save_prototype_checkpoint` gained an OPTIONAL
-     `generator`/`generator_cfg` (default `None`) rather than getting a
-     fourth, parallel checkpoint-saving function written for the
-     two-module (pooling + classifier, no generator) shape — `cli/
-     train_baseline.py` calls it with both left `None`.
-     `build_prototype_from_checkpoint` still rebuilds the three-module
-     shape unconditionally on the READ side; making it handle a
-     `None`-generator checkpoint is unstarted, same "not registry-aware
-     yet" caveat decision 1 already names.
-   - `cli/train_baseline.py`'s local `score`/`rescore`/`rescore_by_rung`/
-     `wandb_init`/`wandb_log`/`wandb_finish` copies were REMOVED in favour
-     of importing them from this package's own `Runtime.py` — the
-     bare-name-collision concern that justified the duplicates no longer
-     applies (verified: a script IN this package importing `Runtime`
-     resolves to this package's own file), it just had not been revisited
-     since `Runtime.py` was built.
-   - `arm` renamed to `training_framework` in both files'
-     `_IDENTITY_FIELDS` — `arm` is this project's own term (spec.md's
-     Stage 4 comparison table), but is ALSO used loosely throughout
-     spec.md's prose for Stage 2/3 observation arms, so as a COLUMN NAME
-     specifically identifying "which Stage 4 regime" it was ambiguous;
-     `training_framework` names that one axis precisely. Chosen over
-     `training_arch` on purpose: "architecture" is what Pooling/Generator/
-     RoutingHead now ARE (this decision's whole point), so naming the
-     Stage 4 axis "arch" would contradict the distinction just established.
-8. **Stage 2's generator files consolidated into one — RESOLVED, built
-   2026-09-21.** `SetTransformerPrototype.py`/`TrivialPrototype.py`/
-   `SharedMlpPrototype.py` merged into `aiNNModel/models/
-   PrototypeGenerators.py` -- three separate files was never a deliberate
-   choice for this axis, just how they happened to get written one at a
-   time; `PrototypeRoutingHeads.py` already puts every Stage 3 arm in ONE
-   file, so Stage 2 having three was the inconsistent one. `Runtime.py`'s
-   own import and `Checkpoints.build_prototype_from_checkpoint`'s lazy
-   import both updated; class names (`SetTransformerPrototype`,
-   `TrivialPrototype`, `SharedMlpPrototype`) are unchanged, only which
-   file they live in moved. Matching Net (plan.md step 5.1) goes in this
-   same file when it is built.
+   - CHECKPOINT SELECTION (rewritten 2026-11-02 against `cli/train.py`'s `save_tagged`;
+     the earlier `_deployment_accuracy` / `_best_diagnostic.pt` design is gone).
+     Three files, three criteria, because they do not always pick the same epoch:
+     `--best.pt` when no dataset (its mean over combinations of rungs) scores below
+     the saved epoch's number and at least one scores above it
+     (`improves_everywhere`); `--6rung.pt` on the full 6-way combination, mean over
+     datasets — the actual deployment task, never rehearsed in training;
+     `--native.pt` on the mean over combinations whose every query rendered
+     natively (no resampled pixels). The names come from
+     `_prototype_weight_filename` (`Checkpoints.weights_name` segments, the data
+     from `data_tag`), the tag last.
+   - At the time the actual GENERALISATION QUALITY question (does the model
+     do well on held-out combos/WSIs) had no answer — this decision built the
+     MEASUREMENT, not a result. `cli/evaluate.py` (test split) came later.
+7. **Pooling/RoutingHead unified across Stage 4 regimes; `arm`→`training_framework` — RESOLVED 2026-09-21.** User's own
+   framing, settled after several rounds: Pooling/Generator/RoutingHead are properties of the MODEL, independent of
+   Stage 4 (which regime trained it) — a generator's absence in the BASELINE regime is not a limitation to work around, it
+   is Chen et al.'s own definition of "Baseline" (no support set at training time, so nothing for a generator to act on).
+   - `arm` renamed to `training_framework` in `_IDENTITY_FIELDS` — `arm` is this project's own term (spec.md's Stage 4
+     comparison table), but is ALSO used loosely throughout spec.md's prose for Stage 2/3 observation arms, so as a COLUMN
+     NAME specifically identifying "which Stage 4 regime" it was ambiguous; `training_framework` names that one axis
+     precisely. Chosen over `training_arch` on purpose: "architecture" is what Pooling/Generator/RoutingHead now ARE
+     (this decision's whole point), so naming the Stage 4 axis "arch" would contradict the distinction just established.
+8. **Stage 2's generator classes consolidated into one file — RESOLVED 2026-09-21.** `SetTransformerPrototype`,
+   `TrivialPrototype`, `SharedMlpPrototype` (and later `AttnPoolPrototype`) live in ONE file,
+   `aiNNModel/models/PrototypeGenerators.py` — three separate files was never a deliberate choice, just how they got
+   written one at a time; `PrototypeRoutingHeads.py` already puts every Stage 3 arm in one file. Matching Net is not a
+   file: it is a composition (`PrototypeChoices.py`'s docstring).
 
 ## Files
 
 ```
-aiNNModel/models/                    UNCHANGED except three new files
+aiNNModel/models/                    UNCHANGED except the Prototype*/Pooling/ContextEncoders files below
     Pooling.py                        NEW -- the shared support/query pooling
-                                     module (built): Avg/Max/Attn/
-                                     passthrough, Attn wraps Heads.
-                                     AttentionPoolHead. MOVED here from
-                                     training/PrototypicalRoutingHead/
-                                     2026-09-20 -- it is generic encoder/head
-                                     plumbing, same kind as
-                                     PrototypeGenerators.py, and
-                                     Checkpoints.py (below) rebuilding it on
-                                     load would otherwise mean the GENERIC
-                                     layer importing FROM a task-specific
-                                     training package, backwards
-    PrototypeGenerators.py            NEW -- Stage 2, every generator arm in
-                                     ONE file (merged 2026-09-21 from three
-                                     separate files -- SetTransformerPrototype.py/
-                                     TrivialPrototype.py/SharedMlpPrototype.py --
-                                     which was the odd one out, not a
-                                     deliberate choice: PrototypeRoutingHeads.py
-                                     already put every Stage 3 arm in one
-                                     file, so Stage 2 now matches):
-                                     SetTransformerPrototype (main line,
-                                     built), TrivialPrototype (`mean`/
-                                     `median`, the zero-parameter floor,
-                                     built 2026-09-20), SharedMlpPrototype
-                                     (Deep-Sets-style observation arm, no
-                                     cross-member attention, built
-                                     2026-09-20). Matching Net (plan.md step
-                                     5.1) belongs here too when it exists
-    PrototypeRoutingHeads.py          NEW -- Stage 3, query-vs-prototypes
-                                     heads (`forward(query, prototypes)`,
-                                     the shape every arm here shares).
-                                     `CosineTauHead` (the main line, built)
-                                     plus `LearnedPrototypeClassifier`
-                                     (built 2026-09-20, GENERALISED
-                                     2026-09-21) -- the exception to
-                                     "prototypes as an explicit argument"
-                                     from the CALLER's side: Stage 4's
-                                     BASELINE arm, a FIXED learned weight
-                                     matrix used as a `routing_head`-
-                                     INJECTED module's own `prototypes`
-                                     argument (any `Runtime.
-                                     ROUTING_HEAD_CHOICES` entry, not
-                                     hardcoded `CosineTauHead` any more).
-                                     No longer registered in
-                                     `Heads._CLASSIFIER_REGISTRY` / built
-                                     through `common.Head.Head` -- see Open
-                                     design decisions, 7. The non-learnable
-                                     block, bias arm and cross-attention arm
-                                     are plan.md step 5, not yet written
-    CrossAttentionMatch.py            NEW, not yet built -- shared by Stage 2's
-                                     Matching Net and Stage 3's Learnable Arm 2
-    Heads.py                         REUSED, `_CLASSIFIER_REGISTRY` lost its
-                                     `'prototype_cosine'` entry 2026-09-21
-                                     (Open design decisions, 7) -- otherwise
-                                     unchanged (AttentionPoolHead for the
-                                     Attn pooling choice)
+                                     module: Avg/Max/Attn/passthrough, Attn
+                                     wraps Heads.AttentionPoolHead. Lives here,
+                                     not under training/, because Checkpoints.py
+                                     rebuilds it on load and the GENERIC layer
+                                     must not import from a task-specific
+                                     training package
+    PrototypeGenerators.py            NEW -- Stage 2, every collapse arm in ONE
+                                     file: SetTransformerPrototype (main line),
+                                     AttnPoolPrototype, TrivialPrototype
+                                     (`mean`, the zero-parameter floor),
+                                     SharedMlpPrototype (Deep-Sets-style
+                                     observation arm, no cross-member
+                                     attention), PassthroughCollapse
+    ContextEncoders.py                NEW -- Stage 2's support context (G) and
+                                     query context (F): identity,
+                                     BiLstmSupportContext, AttnLstmQueryContext
+    PrototypeRoutingHeads.py          NEW -- Stage 3, query-vs-prototypes heads
+                                     (`forward(query, prototypes)`, the shape
+                                     every arm here shares): CosineTauHead (the
+                                     main line), CosineLogSumExpHead,
+                                     AttnScoreHead
+    PrototypeChoices.py               NEW -- the four registries (Open design
+                                     decisions, 5)
+    Heads.py                         REUSED (AttentionPoolHead for the Attn
+                                     pooling choice)
     common/
         Head.py                     REUSED unchanged (pooled_view/grid_view)
         Features.py                  REUSED unchanged (encode_raw)
-        Checkpoints.py                EXTENDED -- `save_prototype_checkpoint`
-                                     gained an OPTIONAL `generator`/
-                                     `generator_cfg` 2026-09-21 (Open design
-                                     decisions, 7); `save_checkpoint`/
-                                     `build_from_checkpoint` (the ORIGINAL,
-                                     pre-existing pair) still untouched (see
-                                     Open design decisions, 1)
+        Checkpoints.py                EXTENDED -- `save_prototype_checkpoint`/
+                                     `build_prototype_from_checkpoint`;
+                                     `save_checkpoint`/`build_from_checkpoint`
+                                     (the ORIGINAL, pre-existing pair) untouched
+                                     (Open design decisions, 1)
 
 training/PrototypicalRoutingHead/
     spec.md                          this file
-    plan.md                          working order, staged
+    plan.md                          what is built, what is not
     Episodes.py                      (built) the mixed pool, the overlap
                                      rule, the K-batch draw, the 39 training
                                      combinations and their epoch schedule,
@@ -688,19 +587,14 @@ training/PrototypicalRoutingHead/
                                      position mechanics with sample_episode
                                      rather than duplicating them; see Open
                                      design decisions, 6
-    Runtime.py                       (built 2026-09-20) GENERATOR_CHOICES
-                                     (Stage 2: set_transformer, mean,
-                                     median, shared_mlp) / ROUTING_HEAD_
-                                     CHOICES (Stage 3: cosine_tau only) --
-                                     see Open design decisions, 5. Also
+    Runtime.py                       (built 2026-09-20) re-exports the four
+                                     registries from PrototypeChoices.py. Also
                                      holds wandb_init/wandb_log/wandb_finish
                                      AND score/rescore/rescore_by_rung
-                                     (added 2026-09-21 for cli/train.py's
-                                     val loop) -- all duplicates of
+                                     (added 2026-09-21 for cli/train.py's val
+                                     loop) -- all duplicates of
                                      ClassifyingRoutingHead/Runtime.py's own,
-                                     100% generic, same bare-name-collision
-                                     reason as decision 5's own Runtime.py
-                                     note
+                                     100% generic
     Losses.py                        (built) L_bal / L_ord_a / L_ord_b, each
                                      taking THIS EPISODE's own rung subset
                                      (episode_class_weights recomputes w_c
@@ -716,14 +610,6 @@ training/PrototypicalRoutingHead/
                                      val_scores_per_combo.csv / _per_rung.csv
                                      and *_best.pt (total) / *_6rung.pt /
                                      *_native.pt; --resume-dir; --supply-only
-        train_baseline.py             DELETED 2026-09-22 -- Stage 4's own
-                                     BASELINE arm, built 2026-09-20,
-                                     generalised 2026-09-21, never had its
-                                     inference-time positioning settled (what
-                                     a "Baseline" checkpoint should actually
-                                     do against a genuinely new WSI). Will be
-                                     redesigned from scratch, not resumed
-                                     from that version.
         evaluate.py                   (built) scores checkpoints on the TEST
                                      half of the recorded split into two tables:
                                      the original (random full 6-way

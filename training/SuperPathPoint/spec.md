@@ -2,6 +2,19 @@
 
 `training/SuperPathPoint/`
 
+> **2026-11-02 核對（只比對了文中的檔名與識別字，沒有重讀全文，也沒有逐段改）：**
+> - job script 在 `jobscripts/SuperPathPointJobs/`（`MakeHaLabels.sh`、`TrainSuperPathPoint.sh`、`TestSuperPathPoint.sh`、
+>   `PrepareChainStack.sh`、`ReEvalSuperPathPoint.sh`、`SurvivalAlphaAnalysis*.sh` 等）；文中的路徑已照這個目錄改過。
+> - 程式現況：`cli/{train_superpathpoint,make_ha_labels,inspect_ha_labels,demo_ha,demo_homography,prepare_chain_stack,reeval_density,
+>   survival_alpha_analysis,demo_survival_analysis}.py`、`common/{Corpora,Homography,HomographyConfig,Interfaces,KeypointLabelStore}.py`、
+>   `SuperPoint/{Backbones,EncoderBackbone,Decoders,Heads,HomographicAdaptation,KeypointNet,Losses,Teacher,Trainer,Datasets}.py`，
+>   另有文中沒有的 `SurvivalAnalysis/` 套件。測試在 `utilities/test_modules/TestSuperPathPoint/`。
+> - 還沒做：`SuperPathPointLocalizer`（第 11 節，stage 3 多一個 localizer）和對 SIFT 的 repeatability bench。
+> - `best_region_index`、`best_rotation`、`SlideWinSimRotResult` 是舊 stage 2 結果型別的名字，已被 `CandidateSet`／`LocalizationResultSet` 取代。
+> - 文中的上游參照路徑 `/work/u26130998/github_repos/SuperPoint`、`/work/u26130998/GMR-Conv`、`/work/u26130998/prov-gigapath`
+>   目前都不在磁碟上；引用的上游數字（loss 的 margin、權重等）以上游原始碼為準。
+>   目前都不在磁碟上。
+
 這份文件規劃訓練程序，不是實作紀錄。它要回答的是：資料怎麼準備、模型怎麼組、
 loss 是什麼、訓練迴圈長什麼樣、介面切在哪裡才換得掉 encoder 與 decoder，以及
 ——最重要的——**什麼數字會決定這整件事值不值得做**。
@@ -672,7 +685,7 @@ Stage C  --> 一個多了 resolution head 的 checkpoint
 
 Stage B 的表必須記下 detector 的 `identity_id`。否則換一個 detector 重跑，兩張
 表混在同一個目錄裡，而它們量的是不同的東西——這正是 `FeatureStore` 存在的理由
-（`utilities/FeatureStore.py` 開頭那段）。
+（`utilities/Store.py` 開頭那段）。
 
 ---
 
@@ -1151,7 +1164,7 @@ descriptor loss 用。
 
 ### 6.3 HA label 怎麼存
 
-路徑與規矩照 `utilities/FeatureStore.py`：
+路徑與規矩照 `utilities/Store.py`：
 
 ```
 result/cache/<made_by>_keypoint_labels/<wsi_stem>__ds<d>__<cfg8>.safetensors
@@ -1199,7 +1212,7 @@ M 處有膝點，那就是真實密度；若一路貼著 M，就是在截斷（C
 #### 它不是一串影像運算
 
 `query_sim/augment/` 底下每個 augment 都是一個獨立的影像函式，`apply_rotation`、
-`apply_vignette` 各做各的，`cli/demo.py` 因此可以一格畫一個。**homography 不是
+`apply_vignette` 各做各的，`utilities/cli/demo/show_camera_effects.py` 因此可以一格畫一個。**homography 不是
 那樣。** 它對一個四邊形的四個角做四次擾動，最後解出**一個** 3x3 矩陣
 （`superpoint/models/homographies.py:152-230`）。所以「單獨 demo 一個操作」的意思
 是把另外三個布林開關關掉，不是抽出一個函式來單獨呼叫。
@@ -1249,7 +1262,7 @@ HA 的尺度抖動就會跨過半個 rung，Stage A 的 label 開始混入相鄰
 
 #### `cli/demo_homography.py`
 
-形狀照 `query_sim/cli/demo.py`：一張多格圖，每格一個操作，加上參數值與其抽樣
+形狀照 `utilities/cli/demo/show_camera_effects.py`：一張多格圖，每格一個操作，加上參數值與其抽樣
 範圍的並排列印（`_print_capture_params` 那個作法）。
 
 不需要模型，不需要 GPU，秒級。這是「昂貴的執行之前那個可以先看一眼的東西」。
@@ -2128,9 +2141,9 @@ teacher 是 COCO domain 的權重，H&E 是 out-of-domain，label 的品質是�
 | 檔案 | 改什麼 |
 |---|---|
 | `utilities/_paths.py` | 加 `TRAINING_DIR`，納入 `setup_import_paths()` |
-| `jobscripts/` | `SuperPathPointLabels.sh`（array over slides）、`SuperPathPointTrain.sh`（GPU） |
+| `jobscripts/SuperPathPointJobs/` | `MakeHaLabels.sh`（array over slides）、`TrainSuperPathPoint.sh`（GPU） |
 | `utilities/test_modules/` | 第 10 節的六個測試 |
-| `utilities/bench_modules/bench_superpathpoint.py` | repeatability 對 SIFT |
+| bench（還沒寫） | repeatability 對 SIFT |
 | `log/TODO.log` | 一筆，含這份 spec 的決定與它們的理由 |
 
 ---
@@ -2569,10 +2582,10 @@ label，而且不會報錯。
 | 23b | `utilities/test_modules/TestSuperPathPoint/test_corpora.py`（第 12 節 3c 的 corpus） |
 | 23c | `utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py`（第 11-19 支） |
 | 23d | `utilities/test_modules/TestSuperPathPoint/test_encoder_backbone.py`（`EncoderBackbone.py`） |
-| 24 | `jobscripts/MakeHaLabels.sh` |
-| 25 | `jobscripts/TrainSuperPathPoint.sh` |
+| 24 | `jobscripts/SuperPathPointJobs/MakeHaLabels.sh` |
+| 25 | `jobscripts/SuperPathPointJobs/TrainSuperPathPoint.sh` |
 
-這八支測試全部掛在 `jobscripts/TestSuperPathPoint.sh` 底下，分成六個 stage：
+這八支測試全部掛在 `jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh` 底下，分成六個 stage：
 `mask`（`from_mask`）、`store`（三個 store）、`decoder`、`ha`、`student`、
 `backbone`。**沒有一支需要資料、權重或 GPU**——金字塔、玻片、偵測器、ViT 全是檔案
 自己捏的，所以它們可以在 login node 上秒級跑完，而它們擋在前面的那些執行是數小時

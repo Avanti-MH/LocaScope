@@ -4,6 +4,12 @@
 步驟。這份是**現在要做什麼、按什麼順序、做到哪**。決定的理由留在這裡，量測的結論
 進 `log/TODO.log`。
 
+> **2026-11-02 核對（只比對文中的檔名與識別字，沒有重讀全文）：** job script 在 `jobscripts/SuperPathPointJobs/`
+> （文中的 `jobscripts/.../PrepareChainStack.sh` 就是 `jobscripts/SuperPathPointJobs/PrepareChainStack.sh`）；
+> `test_chain_stack.py` 在 `utilities/test_modules/TestSuperPathPoint/`。文中的 `_write_rung`、`_pick_record`、
+> `_sampler_config_for`、`tiles_chains`、`PreTileMeta` 在程式裡找不到，是當時的名稱。
+> 「做到哪」的狀態字樣是當時的，沒有同步。
+
 **三個階段，這是現況（2026-09-03 跟使用者對過）：**
 
 ```
@@ -310,7 +316,7 @@ metadata 一直都在，pixel 只有 `__getitem__` 才讀）：
 
 寫的過程中抓到的真的 bug（供以後參考）：`OwnTiles.__getitem__` 一度少了
 `centre_crop`（會把整張 pre-tile 硬縮成 tile，不是裁中心那塊）；重構
-`extract_pretiles.py` 的關鍵字參數時漏改一行 `args.n`（`_write_rung` 最後的
+pre-tile 抽取程式的關鍵字參數時漏改一行 `args.n`（最後的
 print，runtime `NameError`）；第一版 `base_rung` 測試餵了同一張沒模糊過的圖
 兩次，驗證不到任何東西，改成先把圖真的降到目標 ds 畫質再餵。
 
@@ -696,10 +702,10 @@ hinge。軟標籤是實驗。
 - `spec.md` §13「四個 arm」底下的執行細節（載入斷言、RGB 複製除以三、`gray+pretrain`
   是自蒸餾、兩片撐不起四個 arm）還留在 spec 裡，內容跟 1.1 現在的「現況讀數」與
   「下一次重訓」兩節重疊——之後要對一次要不要搬到這裡，這次沒動它。
-- ~~`MppStack.py`/`CompositeStack.py` 兩個檔案~~ —— 2026-09-05 整併成
-  `ChainStack.py`（`FStack`/`RStack`/`CStack` 三個 class），`test_survival.py`
-  裡跟 F/R 幾何有關的兩節（`rung_scale`/`rung_shrink`、'R' 的降解）搬進新的
-  `test_chain_stack.py`，一起補了 `CStack` 原本完全沒有的單元測試。見 2.1。
+
+- **2026-11-02 加入（沒動手）：**
+  - 拆 `cli/demo_survival_analysis.py`（2941 行）：五個不相關的 demo（`--parts chains_stack/merge_grid/visualize/scale_diagnostic/scale_synthetic_control`）擠在一個 `main()`。改成 argparse subparsers 或拆檔，一個 demo 一個函式、各自參數群組；先盤點 `jobscripts/SuperPathPointJobs/` 裡的呼叫點（`DemoSurvivalAnalysis.sh`）。
+  - `common/KeypointLabelStore.py` 搬上 `Cache.py`：features 與 pre-tile 已併進 `Store.py`、按位址讀，只剩它還是自己一套 tmp+replace／cfg_hash／`find`、`find_one`，寫在 `result/cache/<made_by>_keypoint_labels/`。它的 `pretile_id` 已經是 corpus key，label 與 pre-tile 的配對不受影響。改用 `Cache.cache_root`／`atomic_file`，目錄 `<made_by>_labels/<corpus key>/<slide>/ds<d>/<ha_id>/`，讀端從 corpus 算位址而不是 `find`。
 
 ---
 
