@@ -7,11 +7,11 @@ Stage 2 把一張 query 對到 WSI 上的候選視窗，分兩階段：
 
 檢索階段不產生更細的物理位置；位置細化是 stage 3 的事。
 
-狀態（2026-10-19）：程式的**結構**照 `blueprint.md` 重構過：每個方法都是一個 `Retriever`
+狀態（2026-10-26）：`proposal.md` 的兩個新架構（GloRet、LogLoRet）與統一訓練框架（`training/GloRet`）已實作，見下面「新的架構與統一訓練框架」；本段以下是 2026-10-19 的狀態。程式的**結構**照 `blueprint.md` 重構過：每個方法都是一個 `Retriever`
 （`Retriever.py`），reranker 是吃上游名單的 retriever，`MultiPhases` 串接，pipeline 與 bench 同一個
 config 就是同一個 cache entry。本文件以下講的是**方法本身**（演算法、損失、訓練、評估），仍然有效；
 講介面的段落（`RetrievalContext`、`ScoredReranker`、`TwoPhase`、`OutputPolicy`、`UnionRetriever`）
-是重構前的接法，已由 `blueprint.md` 第二到五節取代，留在下面只為了說明當初的設計理由。測試用
+是重構前的接法，已由 `Retriever.py` 開頭的 docstring 與 `blueprint.md` 第二、三節取代，留在下面只為了說明當初的設計理由。測試用
 `sbatch jobscripts/RerankHead/TestRerank.sh`。標〔待驗證〕的是還沒用資料或程式確認的假設。
 
 | 部分 | 在哪裡 | 測試 |
@@ -27,17 +27,57 @@ config 就是同一個 cache entry。本文件以下講的是**方法本身**（
 | 命名 | `Naming.py` | `test_naming` |
 | 標籤、損失、指標、visit、訓練、S7 擬合 | `training/RerankHead/` | `test_neural` |
 | 評估 | `utilities/bench_modules/RetrieverArms.py`、`ArmTables.py`、`bench_stage2_retriever.py` | `test_retriever_arms`、`test_arm_tables` |
-| mask 瘦身 | `TissueMask.py`、`utilities/cli/build_cache/slim_masks.py` | `test_slim_masks` |
+| mask 瘦身 | `TissueMask.py`（`SlideMask.save`／`load`，`packbits+zlib`） | — |
 | 巢狀 config 的 tuple | `ConfigIdentity.py` | `test_config_identity` |
 
 **還沒做**：`TileGT` 的窗口外圍 `margin` 版本；`raw`（不 pool 的 patch token）的 sliding window
-與 reranker 讀法；`--cache ro|rw`（P1 到 P3 的 cache 模式）；訓練的 crash-resume；S4 沒有單元測試。
+與 reranker 讀法；訓練的 crash-resume；S4 沒有單元測試。
 與前面設計的小差異：位置偏移的方法叫 `shift_px()`（level px）；`WinEmbedder` 沒有鄰居混合層（見 F3）。
+
+## 新的架構與統一訓練框架（`proposal.md`，2026-10-26）
+
+`proposal.md` 在本文件的方法之外提出**兩個架構**和**一個訓練框架**。它們不取代上面的第一、二階段方法，而是把 F3 `WinEmbed`（學習式視窗 embedding）和 S5 `TileGT`／S2 `CorrNet`（學習式重排）推廣、並用同一套訓練流程訓練；`training/RerankHead` 仍在，目前 bench 裡的 `winembed`、`tilegt`、`corrnet` arm 讀的是它的權重。
+
+| proposal | 對應本文件 | 做什麼 | 位置 |
+|---|---|---|---|
+| **Arch 1　`GloRet-{ContextEn}-{GlobalEn}`**（雙塔） | 推廣 F3 `WinEmbed` | tile → ContextEn → GlobalEn → $q^\top k/\tau$。$k$ 只依賴 window，可 cache，所以能吃整張 slide 的全部窗口（Phase 1），也能吃上游名單（reranker）。ContextEn：`SelfAttn`、`GNN`、`SptSelfAttn`、`Identity`、`CLSTrans`；GlobalEn：`AttnPool`、`MaskedMean`、`CNN`、`GraphPool`、`Align`、`Identity`。搜尋 `exact`（`hnsw`／`ivf` 尚未實作） | `RetrieverGloRet`（第一階段用 `RetrieverGloRetConfig`、接在名單後用 `RerankerGloRetConfig`，兩個 config 建出同一個類別） |
+| **Arch 2　`LogLoRet-{ContextEn}-{GlobalEn}[+no-match]`**（pair 打分器） | 推廣 S5 `TileGT`、S2net `CorrNet` | FoV 與窗口經共用的 ContextEn，雙向 cross-attention，每個 head 的證據（aligned、margin、雙向一致、dustbin、coverage、entropy、match feature）合成一個分數；no-match：`dustbin`／`sinkhorn`／`sigmoid`；證據在 tile 上的聚合 `evidence_agg` 預設 `attn`。分數依賴 query，窗口端不能 cache，所以接在 Phase $\ge 2$ | `RerankerLogLoRet` |
+| **TilePool** | 第一階段的 pooling 欄位 | `cls`、`cls_avg`、`cls_std`、`grid2x2`、`attnpool`（讀 patch token 的可學習池化，三階段訓練） | `aiNNModel/models/GloRet.py` |
+
+名稱、arm 文法與合法組合見 `proposal.md` §11；權重在 `<results>/GloRet/weights/<data>--<encoder>--<pooling>--<method>[--<no-match>]--<best|last>.pt`（`ArmSpec.learned_weights`）。
+
+### 統一訓練框架（`training/GloRet/`，細節在 `proposal.md` §9）
+
+兩個架構用**同一套**訓練機制，差別只在打分函數：
+
+- **兩個獨立的軸**：打分方式（GloRet 的向量內積／LogLoRet 的 pair）× **item 來源**（`@items=level`：這個 level 的所有窗口 × 4 旋轉；`@items=list`：另一個 retriever 的名單）。**角色由 item 來源決定，不看架構**：用 level 訓練的是 retriever（驗證時自己列出整個 level 的窗，看 R@500），用 list 訓練的是 reranker（重排名單前 100 個，看 R@10）；兩個架構都可以當任一種（pair 打分器當 retriever 要對整個 level 的每個窗各算一對）。預設：GloRet 是 level，LogLoRet 是 list。
+- **一個行程、多個 head、同一批 FoV**：一個 visit（slide 的一個 level）編碼一次，所有 head 在同一批 FoV 上訓練、同一個驗證集上評估。head 名稱後面可加 `@items=`、`@top=`，以及 `HEAD_FLAGS` 裡的任何旗標（`@w-geo=1.0@sigma=2`、`@ignore-expand=0.25`、`@lr=1e-4`……），所以**一個設定就是一個 head**，設定之間是配對比較。不是預設值的選項會成為 head 名稱與權重檔名的一部分。
+- **標籤**（§9.1）：positive（正確旋轉的答案窗；名單裡沒有答案本身時，`tol_px` 內的窗代替）、ignore（以答案為中心、`--ignore-expand` × FoV 窗的方框內的非 positive）、hard negative（其餘）；`--wrong-rotation {ignore,negative}`；可選的近鄰軟目標（`--w-geo`、`--soft-target`）。**名單裡沒有任何正例時，把答案的窗加進 item**（log 的 `injected`），FoV 不跳過；驗證不補，仍算 miss。
+- **候選池**（§9.5）：`--top-p` 是比例（`0.05`、`1.0`）或個數（`2000`），任一種都能給任何 head。`1.0`（或 K 涵蓋全部）= 全部；大於 0.5 = 每步用網路當下的分數取前 K；0.5 以下 = 每個 episode 開頭選一次，`--warmup-epochs` 內由 teacher（第一階段 SlideWin 的 `window_scores`，名單則為名單順序）選，之後由網路自己選，並有 hard-negative 記憶表。pair 打分器對整個 level 排不了名，只用 teacher 的 episode。
+- **Gradient Cache 與多卡拆窗**（§9.6）：窗口向量（或 pair 分數）先不帶圖算，對它們求梯度，再分塊帶圖回傳；`--window-split G` 讓 G 個行程共同分擔一個 level 的窗口。
+- **attnpool 三階段**（§9.4）：A 粗 level、B 細 level、C 凍結池化。B 階段的 level 是 `LazyLevel`：窗被用到才讀並編碼它底下的 tile，**不讀整個細層**；池的選法與其他階段相同（warm-up 用 teacher，之後網路自己選，評分時讀的 tile 只用一次就丟）。GloRet 與 LogLoRet 都能在 B 階段訓練（GloRet 以 `@items=list` 當 reranker）。
+- **命名**：smoke 用 `Smoke<JobName>`，實驗用 `Exp<ScriptName>`（一個名字反覆覆蓋），它們的 log、result、cache、權重都在 `result/<job>/` 底下，不碰正式名稱。
+
+### 怎麼跑
+
+| 目的 | 指令 |
+|---|---|
+| 正式矩陣（11 個 job、29 隻 arm） | `jobscripts/GloRet/GloRet.sh` 開頭列出每個 job 的指令（`TOP_P`、`HEADS`、`POOLING`） |
+| attnpool 三階段 | `bash jobscripts/GloRet/GloRetAttnPool.sh`（`JOB=ExpGloRetAttnPool` 為縮小的實驗） |
+| 訓練機制與 arm 的篩選 | `ROUND=1..4 bash jobscripts/GloRet/ExpGloRetScreen.sh`：1 候選與 `--top-p`；2 標籤；3 溫度、學習率、寬度、decoder、輔助 loss；4 十五個 arm（gigapath `cls`） |
+| 測試 | `sbatch jobscripts/GloRet/TestGloRet.sh`（41 項，合成資料） |
+
+### 狀態
+
+- 已實作並通過測試：兩個架構、統一的 item／role／top-p、每個 head 自己的旗標、Gradient Cache 與拆窗、lazy 層（階段 B）、decoder 輔助 loss。
+- 在真實資料上量過：`ExpGloRetFull`（整層 softmax 的速度與記憶體，見 `proposal.md` §9.5）；`RerankHead` 的 `winembed`／`tilegt`／`corrnet`（舊流程）。
+- 還在跑、未下結論：`ExpGloRetScreen` 第 1 與第 4 輪、`ExpGloRetAttnPool`。
+- 尚未實作：`hnsw`／`ivf` 搜尋（`RetrieverGloRet.run_wsi` 有 TODO）、KoLeo 均勻性（`proposal.md` §9.3 b）、LogLoRet 的多個名單來源。
 
 ## 詞彙
 
-query、shot 沿用 `CLAUDE.md`；pool、rank、答案視窗、arm、pooling 見
-`bench_stage2_retriever.py` 開頭的 VOCABULARY（原 window bench）。
+query、shot 見 `bench_stage2_retriever.py` 開頭的 VOCABULARY；pool、rank、答案視窗、arm、pooling 見
+`bench_stage2_retriever.py` 開頭的 VOCABULARY。
 
 | 中文 | English | 定義 |
 |---|---|---|
@@ -131,8 +171,8 @@ sliding window 同時有兩種 arm：全排序（`cls_avg+mean`，pooling arm）
 
 | | 現況 | 目標（未實作） |
 |---|---|---|
-| 第一階段 | `SlidingWinSimRot`（canonical，滑窗 cosine，試 4 個旋轉） | 同左，加 F1 到 F4 與 `UnionRetriever` |
-| 第二階段 | 無 | S0 到 S7 與 `xenc`，鏈式 |
+| 第一階段 | `SlidingWinSimRot`（canonical）、F1 到 F4、`GloRet`（Arch 1） | `UnionRetriever`；`GloRet` 的 `hnsw`/`ivf` 搜尋 |
+| 第二階段 | S0 到 S7、`xenc`、`LogLoRet`（Arch 2），`MultiPhases` 串接 | 見「決議與待確認」 |
 | 候選 | `Candidate` / `CandidateSet`（`StageInterface.py`） | 基礎類別不變，子類別帶方法專屬欄位 |
 
 ## 候選
@@ -193,7 +233,7 @@ class UnionCandidate(Candidate):       # UnionRetriever
   `grids[c.region_index].tile_origin_l0(c.lattice, c.row, c.col)` 加上 `c.shift_px() * ds`。
   bench、視覺化、pipeline、stage 3 都用這一條。
 
-## 介面（重構前；現在的介面見 `blueprint.md`）
+## 介面（重構前；現在的介面見 `Retriever.py` 開頭的 docstring，串接規則見 `blueprint.md`）
 
 > 下面到「OutputPolicy」為止是重構前的接法：第一階段交出 `RetrievalContext`、reranker 是另一種
 > Protocol、`TwoPhase` 把它們包成一個 stage、`OutputPolicy` 裁名單。現在 reranker 就是吃上游名單的
@@ -436,20 +476,15 @@ S6 的警告：通用紋理區會形成一整片高分平台，真位置反而�
 - 現況：`SlideMask.save` 把 mask 存成每格一個 byte 的 uint8（`result/cache/*/slide=*/mask/mask_*.safetensors`）。273 個檔案共 195.6 GB（平均 716 MB，最大 1.24 GB）；例如 BRACS_1489 是 12376×32370 = 400 MB（`mask_ds=4`）。當時 `MppRoutingHead` 的 cache 目錄 183 GB 幾乎都是它（這些 mask 現在在 `Masks`）。
 - 做法：同一個 safetensors 檔內改存 `np.packbits` 後再 `zlib` 壓縮的位元組，metadata 加 `mask_encoding`；`load` 依 metadata 解碼，沒有該欄位就視為舊格式（uint8 原樣），**新舊檔案都能讀**。tissue mask 是大片連續區塊，預期壓到數 MB 以內〔待量測：先在 3 張 slide 上量〕。
 - 讀回的陣列與原來逐位元相同，所以 `record_*.json`、mask 的 id、`VERSION` 都不變；測試是「所有現有 mask 轉換後 `np.array_equal`」。
-- 轉換工具 `utilities/cli/build_cache/slim_masks.py` 走 Slurm（CPU array）；先寫暫存檔、驗證逐位元相同後才原子替換，並需明確的 `--replace` 才覆蓋原檔。`components`（uni2-pca mask 才有，581 到 814 MB）不在這次範圍。
+- `components`（uni2-pca mask 才有，581 到 814 MB）不在這次範圍。
 - 影響的程式只有 `utilities/TissueMask.py` 的 `SlideMask.save` / `load`（讀取端 `TissueMaskConfig.py` 只呼叫 `SlideMask.load`）。
 
 ### P1 到 P3：現做現用，不存本地
 
 本機沒有空間，P1 到 P3 的產物**不寫到磁碟**。每次訓練、評估都在記憶體中現做，用完丟棄；
-同時保留一個 cache 開關，**目前不使用**：
+`/work` 只寫 checkpoint、log、結果 csv、wandb。
 
-| 旗標 | 行為 | 狀態 |
-|---|---|---|
-| `--cache off`（預設） | 全部現做現用；`/work` 只寫 checkpoint、log、結果 csv、wandb | **目前採用** |
-| `--cache ro` / `--cache rw` | 讀 / 讀寫 Store（`FeatureMapCache` 的 slide-level 特徵、photos 類特徵、候選名單） | 之後再開，介面不變 |
-
-| 步驟 | `off` 模式的做法 |
+| 步驟 | 做法 |
 |---|---|
 | P1 slide-level 特徵 | 由 retriever 在記憶體編碼 (slide, level)（main + offset，`cls_avg`），level 切換時由下一個 visit 取代；retriever 自己的 `_by_ds` 保留這張 slide 看過的 level，下一張 slide 才釋放 |
 | P2 FoV 與 query 特徵 | 用**非 cached** 的 `FovSupply(microscope, plan, cfg, mask)` 現場抽位置與渲染照片（seed 與評估用的不同）；query tile（main + offset）在 4 個旋轉各編碼一次；真值（level、ds、matching_rotation、中心、`B_t`、`B_f`）現場算 |
@@ -465,7 +500,7 @@ S6 的警告：通用紋理區會形成一整片高分平台，真位置反而�
 - 平行度：訓練不用 DDP。多 GPU 節點上用 `--shard I/N` 把 visit 切給 N 個行程，各自訓練獨立的 run（沿用 `PrototypicalRoutingHead.sh` 的 `PARALLEL` 做法）；slide 的讀圖與渲染用 CPU worker。
 - 最佳化：AdamW，lr 3e-4（S5）/ 1e-3（CorrNet）/ 1e-4（F3），weight decay 1e-2，cosine 排程，bf16 autocast，梯度裁剪 1.0；epoch 30。
 - 驗證與選擇：`val` slide，選 `R@K′`（對訓練設定的 (K, K′)）最高者，另存 `last`。
-- 檔名沿用 `weight_filename` 的慣例：`uni2_frozen_cls_avg_tilegt_list_best.pt`；超參數（含 `pos_iou`、`hit_iou`）記在 `ckpt['args']`，評估時不符就拒絕。
+- 檔名由 `Checkpoints.weights_name` 與 `data_tag(args.train_datasets)` 組成（`training/RerankHead/cli/train.py`）；超參數（含 `pos_iou`、`hit_iou`）記在 `ckpt['args']`，評估時不符就拒絕。
 - 紀錄：wandb 與 `Runtime.py` 沿用 `PrototypicalRoutingHead`。
 
 ### 資料切分
@@ -534,7 +569,7 @@ FoV 從 `supply_for` 取（與 pipeline bench 同一批照片）。job 名是 `S
 - S0 在只有 main 時退化成第一階段。
 - 標籤：`pos` / `neg` / `ignore` 在已知幾何下的分類；`ignore` 不進分母。
 - `TwoPhase` 的 id 隨任何子設定改變（接入 `test_config_identity`）；巢狀 tuple 的 JSON 來回。
-- 損失的形狀與梯度；`slim_masks` 的逐位元來回；`faiss` 能 import 且 `hnsw` 的最近鄰與 `exact` 在小例子上一致。
+- 損失的形狀與梯度；mask 編碼的逐位元來回；`faiss` 能 import 且 `hnsw` 的最近鄰與 `exact` 在小例子上一致。
 
 ## 檔案配置
 
@@ -548,23 +583,29 @@ FoV 從 `supply_for` 取（與 pipeline bench 同一批照片）。job 名是 `S
 | `stage2_retrieval/ArmSpec.py` | bench 的 arm 文法：`[encoder:]Method::pooling[+op][@K]` 用 `::` 接起來，retriever 在前、reranker 在後；`config_of_arm` |
 | `stage2_retrieval/blueprint.md` | 重構藍圖；附錄是每個方法的詳細資料流（推論與訓練），含張量形狀 |
 | `stage2_retrieval/Retriever{SlidingWinSimRot,BagOfTiles,TileVote,ClusterBow,WinEmbed}.py` | 第一階段（各有 config 與 recipe） |
+| `stage2_retrieval/RetrieverGloRet.py`、`aiNNModel/models/GloRet.py` | `RetrieverGloRet`（Arch 1）、`RerankerGloRet`、`RerankerLogLoRet`（Arch 2）與網路 |
+| `training/GloRet/` | 統一訓練框架：`Supply`（FoV、level、標籤）、`Items`、`Pool`、`Full`（Gradient Cache）、`Rerank`、`Episodes`、`Lazy`、`Losses`、`Steps`、`cli/train.py` |
+| `jobscripts/GloRet/*.sh` | `GloRet.sh`（正式矩陣）、`GloRetAttnPool.sh`、`ExpGloRetScreen.sh`、`ExpGloRetFull.sh`、`TestGloRet.sh` |
+| `utilities/test_modules/TestGloRet/` | 測試 |
 | `stage2_retrieval/RerankerScorers.py` | S0、S1、S2（免訓練）、S6 |
 | `stage2_retrieval/RerankerEncode.py` | S3、S4、`xenc` |
 | `stage2_retrieval/RerankerNeural.py` | 載入權重的 S2net、S5、S7 |
 | `stage2_retrieval/MultiPhases.py` | 串接與 recipe 表 |
 | `stage2_retrieval/Naming.py` | entry 的名稱 |
-| `aiNNModel/models/RerankHeads.py` | `TileGraphTransformer`、`CorrNet`、`CandidateContext`、`WindowAggregator` |
+| `aiNNModel/models/RerankHeads.py` | `TileGT`、`CorrNet`、`CandidateContext`、`TileGTContext`、`WinEmbedder`、`StackNet` |
 | `aiNNModel/models/RerankChoices.py` | 架構 registry |
 | `aiNNModel/models/common/Checkpoints.py` | 新增 `save_rerank_checkpoint` / `build_rerank_from_checkpoint`（只新增函式） |
-| `training/RerankHead/` | `spec.md`、`plan.md`、`Datasets.py`、`Episodes.py`（visit）、`Losses.py`、`Runtime.py`、`cli/{train,evaluate}.py` |
+| `training/RerankHead/` | `Labels.py`、`Visits.py`（visit）、`Embed.py`、`Losses.py`、`Metrics.py`、`Steps.py`、`Usage.py`、`Runtime.py`、`cli/{train,fit_stack}.py` |
 | `utilities/bench_modules/RetrieverArms.py`、`bench_stage2_retriever.py` | 評估（每個 arm 有 whole 與 production 兩種模式） |
-| `utilities/cli/build_cache/slim_masks.py` | P0 轉換工具 |
-| `jobscripts/RerankHead/*.sh`、`jobscripts/SlimMasks.sh` | Train、Eval、SlimMasks（沒有 Prepare job：P1 到 P3 現做現用） |
+| `jobscripts/RerankHead/*.sh` | `RerankHead.sh`（訓練）、`FitStack.sh`、`TestRerank.sh`；沒有 Prepare job：P1 到 P3 現做現用 |
 | `utilities/test_modules/TestRerank/` | 測試 |
 
 ## 基礎模組改動
 
 能不改就不改；必要的改動如下，**每一項動手前需要明確批准**。
+
+> 2026-11-02 核對：下表是當時的紀錄。`locascope_environment.yml` 在 repo 外（`/work/u26130998/`），
+> repo 內的 `environment.yml` 已含 `faiss-cpu==1.13.0`。「未測」「未做」是當時的狀態，沒有逐項重核。
 
 | 檔案 | 改動 | 原因 | 狀態 |
 |---|---|---|---|
@@ -572,8 +613,8 @@ FoV 從 `supply_for` 取（與 pipeline bench 同一批照片）。job 名是 `S
 | `utilities/TissueMask.py` | `SlideMask.save` / `load` 的 mask 編碼（P0） | 瘦身 | 已完成（未測） |
 | `utilities/ConfigIdentity.py` | 支援「巢狀 config 的 tuple」，見下 | `TwoPhase` 的 config | 已完成（未測） |
 | `stage2_retrieval/StageInterface.py` | 上面的 `Candidate` 家族、`origin_l0`、`rows()`、`Reranker`、`Retriever.context` | 介面 | 已完成（未測） |
-| `stage2_retrieval/SlidingWinSimRot.py` | 新增 `context()`、`extra_poolings`（NOT_IDENTITY）、K 的 recipe；`candidate_set` 的 NMS 向量化（輸出不變，只改效能） | 介面、K 變大時的效能〔待量測〕 | 部分完成（未測；`extra_poolings` 未做） |
-| `utilities/LocaScopePipeline.py` | `stage2()` 把 `ctx` 傳給 reranker；reranker 的 recipe 表（可選） | 介面 | 部分完成（未測；recipe 表未做） |
+| `stage2_retrieval/RetrieverSlidingWinSimRot.py` | 新增 `context()`、K 的 recipe；`candidate_set` 的 NMS 向量化（輸出不變，只改效能） | 介面、K 變大時的效能〔待量測〕 | 已完成（未測） |
+| `utilities/LocaScopePipeline.py` | `stage2()` 把 `ctx` 傳給 reranker；reranker 的 recipe 表（可選） | 介面 | 已由 `MultiPhases.py` 取代（`ctx` 傳遞不存在了；chain 的 recipe 表是 `MULTIPHASES_RECIPES`） |
 | `utilities/bench_modules/BenchCommon.py` | `run_stage2` 增加兩個選用 role（`first_phase`、`rerank_scores`）並登記 | 讓 composite 的中間分數落地 | 已完成（未測） |
 | `utilities/bench_modules/bench_locascope.py` | 用 `roles_of(stages)` 取代 `ROLES` | stage 2 的額外 table 進 entry | 已完成（未測） |
 | `utilities/test_modules/test_config_identity.py` | 新 config 的 recipe lint 與 id 測試 | 慣例 | 已完成（未測） |
@@ -608,10 +649,13 @@ FoV 從 `supply_for` 取（與 pipeline bench 同一批照片）。job 名是 `S
 1. 候選窗與 FoV 有重疊者不當負例；標籤由 `pos` / `neg` / `ignore` 三態決定，門檻為面積比例。
 2. `Candidate` 基礎類別不變，方法專屬資訊用子類別加欄位。
 3. K 是實驗軸，主要目標是 top-100 的 recall；部署時才可能用 K=500。
-4. P1 到 P3 現做現用，不存本地；cache 模式保留為旗標，目前不使用；先瘦身 mask。
+4. P1 到 P3 現做現用，不存本地；先瘦身 mask。
 5. Stage 3 要求旋轉正確（硬要求）：旋轉不對的候選視為未命中；位置對但旋轉錯的窗口是負例（旋轉難負例）。
 6. 支援巢狀 config 的 tuple（不影響現有 id）。
 7. 安裝 `faiss-cpu` 並更新 yml（已完成）。
+8. （2026-10-26）GloRet 與 LogLoRet 用同一套訓練框架：item 來源（`level`/`list`）、角色（`retriever`/`reranker`）、`--top-p`（比例或個數）是三個獨立的軸，每個 head 可以有自己的旗標，一個設定就是一個 head。
+9. （2026-10-26）名單裡沒有任何正例時把答案的窗加進 item，不跳過 FoV；驗證不補。
+10. （2026-10-26）attnpool 的階段 B 不讀整個細層：窗被用到才讀它底下的 tile，pool 的選法與其他階段相同。
 
 **待量測 / 待驗證**
 1. `pos_iou`、`hit_iou`、`loc_min_iou` 的預設值（0.5 / 0.5 / 0.1）是起始值，要用資料看正例數量與 stage 3 的實際成功率後再定。

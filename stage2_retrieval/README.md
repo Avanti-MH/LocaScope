@@ -27,7 +27,7 @@ legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical �
 
 ### 方法一覽
 
-#### `Retriever.py` — 介面（設計見 `blueprint.md`）
+#### `Retriever.py` — 介面（設計見該檔開頭的 docstring；名詞與串接規則見 `blueprint.md`）
 
 - 每個 stage 2 方法都是 `Retriever`：`retrieve(upstream, query, topk=None) → RetrievalOutput`。
   第一階段方法的上游是 stage 1 的 `EstMppResult`，reranker 的上游是另一個 retriever 的 `RetrievalOutput`；
@@ -55,6 +55,13 @@ legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical �
 | `RetrieverTileVote.py` | `tilevote:<recipe>` | query tile 找最近的 tile 投票（`exact` / `hnsw` / `ivf`） |
 | `RetrieverClusterBow.py` | `clusterbow:<recipe>` | tile 分群的直方圖交集 |
 | `RetrieverWinEmbed.py` | `winembed:<recipe>` | 學習出的視窗向量 |
+
+`RetrieverGloRet.py`（設計見 `proposal.md`）：GloRet 與 LogLoRet，**不在** `METHODS` 的 recipe 表裡，只能用
+arm 文法 `--stage2 arm:GloRet-{ContextEn}-{GlobalEn}::{TilePool}+{search}`／`arm:LogLoRet-...::{TilePool}+{no-match}`
+（`ArmSpec.py`）。`RetrieverGloRet` 兩種都行：第一階段（`RetrieverGloRetConfig`，整層每個視窗的向量算一次留著，query 是
+每個旋轉一次矩陣-向量乘積）或接在別人後面（`RerankerGloRetConfig`，只打名單裡的視窗）；`RerankerLogLoRet`
+（`RerankerLogLoRetConfig`）只能吃名單，因為它的分數要 query 與視窗一起讀，第一階段時被餵整層視窗。權重是
+`training/GloRet` 寫的 checkpoint（`weights` 進 identity，換檔就是另一個 retriever）。
 
 共用的走法（從 routed level 往細的 level 退、編碼 level 與 query、top-k 去重）在 `Context.py`
 （`SlideLevels`、`WindowSearch`、`top_candidates`）。`SlidingWindowSimilarity` 也在 `RetrieverSlidingWinSimRot.py`。
