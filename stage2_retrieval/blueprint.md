@@ -1,28 +1,12 @@
 # Stage 2 重構藍圖
 
-本文件是 stage 2 重構的施工依據：目標、介面、串接方式、每個檔案的架構與施工順序。附錄 A 是各方法的
-資料流（原 `dataflow.md`），算法在這次重構中不變。
-
----
-
-## 〇、目標
-
-1. **所有 stage 2 方法都是對等的 `Retriever`。** 第一階段方法（SlidingWinSimRot、BagOfTiles、TileVote、
-   ClusterBow、WinEmbed）吃 stage 1 的輸出；reranker（Dual、CSLS、Corr、CandGraph、Shift、TokenMatch、
-   XEnc、TileGT、CorrNet、Stack）吃另一個 retriever 的輸出。除此之外沒有差別，誰也不寄生在誰身上。
-   SlidingWinSimRot 的角色如同 `GigaPathFunc`，其他第一階段方法是和它抗衡的對等實作；reranker 堆疊在上面。
-2. **`Retriever.py` 只放最小的介面和定義**（對應 `aiNNModel/TileEncoderFunc.py`）。參數、attribute 由子類自己
-   定義。廢除 `CoRetriever`（`CoRetrieve.py`）、`CoStage.py`、`Union.py`、`Rerank.py` 的多 scorer 框架；
-   `TwoPhase.py` 改為 `MultiPhases.py`。不需要 `Reranker.py`：reranker 就是 Retriever。
-3. **config 決定一切。** 所有影響算法的參數在 config 階段決定，id 在建構前就固定。例外是消費者在呼叫時
-   選的 `topk`（只取前綴，不影響算法）。
-4. **encoder 共用接口**：可以接收上游（或呼叫端）已建好的 encoder，省下建構與記憶體；也可以自己建。接收時
-   和自己 config 的設定比對，不合就 raise，讓 pipeline 停下來，絕不改用別人的。
-5. **副產物橋接鎖**：下游宣告要用上游的副產物、上游有提供但 key 對不上 → raise。上游沒有提供（例如上游的
-   名單是從 cache 讀回的）→ 下游自己做出它要的東西。下游沒宣告 → 完全不看上游的副產物。
-6. **pipeline 和 bench 用同一個 config，就是同一個 id、同一個 cache entry。** 每一段一個 entry，以
-   `_after-<上游 hash>` 串起來。
-7. **算法結果與重構前完全一致**，只有 id 與名稱改變；用重構前保留的 cache 驗證。
+> **狀態：重構已完成（2026-11-02 核對並瘦身）。** 這份原本是施工依據：目標、`Retriever.py` 的介面草稿、每個檔案的架構、
+> pipeline／bench 的串接、產物表、施工順序。完成之後，目標與介面草稿的內容已經在 `Retriever.py` 開頭的 docstring 裡；
+> 檔案架構與產物表隨程式改了名（草稿裡的 `Context.frame_at`、`ArmTables.arm_entry`、`ArmTables.add_level`、
+> `truth_rank_offset_in_all`、`stage2_output`、`max_rot_per_place` 現在都不存在）；施工順序與驗證紀錄過時了。這些都刪掉了
+> （原文：`git show HEAD:stage2_retrieval/blueprint.md`，在 commit 這次瘦身之前 HEAD 就是原文）。
+> 留下：名詞與規則、串接與 id／cache 的規則、實作時與草稿不同的決定、附錄 A 各方法的資料流。
+> 介面的現況看 `Retriever.py`、`MultiPhases.py`、`Context.py`、`StageInterface.py`。GloRet／LogLoRet（`RetrieverGloRet.py`）見 `proposal.md`。
 
 ---
 
@@ -45,62 +29,7 @@
 
 ---
 
-## 二、`Retriever.py`：最小介面
-
-```
-Retriever.py
-├── RetrieverConfig(IdentifiedConfig)     沒有欄位；慣例：名單長度欄位叫 raw_topk
-├── Extra            (frozen)  kind: str, key: tuple, value: Any       一份副產物
-├── RetrievalOutput            candidates: CandidateSet                第一層：候選名單（必備）
-│                              extras: Dict[str, Extra]                第三層：自己定義的副產物
-│                              parent: Optional[RetrievalOutput]       上游的輸出（整條鏈可回溯）
-│                              producer: str                           產出者（entry 名）
-│   └── find(kind) -> Optional[Extra]     沿 parent 往上找
-├── Uses             (frozen)  kind, key                               下游宣告要用的上游副產物
-├── BridgeError(RuntimeError)
-├── EncoderPool                                                        ← 由 Context.py 搬來並改寫
-│   ├── get(cfg) -> TileEncoder           依 trunk（去掉 pooling 的 encoder config + weights_id）共用，
-│   │                                     回傳套上 cfg.pooling 的 view
-│   └── offer(built)                      登記外部建好的 encoder，以它自己的 cfg 為 key
-├── check_encoder(built, wanted_cfg)      trunk 或 weights_id 不同 → raise
-└── Retriever(IdentifiedBuild)            [抽象]
-    ├── UPSTREAM: Tuple[type, ...]        可接受的上游型別：(EstMppResult,) 或 (RetrievalOutput,)
-    ├── __init__(cfg, device=None, *, encoders: Optional[EncoderPool] = None)
-    │                                     沒給就自己建；有給就經由它取得並比對
-    ├── encoder_needs() -> Dict[str, TileEncoderConfig]   要用哪些 encoder（讓呼叫端知道能共用什麼）
-    ├── uses() -> Tuple[Uses, ...]        橋接鎖宣告，預設 ()；由 config 的 reuse 欄位決定
-    ├── build(wsi, mask) -> self          綁定 slide（第二層：wsi、mask）
-    ├── retrieve(upstream, query, *, topk=None) -> RetrievalOutput    [基類實作，子類不覆寫]
-    │     檢查 upstream 型別 → 檢查橋接鎖 → self.run(...) → 取前 topk
-    ├── run(upstream, query) -> RetrievalOutput           [抽象，子類實作]
-    └── tables(output, qc) -> Dict[str, List[dict]]        可選：副產物寫成表，預設 {}
-```
-
-**三層輸入**
-
-| 層級 | 內容 |
-|---|---|
-| 第一層 | `upstream`：`EstMppResult` 或 `RetrievalOutput` |
-| 第二層 | `build` 綁定的 wsi、mask；`query`（影像 / `QueryPatchContainer`） |
-| 第三層 | `upstream.find(kind)`：上游（或更上游）的副產物 |
-
-**encoder 規則**：比對 trunk（model、transform、head）與實際載入權重的 `weights_id`；pooling 不在比對範圍，
-由各 retriever 依自己的 config 在共用的 trunk 上套用。uni2 的 `cls` 與 `cls_avg` 共用一個載入的模型。
-`TileEncoderConfig.pooling` 是欄位、預設 `''`（模型自己的，ViT 為 `cls`），並沒有強制設定。
-
-**橋接鎖**
-
-- 宣告是 config 的 `reuse: Tuple[str, ...]` 欄位，`NOT_IDENTITY`：有了鎖的保證，取用上游的特徵和自己算的
-  結果相同，它只是省時間。
-- 下游宣告了，上游有提供，但 key（trunk id、pooling、tile、overlap、level、mask）對不上 → `BridgeError`。
-- 下游宣告了，上游沒有提供（上游名單是從 cache 讀回的，cache 不存記憶體裡的特徵）→ **下游自己負責**，
-  只為它收到的名單做出需要的特徵（候選 tile 現場編碼、query 自己編碼、CSLS 自己抽樣參考 tile）。
-  **不回頭叫上游補算**：這本來就是下游的任務，取用上游的副產物只是下游的捷徑。
-- 下游沒宣告 → 不看上游的副產物。
-
----
-
-## 三、stage 2 內部的串接
+## 二、stage 2 內部的串接
 
 ```
 stage 1  EstMppResult
@@ -124,246 +53,51 @@ stage 1  EstMppResult
           CandidateSet → stage 3（讀前 topk）
 ```
 
-### `MultiPhases.py`（由 `TwoPhase.py` 改名）
-
-```
-MultiPhases.py
-├── MultiPhasesConfig(RetrieverConfig)   phases: Tuple[RetrieverConfig, ...]
-│     __post_init__：第 0 段的 UPSTREAM 必須收 EstMppResult，其餘必須收 RetrievalOutput；
-│                   每段的 topk_in ≤ 上一段的 raw_topk
-├── MultiPhases(Retriever)
-│     __init__：一個 EncoderPool 給所有段
-│     run(upstream, query, cached=None)：依序 retrieve；cached(i) 是 cache 查詢的 hook，
-│           命中就直接用讀回的名單（沒有副產物，下游照第二節的規則自己負責）
-└── MULTIPHASES_RECIPES
-```
-
-arm `A::B::C` ≡ `MultiPhasesConfig(phases=(A, B, C))`。
-
-### `Context.py`：共用工具箱（不是基類）
-
-```
-Context.py
-├── 既有：LATTICES、OnDemandTiles、MemorySource、WindowBatch、window_boxes、iou_matrix、separated、
-│         top_candidates（預選改用 raw_topk）、offset_pair_cosines、rotated_query_tiles
-├── 由 SlidingWinSimRot 搬出（第一階段 retriever 共用）：
-│   ├── level_geometry(wsi, mask, level, tile_size, overlap) -> (regions, grids)
-│   ├── fitting_rotations(grids, dims)
-│   ├── route_levels(routed, n_levels, fits, search) -> CandidateSet    退到更細 level 的邏輯
-│   ├── LevelFeatures   一個 level 的 region grids（encoder view、tile、overlap；可接 feature_store）
-│   └── QueryFeatures   query 各旋轉的特徵
-├── frame_at(wsi, mask, level, tile_size, overlap) -> CandidateSet      讀回 cache 用，不需要 retriever
-├── nearest_window(frame, dims, x, y, rotation)                         純幾何，truth 用
-└── 移出：EncoderPool（到 Retriever.py）、LiveSource（由 extras 取代）
-```
+`MultiPhases`（`MultiPhasesConfig(phases=(...))`）把它們串起來；arm `A::B::C` ≡ `MultiPhasesConfig(phases=(A, B, C))`。
+每段 `topk_in` 不能超過上一段的 `raw_topk`；方法放在不能工作的位置時，串接被拒絕（`Retriever.py` 的 `takes_wsi`／`takes_candidates`、
+`ArmSpec.METHODS`）。`OutputPolicyConfig`（`max_rot_per_place`）已刪除、不移植：當時 repo 內每個使用處都設 0，等於沒作用；
+要做「限制同一地點的旋轉數」的實驗時，寫成一個接在鏈上的 reranker。
 
 ---
 
-## 四、各檔案的架構
+## 三、pipeline 與 bench 怎麼對上同一份 entry
 
-### 第一階段 retriever（各自是 `Retriever` 子類，`UPSTREAM = (EstMppResult,)`，自己編碼）
-
-```
-RetrieverSlidingWinSimRot.py
-├── _score_mean / _score_geomean / _score_min、WINDOW_SCORES、window_score、SlidingWindowSimilarity、
-│   _sim_tensors*（搬過來，內容不變）
-├── RetrieverSlidingWinSimRotConfig   encoder, tile_size, overlap, raw_topk, min_sep_tiles, score
-├── RetrieverSlidingWinSimRot(Retriever)
-│   ├── run：route_levels → LevelFeatures / QueryFeatures → 分數圖 → top_candidates
-│   ├── extras：level_features、query_features、window_scores、tile_sims
-│   ├── tables：tile_sims
-│   └── window_tile_sims(c)            truth_sim 用
-└── SLIDEWIN_RECIPES
-
-RetrieverBagOfTiles.py / RetrieverTileVote.py / RetrieverClusterBow.py / RetrieverWinEmbed.py
-├── 各自的 Config：encoder, tile_size, overlap, raw_topk, min_sep_tiles, 自己的參數
-├── Retriever 子類：run = route_levels → LevelFeatures → 自己的 window_maps → top_candidates
-│                  extras：level_features、window_scores
-└── 各自的 RECIPES
-```
-
-### reranker（各自是 `Retriever` 子類，`UPSTREAM = (RetrievalOutput,)`；檔案照現在分，只改名）
-
-```
-RerankerScorers.py   RerankerDual / RerankerCsls / RerankerCorr / RerankerCandGraph
-RerankerEncode.py    RerankerShift / RerankerTokenMatch / RerankerXEnc
-RerankerNeural.py    RerankerTileGT / RerankerCorrNet / RerankerStack
-                     NeuralInputs、neural_inputs、pair_features、stack_features（training 用，保留）
-├── 每個 Config：encoder（含 pooling，明確寫出，不再有 '' = 上游的）、topk_in、方法參數、reuse（NOT_IDENTITY）
-├── run：取上游前 topk_in 個 → 特徵（經鎖取上游的，或自己做）→ 算分數欄 → 依自己的欄排序
-│        → RerankedCandidate（first_score / first_rank 沿用）
-├── extras：columns
-└── tables：rerank_scores
-```
-
-`OutputPolicyConfig`（`max_rot_per_place`）刪除，不移植：repo 內每個使用處都設 0（全部保留，等於沒作用）。
-要做「限制同一地點的旋轉數」的實驗時，寫成一個 reranker 接在鏈上。
-
-### 其他
-
-```
-StageInterface.py    Candidate 系列、CandidateSet：不變
-                     移除 Retriever / Reranker Protocol、RetrievalContext、TileFeatureSource、RerankNeeds
-                     （由 Retriever.py 取代）
-Naming.py            stage_name 通用化：由 config 註冊的 slug 與 operation 欄位產生，slidewin 不再特判
-ArmSpec.py           config_of_arm(spec, ...) -> MultiPhasesConfig（由 bench 的 RetrieverArms 搬來）；
-                     各方法 Config 提供 from_segment(seg, ...)
-__init__.py          METHODS：slidewin、bagoftiles、tilevote、clusterbow、winembed、各 reranker、multiphases；
-                     recipe('arm:<arm 文字>') 經 ArmSpec.config_of_arm
-```
-
-arm 文字轉 config 放在 stage 2 套件：pipeline 只經由各 stage 套件的 `recipe()` 把文字轉成 config
-（stage 1 的 `knn:gigapath` 也是 stage1_estimation 自己解析），不需要知道 stage 2 的文法；bench 呼叫同一個
-函式，所以兩邊的 config 由同一份程式產生，id 一定相同。
+- **每一段一個 cache entry**：`result/cache/<job>/…/stage1=<s1|oracle>/stage2/`（真實照片鏈則在 `photos=<id>/` 底下）。每段 id =
+  `stage_hexid(段 config, (mask, 上一段 id))`，名稱帶 `_after-<上一段 hash>`；stage 3 在 `stage2=<最後一段 entry 名>/stage3/`。
+  所以 pipeline 與 bench 只要 config 相同，就是同一個 id、同一個檔。
+- **arm 文字轉 config 放在 stage 2 套件**（`ArmSpec.config_of_arm`；各 stage 套件的 `recipe()`）：pipeline 只經由 `recipe()` 把文字轉成 config，
+  不需要知道 stage 2 的文法；bench 呼叫同一個函式，兩邊的 config 由同一份程式產生，id 一定相同。
+- **bench 可以走快速路徑**（SlidingWindow 的串流、level store），為了比較所有方法、快速看到結果；但算法結果必須相同，每條快速路徑都有 gate
+  證明這點。pipeline 不開 level store／feature store。
+- **答案怎麼算只有一份定義**：答案是哪格、排第幾、名單裡的位置，只在 `BenchCommon`（`answers`、`ranked_ranks`、`listed_places`），
+  bench、pipeline 的 truth、analyze、plot 都用它。bench 不另存評分列：`result/Stage2RetrieverBench/<encoder>/stage2_retriever.csv` 每張 slide
+  從 cache 的 entry 讀出（`--assemble` 只讀 cache 重組，`--report-only` 讀這個 csv 出報表）。一個 entry 存什麼，準則見 `ARCHITECTURE.md`「entry 存什麼」。
 
 ---
 
-## 五、和其他 stage、pipeline、bench 的串接
+## 四、實作時與草稿不同的決定
 
-### stage 3
-
-吃 `RetrievalOutput.candidates`（`CandidateSet`）的前 `topk`，不變。
-
-### pipeline（`utilities/LocaScopePipeline.py`）
-
-- 移除 `rerankers` 參數；stage 2 是一個 Retriever 或一個 MultiPhases（`--stage2 <method>:<recipe>` 或
-  `--stage2 arm:<arm 文字>`）。
-- `stage2()` 回傳 `RetrievalOutput`；`LocaScopeQueryResult.stage2` 仍是 `CandidateSet`，另加 `stage2_output`。
-- `utilities/cli/driver/locate_photo.py`：副產物表由 `retriever.tables()` 產生。
-
-### pipeline bench（`utilities/bench_modules/BenchCommon.py`、`bench_locascope.py`）
-
-- cache：stage 2 的每一段各一個 entry，`stage1=<s1|oracle>/stage2/<該段 entry 名>`；每段 id =
-  `stage_hexid(段 config, (mask, 上一段 id))`，名稱帶 `_after-<上一段 hash>`；stage 3 在
-  `stage2=<最後一段 entry 名>/stage3/`。
-- `run_stage2`：每段寫 `output`、`retriever.tables()`、truth 表。
-- 讀回：`frame_from_rows` 改用 `Context.frame_at`，不需要 retriever 物件。
-- `Stage`：stage 2 持有多段；`stage_hexid` 照舊（權重檔內容進 id）。
-- flag：`--stage2-k` 改為 `--stage2-raw-topk`（由 config 欄位自動產生）。
-
-### stage 2 bench（`bench_stage2_retriever.py`、`RetrieverArms.py`、`ArmTables.py`）
-
-```
-arm 文字 ──ArmSpec.config_of_arm──▶ MultiPhasesConfig      （與 pipeline 同一個函式 → 同一個 id）
-   │
-   ├── SlidingWindow arm：串流快速路徑（保留）
-   │     一次掃 level，所有 pooling × score，特徵不留
-   │     gate：結果必須等於 RetrieverSlidingWinSimRot（更新 gate_window_stream / gate_scored_windows）
-   │     寫自己的 entry（id = 對應 RetrieverSlidingWinSimRotConfig 的 stage_hexid）
-   │
-   └── 其他 arm：ArmEngine = 共用前綴的 phase 樹
-         每個節點 = 一個 Retriever 物件，共用一個 EncoderPool
-         level store（bench 專用）：以 key（trunk id、pooling、tile、overlap、level、mask）嚴格比對，
-           經由 retriever 的正式 feature_store 接口取用；一個 level 編碼一次，所有 arm 做完，換 level 就清
-         下游需要的 sliding window 節點：在 engine 內即時算，不重寫串流已寫的 entry，只比對兩份名單是否相同
-         ranked 模式：讀第一階段節點的 extras['window_scores']
-         FeatureHosts、host._encoder 直接塞 encoder 的做法：刪除
-```
-
-bench 為了比較所有方法、快速看到結果，做法可以和 pipeline 不同，但算法結果必須相同；每條快速路徑都有
-gate 證明這點。pipeline 不開 level store / feature store。
-
-### training（`training/RerankHead/*`）
-
-改 import 路徑與類別名，行為不變。`cli/fit_stack.py` 改為跑 MultiPhases 鏈，分數欄由各 reranker 段的
-`columns` 副產物（沿 parent）收集。
+- **下游自己做特徵的方式**：reranker 沒有可取用的上游特徵時（例如上游名單從 cache 讀回），用和第一階段同一個 `encode_level` 編碼名單所在的
+  整個 level，而不是只編候選 tile。這樣「上游現算」與「從 cache 讀回」兩種情況的數字逐位元相同；只編候選 tile 的讀取路徑不同，fp16 下最後幾位可能不同。
+- **reranker 的共用做法** `RerankerScorers.ColumnRanker`：讀前 `topk_in`、建 incoming table、取特徵、寫欄位、依欄位排序、欄位當 `columns`
+  副產物往下傳。它是 `Retriever` 子類，不是另一種介面；`RerankerEncode`、`RerankerNeural` 的方法也繼承它。
+- **sibling 共用一次打分**（bench）：只差排序欄位的 reranker（例如 Corr 的四個欄位）打分一次，其他欄位用 `Context.reordered` 重排；結果與各自打分相同。
+- **bench 的 level store**：`RetrieverArms.LevelStore`，key 是 `Context.feature_key`，只留目前的 level；同一份特徵的所有 arm 共用一份。
+- **entry 的寫入只有一處**：`BenchCommon.write_phase`，pipeline 與 bench 都用它；記錄由 `BenchCommon.phase_record` 產生，名稱與 hash 由
+  `BenchCommon.phase_ids` 產生。
+- **`tile_sims` 只寫前 10 個**（`RetrieverSlidingWinSimRot.TILE_SIM_ROWS`）：名單 1000 個時全寫是每個 FoV 兩萬列。
+- **`Stage` 的 stage 2 一律是 chain**：單一 retriever 是一段的 `MultiPhases`（`BenchCommon.as_chain`），所以每個 stage 2 都按段建 entry；
+  `stage_entries()[2]` 是最後一段（stage 3 讀的名單）。
+- **class 是 identity 的一部分**：`RetrieverConfig.identity_parts` 前面有 `retriever=<class>`（理由在 `RetrieverConfig` 的 docstring：各自在預設 op 的
+  BagOfTiles+gap、TileVote+exact、ClusterBow、Dual+dual 都只差 `encoder`，id 會相同）。
+- **ClusterBow 不是決定性的**：k-means 的 `index_add_` 在 CUDA 上是 atomic add，每次跑少數列的名次可能小動；使用者接受，不改成決定性。
 
 ---
 
-## 六、產物檔案與誰負責
+## 附錄 A：各方法的資料流
 
-### cache entry（`result/cache/<job>/.../stage1=<s1|oracle>/stage2/`，檔名 `<kind>_<entry 名>.<ext>`）
-
-| kind | 內容 | 現在誰寫 | 誰讀 | 重構後 |
-|---|---|---|---|---|
-| `record` (.json) | config、各 VERSION、上游、環境、權重 fingerprint、`limit` | `BenchCommon.Stage.record`、`ArmTables.arm_entry` | `Cache`（是否命中、是否完整） | 每段一份；記 `raw_topk` |
-| `output` (.csv) | 每個 FoV 的候選名單：rank、region、lattice、row、col、rotation、score、x0/y0/w0/h0、候選的額外欄、level、ds、irretrievable_lvl、alter_lvl、error、t_s | `BenchCommon.run_stage2`（pipeline bench）、`stage2_tables`（bench 串流）、`ArmTables.add_level`（bench engine） | stage 3（`stage2_for_stage3`）、分析、bench 報表、demo | 每段一份；每列加 `n_listed` |
-| `tile_sims` (.csv) | 每個候選、每個 query tile 對其下 WSI tile 的餘弦 | sliding window 的 `tile_sim_rows` | `plot_locascope.py`、`locate_photo.py` | `RetrieverSlidingWinSimRot.tables()` |
-| `truth` (.csv) | 每個 FoV 的兩個答案（只有合成 FoV、只有第一段有）：`truth_main_*` 與 `truth_offset_*` 各是 region / row / col、level-0 框、到 query 格中心的距離、分數；名次 `truth_rank_main`（M 在 main）、`truth_rank_main_in_all`、`truth_rank_offset_in_offset`、`truth_rank_offset_in_all`；`pool_main`、`pool_all`；`truth_rotation`、`truth_level`。搜到別層時只有位置、框、距離 | `BenchCommon.truth_rows`、`stage2_tables`（bench 串流） | bench 報表、分析、plot（都從第一段讀） | `TRUTH_VERSION` 4；reranker 段不寫（它只對名單打分，答案就是第一段的） |
-| `truth_sim` (.csv) | 兩個答案的逐 tile 餘弦，`lattice` 欄分 main / offset | `BenchCommon.truth_rows`（需要 sliding window 的 sim maps） | `plot_locascope.py` | 只有提供 `tile_sims` 的 retriever |
-| `first_phase` (.csv) | 第一階段提出的名單 | `TwoPhase.phase_rows` | 分析 | 刪除：第一階段本身就是一個 entry 的 `output` |
-| `rerank_scores` (.csv) | 每個 reranker 收到的候選（依讀入順序）：視窗 key（region / lattice / row / col / rotation）與它自己寫的欄。進出名次、分數、框、`in` / `first` / `first_rank` 由上游與本段的 `output` 依 key join 得到 | `Context.score_rows`（`ColumnRanker.tables()`） | 分析 | 每個 reranker 段的 `tables()` 寫自己的欄 |
-
-一個 entry 只寫它那一段有的表（`BenchCommon.phase_roles`：`output` + retriever 的 `TABLES` + 第一段有真值時的 `truth`、`truth_sim`），命中也只要求這些表。各欄存不存的準則見 `ARCHITECTURE.md`「entry 存什麼」。
-
-### bench 結果（`result/Stage2RetrieverBench/<encoder>/`）
-
-| 檔案 | 內容 | 誰寫 / 誰讀 |
-|---|---|---|
-| `stage2_retriever.csv` | 每個 FoV、每個 arm 的評分列（rank_main、pool、mode = ranked（NMS off）/ listed（NMS on）等；舊 CSV 的 whole / production 讀成這兩個） | 每張 slide 從 cache 的 entry 讀出（`slide_rows`）：ranked 列就是第一段 `truth` 的名次，listed 列是答案在最後一段 `output` 裡的位置（`BenchCommon.listed_places`），以第一段的答案為準；`--assemble` 不跑模型、只讀 cache 重組；`--report-only` 讀它出報表 |
-
-bench 不另存評分列：每個 arm 只留它的 stage 2 entry，續跑看 entry 是否涵蓋每個有 FoV 的 level（從 render 表放置 FoV，不必 render 照片）。答案是哪格、排第幾、名單裡的位置，只有 `BenchCommon` 一份定義（`answers`、`ranked_ranks`、`listed_places`），bench、pipeline 的 truth、analyze、plot 都用它。
-
----
-
-## 七、施工順序（working list）
-
-施工期間舊檔全部保留，測試可以同時 import 新舊兩版、直接比對結果相同；驗證通過後舊檔交給使用者刪。
-不新增 slurm script；測試併入既有的測試檔。測試由 `jobscripts/RerankHead/TestRerank.sh`、
-`jobscripts/TestConfig.sh` 送 Slurm。
-
-| 步驟 | 檔案 | 動作 | 驗證 |
-|---|---|---|---|
-| 1 | `stage2_retrieval/Retriever.py` | 新增 | `test_context.py` 擴充：encoder 比對會 raise、橋接鎖（key 不合 raise；上游沒有時下游自己做）、`topk > raw_topk` 會 raise |
-| 1 | `stage2_retrieval/Context.py` | 搬入 level / query 共用工具、`frame_at`、`nearest_window`；移出 EncoderPool、LiveSource | 同上 |
-| 2 | `stage2_retrieval/RetrieverSlidingWinSimRot.py` | 新增（移植） | 與舊 `SlidingWinSimRot` 在合成資料上名單、分數完全相同 |
-| 3 | `RetrieverBagOfTiles.py`、`RetrieverTileVote.py`、`RetrieverClusterBow.py`、`RetrieverWinEmbed.py` | 新增（移植） | 與舊 CoRetriever 路徑結果相同 |
-| 4 | `RerankerScorers.py`、`RerankerEncode.py`、`RerankerNeural.py` | 新增（移植） | 與舊 `ScoredReranker` 單 scorer 結果相同（`test_rerank.py`、`test_neural.py` 改寫） |
-| 5 | `MultiPhases.py`、`__init__.py`、`Naming.py`、`ArmSpec.py` | 新增 / 修改 | `test_naming.py`、`test_arm_spec.py` |
-| 5 | `StageInterface.py` | 移除被取代的 Protocol | 同上 |
-| 6 | `utilities/LocaScopePipeline.py`、`utilities/bench_modules/BenchCommon.py`、`utilities/cli/driver/locate_photo.py`、`utilities/cli/plot/plot_locascope.py` | 修改 | `test_locascope_stages.py` |
-| 7 | `utilities/bench_modules/RetrieverArms.py`、`ArmTables.py`、`bench_stage2_retriever.py` | 改寫 / 修改 | `test_retriever_arms.py`、`test_arm_tables.py`、bench 內建 gate |
-| 8 | `training/RerankHead/{Steps,Visits,Embed}.py`、`cli/train.py`、`cli/fit_stack.py`、`utilities/bench_modules/bench_offgrid_score.py` | 改 import / fit_stack 改走 MultiPhases | `test_config_identity.py`（模組清單、recipe lint） |
-| 8 | `realtest.sh`、`jobscripts/BenchLocaScope.sh`、`jobscripts/PlotLocaScope.sh` | `--stage2-k` → `--stage2-raw-topk` | — |
-| 9 | Smoke | `-J SmokeStage2RetrieverBench`，`raw_topk = 1000` | 依 arm 文字與重構前的 cache 逐一比對 `output` 表 |
-| 10 | `stage2_retrieval/README.md`、`spec.md`、本文件、`ARCHITECTURE.md` | 更新文件 | — |
-| 11 | 交給使用者刪 | `SlidingWinSimRot.py`、`BagOfTiles.py`、`TileVote.py`、`ClusterBow.py`、`WinEmbed.py`、`CoRetrieve.py`、`CoStage.py`、`Union.py`、`TwoPhase.py`、`Rerank.py`、`RerankScorers.py`、`RerankEncode.py`、`RerankNeural.py`、`dataflow.md` | — |
-
-### 驗證時要注意
-
-- 下游自己做特徵（候選 tile 現場編碼）與取用上游整層編碼的特徵，讀取路徑與 batch 組成不同，fp16 下最後幾位
-  可能有微小差異，同分時排序可能不同。比對時分開回報「完全相同」與「差在容許誤差內」。
-- stage 2 的 id 全部會變；重構前的 cache 不刪，只用來依 arm 文字比對結果。
-
----
-
-## 八、施工紀錄（與藍圖的差異）
-
-施工到第九步之前完成；以下是實作時定下、藍圖沒寫到或改了的地方。
-
-- **下游自己做特徵的方式**：reranker 沒有可取用的上游特徵時（例如上游名單從 cache 讀回），用和第一階段
-  同一個 `encode_level` 編碼名單所在的整個 level，而不是只編候選 tile。這樣「上游現算」與「從 cache 讀回」
-  兩種情況的數字逐位元相同；只編候選 tile 的讀取路徑不同，fp16 下最後幾位可能不同。
-- **reranker 的共用做法** `RerankerScorers.ColumnRanker`：讀前 `topk_in`、建 incoming table、取特徵、
-  寫欄位、依欄位排序、欄位當 `columns` 副產物往下傳。它是 `Retriever` 子類，不是另一種介面；
-  `RerankerEncode`、`RerankerNeural` 的方法也繼承它。
-- **sibling 共用一次打分**（bench）：只差排序欄位的 reranker（例如 Corr 的四個欄位）打分一次，其他欄位用
-  `Context.reordered` 重排；結果與各自打分相同（`test_rerank`）。
-- **bench 的 level store**：`RetrieverArms.LevelStore`，key 是 `Context.feature_key`，只留目前的 level；
-  經由 retriever 的 `feature_store`（`shared_level`）取用，所以同一份特徵的所有 arm 共用一份。
-- **entry 的寫入只有一處**：`BenchCommon.write_phase`，pipeline 與 bench 都用它；記錄由
-  `BenchCommon.phase_record` 產生；名稱與 hash 由 `BenchCommon.phase_ids` 產生。
-- **`tile_sims` 只寫前 10 個**（`TILE_SIM_ROWS`）：名單 1000 個時全寫是每個 FoV 兩萬列。
-- **`Stage` 的 stage 2 一律是 chain**：單一 retriever 是一段的 `MultiPhases`（`BenchCommon.as_chain`），
-  所以每個 stage 2 都按段建 entry；`stage_entries()[2]` 是最後一段（stage 3 讀的名單）。
-- **class 是 identity 的一部分**：`RetrieverConfig.identity_parts` 前面加上 `retriever=<class>`。原本 id
-  只記與自己 BASELINE 不同的欄位，各自在預設 op 的 BagOfTiles+gap、TileVote+exact、ClusterBow、Dual+dual
-  都只差 `encoder`，因此 id 相同；bench 把它們當成同一個物件執行，接在它們後面的 reranker 也會共用同一個
-  entry 與 `_after-`（smoke 572081 發現；`test_retriever_arms` 的 q 項）。
-- **驗證（smoke 572456 對舊 uni2 run，BRACS_310 + S1128171）**：SlidingWindow 15 個、BagOfTiles、TileVote(exact)、
-  CSLS、各 reranker 的第一個欄位逐列相同。其餘 reranker 欄位不同，是因為舊 run 的每個方法只建一個 reranker，所有欄位
-  都用第一個排序（舊 CSV 中 Corr 四欄、CandGraph 三欄、Dual 兩欄的 rank 逐列相同）；新的是對的。ClusterBow 有
-  少數列名次小動（cls_avg 2/518、rings3 約 14/518）：k-means 的 `index_add_` 在 CUDA 上是 atomic add，每次跑
-  都可能不同；使用者接受，不改成決定性。
-- **刪除**（交使用者刪檔）：`Union.py`、`OutputPolicyConfig`、`UnionCandidate`、舊的
-  `Retriever` / `Reranker` Protocol、`RetrievalContext`、`RerankNeeds`、`LiveSource`、舊的 `EncoderPool`。
-
----
-
-## 附錄 A：各方法的資料流（原 `dataflow.md`）
-
-算法在這次重構中不變。其中「`ctx = RetrievalContext`」「bench 把 host 的 ctx 交給 reranker」的接法由本文件
-第二、三節取代：特徵由各 retriever 自己做，或經橋接鎖取用上游的副產物。
+算法在這次重構中不變。其中「`ctx = RetrievalContext`」「bench 把 host 的 ctx 交給 reranker」的接法已被取代（`RetrievalContext` 已不存在）：
+特徵由各 retriever 自己做，或經橋接鎖取用上游的副產物（`Retriever.py` 開頭的 docstring）。
 
 符號：`R, C` 一個區域的 tile 格點列、欄數；`rq, cq` query 的 tile 格點（約 4×5，轉 90 / 270 度後是 5×4）；
 `n = rq·cq`（約 20）；`F` 特徵維度（`cls` 1536、`cls_avg` / `cls_std` 3072、`rings3` 4608、`grid2x2` 7680，UNI2 與 GigaPath 的基底都是 1536）；
@@ -612,4 +346,4 @@ logit = 視窗向量 · query 向量 / 溫度            對象是「整層所�
 ### A.4 要記得的兩個限制
 
 - reranker 的**訓練候選只來自 sliding window 的名單**（`uni2-avg-k500`，`cls_avg+mean`）。新 bench 允許把 TileGT 接在別的 retriever 的名單後面，那是訓練與使用的候選分布不同。
-- `train.py` 的 pooling 由 `--retriever` 指定的 recipe 決定，目前只有 `cls`、`cls_avg`；`rings3`、`grid2x2` 的版本要先加 recipe。
+- `training/RerankHead/cli/train.py` 的 encoder 與 pooling 由 `--encoder`（`uni2`、`gigapath`）和 `--pooling`（預設 `cls_avg`）指定，heads 讀同一個 pooling；`--k`（預設 500）是訓練用的名單長度。
