@@ -324,8 +324,14 @@ def _first_rank(df: Optional[pd.DataFrame], cx, cy, tol, xcol='x0', ycol='y0',
     return int(hit['rank'].min()) if len(hit) else None
 
 
+def tile_size_of(cfg) -> int:
+    """The tile size of a stage 2 config: its own, or -- a chain of phases (`MultiPhasesConfig`, which is what a recipe such as
+    `slidewin:gigapath` builds) -- the first phase's."""
+    return int(cfg.phases[0].tile_size if hasattr(cfg, 'phases') else cfg.tile_size)
+
+
 def join(runs: List[SlideRun], stages, tol_um: float) -> pd.DataFrame:
-    tile = stages[1].cfg.tile_size
+    tile = tile_size_of(stages[1].cfg)
     padding = stages[2].cfg.padding
     out = []
     for run in runs:
@@ -1185,7 +1191,7 @@ def main():
         fig_dir.mkdir(parents=True, exist_ok=True)
         plot_stats(sel, args.plot, args.by or None, fig_dir, args.dpi)
     by_slide = {r.name: r for r in runs}
-    args.tile_size = stages[1].cfg.tile_size
+    args.tile_size = tile_size_of(stages[1].cfg)
     if panels:
         fig_dir = out / 'figures' / 'fov'
         fig_dir.mkdir(parents=True, exist_ok=True)
