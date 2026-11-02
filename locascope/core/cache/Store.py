@@ -1,6 +1,6 @@
 """The feature store: encoded tile features as cache entries.
 
-    from Store import FeatureStore as FS, FeatureMapCache, feature_id
+    from locascope.core.cache.Store import FeatureStore as FS, FeatureMapCache, feature_id
 
 FEATURES are `Cache.TREE` entries of kind `features`, hung under what the
 tiles are: a whole-slide grid, a TileSampler draw or a batch of photos.
@@ -53,7 +53,7 @@ from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
-from Cache import Address, wsi_stem_of
+from locascope.core.cache.Cache import Address, wsi_stem_of
 
 
 class StoreMismatch(RuntimeError):
@@ -109,7 +109,7 @@ def encoder_names(encoder) -> Tuple[str, str]:
     """`(tag, config id)` of an encoder build or its config: what names its
     features. The tag is `_paths.encoder_tag` of the registered name and the
     head; the id is the CONFIG's, so it needs no weights loaded."""
-    from _paths import encoder_tag                                # noqa: PLC0415
+    from locascope.paths import encoder_tag   # noqa: PLC0415
     cfg = getattr(encoder, 'cfg', encoder)
     name = getattr(type(cfg), 'REGISTERED_AS', None) or 'enc'
     return encoder_tag(name, getattr(cfg, 'head', '') or ''), cfg.identity_id()
@@ -534,7 +534,7 @@ def from_store_tensors(tensors: dict, regions, *, ds: float, level: int,
     """Split the flat features back into one FeaturesMap per grid -- by the
     grids' own lengths, which agree with the stored `region` column only if
     the geometry check passed; if they disagree this raises."""
-    from PatchingLib import FeaturesMap, WsiFeaturesMap, region_grids  # noqa: PLC0415
+    from locascope.core.tiles.PatchingLib import FeaturesMap, WsiFeaturesMap, region_grids  # noqa: PLC0415
     features = tensors['features']
     if features.ndim != 3 or features.shape[1] != 1:
         raise ValueError(f'expected [N, 1, D] features, got {tuple(features.shape)}')
@@ -635,8 +635,8 @@ class FeatureMapCache:
         weights), the grid code, the mask recipe's code, the upstream ids, the
         environment. Computed once: the encoder's weights_id costs seconds."""
         if self._record is None:
-            from ConfigIdentity import record                     # noqa: PLC0415
-            from SlideReader import SlideReader                   # noqa: PLC0415
+            from locascope.core.config.ConfigIdentity import record                     # noqa: PLC0415
+            from locascope.core.slides.SlideReader import SlideReader                   # noqa: PLC0415
             self._record = record(
                 self.encoder, also=(FeatureStore, SlideReader, self.mask_cfg),
                 seg_id=self.seg_id, region_id=self.region_id)
@@ -716,7 +716,7 @@ class FeatureMapCache:
                       f'level {level} ds {ds}')
             return None
         columns, _ = FeatureStore.load(path, keys=('x', 'y', 'region', 'grid_rc'))
-        from PatchingLib import region_grids                      # noqa: PLC0415
+        from locascope.core.tiles.PatchingLib import region_grids                      # noqa: PLC0415
         bad = geometry_mismatch(columns, region_grids(
             regions, ds=ds, level=level, tile_size=tile_size, overlap=overlap))
         if bad:
@@ -766,7 +766,7 @@ class FeatureMapCache:
         covers half the slide reads as the slide."""
         if 'w' not in self.mode:
             return {}
-        from PatchingLib import region_grids                      # noqa: PLC0415
+        from locascope.core.tiles.PatchingLib import region_grids                      # noqa: PLC0415
         columns = _columns(region_grids(regions, ds=ds, level=level,
                                         tile_size=tile_size, overlap=overlap))
         n = int(columns['x'].numel())

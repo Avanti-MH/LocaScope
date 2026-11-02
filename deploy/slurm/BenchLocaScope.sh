@@ -19,7 +19,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # ---------------- End-to-end bench: every stage's results into the cache ----
 #
@@ -53,7 +53,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # overwrites the full run's log nor shares its cache:
 #
 #   MODE=smoke sbatch -J BenchLocaScopeSmoke --array=0-1 --time=04:00:00 \
-#       --exclude=25a-hgpn001,25a-hgpn003,25a-hgpn006 jobscripts/BenchLocaScope.sh
+#       --exclude=25a-hgpn001,25a-hgpn003,25a-hgpn006 deploy/slurm/BenchLocaScope.sh
 MODE="${MODE:-full}"
 if [ "$MODE" = "smoke" ]; then SMOKE_WSI=1; SMOKE_PER_LEVEL=5; else SMOKE_WSI=10; SMOKE_PER_LEVEL=50; fi
 
@@ -76,7 +76,7 @@ SLIDE_ARG=""
 echo "======== mode=$MODE  $DATASETS  n_wsi=$N_WSI  per_level=$PER_LEVEL  limit=$LIMIT ========"
 echo "stages $STAGE1 | $STAGE2 | $STAGE3   route $ROUTE   seg $SEG   task ${SLURM_ARRAY_TASK_ID:-all}"
 
-python utilities/bench_modules/bench_locascope.py \
+python -m locascope.cli.bench.bench_locascope \
   --datasets $DATASETS --n-wsi "$N_WSI" \
   --sampler-n-per-rung "$PER_LEVEL" \
   --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" --route "$ROUTE" \

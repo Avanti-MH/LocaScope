@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Tests for the arms of the stage 2 retriever bench that are not the streamed sliding window:
-`utilities/bench_modules/RetrieverArms.py` (how the two modes of an arm make the bench's ranks)
+`locascope/cli/bench/RetrieverArms.py` (how the two modes of an arm make the bench's ranks)
 and the report side of `bench_stage2_retriever.py` (rows of every family in one CSV, one report
 with a block per mode).
 
-    python utilities/test_modules/TestRerank/test_retriever_arms.py
+    python tests/TestRerank/test_retriever_arms.py
 
 No slide, no model, no GPU: lists and maps are arrays, the "slide" is a pool size.
 
@@ -38,21 +38,17 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', 'bench_modules'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import torch                                                     # noqa: E402
 
-import bench_stage2_retriever as bench                           # noqa: E402
-from BenchCommon import (Answer, Answers, Pools, listed_places, listed_windows, pools_of,   # noqa: E402
+from locascope.cli.metrics import analyze_stage2_metrics as analyze                        # noqa: E402
+from locascope.cli.bench.BenchCommon import (Answer, Answers, Pools, listed_places, listed_windows, pools_of,   # noqa: E402
                          ranked_ranks)
-from test_context import TILE, cset                              # noqa: E402
-from stage2_retrieval.StageInterface import Candidate, CandidateSet, ShiftedCandidate   # noqa: E402
-from dump_function.RetrievalReport import paired_stats, truth_rank   # noqa: E402
+from tests.TestRerank.test_context import TILE, cset                              # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet, ShiftedCandidate   # noqa: E402
+from locascope.cli.metrics.RetrievalReport import paired_stats, truth_rank   # noqa: E402
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
 
@@ -226,14 +222,14 @@ def sample_rows() -> List[dict]:
 
 def t_h_the_two_modes_pair_each_with_its_own_baseline() -> str:
     rows: List[dict] = sample_rows()
-    for mode, want in ((bench.MODE_RANKED, [2, 2, 2]), (bench.MODE_LISTED, [3, 1, 1001])):
-        subset: List[dict] = [r for r in rows if bench.mode_of(r) == mode]
-        paired: List[dict] = bench.attach_baseline(subset, BASE)
+    for mode, want in ((analyze.MODE_RANKED, [2, 2, 2]), (analyze.MODE_LISTED, [3, 1, 1001])):
+        subset: List[dict] = [r for r in rows if analyze.mode_of(r) == mode]
+        paired: List[dict] = analyze.attach_baseline(subset, BASE)
         assert len(paired) == len(subset), 'every row finds the baseline of its mode'
         mine: List[dict] = [r for r in paired if r['arm'] == METHOD]
         assert [truth_rank(r) for r in mine] == want, (mode, [truth_rank(r) for r in mine])
-    ranked: Dict[str, Any] = paired_stats([r for r in bench.attach_baseline(
-        [r for r in rows if bench.mode_of(r) == bench.MODE_RANKED], BASE) if r['arm'] == METHOD])
+    ranked: Dict[str, Any] = paired_stats([r for r in analyze.attach_baseline(
+        [r for r in rows if analyze.mode_of(r) == analyze.MODE_RANKED], BASE) if r['arm'] == METHOD])
     assert (ranked['W'], ranked['L'], ranked['T']) == (3, 0, 0), ranked     # 2 beats the baseline's 7
     return 'W/L/T 3/0/0 ranked'
 
@@ -242,15 +238,15 @@ def t_i_a_report_runs_over_both_modes_and_a_csv() -> str:
     rows: List[dict] = sample_rows()
     with tempfile.TemporaryDirectory() as tmp:
         path: Path = Path(tmp) / 'stage2_retriever.csv'
-        bench.write_csv(rows, path)
-        back: List[dict] = bench.read_rows([path], quiet=True)
+        analyze.write_csv(rows, path)
+        back: List[dict] = analyze.read_rows([path], quiet=True)
     assert len(back) == len(rows)
     assert all(isinstance(r['list_len'], int) for r in back if r['list_len'] != ''), 'list_len is a number'
-    assert bench.report_arms(back) == [BASE, METHOD, RERANK]
-    assert bench.pick_baseline(back) == BASE
-    assert bench.check_pools(back, BASE, emit=lambda s: None) == 0
+    assert analyze.report_arms(back) == [BASE, METHOD, RERANK]
+    assert analyze.pick_baseline(back) == BASE
+    assert analyze.check_pools(back, BASE, emit=lambda s: None) == 0
     lines: List[str] = []
-    bench.tabulate(back, False, emit=lines.append)
+    analyze.tabulate(back, False, emit=lines.append)
     text: str = '\n'.join(lines)
     assert 'RANKED (NMS off)' in text and 'LISTED (NMS on)' in text, 'one block per mode'
     assert text.index('RANKED (NMS off)') < text.index('LISTED (NMS on)')
@@ -264,13 +260,13 @@ def t_j_an_older_csv_is_read_in_the_grammar() -> str:
     old: List[dict] = [{k: v for k, v in r.items() if k not in ('mode', 'family')} for r in
                        fake_rows('cls+mean', 'pooling', 'whole', [dict(rank_main=7, rank_offset_in_offset=9,
                                                                        rank_main_in_all=11, rank_offset_in_all=12)] * 2, {})]
-    assert all(bench.mode_of(r) == bench.MODE_RANKED and bench.family_of(r) == 'pooling' for r in old)
-    assert bench.mode_of({'mode': 'whole'}) == bench.MODE_RANKED and bench.mode_of({'mode': 'production'}) == \
-        bench.MODE_LISTED, 'the older names of the modes'
+    assert all(analyze.mode_of(r) == analyze.MODE_RANKED and analyze.family_of(r) == 'pooling' for r in old)
+    assert analyze.mode_of({'mode': 'whole'}) == analyze.MODE_RANKED and analyze.mode_of({'mode': 'production'}) == \
+        analyze.MODE_LISTED, 'the older names of the modes'
     lines: List[str] = []
-    bench.tabulate(old, False, emit=lines.append)
+    analyze.tabulate(old, False, emit=lines.append)
     assert old[0]['arm'] == BASE, 'cls+mean of an encoder-uni2 row is uni2:SlidingWindow::cls+mean'
-    assert old[0]['mode'] == bench.MODE_RANKED, 'the report writes the mode in its own name'
+    assert old[0]['mode'] == analyze.MODE_RANKED, 'the report writes the mode in its own name'
     assert BASE in '\n'.join(lines)
     return 'cls+mean -> ' + old[0]['arm'] + '; whole / production -> ranked / listed'
 
@@ -280,14 +276,14 @@ def t_k_pools_that_disagree_are_counted() -> str:
     for r in rows:
         if r['arm'] == RERANK and r['fov_id'] == 0:
             r['pool_all'] += 1
-    assert bench.check_pools(rows, BASE, emit=lambda s: None) == 1, 'one FoV of the reranker arm'
+    assert analyze.check_pools(rows, BASE, emit=lambda s: None) == 1, 'one FoV of the reranker arm'
     return 'a FoV ranked in another pool is not silently compared'
 
 
 def t_l_the_listed_share_is_the_ceiling_of_a_list() -> str:
-    rows: List[dict] = [r for r in sample_rows() if bench.mode_of(r) == bench.MODE_LISTED]
+    rows: List[dict] = [r for r in sample_rows() if analyze.mode_of(r) == analyze.MODE_LISTED]
     lines: List[str] = []
-    bench.listed_report(rows, [BASE, METHOD, RERANK], emit=lines.append)
+    analyze.listed_report(rows, [BASE, METHOD, RERANK], emit=lines.append)
     row: str = next(line for line in lines if line.startswith(f'| {METHOD}'))
     assert '67%' in row, row                  # 2 of the 3 FoVs have the main answer listed
     base: str = next(line for line in lines if line.startswith(f'| {BASE}'))
@@ -299,12 +295,12 @@ def t_l_the_listed_share_is_the_ceiling_of_a_list() -> str:
 def t_m_the_curve_never_counts_an_unlisted_answer_as_a_hit() -> str:
     """K past the pool is the whole level, but an answer that is not listed is pool + 1, which a large K
     must not swallow."""
-    rows: List[dict] = [r for r in sample_rows() if bench.mode_of(r) == bench.MODE_LISTED and r['arm'] == BASE]
+    rows: List[dict] = [r for r in sample_rows() if analyze.mode_of(r) == analyze.MODE_LISTED and r['arm'] == BASE]
     for r in rows:
         r['pool_all'] = 50
         r['rank_main_in_all'] = r['rank_offset_in_all'] = 51      # not listed in a pool of 50
     lines: List[str] = []
-    bench.curve_report(rows, [BASE], emit=lines.append)
+    analyze.curve_report(rows, [BASE], emit=lines.append)
     row: str = next(line for line in lines if line.startswith(f'| {BASE}'))
     assert ' 0%' in row and '100%' not in row, row
     return row.strip()
@@ -315,9 +311,9 @@ def t_n_every_operation_of_a_reranker_is_its_own_config_column_and_entry() -> st
     column of the FIRST operation to be built for every later one, so Corr+diag, +contrast, +mnn and
     +sinkhorn (and Dual, CandGraph) came out as one list four times. Now an operation is the config's: each
     is its own config, orders by its own column and is its own entry."""
-    from stage2_retrieval import retriever_class
-    from stage2_retrieval.ArmSpec import parse_arm, phase_configs
-    from stage2_retrieval.Naming import config_label
+    from locascope.core.stage2_retrieval import retriever_class
+    from locascope.core.stage2_retrieval.ArmSpec import parse_arm, phase_configs
+    from locascope.core.stage2_retrieval.Naming import config_label
     groups: Dict[str, List[str]] = {
         'Corr::cls_avg': ['diag', 'contrast', 'mnn', 'sinkhorn'],
         'Dual::cls_avg': ['dual', 'cos_main'],
@@ -338,8 +334,8 @@ def t_n_every_operation_of_a_reranker_is_its_own_config_column_and_entry() -> st
 
 
 def t_o_the_arms_a_run_makes_come_prefix_first_and_leave_out_a_plain_window() -> str:
-    from RetrieverArms import arm_texts
-    from stage2_retrieval.ArmSpec import parse_arm
+    from locascope.cli.bench.RetrieverArms import arm_texts
+    from locascope.core.stage2_retrieval.ArmSpec import parse_arm
     specs = [parse_arm(t, 'uni2') for t in (
         'uni2:SlidingWindow::cls+mean::Corr::cls_avg+diag',
         'uni2:SlidingWindow::cls+mean::Corr::cls_avg+sinkhorn',
@@ -357,10 +353,10 @@ def t_o_the_arms_a_run_makes_come_prefix_first_and_leave_out_a_plain_window() ->
 
 
 def t_p_the_engine_is_the_tree_of_the_phases_and_files_them_as_the_pipeline_does() -> str:
-    from BenchCommon import phase_ids
-    from RetrieverArms import ArmEngine, _sibling_key
-    from stage2_retrieval.ArmSpec import config_of_arm, parse_arm
-    from stage2_retrieval.Retriever import EncoderPool
+    from locascope.cli.bench.BenchCommon import phase_ids
+    from locascope.cli.bench.RetrieverArms import ArmEngine, _sibling_key
+    from locascope.core.stage2_retrieval.ArmSpec import config_of_arm, parse_arm
+    from locascope.core.stage2_retrieval.Retriever import EncoderPool
     chain = 'uni2:SlidingWindow::cls+mean::Corr::cls_avg+sinkhorn'
     other = 'uni2:SlidingWindow::cls+mean::Corr::cls_avg+diag'
     vote = 'uni2:TileVote::cls_avg+exact'
@@ -403,10 +399,10 @@ def t_q_methods_at_their_own_baselines_are_not_one_phase() -> str:
     differing from it in `encoder` only -- had one id. The engine ran them all as the first one it built
     ('RetrieverBagOfTiles eats EstMppResult, not RetrievalOutput' from a Dual arm), and a reranker after
     two of them would have been one entry with one `_after-`."""
-    from BenchCommon import phase_ids
-    from RetrieverArms import ArmEngine
-    from stage2_retrieval.ArmSpec import config_of_arm, parse_arm, phase_configs
-    from stage2_retrieval.Retriever import EncoderPool
+    from locascope.cli.bench.BenchCommon import phase_ids
+    from locascope.cli.bench.RetrieverArms import ArmEngine
+    from locascope.core.stage2_retrieval.ArmSpec import config_of_arm, parse_arm, phase_configs
+    from locascope.core.stage2_retrieval.Retriever import EncoderPool
     firsts: List[str] = ['uni2:BagOfTiles::cls_avg+gap', 'uni2:TileVote::cls_avg+exact', 'uni2:ClusterBow::cls_avg']
     cfgs = [phase_configs(parse_arm(t))[0] for t in firsts]
     cfgs.append(phase_configs(parse_arm('uni2:SlidingWindow::cls+mean::Dual::cls_avg+dual'))[-1])

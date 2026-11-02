@@ -49,9 +49,9 @@ from typing import Iterator, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
-from ReadGeometry import (LEVEL_REL_TOL, FovGeometry, ReadRect, ReadSpec,
+from locascope.core.slides.ReadGeometry import (LEVEL_REL_TOL, FovGeometry, ReadRect, ReadSpec,
                           is_native, level_for, level_px, nearest_level)
-from SafeSlide import SafeSlide
+from locascope.core.slides.SafeSlide import SafeSlide
 
 #: The resampling filters a reader can be built with.
 #:   lanczos  PIL LANCZOS -- the microscope simulation's filter

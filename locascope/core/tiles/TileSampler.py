@@ -223,10 +223,10 @@ import numpy as np
 # footprint) for a slide, and is the one place that knows ds 2 is native on a
 # 2x pyramid and a shrink on a 4x one.
 
-from ConfigIdentity import (IdentifiedConfig, record,          # noqa: E402
+from locascope.core.config.ConfigIdentity import (IdentifiedConfig, record,          # noqa: E402
                             record_diff, register)
-from Cache import Address, check_source, source_key, wsi_stem_of  # noqa: E402
-from DsLadder import DsLadder, RungPlan                          # noqa: E402
+from locascope.core.cache.Cache import Address, check_source, source_key, wsi_stem_of  # noqa: E402
+from locascope.core.slides.DsLadder import DsLadder, RungPlan                          # noqa: E402
 
 
 def native_plans(wsi, tile: int, factor: int = 1) -> List[RungPlan]:
@@ -278,7 +278,7 @@ class PlanSpec:
     camera: object = None                  # ReadGeometry.ReadSpec
 
     def __post_init__(self):
-        from ReadGeometry import ReadSpec                         # noqa: PLC0415
+        from locascope.core.slides.ReadGeometry import ReadSpec                         # noqa: PLC0415
         if self.kind not in ('ladder', 'native'):
             raise ValueError(f"kind must be 'ladder' or 'native', got {self.kind!r}")
         if self.kind == 'ladder' and not self.rungs:
@@ -1138,7 +1138,7 @@ class TileSampler:
         # corner detector fires on.
         if not hasattr(wsi, 'read_region_rgb'):
             raise TypeError(
-                f'TileSampler takes a utilities/SafeSlide.SafeSlide, not a '
+                f'TileSampler takes a locascope/core/slides/SafeSlide.SafeSlide, not a '
                 f'{type(wsi).__name__}. A plain OpenSlide paints every scanner '
                 f'hole black, and these tiles are read and used, not only drawn')
         self.wsi = wsi
@@ -2198,7 +2198,7 @@ class TileSampler:
                            entry.path('meta', sid, '.json'), cfg=cfg)
             info.update(mask_hit=True, samples_hit=True)
         else:
-            from SafeSlide import SafeSlide                     # noqa: PLC0415
+            from locascope.core.slides.SafeSlide import SafeSlide                     # noqa: PLC0415
             with SafeSlide(str(wsi_path)) as wsi:
                 mask, mask_hit = masks.mask(wsi)
                 out = cls(wsi, mask, cfg, slide=slide)

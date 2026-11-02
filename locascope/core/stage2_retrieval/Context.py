@@ -35,11 +35,11 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from PatchingLib import FeaturesMap, PatchGrid, QueryPatchContainer, WsiFeaturesMap, region_grids
-from ReadGeometry import ReadSpec
-from TissueMask import TissueRegion
-from stage2_retrieval.Retriever import Extra, RetrievalOutput, trunk_id
-from stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet
+from locascope.core.tiles.PatchingLib import FeaturesMap, PatchGrid, QueryPatchContainer, WsiFeaturesMap, region_grids
+from locascope.core.slides.ReadGeometry import ReadSpec
+from locascope.core.tiles.TissueMask import TissueRegion
+from locascope.core.stage2_retrieval.Retriever import Extra, RetrievalOutput, trunk_id
+from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet
 
 LATTICES: Tuple[str, str] = ('main', 'offset')
 
@@ -326,7 +326,7 @@ class WindowSearch:
         self.level_encodes: Dict[int, Tuple[float, int]] = {}
 
     def build(self, wsi: Any, mask: Any) -> None:
-        from SlideReader import SlideReader                           # noqa: PLC0415
+        from locascope.core.slides.SlideReader import SlideReader                           # noqa: PLC0415
         self.reader = SlideReader(wsi, workers=self.read_workers)
         self.levels = SlideLevels(wsi, mask, self.tile_size, self.overlap)
         self._by_level = {}
@@ -857,7 +857,7 @@ class ScoreTable:
 def firsts(cs: CandidateSet) -> Tuple[List[float], List[int]]:
     """`(score, rank)` the first phase gave each candidate of the list: a reranked candidate carries them; a
     first-phase one is its own first phase."""
-    from stage2_retrieval.StageInterface import RerankedCandidate       # noqa: PLC0415
+    from locascope.core.stage2_retrieval.StageInterface import RerankedCandidate       # noqa: PLC0415
     score: List[float] = [float(c.first_score) if isinstance(c, RerankedCandidate) else float(c.score)
                           for c in cs.candidates]
     rank: List[int] = [int(c.first_rank) if isinstance(c, RerankedCandidate) else i + 1
@@ -943,7 +943,7 @@ def ordered(cs: CandidateSet, table: ScoreTable, column: str) -> CandidateSet:
     """The list ordered by `column` (descending; ties keep the incoming order), each candidate scored by it,
     remembering the first phase's score and rank, and of the kind the table's columns call for: a
     `ShiftedCandidate` when there is a shift, a `TokenMatchCandidate` when there are inliers."""
-    from stage2_retrieval.StageInterface import (RerankedCandidate, ShiftedCandidate,   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.StageInterface import (RerankedCandidate, ShiftedCandidate,   # noqa: PLC0415
                                                  TokenMatchCandidate)
     final: torch.Tensor = table[column]
     order: List[int] = torch.argsort(final, descending=True, stable=True).tolist()
@@ -1047,18 +1047,18 @@ class RerankFeatures:
         self._tiles: Dict[int, OnDemandTiles] = {}
 
     def build(self, wsi: Any, mask: Any) -> None:
-        from SlideReader import SlideReader                           # noqa: PLC0415
+        from locascope.core.slides.SlideReader import SlideReader                           # noqa: PLC0415
         self.reader = SlideReader(wsi)
         self.levels = SlideLevels(wsi, mask, self.tile_size, self.overlap)
         self._by_level, self._tiles = {}, {}
 
     def uses(self) -> Tuple[Any, ...]:
-        from stage2_retrieval.Retriever import Uses                  # noqa: PLC0415
+        from locascope.core.stage2_retrieval.Retriever import Uses                  # noqa: PLC0415
         return (Uses('level_features', self.key),) if self.reuse else ()
 
     def source(self, upstream: RetrievalOutput, query: Any) -> Tuple[GridSource, bool]:
         """`(features, made here)`: the upstream's when reused, else this reranker's own."""
-        from stage2_retrieval.Retriever import take                  # noqa: PLC0415
+        from locascope.core.stage2_retrieval.Retriever import take                  # noqa: PLC0415
         if self.reuse:
             got: Optional[Any] = take(upstream, self.uses()[0])
             if got is not None:

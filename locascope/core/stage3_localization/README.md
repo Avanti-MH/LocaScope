@@ -20,7 +20,7 @@
 - **baseline** — 從一開始就不是 canonical 的候選，是刻意獨立的對照方法，存在
   的價值是拿來比較，不是要接手 production。
 - **diagnostic** — 拿來回答「系統現在的狀態／行為是什麼」的工具，沒有任何
-  模組 import 它；通常在 `*/cli/` 或 `utilities/test_modules/` 底下。
+  模組 import 它；通常在 `*/cli/` 或 `tests/` 底下。
 
 legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical 同一個責任的候
 選」：legacy 曾經是（或就是被取代前的 canonical），baseline 從來就不是。
@@ -30,7 +30,7 @@ legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical �
 #### `SIFT_RANSAC.py` — canonical，唯一實作
 
 stage 3 目前唯一註冊的方法（`stage3_localization/__init__.py` 的 `METHODS` 只有 `sift`；
-`--stage3 sift:default`），`LocaScopePipeline`（`utilities/LocaScopePipeline.py`）由此建出定位器。
+`--stage3 sift:default`），`LocaScopePipeline`（`locascope/core/pipeline.py`）由此建出定位器。
 把 retrieval 給的 tile 級精度（誤差 ≤ 1 tile）用 SIFT keypoint + RANSAC homography
 細化到 sub-pixel。`StageInterface.py` 定義所有定位器共有的介面：`Localizer` protocol、
 `LocalizationResult`（一個驗證過的候選）、`LocalizationResultSet`（`.best` = confidence 最大者，

@@ -50,16 +50,16 @@ import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 import torch.utils.data                                             # noqa: E402
 
-from AccessDatasets import locate, list_names, pick_wsi_names        # noqa: E402
-from SafeSlide import SafeSlide                                     # noqa: E402
-from Cache import job_name                                           # noqa: E402
-from TileSampler import PlanSpec, TileSampler                       # noqa: E402
-from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
-from ReadGeometry import finer_levels                               # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
-from camera import Render, photo_rng, render_spec                    # noqa: E402
-from SlideReader import SlideReader                                  # noqa: E402
-from FovSupply import FOV_RECIPES                                    # noqa: E402
+from locascope.core.slides.AccessDatasets import locate, list_names, pick_wsi_names        # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                     # noqa: E402
+from locascope.core.cache.Cache import job_name                                           # noqa: E402
+from locascope.core.tiles.TileSampler import PlanSpec, TileSampler                       # noqa: E402
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS                                  # noqa: E402
+from locascope.core.slides.ReadGeometry import finer_levels                               # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker                 # noqa: E402
+from locascope.core.query_sim.camera import Render, photo_rng, render_spec                    # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                  # noqa: E402
+from locascope.core.query_sim.FovSupply import FOV_RECIPES                                    # noqa: E402
 
 
 #: The label space every baseline classifies into -- rung VALUE, not a
@@ -143,7 +143,7 @@ def data_record(tile_size: int, seg: str) -> Dict:
     A checkpoint carries the one it was trained on (`extra['data']`) and
     `cli/evaluate.py` refuses to score it on data whose record differs, so a
     changed render cannot be read as a changed model."""
-    from ConfigIdentity import enc, environment, parts_of, short_id, versions_of
+    from locascope.core.config.ConfigIdentity import enc, environment, parts_of, short_id, versions_of
     camera_full = FOV_RECIPES[QUERY_RECIPE].gap
     camera_native = FOV_RECIPES[SUPPORT_NATIVE_RECIPE].gap
     sampler = FOV_RECIPES[QUERY_RECIPE].sampler

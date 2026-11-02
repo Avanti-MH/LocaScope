@@ -2,7 +2,7 @@
 
 **狀態（2026-10-26）。** 這份文件原本是 2026-07 的「怎麼加速 GigaPath encode」清單（起點：一張 WSI 的 retrieval 約 30 分鐘，瓶頸是 GigaPath ViT-g 對所有 tissue patch 做 encode）。之後真正讓時間下降的，除了 fp16，是**讀圖**（reader 統一與整塊讀取）、**CPU 預算**、**不要重算的快取**；原清單裡的 ToMe、flash-attn、`torch.compile` 沒有帶來實質的收益。所以下面先寫「現在是什麼樣」和「怎麼演進到這裡」，原本的逐項說明保留在後面（每項加了一行現況）。
 
-數字的出處：`log/TODO.log`、`log/MILESTONE.log`、`ARCHITECTURE.md`（讀取與加速一節）、`utilities/SlideReader.py` 的 docstring，以及 2026-10 訓練 job 的 log。標「（量級）」的是不同 job、不同資源下的對照，只能看量級；標「（推測）」的是還沒用資料確認。
+數字的出處：`log/TODO.log`、`log/MILESTONE.log`、`ARCHITECTURE.md`（讀取與加速一節）、`locascope/core/slides/SlideReader.py` 的 docstring，以及 2026-10 訓練 job 的 log。標「（量級）」的是不同 job、不同資源下的對照，只能看量級；標「（推測）」的是還沒用資料確認。
 
 ---
 
@@ -11,15 +11,15 @@
 | 項目 | 現況 | 量到的效果 | 在哪裡 |
 |---|---|---|---|
 | fp16 autocast | **採用**（所有 production encoder `dtype='fp16'`） | GigaPath 5.4–5.5×（H200，bs ≥ 16）；cos = 0.99995；建 feature 67,348 tiles 97 s = 694 tiles/s，fp32 為 97 tiles/s（約 7×，job 374401） | `encoder_config(...).with_model(dtype='fp16')` |
-| batch size | **採用**：預設 32 → 128；整層 encode 用 1024（`RealTest.sh` 的 `STAGE2_BATCH`） | 吞吐在 bs 128 以上飽和（fp32 97 p/s） | `GigaPathFunc.gigapath_encode` |
+| batch size | **採用**：預設 32 → 128；整層 encode 用 1024（`RealTest.sh` 的 `STAGE2_BATCH`） | 吞吐在 bs 128 以上飽和（fp32 97 p/s） | `GigaPath.gigapath_encode` |
 | `torch.compile` | 保留成選項（`TileEncoder._set_model(compile=)`），**沒有帶來收益** | fp32 單獨 1.0–1.1×，bs 大時幾乎為 1 | `TileEncoder` |
 | Flash Attention | 環境裝了（flash-attn 2.5.8），**沒有收益** | H200 上 1.00–1.01× | — |
 | ToMe | **否決，程式碼已刪**  | 見第 6 節 | — |
-| 讀圖：整塊讀取 + worker | **採用**（`SlideReader.read_grid`，2026-10-03 統一） | 一個 tile 讀一次約 270 tiles/s → 整塊讀再切加 worker 約 1,060 tiles/s；Ki67／BRACS L0 約 3,570 tiles/s | `utilities/SlideReader.py` |
+| 讀圖：整塊讀取 + worker | **採用**（`SlideReader.read_grid`，2026-10-03 統一） | 一個 tile 讀一次約 270 tiles/s → 整塊讀再切加 worker 約 1,060 tiles/s；Ki67／BRACS L0 約 3,570 tiles/s | `locascope/core/slides/SlideReader.py` |
 | CPU 預算 | **採用** | thread 數超過 CPU 數：bench 慢 7 倍、訓練 encode 慢 3 倍（36 → 251 tiles/s 每 process） | `CpuBudget` |
 | uint8 進 encoder、GPU 前處理、結果留 GPU | **採用** | 訓練輸入約 25 → 151 tiles/s | `TileEncoder`、`GridBlock` |
 | 多 GPU | **採用**（`DataParallel`，gigapath／uni2 再加 `compile`） | 約 N×（量級） | `TileEncoder._set_model` |
-| Feature cache | **採用**（`FeatureStore`，內容雜湊 id）；訓練用記憶體版 `MemoryFeatureStore`（`--keep-levels`） | 重跑時整個 encode 省掉；**讀圖省不掉** | `utilities/Store.py`（`FeatureStore`）、`training/GloRet/Supply.py` |
+| Feature cache | **採用**（`FeatureStore`，內容雜湊 id）；訓練用記憶體版 `MemoryFeatureStore`（`--keep-levels`） | 重跑時整個 encode 省掉；**讀圖省不掉** | `locascope/core/cache/Store.py`（`FeatureStore`）、`training/GloRet/Supply.py` |
 | 其餘（INT8、TensorRT、Dynamic ViT／EViT、pruning、distillation） | **沒做** | — | — |
 
 ---
@@ -175,7 +175,7 @@ model = timm.create_model(
 > `patch_embed.grid_size`，所以 `model_spec` 會宣稱 197 個 token 而輸出只有
 > 101 個。在 `features()` 還是 `raw[:, 0]` 的年代沒有任何東西會發現這件事。
 >
-> `aiNNModel/GigaPathFunc.py` 裡的實作已刪除；等效測試已於
+> `locascope/core/backbones/GigaPath.py` 裡的實作已刪除；等效測試已於
 > 2026-10-05 移除。下面這段留著，是為了記錄「當初為什麼想用」——
 > `MILESTONE.log` 記的是失敗過程，不是動機。
 
@@ -209,7 +209,7 @@ if torch.cuda.device_count() > 1:
 
 ## 8. Feature Cache
 
-> **現況：採用。** `FeatureStore`（`utilities/Store.py`，內容雜湊 id，pipeline 與 bench 共用）；訓練用記憶體版 `MemoryFeatureStore`。省得掉 encode，省不掉讀圖（BRACS_1228 L0：讀 278 s／編碼 285 s），所以讀圖要另外加速。
+> **現況：採用。** `FeatureStore`（`locascope/core/cache/Store.py`，內容雜湊 id，pipeline 與 bench 共用）；訓練用記憶體版 `MemoryFeatureStore`。省得掉 encode，省不掉讀圖（BRACS_1228 L0：讀 278 s／編碼 285 s），所以讀圖要另外加速。
 
 同一張 WSI 在不同 query 下只需 encode 一次。  
 將 `WsiRegionsFeatures` 序列化到磁碟，下次直接 load：
@@ -314,11 +314,11 @@ trtexec --onnx=gigapath.onnx --fp16 --saveEngine=gigapath.trt
 
 ## 相關檔案
 
-- `aiNNModel/GigaPathFunc.py` — `GigaPathEncoderConfig`, `GigaPathEncoder`（ToMe 已刪）
-- `utilities/SlideReader.py` — `read`、`read_grid`、`read_points`；docstring 有 270 → 1,060 tiles/s 的來源
-- `utilities/CpuBudget.py` — worker 與 thread 的分配
-- `utilities/Store.py`（`FeatureStore`）、`training/GloRet/Supply.py`（`MemoryFeatureStore`）— 快取
-- `aiNNModel/TileEncoderFunc.py` — `_set_model(multi_gpu=, compile=)`、結果留在 GPU
+- `locascope/core/backbones/GigaPath.py` — `GigaPathEncoderConfig`, `GigaPathEncoder`（ToMe 已刪）
+- `locascope/core/slides/SlideReader.py` — `read`、`read_grid`、`read_points`；docstring 有 270 → 1,060 tiles/s 的來源
+- `locascope/host/cpu.py` — worker 與 thread 的分配
+- `locascope/core/cache/Store.py`（`FeatureStore`）、`training/GloRet/Supply.py`（`MemoryFeatureStore`）— 快取
+- `locascope/core/backbones/TileEncoder.py` — `_set_model(multi_gpu=, compile=)`、結果留在 GPU
 - `training/GloRet/Lazy.py`、`training/GloRet/Full.py` — lazy token 與 Gradient Cache
-- `utilities/bench_modules/bench_gigapath_configs.py` — 速度與精度 benchmark
+- `locascope/cli/bench/bench_gigapath_configs.py` — 速度與精度 benchmark
 - `ARCHITECTURE.md`（讀取與加速）、`log/TODO.log`、`log/MILESTONE.log`（M3）— 數字與決策的出處

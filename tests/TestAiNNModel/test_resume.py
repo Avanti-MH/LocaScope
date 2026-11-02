@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for aiNNModel/models/common/Resume.py -- crash-resume state.
+"""Tests for locascope/core/networks/Resume.py -- crash-resume state.
 
-    python utilities/test_modules/TestAiNNModel/test_resume.py
+    python tests/TestAiNNModel/test_resume.py
 
 No slide, no encoder: a two-layer toy model trained on data drawn from every
 generator Resume.py saves (python's `random`, numpy, torch, and a named
@@ -29,17 +29,13 @@ import sys
 import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
-from Resume import ResumeFile, ResumeMismatch                    # noqa: E402
+from locascope.core.networks.Resume import ResumeFile, ResumeMismatch                    # noqa: E402
 
 _RESULTS = []
 IDENTITY = {'loss': 'bal', 'lr': 0.01, 'rungs': [1, 2, 4]}

@@ -73,7 +73,7 @@ METHODS: Dict[str, MethodInfo] = {
 }
 
 #: The names of the proposal (`proposal.md` §4, §5.2, §6.4, §11), spelt here so an arm's name needs no torch;
-#: `test_neural` holds them equal to `aiNNModel/models/GloRet.py`'s.
+#: `test_neural` holds them equal to `locascope/core/networks/GloRet.py`'s.
 CONTEXT_EN: Tuple[str, ...] = ('SelfAttn', 'GNN', 'SptSelfAttn', 'Identity', 'CLSTrans')
 GLOBAL_EN: Tuple[str, ...] = ('AttnPool', 'MaskedMean', 'CNN', 'GraphPool', 'Align', 'Identity')
 SEARCHES: Tuple[str, ...] = ('exact', 'hnsw', 'ivf')
@@ -247,13 +247,13 @@ def learned_weights(encoder: str, pooling: str, method: str, op: str = '', data:
 
 
 def _encoder(seg: Segment, pooling: str) -> Any:
-    from TileEncoderFunc import encoder_config                     # noqa: PLC0415
+    from locascope.core.backbones.TileEncoder import encoder_config                     # noqa: PLC0415
     return encoder_config(seg.encoder, pooling=pooling).with_model(dtype='fp16')
 
 
 def _offered(cfg: Any) -> Optional[Tuple[Any, ...]]:
     """The key of the level features a phase of this config offers downstream, None for one that reads none."""
-    from stage2_retrieval.Context import feature_key               # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Context import feature_key               # noqa: PLC0415
     enc: Optional[Any] = getattr(cfg, 'encoder', None)
     if enc is None or not hasattr(cfg, 'overlap'):
         return None
@@ -266,7 +266,7 @@ def segment_config(seg: Segment, *, first: bool, topk_in: int, raw_topk: int, mi
     `min_sep_tiles`; a reranker reads `topk_in` of the list before it, and reuses the level features of a
     phase before it (`offered`) when they are the very features it would make (the same encoder, pooling,
     tile and lattices). The other settings are each method's own defaults, the ones the bench has run with."""
-    from stage2_retrieval import RerankerEncode as RE, RerankerNeural as RN, RerankerScorers as RS   # noqa: PLC0415
+    from locascope.core.stage2_retrieval import RerankerEncode as RE, RerankerNeural as RN, RerankerScorers as RS   # noqa: PLC0415
     pooling: str = seg.pooling
     overlap: bool = True
     if pooling.endswith(MAIN_ONLY):
@@ -279,14 +279,14 @@ def segment_config(seg: Segment, *, first: bool, topk_in: int, raw_topk: int, mi
     if seg.method.startswith(('GloRet-', 'LogLoRet-')):
         weights: str = learned_weights(seg.encoder, pooling, seg.method, seg.op)
         if seg.method.startswith('GloRet-') and first:
-            from stage2_retrieval.RetrieverGloRet import RetrieverGloRetConfig   # noqa: PLC0415
+            from locascope.core.stage2_retrieval.RetrieverGloRet import RetrieverGloRetConfig   # noqa: PLC0415
             return RetrieverGloRetConfig(encoder=_encoder(seg, pooling), weights=weights, method=seg.method,
                                          tile_size=256, overlap=overlap, raw_topk=raw_topk,
                                          min_sep_tiles=min_sep_tiles, search=seg.op or 'exact', band=16)
-        from stage2_retrieval.Context import feature_key               # noqa: PLC0415
+        from locascope.core.stage2_retrieval.Context import feature_key               # noqa: PLC0415
         enc_l: Any = _encoder(seg, pooling)
         reuse_l: Tuple[str, ...] = ('level_features',) if feature_key(enc_l, 256, overlap) in offered else ()
-        from stage2_retrieval import RetrieverGloRet as RG             # noqa: PLC0415
+        from locascope.core.stage2_retrieval import RetrieverGloRet as RG             # noqa: PLC0415
         read: int = raw_topk if first else topk_in
         if seg.method.startswith('GloRet-'):
             return RG.RerankerGloRetConfig(encoder=enc_l, weights=weights, method=seg.method, tile_size=256,
@@ -298,21 +298,21 @@ def segment_config(seg: Segment, *, first: bool, topk_in: int, raw_topk: int, mi
         common: Dict[str, Any] = dict(encoder=enc, tile_size=256, overlap=overlap, raw_topk=raw_topk,
                                       min_sep_tiles=min_sep_tiles)
         if seg.method == 'SlidingWindow':
-            from stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig   # noqa: PLC0415
+            from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig   # noqa: PLC0415
             return RetrieverSlidingWinSimRotConfig(**common, score=seg.op)
         if seg.method == 'BagOfTiles':
-            from stage2_retrieval.RetrieverBagOfTiles import RetrieverBagOfTilesConfig   # noqa: PLC0415
+            from locascope.core.stage2_retrieval.RetrieverBagOfTiles import RetrieverBagOfTilesConfig   # noqa: PLC0415
             return RetrieverBagOfTilesConfig(**common, mode=seg.op, channels=256)
         if seg.method == 'TileVote':
-            from stage2_retrieval.RetrieverTileVote import RetrieverTileVoteConfig   # noqa: PLC0415
+            from locascope.core.stage2_retrieval.RetrieverTileVote import RetrieverTileVoteConfig   # noqa: PLC0415
             return RetrieverTileVoteConfig(**common, backend=seg.op, m=64, tau=0.05, smooth=1, hnsw_m=32,
                                            ef_search=128, nlist=1024, nprobe=16, chunk=8192)
         if seg.method == 'ClusterBow':
-            from stage2_retrieval.RetrieverClusterBow import RetrieverClusterBowConfig   # noqa: PLC0415
+            from locascope.core.stage2_retrieval.RetrieverClusterBow import RetrieverClusterBowConfig   # noqa: PLC0415
             return RetrieverClusterBowConfig(**common, k1=32, k2=64, iters=10, fit_tiles=200000, buckets=4096,
                                              bigram_weight=0.5, seed=0, channels=256)
         if seg.method == 'WinEmbed':
-            from stage2_retrieval.RetrieverWinEmbed import RetrieverWinEmbedConfig   # noqa: PLC0415
+            from locascope.core.stage2_retrieval.RetrieverWinEmbed import RetrieverWinEmbedConfig   # noqa: PLC0415
             return RetrieverWinEmbedConfig(**common, weights=weights_name(seg.encoder, pooling, 'winembed'),
                                            band=256)
         raise ValueError(f'{seg.method} is not a first-phase retriever')
@@ -321,7 +321,7 @@ def segment_config(seg: Segment, *, first: bool, topk_in: int, raw_topk: int, mi
     if seg.method == 'TokenMatch':
         return RE.RerankerTokenMatchConfig(encoder=_encoder(seg, ''), tile_size=256, topk_in=topk_in)
     enc = _encoder(seg, pooling)
-    from stage2_retrieval.Context import feature_key               # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Context import feature_key               # noqa: PLC0415
     reuse: Tuple[str, ...] = ('level_features',) if feature_key(enc, 256, overlap) in offered else ()
     shared: Dict[str, Any] = dict(encoder=enc, tile_size=256, overlap=overlap, topk_in=topk_in)
     if seg.method == 'Dual':
@@ -366,7 +366,7 @@ def phase_configs(spec: ArmSpec, *, raw_topk: int = 1000, min_sep_tiles: float =
 def config_of_arm(spec: ArmSpec, *, raw_topk: int = 1000, min_sep_tiles: float = 1.0) -> Any:
     """The `MultiPhasesConfig` of the chain `spec` names (one phase for an arm of one segment): what
     `--stage2 arm:<text>` runs and what the bench files the arm under."""
-    from stage2_retrieval.MultiPhases import MultiPhasesConfig     # noqa: PLC0415
+    from locascope.core.stage2_retrieval.MultiPhases import MultiPhasesConfig     # noqa: PLC0415
     return MultiPhasesConfig(phases=tuple(phase_configs(spec, raw_topk=raw_topk, min_sep_tiles=min_sep_tiles)))
 
 

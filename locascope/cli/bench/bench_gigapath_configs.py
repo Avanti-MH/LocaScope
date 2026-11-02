@@ -58,25 +58,22 @@ from dataclasses import replace
 from itertools import groupby
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from _paths import setup_import_paths, RESULT_DIR, job_result_dir
-setup_import_paths()
+from locascope.paths import DATASETS_DIR, RESULT_DIR, job_result_dir
 
-from SafeSlide import SafeSlide                                     # noqa: E402
-from PatchingLib import region_grids                                 # noqa: E402
-from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
-from TileSampler import SAMPLER_RECIPES, TileSampler, native_plans  # noqa: E402
-from ReadGeometry import ReadSpec                                                # noqa: E402
-from SlideReader import SlideReader                                             # noqa: E402
-from GigaPathFunc import GigaPathEncoderConfig                        # noqa: E402
-from TileEncoderFunc import encoder_config                           # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                     # noqa: E402
+from locascope.core.tiles.PatchingLib import region_grids                                 # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
+from locascope.core.tiles.TileSampler import SAMPLER_RECIPES, TileSampler, native_plans  # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                                # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                             # noqa: E402
+from locascope.core.backbones.GigaPath import GigaPathEncoderConfig                        # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config                           # noqa: E402
 
 
 # ── shared config table ─────────────────────────────────────────────────────
@@ -782,16 +779,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--mode', choices=['accuracy', 'speed'], default='accuracy')
-    ap.add_argument('--wsi', default=(
-        '/work/u26130998/datasets/histoimage.na.icar.cnr.it'
-        '/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs'))
+    ap.add_argument('--wsi', default=os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it',
+        'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003694.svs'))
 
     # ── accuracy mode ──
-    ap.add_argument('--svs', default=(
-        '/work/u26130998/datasets/histoimage.na.icar.cnr.it'
-        '/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs'))
-    ap.add_argument('--mrxs', default=(
-        '/work/u26130998/datasets/Ki67_with_photo/S1104043_G7E_110207_mrxs/'
+    ap.add_argument('--svs', default=os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it',
+        'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003694.svs'))
+    ap.add_argument('--mrxs', default=os.path.join(DATASETS_DIR, 'Ki67_with_photo', 'S1104043_G7E_110207_mrxs',
         'S1104043,G7E,110207.mrxs'))
     ap.add_argument('--total-patches', type=int, default=200)
     ap.add_argument('--tile-size', type=int, default=256)

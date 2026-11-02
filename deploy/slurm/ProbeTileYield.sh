@@ -18,10 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  utilities/cli/diagnostics/probe_tile_yield.py
+#  locascope/cli/diagnostics/probe_tile_yield.py
 #
 #  FEATURE_MAP=only (default here)  how big the WHOLE-SLIDE feature map is at
 #                                   every pyramid level: tiles and GB, with and
@@ -31,9 +31,9 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  FEATURE_MAP=off                  the sampler cells only -- the tool's original
 #                                   job: how many TRAINING tiles a sampler draws
 #
-#    sbatch jobscripts/ProbeTileYield.sh
-#    ENCODER=gigapath TILE_SIZE=256 sbatch jobscripts/ProbeTileYield.sh
-#    DATASET=bracs/test FP32=1 sbatch jobscripts/ProbeTileYield.sh   # narrows the slides
+#    sbatch deploy/slurm/ProbeTileYield.sh
+#    ENCODER=gigapath TILE_SIZE=256 sbatch deploy/slurm/ProbeTileYield.sh
+#    DATASET=bracs/test FP32=1 sbatch deploy/slurm/ProbeTileYield.sh   # narrows the slides
 #
 #  WHICH SLIDES: every slide that has a mask in result/cache/<MASK_CACHE_JOB>/
 #  slide=*/mask/ -- by default the shared hest masks of Masks -- so every row has
@@ -58,7 +58,7 @@ ARGS=(--seg "$SEG" --mask-cache-job "$MASK_CACHE_JOB"
 [ -n "${DS:-}" ] && ARGS+=(--ds $DS)
 
 echo "======== ProbeTileYield ${ARGS[*]} ========"
-python utilities/cli/diagnostics/probe_tile_yield.py "${ARGS[@]}"
+python -m locascope.cli.diagnostics.probe_tile_yield "${ARGS[@]}"
 status=$?
 
 echo ""

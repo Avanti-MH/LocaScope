@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Tests for training/SuperPathPoint/common/DsLadder.py.
 
-    python utilities/test_modules/test_ds_ladder.py
-    python utilities/test_modules/test_ds_ladder.py --wsi /path/to/slide.svs
+    python tests/test_ds_ladder.py
+    python tests/test_ds_ladder.py --wsi /path/to/slide.svs
 
 No model, no GPU, and by default no WSI: the two pyramids it checks against are
 the ones already measured from this project's own runs (spec.md 6.5), written
@@ -43,27 +43,13 @@ import argparse
 import os
 import sys
 
-# `utilities/` holds the one definition of the output roots (`_paths.py`), and
-# `setup_import_paths` -- which puts every other package on the path -- is
-# inside it, so it has to be reachable before anything else is imported.
-#
-# BOTH parents are inserted, and that is deliberate rather than sloppy: this
-# file runs from `utilities/test_modules/` and from
-# `utilities/test_modules/TestSuperPathPoint/`, one level deeper, and inserting
-# both means the move needs no edit here. The one that is not `utilities/` is
-# either the repo root or `test_modules/`; neither holds a `_paths.py`, and
-# `setup_import_paths` puts the repo root on the path anyway.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths()
 
-from DsLadder import DEFAULT_RUNGS, DsLadder                # noqa: E402
-from ReadGeometry import LEVEL_REL_TOL, level_for          # noqa: E402
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS, DsLadder                # noqa: E402
+from locascope.core.slides.ReadGeometry import LEVEL_REL_TOL, level_for          # noqa: E402
 
 
 #: The two pyramid shapes this project actually has, measured from the runs
@@ -346,7 +332,7 @@ _SECTIONS = {
 
 def _print_real_slide(path, tile_size):
     """Not an assertion. A look at a real pyramid, for a human."""
-    from SafeSlide import SafeSlide
+    from locascope.core.slides.SafeSlide import SafeSlide
 
     wsi = SafeSlide(path)
     try:

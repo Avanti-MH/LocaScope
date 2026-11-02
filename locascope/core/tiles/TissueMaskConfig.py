@@ -10,7 +10,7 @@ from, cached or not.
 
 Three modules, three jobs, one direction:
 
-    TissueMaskConfig  ->  TissueSegFunc (producer)  ->  TissueMask (product)
+    TissueMaskConfig  ->  TissueSeg (producer)  ->  TissueMask (product)
     recipe + cache        slide -> SlideMask            SlideMask + regions
 
 The product imports neither of the others, the way WsiFeaturesMap knows nothing
@@ -33,15 +33,15 @@ import time
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
-from Cache import (Address, Entry, check_source, source_key,   # noqa: E402
+from locascope.core.cache.Cache import (Address, Entry, check_source, source_key,   # noqa: E402
                    wsi_stem_of)
-from ConfigIdentity import (IdentifiedConfig, ModelConfig, enc,  # noqa: E402
+from locascope.core.config.ConfigIdentity import (IdentifiedConfig, ModelConfig, enc,  # noqa: E402
                             parts_of, record,
                             register, short_id)
-from HestSegFunc import HEST_ARCH, HestSegConfig                 # noqa: E402
-from TissueMask import SlideMask, TissueMask                     # noqa: E402
-from TissueSegFunc import PlaneSegConfig, TissueSegConfig        # noqa: E402
-from Uni2PcaSegFunc import Uni2PcaSegConfig                      # noqa: E402
+from locascope.core.backbones.HestSeg import HEST_ARCH, HestSegConfig                 # noqa: E402
+from locascope.core.tiles.TissueMask import SlideMask, TissueMask                     # noqa: E402
+from locascope.core.backbones.TissueSeg import PlaneSegConfig, TissueSegConfig        # noqa: E402
+from locascope.core.backbones.Uni2PcaSeg import Uni2PcaSegConfig                      # noqa: E402
 
 
 @register('tissue-mask')
@@ -51,7 +51,7 @@ class TissueMaskConfig(IdentifiedConfig):
 
     Every field is identity: each one moves the region list, and there is no
     performance knob among them. The segmenter's own config carries the ones
-    that move the SEGMENTATION (see TissueSegFunc); the two here only move
+    that move the SEGMENTATION (see TissueSeg); the two here only move
     the regions found in it.
 
     `seg` HAS NO DEFAULT, so no caller gets a segmentation without naming it:
@@ -190,7 +190,7 @@ class MaskMaker:
         """The identity record of this recipe's raw masks: the segmenter
         config, its VERSIONs and the reader's, the weights' content and the
         environment."""
-        from SlideReader import SlideReader                         # noqa: PLC0415
+        from locascope.core.slides.SlideReader import SlideReader                         # noqa: PLC0415
         return record(self.cfg.seg, also=(SlideReader,),
                       weights=self.cfg.seg.weights_key())
 

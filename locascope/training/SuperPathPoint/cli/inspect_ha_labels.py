@@ -2,7 +2,7 @@
 """spec.md 12 step 5: the decision point. Are these labels worth training on?
 
     python training/SuperPathPoint/cli/inspect_ha_labels.py --datasets @legacy-val
-    python training/SuperPathPoint/cli/inspect_ha_labels.py --wsi BRACS_1228 --with-model --tiles 8
+    python training/SuperPathPoint/cli/inspect_ha_labels.py --wsi BRACS_1003694 --with-model --tiles 8
 
 Outputs (in result/<SLURM_JOB_NAME or InspectHaLabels>/):
     ha_labels__<slide>_ds<d>.png
@@ -59,24 +59,21 @@ import csv
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
 import matplotlib                                                 # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                   # noqa: E402
 import numpy as np                                                # noqa: E402
 
-from cli import (add_corpus_args, add_labels_args, add_slides_args,  # noqa: E402
+from locascope.training.SuperPathPoint.cli import (add_corpus_args, add_labels_args, add_slides_args,  # noqa: E402
                  corpus_arg, job_result_dir, labels_root, slides_from_args)
 
 
-from Cache import wsi_stem_of                                     # noqa: E402
-from common import KeypointLabelStore                # noqa: E402
-from common.KeypointLabelStore import points_from_prob             # noqa: E402
-from TileSampler import centre_crop  # noqa: E402
+from locascope.core.cache.Cache import wsi_stem_of                                     # noqa: E402
+from locascope.training.SuperPathPoint.common import KeypointLabelStore                # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import points_from_prob             # noqa: E402
+from locascope.core.tiles.TileSampler import centre_crop  # noqa: E402
 
 
 #: Every string a reader will see. Rewritten on every run so the definitions
@@ -186,8 +183,8 @@ def _agreement(corpus, tiles, meta, args):
     """Two independent HA runs per tile, scored against a shifted decoy."""
     import torch                                                  # noqa: PLC0415
 
-    from SuperPoint.HomographicAdaptation import HaConfig         # noqa: PLC0415
-    from SuperPoint.Teacher import TeacherConfig                  # noqa: PLC0415
+    from locascope.training.SuperPathPoint.SuperPoint.HomographicAdaptation import HaConfig         # noqa: PLC0415
+    from locascope.training.SuperPathPoint.SuperPoint.Teacher import TeacherConfig                  # noqa: PLC0415
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ha = HaConfig(num=args.num).build(TeacherConfig().build(device))

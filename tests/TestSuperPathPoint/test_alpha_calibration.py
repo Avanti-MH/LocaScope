@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for `SurvivalAnalysis/AlphaCalibration.py`. plan.md 2.2①.
 
-    python utilities/test_modules/TestSuperPathPoint/test_alpha_calibration.py
+    python tests/TestSuperPathPoint/test_alpha_calibration.py
 
 PURE, NO GPU, NO NET -- every function here takes arrays a human can type by
 hand. That is the whole point of splitting alpha calibration out of
@@ -16,17 +16,13 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                            # noqa: E402
 
-from SurvivalAnalysis import AlphaCalibration as AC            # noqa: E402
-from SurvivalAnalysis.Attribution import NONE                   # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import AlphaCalibration as AC            # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Attribution import NONE                   # noqa: E402
 
 _RESULTS = []
 

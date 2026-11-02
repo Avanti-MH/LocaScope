@@ -4,35 +4,33 @@ Named after upstream's stages 2 and 3, which is what this package reproduces
 (spec.md 3.1). Stage 1 -- MagicPoint on synthetic shapes -- is skipped in favour
 of the released weights, and `Teacher.py` is the only thing that loads them.
 
-Flat re-exports, matching `common/__init__.py`: with
-`training/SuperPathPoint/` on sys.path (`_paths.setup_import_paths(
-'SuperPathPoint')`), callers spell `from SuperPoint.Teacher
-import TeacherConfig` or take the short names from here.
+Flat re-exports, matching `common/__init__.py`: callers spell
+`from locascope.training.SuperPathPoint.SuperPoint.Teacher import TeacherConfig` or take the short names from here.
 
 The import order below is the dependency order, and it is not alphabetical:
 `Decoders` owns the depth-to-space that `Teacher` imports, and `Backbones` owns
 the `VggBlock` that both heads are built from.
 """
 
-from SuperPoint.Backbones import (VggBackbone, VggBackboneConfig, VggBlock,
+from locascope.training.SuperPathPoint.SuperPoint.Backbones import (VggBackbone, VggBackboneConfig, VggBlock,
                                   to_model_channels)
-from SuperPoint.Decoders import (DepthToSpaceDecoder,
+from locascope.training.SuperPathPoint.SuperPoint.Decoders import (DepthToSpaceDecoder,
                                  DepthToSpaceDecoderConfig, UpsampleDecoder,
                                  UpsampleDecoderConfig, depth_to_space_prob)
-from SuperPoint.Heads import (DescriptorHead, DescriptorHeadConfig,
+from locascope.training.SuperPathPoint.SuperPoint.Heads import (DescriptorHead, DescriptorHeadConfig,
                               sample_descriptors)
-from SuperPoint.Teacher import SuperPointTeacher, TeacherConfig
-from SuperPoint.HomographicAdaptation import (HaConfig, HaResult,
+from locascope.training.SuperPathPoint.SuperPoint.Teacher import SuperPointTeacher, TeacherConfig
+from locascope.training.SuperPathPoint.SuperPoint.HomographicAdaptation import (HaConfig, HaResult,
                                               HomographicAdaptation)
-from SuperPoint.KeypointNet import (KeypointNet, KeypointNetConfig,
+from locascope.training.SuperPathPoint.SuperPoint.KeypointNet import (KeypointNet, KeypointNetConfig,
                                     KeypointOutput, Keypoints,
                                     extract_keypoints)
-from SuperPoint.Losses import (SuperPointLoss, SuperPointLossConfig,
+from locascope.training.SuperPathPoint.SuperPoint.Losses import (SuperPointLoss, SuperPointLossConfig,
                                cell_labels, descriptor_loss, detector_loss,
                                space_to_depth)
-from SuperPoint.Datasets import (BALANCE_MODES, HomographyPairDataset,
+from locascope.training.SuperPathPoint.SuperPoint.Datasets import (BALANCE_MODES, HomographyPairDataset,
                                  PairDatasetConfig, splat)
-from SuperPoint.Trainer import Trainer, TrainerConfig
+from locascope.training.SuperPathPoint.SuperPoint.Trainer import Trainer, TrainerConfig
 
 __all__ = [
     # Backbones

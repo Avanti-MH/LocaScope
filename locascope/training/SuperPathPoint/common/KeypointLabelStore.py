@@ -3,7 +3,7 @@
     points = points_from_prob(result.mean_prob, result.counts, cfg)
     LabelStore.save(job, corpus, batch, LabelMeta.of(...))   # under its draw
 
-    batch, meta = LabelStore.load(path, require={'wsi_stem': 'BRACS_1228'})
+    batch, meta = LabelStore.load(path, require={'wsi_stem': 'BRACS_1003694'})
     xy = batch.points_of(i)          # [n_kp[i], 2] int16, tile coordinates
 
 SPARSE, NOT DENSE, AND THE ARITHMETIC THAT DECIDES IT
@@ -61,7 +61,7 @@ import torch
 from safetensors.numpy import save_file
 from safetensors import safe_open
 
-from ConfigIdentity import enc, short_id
+from locascope.core.config.ConfigIdentity import enc, short_id
 
 #: Bumped when a field changes MEANING. Adding one with a default does not need
 #: it. ConfigIdentity's first rule.

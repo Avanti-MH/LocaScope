@@ -22,8 +22,8 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequ
 import numpy as np
 import torch
 
-from training.GloRet.Steps import place_of
-from training.GloRet.Supply import Cands, Fov, FovResult, Level, Part, Shape, fov_of
+from locascope.training.GloRet.Steps import place_of
+from locascope.training.GloRet.Supply import Cands, Fov, FovResult, Level, Part, Shape, fov_of
 
 TileKey = Tuple[Part, int, int]          # (region, lattice), row, col of a tile in its grid
 
@@ -181,8 +181,8 @@ def logloret_rank_lazy(net: torch.nn.Module, res: FovResult, access: TileAccess,
     """`Steps.logloret_rank` for a source that encodes on demand: the rank of the first answer when the network
     re-orders the first `keep` windows of the list, the tokens of only those windows' tiles read and encoded."""
 
-    from BenchCommon import listed_windows                                        # noqa: PLC0415
-    from stage2_retrieval.RetrieverGloRet import amp_context                      # noqa: PLC0415
+    from locascope.cli.bench.BenchCommon import listed_windows                                        # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverGloRet import amp_context                      # noqa: PLC0415
     cs = replace(res.cs, candidates=res.cs.candidates[:keep])
     if not len(cs):
         return float('inf')
@@ -213,8 +213,8 @@ def gloret_rerank_rank_lazy(net: torch.nn.Module, res: FovResult, access: TileAc
                             device: Optional[Any] = None) -> float:
     """`Steps.gloret_rerank_rank` for a source that encodes on demand: a bi-encoder re-orders the first `keep` windows of
     the list by the score of the query against each window's vector, the tiles of only those windows read and encoded."""
-    from BenchCommon import listed_windows                                        # noqa: PLC0415
-    from stage2_retrieval.RetrieverGloRet import amp_context                      # noqa: PLC0415
+    from locascope.cli.bench.BenchCommon import listed_windows                                        # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverGloRet import amp_context                      # noqa: PLC0415
     cs = replace(res.cs, candidates=res.cs.candidates[:keep])
     if not len(cs):
         return float('inf')

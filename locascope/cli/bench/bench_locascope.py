@@ -2,7 +2,7 @@
 """End-to-end LocaScope bench: synthetic FoVs with known positions through the
 three stages, every stage's output and by-products kept as cache entries.
 
-    python utilities/bench_modules/bench_locascope.py \\
+    python -m locascope.cli.bench.bench_locascope \\
         --datasets @legacy-val --n-wsi 10 \\
         --stage1 knn:gigapath --stage2 slidewin:gigapath --stage3 sift:default \\
         --route both
@@ -43,7 +43,7 @@ all hit is not rendered.
 --route stage1 routes stage 2 to stage 1's level, oracle to the level the FoV
 was placed at (`stage1=oracle/`), both runs stages 2 and 3 once per route.
 
-Nothing here scores or draws. `utilities/cli/plot/plot_locascope.py` joins the
+Nothing here scores or draws. `locascope/cli/plot/plot_locascope.py` joins the
 render CSV and these tables and computes every error from them.
 
 The tables, the loop that fills them and the helpers other tools import are in
@@ -59,16 +59,13 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Tuple
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))      # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from locascope import paths as _paths                                                       # noqa: E402
 
-import Cache                                                           # noqa: E402
-from CpuBudget         import CpuBudget                                 # noqa: E402
-from TissueMaskConfig  import MASK_RECIPES, MaskMaker                   # noqa: E402
-from FovSupply         import FovSupply                                 # noqa: E402
-from BenchCommon       import (RunClock, Shot, Stage, Truth,            # noqa: E402
+from locascope.core.cache import Cache                                                           # noqa: E402
+from locascope.host.cpu import CpuBudget                                 # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker                   # noqa: E402
+from locascope.core.query_sim.FovSupply import FovSupply                                 # noqa: E402
+from locascope.cli.bench.BenchCommon import (RunClock, Shot, Stage, Truth,            # noqa: E402
                                add_run_args, fmt_time, matching_rotation,
                                parse_run_args, require_gpu_if_allocated,
                                query_grid_centre, roles_of, run_from_args,

@@ -71,8 +71,8 @@ import uuid
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
-from _paths import RESULT_DIR, job_name                          # noqa: F401
-from ConfigIdentity import record_diff                           # noqa: E402
+from locascope.paths import RESULT_DIR, job_name   # noqa: F401
+from locascope.core.config.ConfigIdentity import record_diff                           # noqa: E402
 
 
 class CacheMismatch(RuntimeError):

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Tests for the learned part of stage 2: the networks (`aiNNModel/models/RerankHeads.py`), their
+"""Tests for the learned part of stage 2: the networks (`locascope/core/networks/RerankHeads.py`), their
 checkpoints, the retrievers that load them (`RerankerNeural.py`: TileGT, CorrNet, Stack;
 `RetrieverWinEmbed.WindowEmbeddings`), and the training code's pieces (`training/RerankHead`: labels, losses,
 metrics, steps, the embedding's loss).
 
-    python utilities/test_modules/TestRerank/test_neural.py
+    python tests/TestRerank/test_neural.py
 
 No slide, no encoder, no GPU. The networks are tiny and untrained, so what is
 tested is what must be true of ANY weights -- shapes, that a checkpoint rebuilds
@@ -22,38 +22,34 @@ import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
-from test_context import cset, make_source, unit                 # noqa: E402
-from test_rerank import ENC, QUERY, REUSE, bound, planted, ported_upstream, random_candidates   # noqa: E402
-from Checkpoints import build_rerank_from_checkpoint, save_rerank_checkpoint   # noqa: E402
-from RerankChoices import build_rerank                           # noqa: E402
-from stage2_retrieval import RerankerNeural as RN, RerankerScorers as RS   # noqa: E402
-from stage2_retrieval.Context import GridSource, ScoreTable, WindowBatch, top_candidates   # noqa: E402
-from stage2_retrieval.RerankerNeural import (N_GLOBAL, N_PAIR, N_SCALAR, NeuralInputs,   # noqa: E402
+from tests.TestRerank.test_context import cset, make_source, unit                 # noqa: E402
+from tests.TestRerank.test_rerank import ENC, QUERY, REUSE, bound, planted, ported_upstream, random_candidates   # noqa: E402
+from locascope.core.networks.Checkpoints import build_rerank_from_checkpoint, save_rerank_checkpoint   # noqa: E402
+from locascope.core.networks.RerankChoices import build_rerank                           # noqa: E402
+from locascope.core.stage2_retrieval import RerankerNeural as RN, RerankerScorers as RS   # noqa: E402
+from locascope.core.stage2_retrieval.Context import GridSource, ScoreTable, WindowBatch, top_candidates   # noqa: E402
+from locascope.core.stage2_retrieval.RerankerNeural import (N_GLOBAL, N_PAIR, N_SCALAR, NeuralInputs,   # noqa: E402
                                              neural_inputs, pair_features, stack_features)
-from stage2_retrieval.RetrieverWinEmbed import WindowEmbeddings                           # noqa: E402
-from stage2_retrieval.StageInterface import (Candidate, CandidateSet, RerankedCandidate,   # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverWinEmbed import WindowEmbeddings                           # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import (Candidate, CandidateSet, RerankedCandidate,   # noqa: E402
                                              ShiftedCandidate)
 
-from training.RerankHead.Embed import EmbedFov, EmbedVisit, embed_loss, window_labels  # noqa: E402
-from training.RerankHead.Labels import (Boxes, LabelConfig, Labels, choose_subset,        # noqa: E402
+from locascope.training.RerankHead.Embed import EmbedFov, EmbedVisit, embed_loss, window_labels  # noqa: E402
+from locascope.training.RerankHead.Labels import (Boxes, LabelConfig, Labels, choose_subset,        # noqa: E402
                                         label_windows)
-from training.RerankHead.Losses import (bce_loss, listwise_loss, loc_loss, pool_softmax_loss,   # noqa: E402
+from locascope.training.RerankHead.Losses import (bce_loss, listwise_loss, loc_loss, pool_softmax_loss,   # noqa: E402
                                         rerank_loss, rot_loss, topk_hinge_loss)
-from training.RerankHead.Metrics import first_hit_rank, recall_at                         # noqa: E402
-from training.RerankHead.cli.train import prefetch                                        # noqa: E402
-from training.RerankHead.Runtime import broadcast_parameters, sync_gradients              # noqa: E402
-from training.RerankHead.Steps import build_head, forward_list, idle_step, train_step     # noqa: E402
-from training.RerankHead.Visits import FovData                                            # noqa: E402
+from locascope.training.RerankHead.Metrics import first_hit_rank, recall_at                         # noqa: E402
+from locascope.training.RerankHead.train import prefetch                                        # noqa: E402
+from locascope.training.RerankHead.Runtime import broadcast_parameters, sync_gradients              # noqa: E402
+from locascope.training.RerankHead.Steps import build_head, forward_list, idle_step, train_step     # noqa: E402
+from locascope.training.RerankHead.Visits import FovData                                            # noqa: E402
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
 
@@ -240,7 +236,7 @@ def t_the_learned_rerankers_order_by_their_column_and_a_stacker_reads_the_chains
 def stack_features_of(out: Any, columns: List[str]) -> torch.Tensor:
     """The stacker's input for the list `out` hands on, built by hand: its incoming table and the columns the
     rerankers upstream wrote, by window."""
-    from stage2_retrieval.Context import incoming_table                              # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Context import incoming_table                              # noqa: PLC0415
     table: ScoreTable = incoming_table(out.candidates)
     keys = [c.key() for c in out.candidates.candidates]
     for name in columns:
@@ -468,7 +464,7 @@ class _LevelMap:
 
 def t_a_slides_levels_are_kept_on_the_host_and_found_again_only_when_they_are_the_same() -> str:
     from types import SimpleNamespace                                             # noqa: PLC0415
-    from training.RerankHead.Visits import MemoryFeatureStore                     # noqa: PLC0415
+    from locascope.training.RerankHead.Visits import MemoryFeatureStore                     # noqa: PLC0415
     store: MemoryFeatureStore = MemoryFeatureStore()
     regions = [SimpleNamespace(x=0, y=0, w=100, h=50, index=0), SimpleNamespace(x=200, y=0, w=80, h=80, index=1)]
     geo = dict(ds=4.0, level=1, tile_size=256, overlap=True)
@@ -523,14 +519,14 @@ def t_prefetch_makes_the_items_ahead_in_order_raises_their_error_and_stops_when_
 
 def t_the_trainer_reports_host_memory_and_a_process_that_fails_leaves_at_once() -> str:
     import subprocess                                                              # noqa: PLC0415
-    from training.RerankHead.cli import train as rh_train                          # noqa: PLC0415
+    from locascope.training.RerankHead import train as rh_train                          # noqa: PLC0415
     text: str = rh_train.host_memory()
     assert 'host RSS' in text and '/dev/shm' in text, text
     # with several processes (torchrun sets WORLD_SIZE) an error ends the process now, with the traceback and exit 1;
     # alone it is raised as it always was
     code: str = ('import sys, os\n'
                  f'sys.path[:0] = {[p for p in sys.path if p]!r}\n'
-                 'from training.RerankHead.cli import train as t\n'
+                 'from locascope.training.RerankHead import train as t\n'
                  'def boom():\n    raise ValueError("planted")\n'
                  't.main = boom\n'
                  'try:\n    t.run()\nexcept ValueError:\n    print("RAISED")\n    sys.exit(0)\n')

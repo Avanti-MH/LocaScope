@@ -16,8 +16,8 @@ from typing import Any, Callable, Dict
 
 import torch.nn as nn
 
-from GloRet import build_gloret, build_logloret
-from RerankHeads import (CandidateContext, ContextCfg, CorrNet, CorrNetCfg, EmbedCfg,
+from locascope.core.networks.GloRet import build_gloret, build_logloret
+from locascope.core.networks.RerankHeads import (CandidateContext, ContextCfg, CorrNet, CorrNetCfg, EmbedCfg,
                          StackCfg, StackNet, TileGT, TileGTCfg, TileGTContext, WinEmbedder)
 
 

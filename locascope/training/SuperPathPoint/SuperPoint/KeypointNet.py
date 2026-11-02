@@ -47,14 +47,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register
 
-from common.Interfaces import check_shapes
-from common.KeypointLabelStore import points_from_prob
-from SuperPoint.Backbones import VggBackbone, VggBackboneConfig
-from SuperPoint.Decoders import (DepthToSpaceDecoder, DepthToSpaceDecoderConfig,
+from locascope.training.SuperPathPoint.common.Interfaces import check_shapes
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import points_from_prob
+from locascope.training.SuperPathPoint.SuperPoint.Backbones import VggBackbone, VggBackboneConfig
+from locascope.training.SuperPathPoint.SuperPoint.Decoders import (DepthToSpaceDecoder, DepthToSpaceDecoderConfig,
                                  depth_to_space_prob)
-from SuperPoint.Heads import (DescriptorHead, DescriptorHeadConfig,
+from locascope.training.SuperPathPoint.SuperPoint.Heads import (DescriptorHead, DescriptorHeadConfig,
                               sample_descriptors)
 
 

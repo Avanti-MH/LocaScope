@@ -2,7 +2,7 @@
 """Tests for `SurvivalAnalysis/SurvivalProcess.py`: the core, GPU-free half.
 plan.md 2.2①.
 
-    python utilities/test_modules/TestSuperPathPoint/test_survival_process.py
+    python tests/TestSuperPathPoint/test_survival_process.py
 
 WHAT THIS DOES NOT COVER. `detect`, `detect_all_rungs`, `detect_all_generations`
 and `rival_at` need a real `net`/prob map and are not exercised here -- this
@@ -19,16 +19,12 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                            # noqa: E402
 
-from SurvivalAnalysis import SurvivalProcess as SP             # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import SurvivalProcess as SP             # noqa: E402
 
 _RESULTS = []
 
@@ -258,7 +254,7 @@ def t_nearest_detection_picks_the_closest_and_its_score():
 def t_nearest_detection_empty_points_is_NONE_not_a_crash():
     dist, sc = SP.nearest_detection(np.zeros((0, 2)), np.zeros(0),
                                     np.array([[0.0, 0.0]]))
-    from SurvivalAnalysis.Attribution import NONE
+    from locascope.training.SuperPathPoint.SurvivalAnalysis.Attribution import NONE
     if dist[0] != NONE:
         raise AssertionError(f'expected NONE sentinel, got {dist[0]}')
     return 'no detections at all -> NONE, not an exception'

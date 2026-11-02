@@ -43,39 +43,36 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
-from cli import (add_corpus_args, add_labels_args,  # noqa: E402
+from locascope.training.SuperPathPoint.cli import (add_corpus_args, add_labels_args,  # noqa: E402
                  corpus_arg, job_result_dir, labels_root)
 
 
 import torch                                                      # noqa: E402
 
-from ConfigIdentity import config_json                            # noqa: E402
+from locascope.core.config.ConfigIdentity import config_json                            # noqa: E402
 
-from DsLadder import DEFAULT_RUNGS                          # noqa: E402
-from common.HomographyConfig import HomographyConfig               # noqa: E402
-from SuperPoint.Datasets import BALANCE_MODES, PairDatasetConfig   # noqa: E402
-from SuperPoint.KeypointNet import (KeypointNetConfig,            # noqa: E402
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS                          # noqa: E402
+from locascope.training.SuperPathPoint.common.HomographyConfig import HomographyConfig               # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Datasets import BALANCE_MODES, PairDatasetConfig   # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.KeypointNet import (KeypointNetConfig,            # noqa: E402
                                     load_upstream)
-from SuperPoint.Teacher import SuperPointTeacher                  # noqa: E402
-from SuperPoint.Losses import SuperPointLossConfig                 # noqa: E402
-from SuperPoint.Trainer import TrainerConfig                       # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Teacher import SuperPointTeacher                  # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Losses import SuperPointLossConfig                 # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Trainer import TrainerConfig                       # noqa: E402
 
 
-#: spec.md 6.5. `BRACS_1228` is deliberately in TRAIN: it is the slide
-#: `SlideWinTest`, `BenchMarkV2` and `WindowRetrievalBench` all ran on, so the
-#: existing SIFT and retrieval numbers are about it -- which makes it a sanity
-#: check that can be asked at any time without touching the held-out pair.
+#: spec.md 6.5. The ADH slide `BRACS_1003694` (the old `BRACS_1228` and the other missing
+#: BRACS train slides were replaced by the first on-disk slide of the same
+#: type) is in TRAIN, so a sanity check can be asked at any time without
+#: touching the held-out pair.
 #: Five per stain, chosen so that each addition answers something the set
 #: could not:
 #:   BRACS_1579  Group_BT/Type_N   -- Group_BT was absent entirely, and normal
 #:                                    tissue is the furthest in architecture
 #:                                    from ADH / FEA / DCIS
-#:   BRACS_1284  Group_MT/Type_IC  -- the largest type, and invasive carcinoma
+#:   BRACS_1411  Group_MT/Type_IC  -- the largest type, and invasive carcinoma
 #:                                    is unlike the other four
 #:   S1103520 (110126), S1140701 (111018) -- the three Ki67 slides already here
 #:                                    are 110208, 110208 and 111220, i.e. two
@@ -85,8 +82,8 @@ from SuperPoint.Trainer import TrainerConfig                       # noqa: E402
 #: Five and five is also what first makes the leave-one-stain-out arm possible
 #: (spec.md 13): with both stains in TRAIN the held-out number says "an unseen
 #: slide", never "an unseen stain".
-TRAIN_SLIDES = ('BRACS_1228', 'BRACS_1476', 'BRACS_1936',
-                'BRACS_1579', 'BRACS_1284',
+TRAIN_SLIDES = ('BRACS_1003694', 'BRACS_1474', 'BRACS_1813',
+                'BRACS_1579', 'BRACS_1411',
                 'S1104233,G7E,110208', 'S1104360,G7E,110208',
                 'S1151088,G7E,111220', 'S1103520,G7E,110126',
                 'S1140701,G7E,111018')

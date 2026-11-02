@@ -47,25 +47,22 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
 import numpy as np                                              # noqa: E402
 import matplotlib                                               # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
-from cli import job_result_dir                                  # noqa: E402
+from locascope.training.SuperPathPoint.cli import job_result_dir                                  # noqa: E402
 
 
-from common.Homography import (invert, points_input_to_output,  # noqa: E402
+from locascope.training.SuperPathPoint.common.Homography import (invert, points_input_to_output,  # noqa: E402
                                points_output_to_input,
                                sample_homography, valid_mask, warp_image)
-from common.HomographyConfig import HomographyConfig             # noqa: E402
-from TileSampler import (PRE_TILE_FACTOR, centre_margin, pre_tile_px)  # noqa: E402
-from common.Homography import pretile_valid_mask  # noqa: E402
+from locascope.training.SuperPathPoint.common.HomographyConfig import HomographyConfig             # noqa: E402
+from locascope.core.tiles.TileSampler import (PRE_TILE_FACTOR, centre_margin, pre_tile_px)  # noqa: E402
+from locascope.training.SuperPathPoint.common.Homography import pretile_valid_mask  # noqa: E402
 
 #: The four switches, in the order `sample_homography` applies them. Order
 #: matters and is not commutative, so the panels are laid out in it.
@@ -106,10 +103,10 @@ def wsi_tile(path: str, ds: float, size: int, seed: int) -> np.ndarray:
     colour, never a black rectangle whose border is a perfect corner
     (spec.md 6.1)."""
     import math
-    from SafeSlide import SafeSlide
-    from SlideReader import SlideReader
-    from ReadGeometry import ReadSpec
-    from DsLadder import DsLadder
+    from locascope.core.slides.SafeSlide import SafeSlide
+    from locascope.core.slides.SlideReader import SlideReader
+    from locascope.core.slides.ReadGeometry import ReadSpec
+    from locascope.core.slides.DsLadder import DsLadder
 
     with SafeSlide(path) as wsi:
         plan = next(p for p in DsLadder(rungs=(float(ds),)).plan_for(wsi, size))

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for `query_sim/FovSupply.py`: a FoV's flow, TileSampler -> Render.
 
-    python utilities/test_modules/test_fov_supply.py --wsi <slide> [--level 1]
+    python tests/test_fov_supply.py --wsi <slide> [--level 1]
 
-Run through `jobscripts/TestReadPath.sh`, which resolves slide names and loops.
+Run through `deploy/slurm/TestReadPath.sh`, which resolves slide names and loops.
 
 `equiv` pins FovSupply over a PlanSpec against a frozen one-camera FovSupply
 and the `camera_plan` it drew over: given that rung as a PlanSpec, the same
@@ -30,24 +30,21 @@ import tempfile
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 
-from camera import Render                                        # noqa: E402
-from config import DomainGapConfig                               # noqa: E402
-from FovSupply import FovSupply                                  # noqa: E402
-from DsLadder import RungPlan                                    # noqa: E402
-from ReadGeometry import (REAL_PHOTO_SENSOR as SENSOR, ReadSpec,  # noqa: E402
+from locascope.core.query_sim.camera import Render                                        # noqa: E402
+from locascope.core.query_sim.config import DomainGapConfig                               # noqa: E402
+from locascope.core.query_sim.FovSupply import FovSupply                                  # noqa: E402
+from locascope.core.slides.DsLadder import RungPlan                                    # noqa: E402
+from locascope.core.slides.ReadGeometry import (REAL_PHOTO_SENSOR as SENSOR, ReadSpec,  # noqa: E402
                           level_px)
-from SafeSlide import SafeSlide                                  # noqa: E402
-from SlideReader import SlideReader                              # noqa: E402
-from TileSampler import PlanSpec, SamplerConfig, TileSampler, with_camera  # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                              # noqa: E402
+from locascope.core.tiles.TileSampler import PlanSpec, SamplerConfig, TileSampler, with_camera  # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 
 
 def fov_cfg() -> DomainGapConfig:
@@ -178,7 +175,7 @@ def run_supply(wsi, mask, level_ds, new, expect) -> None:
 
     # The cached draw is the drawn one, and the render entry holds what was
     # drawn: a miss writes it, a hit checks against it or reads it back.
-    import Cache
+    from locascope.core.cache import Cache
     saved_root = Cache.RESULT_DIR
     with tempfile.TemporaryDirectory() as tmp:
         Cache.RESULT_DIR = tmp

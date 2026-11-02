@@ -17,7 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # ---------------- PatchingLib, all three sections ---------------------------
@@ -38,18 +38,18 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # ONLY picks a subset; the default is all three. The names are checked by
 # argparse, so a typo fails at parse time rather than silently running nothing:
 #
-#   sbatch jobscripts/TestPatchingLib.sh                        # all three
-#   ONLY=grid sbatch jobscripts/TestPatchingLib.sh              # was PatchGridIndexTest
-#   ONLY=coords sbatch jobscripts/TestPatchingLib.sh            # was PatchInfoCoordsTest
-#   ONLY=containers sbatch jobscripts/TestPatchingLib.sh        # was TissuePatchContainerTest
-#   ONLY="grid coords" sbatch jobscripts/TestPatchingLib.sh     # the synthetic pair
+#   sbatch deploy/slurm/TestPatchingLib.sh                        # all three
+#   ONLY=grid sbatch deploy/slurm/TestPatchingLib.sh              # was PatchGridIndexTest
+#   ONLY=coords sbatch deploy/slurm/TestPatchingLib.sh            # was PatchInfoCoordsTest
+#   ONLY=containers sbatch deploy/slurm/TestPatchingLib.sh        # was TissuePatchContainerTest
+#   ONLY="grid coords" sbatch deploy/slurm/TestPatchingLib.sh     # the synthetic pair
 #
 # TWO SUBSETS WRITE TO ONE PLACE unless you say otherwise. The log is `%x` and
 # _paths.job_result_dir reads SLURM_JOB_NAME, so --job-name moves BOTH at once
 # -- one knob, no pair of names that has to be kept in agreement:
 #
 #   ONLY=grid sbatch --job-name=TestPatchingLib_grid --time=01:00:00 \
-#       jobscripts/TestPatchingLib.sh
+#       deploy/slurm/TestPatchingLib.sh
 #
 # --time on the command line overrides the directive above, which is set for
 # the containers section. grid and coords are synthetic and finish in seconds;
@@ -72,7 +72,7 @@ echo ""
 # never reads the query. That is cheaper than three argument lists to keep in
 # agreement, and keeping them in agreement is exactly what the split versions
 # failed to do.
-python utilities/test_modules/test_patching_lib.py \
+python tests/test_patching_lib.py \
   --only $ONLY \
   --size $SIZE \
   --tile $SIZE \

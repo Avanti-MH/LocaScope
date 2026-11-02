@@ -15,36 +15,36 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  The tests of the two routing-head training packages, one job.
 #
-#    sbatch jobscripts/PrototypicalRoutingHead/TestRoutingHeads.sh
-#    ONLY="ordinal" sbatch jobscripts/PrototypicalRoutingHead/TestRoutingHeads.sh
+#    sbatch deploy/slurm/PrototypicalRoutingHead/TestRoutingHeads.sh
+#    ONLY="ordinal" sbatch deploy/slurm/PrototypicalRoutingHead/TestRoutingHeads.sh
 #
-#  They live in utilities/test_modules/TestRoutingHeads/, named after this
+#  They live in tests/TestRoutingHeads/, named after this
 #  script: one job owns all three.
 #
-#    episodes   training/PrototypicalRoutingHead/Episodes.py -- the mixed-pool
+#    episodes   locascope/training/PrototypicalRoutingHead/Episodes.py -- the mixed-pool
 #               draws training and validation make (also reads
 #               ClassifyingRoutingHead/Datasets.py's ManifestRow)
-#    kxk        kxk_report in PrototypicalRoutingHead/cli/train.py -- the
+#    kxk        kxk_report in PrototypicalRoutingHead/train.py -- the
 #               validation accuracy the checkpoints are chosen on
 #    ordinal    the ordinal losses in BOTH places they are written,
 #               PrototypicalRoutingHead/Losses.compute_loss and
-#               ClassifyingRoutingHead/cli/train._compute_loss, held to the same numbers
+#               ClassifyingRoutingHead/train._compute_loss, held to the same numbers
 #
 #  No slide and no model: fake pools and toy tensors, seconds. The GPU line above
 #  is there because this cluster wants one, not because the assertions need it.
 #
 #  crash-resume state (Resume.py), which both packages use, is tested in
-#  jobscripts/TestAiNNModel.sh -- it belongs to the shared aiNNModel code.
+#  deploy/slurm/TestAiNNModel.sh -- it belongs to the shared locascope.core code.
 #
 #  ONLY picks a subset, space separated; the default is all three.
 # =============================================================================
 
-TESTS=utilities/test_modules/TestRoutingHeads
+TESTS=tests/TestRoutingHeads
 ONLY="${ONLY:-episodes kxk ordinal}"
 
 status=0

@@ -19,22 +19,22 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
-#  The tests of GloRet and LogLoRet (stage2_retrieval/proposal.md): the networks, their retrievers, their training
-#  (training/GloRet), the patch tokens of TilePool attnpool and their stages, the resource meter, the wandb tools.
+#  The tests of GloRet and LogLoRet (locascope/core/stage2_retrieval/proposal.md): the networks, their retrievers, their training
+#  (locascope/training/GloRet), the patch tokens of TilePool attnpool and their stages, the resource meter, the wandb tools.
 #  No slide, no model weights. Its own job and log (log/TestGloRet), apart from TestRerank's (the stage 2 re-rankers
 #  and RerankHead), so the one never overwrites the other.
 #
-#    sbatch jobscripts/GloRet/TestGloRet.sh
+#    sbatch deploy/slurm/GloRet/TestGloRet.sh
 # =============================================================================
 ONLY="${ONLY:-test_gloret}"
 
 status=0
 for t in $ONLY; do
   echo "======== $t ========"
-  python "utilities/test_modules/TestGloRet/$t.py"
+  python "tests/TestGloRet/$t.py"
   rc=$?
   [ $rc -ne 0 ] && status=$rc
 done

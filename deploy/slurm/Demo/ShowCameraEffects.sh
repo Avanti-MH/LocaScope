@@ -18,10 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
-#  utilities/cli/demo/show_camera_effects.py
+#  locascope/cli/demo/show_camera_effects.py
 #
 #  Every effect of the camera's domain gap alone, then all of them together ("ALL, extreme values";
 #  and one random draw), on a slide crop and on a checkerboard. Per input, in result/<job>/:
@@ -29,11 +29,11 @@ source jobscripts/_env.sh
 #    camera_effects_<input>_diff.png    |tile - none| x GAIN, with each tile's mean difference
 #    camera_effects_<input>_input.png   what the effects were applied to
 #
-#    sbatch jobscripts/ShowCameraEffects.sh
-#    WSI="" sbatch jobscripts/ShowCameraEffects.sh          # the checkerboard only
-#    WSI=S1104233,G7E,110208 SEED=3 sbatch jobscripts/ShowCameraEffects.sh
+#    sbatch deploy/slurm/ShowCameraEffects.sh
+#    WSI="" sbatch deploy/slurm/ShowCameraEffects.sh          # the checkerboard only
+#    WSI=S1104233,G7E,110208 SEED=3 sbatch deploy/slurm/ShowCameraEffects.sh
 # =============================================================================
-WSI="${WSI-BRACS_1228}"      # a slide name (BRACS is SVS, 4x per level); empty: no slide
+WSI="${WSI-BRACS_1003694}"      # a slide name (BRACS is SVS, 4x per level); empty: no slide
 LEVEL="${LEVEL:-1}"          # the pyramid level the crop is read at
 SEED="${SEED:-0}"            # the crop's position and the random draw
 GAIN="${GAIN:-8}"            # the difference sheet is |d| x GAIN
@@ -41,4 +41,4 @@ GAIN="${GAIN:-8}"            # the difference sheet is |d| x GAIN
 ARGS=(--level "$LEVEL" --seed "$SEED" --gain "$GAIN")
 [ -n "$WSI" ] && ARGS+=(--wsi "$WSI")
 
-python -u utilities/cli/demo/show_camera_effects.py "${ARGS[@]}"
+python -u -m locascope.cli.demo.show_camera_effects "${ARGS[@]}"

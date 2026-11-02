@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Remove one variant of a cache entry, or a whole subtree, by its address.
 
-    python utilities/cli/inspect_cache_store/purge_cache.py --job BenchLocaScope \\
-        --level slide=BRACS_1228 seg=hest-caadecfe1e1afe67 --entry mask --id <id>
-    python utilities/cli/inspect_cache_store/purge_cache.py --job ClassifyingRoutingHead \\
-        --level slide=BRACS_1228 seg=hsv-0123456789abcdef
+    python -m locascope.cli.inspect_cache_store.purge_cache --job BenchLocaScope \\
+        --level slide=BRACS_1003694 seg=hest-caadecfe1e1afe67 --entry mask --id <id>
+    python -m locascope.cli.inspect_cache_store.purge_cache --job ClassifyingRoutingHead \\
+        --level slide=BRACS_1003694 seg=hsv-0123456789abcdef
     ... --yes        actually delete; without it, only list
 
 The address is the caller's, level by level (`Cache.Address` checks it is one
@@ -24,11 +24,9 @@ import shutil
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                       # noqa: E402
 
-from Cache import Address                                           # noqa: E402
+from locascope.core.cache.Cache import Address                                           # noqa: E402
 
 
 def _size(path: Path) -> int:

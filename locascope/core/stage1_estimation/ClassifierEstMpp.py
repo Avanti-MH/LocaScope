@@ -2,7 +2,7 @@
 shape `StageInterface.MppEstimator` describes.
 
     cfg = ClassifierEstMppConfig.from_checkpoint(
-        '/work/u26130998/result/ClassifyingRoutingHead/weights/'
+        '$LOCASCOPE_OUTPUT_ROOT/result/ClassifyingRoutingHead/weights/'
         'pure-train_Ki67--gigapath--frozen--arcface--bal--best.pt')
     est = ClassifierEstMpp(cfg).build(wsi)
     result = est.estimate(query_img)   # query_img: RGB uint8 np.ndarray
@@ -56,15 +56,15 @@ import openslide
 import torch
 
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
-from PatchingLib import QueryPatchContainer                              # noqa: E402
-from SafeSlide import SafeSlide                                         # noqa: E402
-from Checkpoints import build_from_checkpoint                          # noqa: E402
-from Features import encode_raw, trunk_raw                              # noqa: E402
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
+from locascope.core.tiles.PatchingLib import QueryPatchContainer                              # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                         # noqa: E402
+from locascope.core.networks.Checkpoints import build_from_checkpoint                          # noqa: E402
+from locascope.core.networks.Features import encode_raw, trunk_raw                              # noqa: E402
 
-from stage1_estimation.StageInterface import (EstMppResult, routed_level,  # noqa: E402
+from locascope.core.stage1_estimation.StageInterface import (EstMppResult, routed_level,  # noqa: E402
                                               weights_path)
-from stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
+from locascope.core.stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
 
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ from stage1_estimation.FoVVote import vote as fov_vote                          
 class ClassifierEstMppConfig(IdentifiedConfig):
     '''Which trained encoder + head to run, and at what tile size.
 
-    `encoder` is `TileEncoderFunc`'s own registered name (`'gigapath'`,
+    `encoder` is `TileEncoder`'s own registered name (`'gigapath'`,
     `'convnext_v2'`, ...); `classifier` is `Heads.py`'s registered name
     (`'linear'`, `'mlp'`, `'arcface'`) -- see `Heads.classifier_class`'s own
     docstring for why a registered name and not `type(...).__name__`.

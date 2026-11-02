@@ -70,24 +70,21 @@ import os
 import sys
 from collections import defaultdict
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
-from cli import (RESULT_DIR, add_corpus_args, add_labels_args,      # noqa: E402
+from locascope.training.SuperPathPoint.cli import (RESULT_DIR, add_corpus_args, add_labels_args,      # noqa: E402
                  corpus_arg, corpus_from_args, job_result_dir, labels_root)
 
 
 import numpy as np                                                # noqa: E402
 import torch                                                      # noqa: E402
 
-from ConfigIdentity import config_from_json                       # noqa: E402
+from locascope.core.config.ConfigIdentity import config_from_json                       # noqa: E402
 
-from DsLadder import DEFAULT_RUNGS                                # noqa: E402
-from SuperPoint.Datasets import PairDatasetConfig                 # noqa: E402
-from SuperPoint.KeypointNet import KeypointNetConfig              # noqa: E402
-from SuperPoint.Trainer import (_repeatability,                   # noqa: E402
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS                                # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Datasets import PairDatasetConfig                 # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.KeypointNet import KeypointNetConfig              # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Trainer import (_repeatability,                   # noqa: E402
                                 _repeatability_row)
 
 #: NOT `job_result_dir('TrainSuperPathPoint')`. That function returns
@@ -246,7 +243,7 @@ def _slides_from(recorded):
     if isinstance(decoded, list) and all(isinstance(x, str) for x in decoded):
         return decoded
 
-    from AccessDatasets import list_names                          # noqa: PLC0415
+    from locascope.core.slides.AccessDatasets import list_names                          # noqa: PLC0415
     picked = sorted(stem for stem in list_names() if stem in recorded)
     if ','.join(picked) != recorded:
         raise SystemExit(

@@ -40,10 +40,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from Cache import Address, wsi_stem_of
-from DsLadder import DEFAULT_RUNGS
-from ReadGeometry import ReadSpec
-from TileSampler import (PRE_TILE_FACTOR, SAMPLER_RECIPES, InheritConfig,
+from locascope.core.cache.Cache import Address, wsi_stem_of
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS
+from locascope.core.slides.ReadGeometry import ReadSpec
+from locascope.core.tiles.TileSampler import (PRE_TILE_FACTOR, SAMPLER_RECIPES, InheritConfig,
                          OverlapConfig, PlanSpec, RichnessConfig, SampleMeta,
                          SamplerConfig, TileSampler, centre_margin)
 
@@ -207,13 +207,13 @@ class Corpus:
         entry of that name."""
         if os.path.exists(str(slide)):
             return str(slide)
-        from AccessDatasets import locate                           # noqa: PLC0415
+        from locascope.core.slides.AccessDatasets import locate                           # noqa: PLC0415
         return str(locate(str(slide)).path)
 
     def draw(self, slide: str) -> TileSampler:
         """The draw of `slide` -- read back when it is in `job`'s cache, made
         (the mask included, through `mask_job`'s cache) when it is not."""
-        from TissueMaskConfig import MaskMaker                      # noqa: PLC0415
+        from locascope.core.tiles.TissueMaskConfig import MaskMaker                      # noqa: PLC0415
         import torch                                                # noqa: PLC0415
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         with MaskMaker(self.mask_cfg, self.mask_job, device) as masks:
@@ -241,8 +241,8 @@ class Corpus:
         key = (os.getpid(), tile.path)
         reader = _READERS.get(key)
         if reader is None:
-            from SafeSlide import SafeSlide                         # noqa: PLC0415
-            from SlideReader import SlideReader                     # noqa: PLC0415
+            from locascope.core.slides.SafeSlide import SafeSlide                         # noqa: PLC0415
+            from locascope.core.slides.SlideReader import SlideReader                     # noqa: PLC0415
             reader = _READERS[key] = SlideReader(SafeSlide(tile.path),
                                                  resize='area')
         m = tile.meta

@@ -50,7 +50,7 @@ import torch.nn.functional as F                             # noqa: E402
 from PIL import Image                                       # noqa: E402
 from torchvision import transforms                          # noqa: E402
 
-from ConfigIdentity import (IdentifiedBuild, IdentifiedConfig,  # noqa: E402
+from locascope.core.config.ConfigIdentity import (IdentifiedBuild, IdentifiedConfig,  # noqa: E402
                             config_from,
                             ModelConfig)
 
@@ -1142,7 +1142,7 @@ class TileEncoder(IdentifiedBuild):
         SuperPoint/EncoderBackbone.py` reached the same computation by
         re-parenting a built encoder into a dynamic class, because the two
         options it saw were "private access across a package boundary" and
-        "change aiNNModel/TileEncoderFunc.py" -- and it declined the second.
+        "change locascope/core/backbones/TileEncoder.py" -- and it declined the second.
         That was a boundary decision, not a technical one: this method needs
         only `self.cfg` and the forwards this class already declares.
         Declared public here, every encoder gets it.
@@ -1359,12 +1359,12 @@ class TileEncoder(IdentifiedBuild):
 #: A module is imported when its encoder is asked for, so a run loads only
 #: the timm/transformers code it uses. Importing several is safe: every
 #: implementation sets HF_HOME to the same `_paths.MODEL_WEIGHTS_DIR`, and
-#: jobscripts/_env.sh exports it before python starts.
+#: deploy/slurm/_env.sh exports it before python starts.
 _IMPLEMENTATIONS = {
-    'gigapath':    'GigaPathFunc',
-    'uni2':        'Uni2Func',
-    'conch_vit':   'ConchVitFunc',
-    'convnext_v2': 'ConvNeXtV2Func',
+    'gigapath':    'locascope.core.backbones.GigaPath',
+    'uni2':        'locascope.core.backbones.Uni2',
+    'conch_vit':   'locascope.core.backbones.ConchVit',
+    'convnext_v2': 'locascope.core.backbones.ConvNeXtV2',
 }
 
 
@@ -1396,13 +1396,13 @@ def add_encoder_args(ap, base: 'TileEncoderConfig') -> None:
     included: `--encoder-batch-size`, `--encoder-model-dtype`,
     `--encoder-transform-...`. A flag not given leaves the field at what `base`
     holds (see `ConfigArgs`)."""
-    from ConfigArgs import add_config_args                         # noqa: PLC0415
+    from locascope.core.config.ConfigArgs import add_config_args                         # noqa: PLC0415
     add_config_args(ap, base, 'encoder')
 
 
 def encoder_cfg_from_args(args, base: 'TileEncoderConfig') -> 'TileEncoderConfig':
     """`base` with every `--encoder-*` flag that was given applied."""
-    from ConfigArgs import config_from_args                        # noqa: PLC0415
+    from locascope.core.config.ConfigArgs import config_from_args                        # noqa: PLC0415
     return config_from_args(args, base, 'encoder')
 
 def admissible_poolings(cfg, wanted) -> tuple:

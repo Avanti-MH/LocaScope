@@ -17,7 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # =============================================================================
@@ -82,7 +82,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #
 #   homography   test_homography.py            geometry, both warp paths
 #   ladder       test_ds_ladder.py             level resolution, synthetic
-#   mask         test_tissue_mask.py           TissueMask, TissueSegFunc and
+#   mask         test_tissue_mask.py           TissueMask, TissueSeg and
 #                                              TissueMaskConfig: derived ds, the
 #                                              span decoy, the 0.5 gate, views,
 #                                              the tiled read, the mask cache
@@ -117,8 +117,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #                                              the only two stages costing
 #                                              minutes rather than seconds
 #
-#   sbatch jobscripts/TestSuperPathPoint.sh                     # all twelve
-#   STAGES="homography ladder" sbatch jobscripts/TestSuperPathPoint.sh
+#   sbatch deploy/slurm/TestSuperPathPoint.sh                     # all twelve
+#   STAGES="homography ladder" sbatch deploy/slurm/TestSuperPathPoint.sh
 #
 # NOTHING HERE RUNS ON A LOGIN NODE, including the stages that need no data,
 # no weights and no GPU. That is a standing rule (ClaudeRules section 3), not a
@@ -126,26 +126,26 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # is exactly what every job that ends up hogging one was believed to be. The
 # subset is selected with STAGES and still submitted:
 #
-#   STAGES="mask backbone" sbatch jobscripts/TestSuperPathPoint.sh
+#   STAGES="mask backbone" sbatch deploy/slurm/TestSuperPathPoint.sh
 #
 # Everything shares one log and one result directory, both keyed on
 # SLURM_JOB_NAME, so --job-name moves the pair together:
 #
 #   STAGES=demo sbatch --job-name=TestSuperPathPoint_demo \
-#       jobscripts/TestSuperPathPoint.sh
+#       deploy/slurm/TestSuperPathPoint.sh
 
 STAGES="${STAGES:-homography ladder mask sampler store decoder ha student pretrained pretrained-weights reeval chain-stack survival survival-report survival-process alpha-calibration alive-candidates backbone backbone-model ladder-wsi demo seg}"
 
 # Every test this jobscript owns lives in one directory, named after the
 # jobscript that runs them. The two that do NOT are deliberate: their subjects
 # are shared modules, not SuperPathPoint's -- `TissueMask` is used by
-# LocaScopePipeline and PatchingLib, and `Uni2PcaSegFunc` is an encoder.
+# LocaScopePipeline and PatchingLib, and `Uni2PcaSeg` is an encoder.
 # `SurvivalAnalysis`'s tests (chain-stack/survival/survival-report) stay HERE
 # even though the package itself was renamed from `PointsAnalysisByMpp`
 # 2026-09-05 -- its only consumer is this jobscript's own pipeline
 # (`build_survival.py`/`report_survival.py`/`inspect_survival.py`), so it does
 # not meet the "shared subject" bar the two exceptions above do.
-TESTS=utilities/test_modules/TestSuperPathPoint
+TESTS=tests/TestSuperPathPoint
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
 KI67=/work/u26130998/datasets/Ki67_with_photo
@@ -156,7 +156,7 @@ KI67=/work/u26130998/datasets/Ki67_with_photo
 # not on the other, and getting them by reading a COARSER level would be the
 # silent failure -- ladder-wsi is where a human sees which level each rung
 # actually resolved to.
-WSI_4X="$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"
+WSI_4X="$BRACS/Group_AT/Type_ADH/BRACS_1003694.svs"
 WSI_2X="$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"
 
 # The demo's tile. ds 4 is native on both pyramids, so the picture is the
@@ -176,7 +176,7 @@ DRAWS=200
 CALIBRATE=2000
 
 # The seg stage reads at level 0 and has no magnification knob -- see
-# Uni2PcaSegFunc.LEVEL. plane_ds was a config field, then a level argument, and
+# Uni2PcaSeg.LEVEL. plane_ds was a config field, then a level argument, and
 # both are gone; a --plane-ds here is what made the 2026-08-26 run exit 1.
 # 200 rather than the config default of 1000, so the fit is minutes. It is a
 # hashed field, so a run at 200 and a run at 1000 correctly get different ids.
@@ -224,7 +224,7 @@ for stage in $STAGES; do
       # composed matrix). Different lines, different quantities, so agreement
       # is evidence rather than a tautology.
       run "homography  (--calibrate: is PRE_TILE_FACTOR 3 enough, ${CALIBRATE} draws)" \
-        python training/SuperPathPoint/cli/demo_homography.py \
+        python -m locascope.training.SuperPathPoint.cli.demo_homography \
           --calibrate "$CALIBRATE" --tile-size "$TILE"
       ;;
 
@@ -238,7 +238,7 @@ for stage in $STAGES; do
     mask)
       # The three mask modules: TissueMask (what mask_ds is, where the mask
       # starts, what the slide contributes, views that cannot leak),
-      # TissueSegFunc (the level picked by ratio, a tiled read equal to the
+      # TissueSeg (the level picked by ratio, a tiled read equal to the
       # whole one) and TissueMaskConfig (seg_id / region_id, the mask cache and
       # the segmenter's lifetime). No --wsi: synthetic only, seconds.
       #
@@ -247,11 +247,11 @@ for stage in $STAGES; do
       # that keeps a caller keeps its test. Exactly half passes, because it
       # compares with >=.
       run "mask  (derived ds, the span decoy, the 0.5 gate, the mask cache)" \
-        python utilities/test_modules/test_tissue_mask.py
+        python tests/test_tissue_mask.py
       ;;
 
     sampler)
-      # utilities/TileSampler.py, rewritten in place. Three axes -- richness,
+      # locascope/core/tiles/TileSampler.py, rewritten in place. Three axes -- richness,
       # overlap, inheritance -- set when sampling and queried afterwards,
       # because those are the same information read twice.
       #
@@ -267,7 +267,7 @@ for stage in $STAGES; do
       # 202,420 overlapping pairs over the real corpus, 69.2 per cent of tiles
       # touching another and every single tile at ds 32.
       run "sampler  (the three axes, the units, and the random-arm decoy)" \
-        python utilities/test_modules/test_tile_sampler.py
+        python tests/test_tile_sampler.py
       ;;
 
     store)
@@ -276,7 +276,7 @@ for stage in $STAGES; do
       # back as the string '14.0' after six correct mask files had been
       # written) lives with SlideMask now, in the `mask` stage above.
       run "store  (features, map cache: address, codec)" \
-        python utilities/test_modules/test_store.py
+        python tests/test_store.py
       run "store  (corpus: the key and the draw's address)" \
         python "$TESTS"/test_corpora.py
       run "store  (label store: threshold/NMS/border/cap, padding, two rounds)" \
@@ -615,17 +615,17 @@ for stage in $STAGES; do
       OUT_DIR="/work/u26130998/result/${SLURM_JOB_NAME:-TestSuperPathPoint}"
       mkdir -p "$OUT_DIR"
       run "demo  (synthetic pattern)" \
-        python training/SuperPathPoint/cli/demo_homography.py \
+        python -m locascope.training.SuperPathPoint.cli.demo_homography \
           --tile-size "$TILE" \
           --out "$OUT_DIR/homography_operations__synthetic.png"
       run "demo  (WSI tile, ds $DEMO_DS)" \
-        python training/SuperPathPoint/cli/demo_homography.py \
+        python -m locascope.training.SuperPathPoint.cli.demo_homography \
           --wsi "$WSI_4X" --ds "$DEMO_DS" --tile-size "$TILE" \
           --out "$OUT_DIR/homography_operations__bracs_ds${DEMO_DS}.png"
       ;;
 
     seg)
-      # Step 3a: aiNNModel/Uni2PcaSegFunc.py. Three tiers in one file, and this
+      # Step 3a: locascope/core/backbones/Uni2PcaSeg.py. Three tiers in one file, and this
       # runs all three -- the config/helper checks need nothing, --with-model
       # loads UNI2, --wsi fits on a slide.
       #
@@ -648,9 +648,9 @@ for stage in $STAGES; do
       # The fit sample size changes the basis and is hashed, so a test run and
       # a production run correctly get different identity ids.
       run "seg  (config + helpers, no weights)" \
-        python utilities/test_modules/test_uni2_pca_seg.py
+        python tests/test_uni2_pca_seg.py
       run "seg  (+model +slide, level 0, $(basename "$WSI_4X"))" \
-        python utilities/test_modules/test_uni2_pca_seg.py \
+        python tests/test_uni2_pca_seg.py \
           --wsi "$WSI_4X" \
           --fit-tiles "$SEG_FIT_TILES" \
           --plane-tiles "$SEG_PLANE_TILES"

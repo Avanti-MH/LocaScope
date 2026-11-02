@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for `kxk_report` and `improves_everywhere` in training/PrototypicalRoutingHead/cli/train.py --
+"""Tests for `kxk_report` and `improves_everywhere` in locascope/training/PrototypicalRoutingHead/train.py --
 the validation accuracy the checkpoints are chosen on.
 
-    python utilities/test_modules/TestRoutingHeads/test_kxk_report.py
+    python tests/TestRoutingHeads/test_kxk_report.py
 
 No model: hand-written per-pair, per-rung accuracies whose answer is worked
 out below.
@@ -25,14 +25,10 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
-from training.PrototypicalRoutingHead.cli.train import (      # noqa: E402
+from locascope.training.PrototypicalRoutingHead.train import (      # noqa: E402
     SUPPORT_NATIVE_DEFAULT, improves_everywhere, kxk_report, val_support_native)
 
 _RESULTS = []
@@ -127,7 +123,7 @@ def t_best_needs_every_dataset_to_hold_and_one_to_rise():
 
 def t_the_support_native_default_is_half_and_val_takes_native_support_above_zero() -> str:
     import argparse                                              # noqa: PLC0415
-    from training.PrototypicalRoutingHead.cli.train import _share   # noqa: PLC0415
+    from locascope.training.PrototypicalRoutingHead.train import _share   # noqa: PLC0415
     assert SUPPORT_NATIVE_DEFAULT == 0.5, f'the default is {SUPPORT_NATIVE_DEFAULT}, not 0.5'
     assert val_support_native(SUPPORT_NATIVE_DEFAULT), 'the default trains on native support: val must too'
     assert val_support_native(1.0) and val_support_native(0.01)

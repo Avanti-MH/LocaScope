@@ -4,7 +4,7 @@
 does around its scoring) and the first-phase methods' scoring (`RetrieverBagOfTiles`, `RetrieverTileVote`,
 `RetrieverClusterBow`).
 
-    python utilities/test_modules/TestRerank/test_rerank.py
+    python tests/TestRerank/test_rerank.py
 
 No slide, no model, no GPU. Features are random unit vectors, so every expected value is computed here, one
 tile at a time, in plain loops, and compared with what the vectorised code returns. A reranker is handed its
@@ -38,31 +38,27 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 import torch.nn.functional as F                                  # noqa: E402
 
-import ConfigIdentity as CI                                      # noqa: E402
-from test_context import TILE, cset, make_source, unit           # noqa: E402
-from TileEncoderFunc import encoder_config                       # noqa: E402
-from stage2_retrieval import RetrieverBagOfTiles as RB           # noqa: E402
-from stage2_retrieval import RetrieverClusterBow as RC           # noqa: E402
-from stage2_retrieval import RetrieverTileVote as RT             # noqa: E402
-from stage2_retrieval.Context import (GridSource, LevelFeatures, MemorySource, QueryFeatures,   # noqa: E402
+from locascope.core.config import ConfigIdentity as CI                                      # noqa: E402
+from tests.TestRerank.test_context import TILE, cset, make_source, unit           # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config                       # noqa: E402
+from locascope.core.stage2_retrieval import RetrieverBagOfTiles as RB           # noqa: E402
+from locascope.core.stage2_retrieval import RetrieverClusterBow as RC           # noqa: E402
+from locascope.core.stage2_retrieval import RetrieverTileVote as RT             # noqa: E402
+from locascope.core.stage2_retrieval.Context import (GridSource, LevelFeatures, MemorySource, QueryFeatures,   # noqa: E402
                                       ScoringInput, WindowBatch, feature_key, incoming_table, reordered,
                                       top_candidates)
-from stage2_retrieval.RerankerScorers import (ColumnRanker, RerankerCandGraph, RerankerCandGraphConfig,   # noqa: E402
+from locascope.core.stage2_retrieval.RerankerScorers import (ColumnRanker, RerankerCandGraph, RerankerCandGraphConfig,   # noqa: E402
                                               RerankerCorr, RerankerCorrConfig, RerankerCsls,
                                               RerankerCslsConfig, RerankerDual, RerankerDualConfig)
-from stage2_retrieval.Retriever import BridgeError, Extra, RetrievalOutput, RetrieverConfig   # noqa: E402
-from stage2_retrieval.StageInterface import (Candidate, CandidateSet, RerankedCandidate,  # noqa: E402
+from locascope.core.stage2_retrieval.Retriever import BridgeError, Extra, RetrievalOutput, RetrieverConfig   # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import (Candidate, CandidateSet, RerankedCandidate,  # noqa: E402
                                              ShiftedCandidate, TokenMatchCandidate, VoteCandidate)
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
@@ -427,8 +423,7 @@ def _method_maps(source: GridSource) -> Dict[str, Tuple[Dict[Tuple[int, int, str
 
 
 def t_every_first_phase_method_finds_the_planted_block_first_in_its_ranking_and_its_list() -> str:
-    sys.path.insert(0, os.path.join(_HERE, '..', '..', 'bench_modules'))
-    from BenchCommon import Answer, Answers, pools_of, ranked_ranks                     # noqa: PLC0415
+    from locascope.cli.bench.BenchCommon import Answer, Answers, pools_of, ranked_ranks                     # noqa: PLC0415
     _, _, source = planted()
     frame: CandidateSet = cset([], n_regions=1)
     main: Tuple[int, str, int, int, int] = (0, 'main', 3, 4, 0)

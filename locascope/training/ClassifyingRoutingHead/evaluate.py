@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 '''Score saved checkpoints on the TEST set.
 
-    python training/ClassifyingRoutingHead/cli/evaluate.py                  # every *--best.pt
+    python -m locascope.training.ClassifyingRoutingHead.evaluate                  # every *--best.pt
     python .../evaluate.py --tag last
     python .../evaluate.py --weights .../pure-train_Ki67--gigapath--frozen--arcface--bal--best.pt
 
@@ -16,7 +16,7 @@ and no head geometry: passing any of those would be a second source of truth
 able to disagree with the weights.
 
 The set is a virtual dataset, written once by
-`utilities/cli/build_cache/make_dataset.py`.
+`locascope/cli/build_cache/make_dataset.py`.
 Read rather than re-derived: a set recomputed from
 `--seed` is one library version away from silently becoming a different
 experiment, and then the "test" set contains slides the model selected on.
@@ -48,23 +48,14 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
-# _paths holds the one definition of every package's sys.path entry
-# (setup_import_paths) -- utilities/ goes on the path here, by hand, because
-# that function is INSIDE it and this is the one step nothing else can do
-# for this file. Same idiom every test_modules/cli entry point uses.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'utilities'))
-from _paths import setup_import_paths                                  # noqa: E402
-setup_import_paths()
-
 import torch                                                        # noqa: E402
 
-import _paths                                                       # noqa: E402
-from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
+from locascope import paths as _paths                                                       # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     RUNGS, add_cache_args, build_manifest, data_record, open_caches,
     read_label_of)
-from AccessDatasets import by_source                                 # noqa: E402
-from training.ClassifyingRoutingHead.Runtime import (                       # noqa: E402
+from locascope.core.slides.AccessDatasets import by_source                                 # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Runtime import (                       # noqa: E402
     build_from_checkpoint, encode_raw, head_parts, predict, rescore_by_rung,
     trunk_raw)
 
@@ -139,7 +130,7 @@ def main() -> int:
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
-    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    from locascope.host.cpu import CpuBudget                                 # noqa: PLC0415
     print(f'  {CpuBudget.for_job(workers=args.num_workers).apply().line()}', flush=True)
 
     device = torch.device(args.device)
@@ -191,7 +182,7 @@ def main() -> int:
                 f'mask than the ones it learned on')
         # Everything else the tiles are made of: sampler distribution, camera
         # templates, rungs, the code versions and the environment.
-        from ConfigIdentity import record_diff                    # noqa: PLC0415
+        from locascope.core.config.ConfigIdentity import record_diff                    # noqa: PLC0415
         stale = record_diff(ckpt['extra'].get('data'), data_record(args.tile, args.seg))
         if stale:
             raise ValueError(
@@ -299,7 +290,7 @@ def write_csvs(out_dir: Path, tag: str, out_rows: List[Dict],
 
 # ── analysis: per_slide_rung / cross_slide_rung / overall, printed + PNG ────
 #
-# Mirrors utilities/cli/metrics/analyze_stage1_metrics.py's THREE VIEWS on
+# Mirrors locascope/cli/metrics/analyze_stage1_metrics.py's THREE VIEWS on
 # purpose -- same shape of question (does a checkpoint fail on one slide, on
 # one rung, or overall), same reason to split by dataset (BRACS steps 4x per
 # pyramid level, Ki67 steps 2x -- pooled numbers would average two different

@@ -17,7 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # =============================================================================
@@ -30,7 +30,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #
 # THE QUESTION. `Uni2PcaSegConfig.larger_pca_as_fg`. The sign of a principal
 # component is arbitrary, nothing in the fit chooses it, and the run of
-# 2026-08-25 reported a foreground fraction of 68.0 percent on BRACS_1228 where
+# 2026-08-25 reported a foreground fraction of 68.0 percent on BRACS_1003694 where
 # that slide's measured tissue is 20.8 (SlideWinTest log, hsv mask at ds 32).
 # 100 - 68 = 32 lands inside the 23-38 percent the three BRACS slides cover, so
 # the flag being backwards is the hypothesis with the most explanatory power --
@@ -54,14 +54,13 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #
 # ONE MAGNIFICATION, because the segmenter has none. Level 0, mask at ds 14 --
 # finer than the ds 32 hsv masks this project uses, and a derived fact rather
-# than a choice. See Uni2PcaSegFunc.LEVEL.
+# than a choice. See Uni2PcaSeg.LEVEL.
 
 BRACS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test
 KI67=/work/u26130998/datasets/Ki67_with_photo
 
 SLIDES=(
-  "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"     # 20.8% tissue measured, the one
-                                                # the 68.0% came from
+  "$BRACS/Group_AT/Type_ADH/BRACS_1003694.svs"     # stands in for BRACS_1228 (20.8% tissue, the 68.0% one), no longer on disk
   "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"              # DAB brown, and a 2x pyramid
 )
 
@@ -78,7 +77,7 @@ echo "======== InspectPcaSeg ========"
 echo "  slides: ${#SLIDES[@]}   level 0, whole slide, mask ds 14"
 echo ""
 
-python utilities/cli/diagnostics/inspect_pca_seg.py \
+python -m locascope.cli.diagnostics.inspect_pca_seg \
   "${SLIDES[@]}" \
   --workers $WORKERS \
   --fit-tiles $FIT_TILES

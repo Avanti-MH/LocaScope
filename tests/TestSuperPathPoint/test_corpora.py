@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Tests for training/SuperPathPoint/common/Corpora.py -- a corpus is a draw.
 
-    python utilities/test_modules/TestSuperPathPoint/test_corpora.py
-    python utilities/test_modules/TestSuperPathPoint/test_corpora.py --wsi <slide>
+    python tests/TestSuperPathPoint/test_corpora.py
+    python tests/TestSuperPathPoint/test_corpora.py --wsi <slide>
 
-Run through `jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh` (the `store`
+Run through `deploy/slurm/SuperPathPointJobs/TestSuperPathPoint.sh` (the `store`
 stage without a slide, `ladder-wsi` with one per pyramid shape).
 
     address   the key is what the draw is -- recipe, mask, rungs, tile, factor --
@@ -24,18 +24,14 @@ import sys
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 
-from ReadGeometry import ReadSpec                                # noqa: E402
-from TileSampler import SampleMeta, TileSampler, centre_crop     # noqa: E402
-from common.Corpora import Corpus, Tile, corpus_of               # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                # noqa: E402
+from locascope.core.tiles.TileSampler import SampleMeta, TileSampler, centre_crop     # noqa: E402
+from locascope.training.SuperPathPoint.common.Corpora import Corpus, Tile, corpus_of               # noqa: E402
 
 _RESULTS = []
 TILE = 256
@@ -88,8 +84,8 @@ def t_the_address_is_the_draws_own():
 def _textured_tile(corpus, path, ds):
     """A `Tile` at a textured position of rung `ds`: the read is checked
     against a shifted decoy, and on glass every crop matches every other."""
-    from SafeSlide import SafeSlide                               # noqa: PLC0415
-    from SlideReader import SlideReader                           # noqa: PLC0415
+    from locascope.core.slides.SafeSlide import SafeSlide                               # noqa: PLC0415
+    from locascope.core.slides.SlideReader import SlideReader                           # noqa: PLC0415
     wsi = SafeSlide(path)
     reader = SlideReader(wsi, resize='area')
     w, h = wsi.dimensions

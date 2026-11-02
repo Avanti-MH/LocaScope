@@ -19,7 +19,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
 #  THE RECIPE of this job, the only one in this file; to run other settings write over it.
@@ -29,7 +29,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  (confirmed places of ki67_with_photo) are read every epoch for monitoring only. The job prints every term of the loss as it is
 #  before its weight (log: `training losses`), so that the weights can be set to make the terms of one size.
 #  A smoke run (`sbatch -J SmokeGloRetMain --partition=dev --time=02:00:00 --gpus-per-node=1 --cpus-per-task=12 --mem=200G
-#  jobscripts/GloRet/GloRetMain.sh`) is the same recipe on 2 slides, 3 visits, 1 epoch, 40 real photos; its weights, log and caches
+#  deploy/slurm/GloRet/GloRetMain.sh`) is the same recipe on 2 slides, 3 visits, 1 epoch, 40 real photos; its weights, log and caches
 #  are under Smoke*.
 # =============================================================================
 TOP_P="0.1"                             # a share of the level's windows each FoV's softmax is over, for BOTH heads (<= 0.5: episodes); to try: 0.5, 1.0
@@ -113,7 +113,7 @@ export MALLOC_ARENA_MAX=8      # job 635195 failed on a 17 MiB array on a node w
                                # glibc gives each thread of the FoV renderers an arena of its own (8 x 96 CPUs at most), each a set of mappings; 8 caps them
 export PYTHONWARNINGS="ignore:Plan failed with a cudnnException:UserWarning"
 
-$LAUNCH training/GloRet/cli/train.py \
+$LAUNCH -m locascope.training.GloRet.train \
   --heads $HEADS --encoder "$ENCODER" --pooling "$POOLING" --fov "$FOV" --val-fov "$VAL_FOV" --real-photos "$REAL_PHOTOS" \
   --epochs "$EPOCHS" --n-train-wsi "$N_TRAIN_WSI" --n-val-wsi "$N_VAL_WSI" --val-logloret-share "$VAL_LOGLORET_SHARE" \
   --top-p "$TOP_P" --episodes "$EPISODES" --max-fov-uses "$MAX_FOV_USES" --warmup-epochs "$WARMUP_EPOCHS" \

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the student half of training/SuperPathPoint/SuperPoint/.
 
-    python utilities/test_modules/test_superpathpoint.py
-    python utilities/test_modules/test_superpathpoint.py --only losses
+    python tests/test_superpathpoint.py
+    python tests/test_superpathpoint.py --only losses
 
 Files 11-19 of spec.md 14 in one place: Interfaces, Backbones, Decoders, Heads,
 KeypointNet, Losses, Datasets, Trainer. No weights, no GPU, no WSI -- the model
@@ -65,53 +65,39 @@ import os
 import sys
 import tempfile
 
-# `utilities/` holds the one definition of the output roots (`_paths.py`), and
-# `setup_import_paths` -- which puts every other package on the path -- is
-# inside it, so it has to be reachable before anything else is imported.
-#
-# BOTH parents are inserted, and that is deliberate rather than sloppy: this
-# file runs from `utilities/test_modules/` and from
-# `utilities/test_modules/TestSuperPathPoint/`, one level deeper, and inserting
-# both means the move needs no edit here. The one that is not `utilities/` is
-# either the repo root or `test_modules/`; neither holds a `_paths.py`, and
-# `setup_import_paths` puts the repo root on the path anyway.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 import torch.nn as nn                                            # noqa: E402
 
-from common import KeypointLabelStore              # noqa: E402
-from common.Homography import invert, points_input_to_output     # noqa: E402
-from common.Interfaces import ShapeMismatch, check_shapes        # noqa: E402
-from common.KeypointLabelStore import (LabelMeta,                # noqa: E402
+from locascope.training.SuperPathPoint.common import KeypointLabelStore              # noqa: E402
+from locascope.training.SuperPathPoint.common.Homography import invert, points_input_to_output     # noqa: E402
+from locascope.training.SuperPathPoint.common.Interfaces import ShapeMismatch, check_shapes        # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import (LabelMeta,                # noqa: E402
                                        batch_from_lists)
 from dataclasses import dataclass                                # noqa: E402
 from types import SimpleNamespace                               # noqa: E402
 
-from TileSampler import SampleMeta, pre_tile_px                 # noqa: E402
-from common.Corpora import Corpus, recipe_config                 # noqa: E402
-from common.KeypointLabelStore import points_from_prob        # noqa: E402
-from SuperPoint.Backbones import VggBackbone, VggBackboneConfig  # noqa: E402
-from SuperPoint.Datasets import PairDatasetConfig, splat         # noqa: E402
-from SuperPoint.Decoders import (DepthToSpaceDecoderConfig,      # noqa: E402
+from locascope.core.tiles.TileSampler import SampleMeta, pre_tile_px                 # noqa: E402
+from locascope.training.SuperPathPoint.common.Corpora import Corpus, recipe_config                 # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import points_from_prob        # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Backbones import VggBackbone, VggBackboneConfig  # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Datasets import PairDatasetConfig, splat         # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Decoders import (DepthToSpaceDecoderConfig,      # noqa: E402
                                  UpsampleDecoderConfig,
                                  depth_to_space_prob)
-from SuperPoint.Heads import DescriptorHeadConfig, sample_descriptors  # noqa: E402
-from SuperPoint.KeypointNet import (KeypointNetConfig,           # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Heads import DescriptorHeadConfig, sample_descriptors  # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.KeypointNet import (KeypointNetConfig,           # noqa: E402
                                     KeypointOutput,
                                     extract_keypoints)
-from SuperPoint.Losses import (SuperPointLossConfig, cell_labels,  # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Losses import (SuperPointLossConfig, cell_labels,  # noqa: E402
                                cell_valid, correspondence_mask,
                                descriptor_loss, detector_loss,
                                space_to_depth)
-from SuperPoint.Trainer import (TrainerConfig, _cut, _match_rate,      # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Trainer import (TrainerConfig, _cut, _match_rate,      # noqa: E402
                                 _repeatability_row)
 
 _RESULTS = []
@@ -755,7 +741,7 @@ def t_validation_splits_by_slide_and_the_parts_sum_to_the_whole():
     is unchanged, `val/<one stem>/...` looks complete, and the other slide is
     simply absent -- which reads as "that slide had no pairs".
     """
-    import Cache                                                  # noqa: PLC0415
+    from locascope.core.cache import Cache                                                  # noqa: PLC0415
     torch.manual_seed(0)
     with _tree() as root:
         corpus, labels_root, _ = _make_stores(
@@ -915,7 +901,7 @@ _STEM_B = 'S1103627,G7E,110127'
 def _tree():
     """`Cache.RESULT_DIR` pointed at a temporary directory for the length of a
     test; yields the job the stores are written under."""
-    import Cache                                                  # noqa: PLC0415
+    from locascope.core.cache import Cache                                                  # noqa: PLC0415
     with tempfile.TemporaryDirectory() as tmp:
         saved, Cache.RESULT_DIR = Cache.RESULT_DIR, tmp
         try:

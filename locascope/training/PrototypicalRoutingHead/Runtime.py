@@ -5,10 +5,10 @@ section's own comment for why.
 
 The Stage 2 (G/F/Collapse)/Stage 3 REGISTRIES themselves (`SUPPORT_
 CONTEXT_CHOICES`/`QUERY_CONTEXT_CHOICES`/`COLLAPSE_CHOICES`/`ROUTING_
-HEAD_CHOICES`) live in `aiNNModel/models/PrototypeChoices.py` -- see that
+HEAD_CHOICES`) live in `locascope/core/networks/PrototypeChoices.py` -- see that
 module's own docstring for the pipeline shape and why "Matching Net" is a
 composition rather than a registry entry -- so the GENERIC checkpoint layer
-(`aiNNModel/models/common/Checkpoints.py`) can read the same registries
+(`locascope/core/networks/Checkpoints.py`) can read the same registries
 `cli/train.py` does without importing a training package. They are
 re-exported here.
 
@@ -25,8 +25,8 @@ from typing import Dict, List
 
 import torch
 
-from training.ClassifyingRoutingHead.Datasets import RUNGS
-from PrototypeChoices import (SUPPORT_CONTEXT_CHOICES, QUERY_CONTEXT_CHOICES,  # noqa: E501,F401
+from locascope.training.ClassifyingRoutingHead.Datasets import RUNGS
+from locascope.core.networks.PrototypeChoices import (SUPPORT_CONTEXT_CHOICES, QUERY_CONTEXT_CHOICES,  # noqa: E501,F401
                               COLLAPSE_CHOICES, ROUTING_HEAD_CHOICES)
 
 

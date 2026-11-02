@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 '''Train the second phase's heads on synthetic FoVs, made as they are used.
 
-    python training/RerankHead/cli/train.py --heads tilegt corrnet winembed \\
+    python -m locascope.training.RerankHead.train --heads tilegt corrnet winembed \\
         --encoder uni2 --pooling cls_avg --k 100 --epochs 30 --tag run1
 
 Several heads are trained in ONE process on the SAME data. Encoding a level of a
@@ -46,34 +46,31 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities'))
-from _paths import LOG_DIR, RESULT_DIR, setup_import_paths              # noqa: E402
-setup_import_paths()
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities', 'bench_modules'))   # BenchCommon
+from locascope.paths import LOG_DIR, RESULT_DIR   # noqa: E402
 
 import numpy as np                                                    # noqa: E402
 import torch                                                          # noqa: E402
 
-from AccessDatasets import by_source, locate                          # noqa: E402
-from CpuBudget import CpuBudget                                        # noqa: E402
-from BenchCommon import require_gpu_if_allocated                      # noqa: E402
-from FovSupply import add_fov_args, fov_from_args                     # noqa: E402
-from RerankChoices import build_rerank                                # noqa: E402
-from Checkpoints import data_tag, save_rerank_checkpoint, weights_name   # noqa: E402
-from TileEncoderFunc import encoder_config                           # noqa: E402
-from stage2_retrieval.RetrieverSlidingWinSimRot import (RetrieverSlidingWinSimRot,   # noqa: E402
+from locascope.core.slides.AccessDatasets import by_source, locate                          # noqa: E402
+from locascope.host.cpu import CpuBudget                                        # noqa: E402
+from locascope.cli.bench.BenchCommon import require_gpu_if_allocated                      # noqa: E402
+from locascope.core.query_sim.FovSupply import add_fov_args, fov_from_args                     # noqa: E402
+from locascope.core.networks.RerankChoices import build_rerank                                # noqa: E402
+from locascope.core.networks.Checkpoints import data_tag, save_rerank_checkpoint, weights_name   # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config                           # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import (RetrieverSlidingWinSimRot,   # noqa: E402
                                                         RetrieverSlidingWinSimRotConfig)
 
-from training.RerankHead.Embed import EmbedVisit, embed_loss, embed_rank, fov_of, visit_of   # noqa: E402
-from training.RerankHead.Labels import LabelConfig                    # noqa: E402
-from training.RerankHead.Metrics import KS, recall_at                 # noqa: E402
-from training.RerankHead.Runtime import (all_sum, broadcast_parameters, dist_done, dist_init,   # noqa: E402
+from locascope.training.RerankHead.Embed import EmbedVisit, embed_loss, embed_rank, fov_of, visit_of   # noqa: E402
+from locascope.training.RerankHead.Labels import LabelConfig                    # noqa: E402
+from locascope.training.RerankHead.Metrics import KS, recall_at                 # noqa: E402
+from locascope.training.RerankHead.Runtime import (all_sum, broadcast_parameters, dist_done, dist_init,   # noqa: E402
                                           gather_objects, plain_args, sync_gradients, wandb_finish,
                                           wandb_init, wandb_log)
-from training.RerankHead.Usage import UsageMeter, advice, usage_lines   # noqa: E402
-from training.RerankHead.Steps import (NEURAL_ARCHS, build_head, first_phase_rank,   # noqa: E402
+from locascope.training.RerankHead.Usage import UsageMeter, advice, usage_lines   # noqa: E402
+from locascope.training.RerankHead.Steps import (NEURAL_ARCHS, build_head, first_phase_rank,   # noqa: E402
                                         idle_step, rank_of, train_step)
-from training.RerankHead.Visits import (FovData, FovResult, MemoryFeatureStore, fov_stream,   # noqa: E402
+from locascope.training.RerankHead.Visits import (FovData, FovResult, MemoryFeatureStore, fov_stream,   # noqa: E402
                                         prepare_fov, take_timers, tick)
 
 ARCHS: Tuple[str, ...] = (*NEURAL_ARCHS, 'winembed')

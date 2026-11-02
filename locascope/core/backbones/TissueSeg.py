@@ -22,7 +22,7 @@ The producer produces and the product only holds: this module imports `SlideMask
 from `TissueMask`, and nothing in `TissueMask` knows a segmenter exists.
 
     method   weights   what it is
-    'hest'   yes       DeepLabV3 + ResNet-50, in HestSegFunc
+    'hest'   yes       DeepLabV3 + ResNet-50, in HestSeg
     'hsv'    no        saturation and value thresholds, then open/close
     'otsu'   no        Otsu on grayscale, excluding near-black
     ''       no        no segmentation. One region over the whole plane, and
@@ -57,12 +57,12 @@ import cv2                                                  # noqa: E402
 import numpy as np                                          # noqa: E402
 from PIL import Image                                       # noqa: E402
 
-from ConfigIdentity import (IdentifiedBuild, IdentifiedConfig,  # noqa: E402
+from locascope.core.config.ConfigIdentity import (IdentifiedBuild, IdentifiedConfig,  # noqa: E402
                             register)
-from Cache import wsi_stem_of                               # noqa: E402
-from ReadGeometry import ReadSpec, nearest_level            # noqa: E402
-from SlideReader import SlideReader                         # noqa: E402
-from TissueMask import SlideMask                            # noqa: E402
+from locascope.core.cache.Cache import wsi_stem_of                               # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec, nearest_level            # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                         # noqa: E402
+from locascope.core.tiles.TissueMask import SlideMask                            # noqa: E402
 
 # Type hints only: hsv and otsu run no network, and a torch import at the top
 # made the model-free segmenters -- and everything that names a mask recipe --
@@ -284,7 +284,7 @@ class PlaneSegConfig(TissueSegConfig):
         if self.method not in NO_MODEL:
             raise ValueError(
                 f'{type(self).__name__} handles {NO_MODEL}; {self.method!r} '
-                f'needs its own config class -- see HestSegFunc')
+                f'needs its own config class -- see HestSeg')
         return PlaneSegmenter(self, device)
 
 
@@ -394,14 +394,14 @@ class PlaneSegmenter(TissueSegmenter):
 # means one file answers "what segmenters exist" without anyone having to guess
 # which import made a name appear.
 #
-# The guard is for the cycle, not for style. HestSegFunc imports this module for
-# its base classes, so entering through HestSegFunc runs this file to the bottom
-# while HestSegFunc is still on line thirty -- and the names below do not exist
+# The guard is for the cycle, not for style. HestSeg imports this module for
+# its base classes, so entering through HestSeg runs this file to the bottom
+# while HestSeg is still on line thirty -- and the names below do not exist
 # yet. Skipping when it is already in flight is correct: it finishes on its own
 # and registers itself either way.
-if 'HestSegFunc' not in sys.modules:
-    from HestSegFunc import HestSegConfig, HestSegmenter   # noqa: E402,F401
+if 'locascope.core.backbones.HestSeg' not in sys.modules:
+    from locascope.core.backbones.HestSeg import HestSegConfig, HestSegmenter   # noqa: E402,F401
 
-if 'Uni2PcaSegFunc' not in sys.modules:
-    from Uni2PcaSegFunc import (Uni2PcaSegConfig,          # noqa: E402,F401
+if 'locascope.core.backbones.Uni2PcaSeg' not in sys.modules:
+    from locascope.core.backbones.Uni2PcaSeg import (Uni2PcaSegConfig,          # noqa: E402,F401
                                 Uni2PcaSegmenter)

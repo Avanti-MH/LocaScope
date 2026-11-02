@@ -33,19 +33,19 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 import numpy as np
 import torch
 
-from SafeSlide import SafeSlide
-from SlideReader import SlideReader
-from TileSampler import PlanSpec
-from TissueMaskConfig import MASK_RECIPES, MaskMaker
-from FovSupply import FovRecipe, FovSupply
-from camera import Render
-from BenchCommon import Answers, Truth, answers, matching_rotation, placed_estimate, query_grid_centre
-from stage2_retrieval.Context import WindowBatch, window_boxes
-from stage2_retrieval.RerankerNeural import NeuralInputs, neural_inputs, pair_features
-from stage2_retrieval.Retriever import RetrievalOutput
-from stage2_retrieval.StageInterface import CandidateSet
+from locascope.core.slides.SafeSlide import SafeSlide
+from locascope.core.slides.SlideReader import SlideReader
+from locascope.core.tiles.TileSampler import PlanSpec
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker
+from locascope.core.query_sim.FovSupply import FovRecipe, FovSupply
+from locascope.core.query_sim.camera import Render
+from locascope.cli.bench.BenchCommon import Answers, Truth, answers, matching_rotation, placed_estimate, query_grid_centre
+from locascope.core.stage2_retrieval.Context import WindowBatch, window_boxes
+from locascope.core.stage2_retrieval.RerankerNeural import NeuralInputs, neural_inputs, pair_features
+from locascope.core.stage2_retrieval.Retriever import RetrievalOutput
+from locascope.core.stage2_retrieval.StageInterface import CandidateSet
 
-from training.RerankHead.Labels import Boxes, LabelConfig, Labels, choose_subset, label_windows, truth_boxes
+from locascope.training.RerankHead.Labels import Boxes, LabelConfig, Labels, choose_subset, label_windows, truth_boxes
 
 
 # ══════════════════════════════════════════════════════════════════════════════

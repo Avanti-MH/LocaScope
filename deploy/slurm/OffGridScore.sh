@@ -19,10 +19,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/_paths.py
+# Runs write outside the checkout; see locascope/paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- What does landing off the grid cost? -----------------------
@@ -103,9 +103,8 @@ IDX=${SLURM_ARRAY_TASK_ID:-0}
 # The dataset and name, for the bench and the result directory; the bench
 # resolves the path itself.
 read -r DATASET STEM < <(python -c "
-import sys; sys.path.insert(0, 'utilities')
-from _paths import setup_import_paths; setup_import_paths()
-from AccessDatasets import by_source
+import sys
+from locascope.core.slides.AccessDatasets import by_source
 pairs = [(s, n) for d in '$DATASETS'.split()
          for s, names in by_source(d, $N_WSI) for n in names]
 print(*pairs[$IDX] if $IDX < len(pairs) else ())")
@@ -129,7 +128,7 @@ echo "======== [$IDX] $STEM  encoder=$TAG ========"
 echo "wsi : $DATASET $STEM"
 echo "out : $OUT_DIR"
 
-python utilities/bench_modules/bench_offgrid_score.py "$STEM" \
+python -m locascope.cli.bench.bench_offgrid_score "$STEM" \
   --dataset "$DATASET" --mask-cache-job "$MASK_CACHE_JOB" \
   --encoder "$ENCODER"${HEAD:+ --head "$HEAD"} \
   --step "${STEP:-16}" \
@@ -167,7 +166,7 @@ echo "  ONE set of figures covering every slide, once the array finishes."
 echo "  --plot-only reads the CSVs and redraws; no GPU, no WSI, no model, so"
 echo "  it runs on a login node in seconds and can be repeated freely:"
 echo ""
-echo "    python utilities/bench_modules/bench_offgrid_score.py --plot-only \\"
+echo "    python -m locascope.cli.bench.bench_offgrid_score --plot-only \\"
 echo "        result/${SLURM_JOB_NAME:-OffGridScore}/$TAG/*/offgrid_scores.csv \\"
 echo "        --out result/${SLURM_JOB_NAME:-OffGridScore}/$TAG/merged"
 echo ""

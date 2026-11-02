@@ -29,14 +29,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ConfigIdentity import register
-from SafeSlide import SafeSlide
-from TileEncoderFunc import TileEncoder, TileEncoderConfig, encoder_config
-from stage1_estimation.StageInterface import EstMppResult
-from stage2_retrieval.Context import (LATTICES, GridSource, LevelFeatures, QueryFeatures, WindowSearch,
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.slides.SafeSlide import SafeSlide
+from locascope.core.backbones.TileEncoder import TileEncoder, TileEncoderConfig, encoder_config
+from locascope.core.stage1_estimation.StageInterface import EstMppResult
+from locascope.core.stage2_retrieval.Context import (LATTICES, GridSource, LevelFeatures, QueryFeatures, WindowSearch,
                                       first_phase_output, top_candidates)
-from stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever, RetrieverConfig
-from stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet, VoteCandidate
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever, RetrieverConfig
+from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet, VoteCandidate
 
 BACKENDS: Tuple[str, ...] = ('exact', 'hnsw', 'ivf')
 

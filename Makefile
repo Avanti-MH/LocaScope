@@ -39,7 +39,7 @@
 #   tell them apart.
 
 # Runs write OUTSIDE the checkout. OUTPUT_ROOT is the repo's parent, matching
-# utilities/_paths.py -- the one definition on the python side -- and it is
+# locascope/paths.py -- the one definition on the python side -- and it is
 # overridable the same way. Keeping results out of the working tree
 # means an `rm -rf` of the checkout, a `git clean`, or a fresh clone cannot
 # take 60 GB of feature stores with them, and nothing under result/ can be
@@ -127,7 +127,7 @@ clean-smoke:
 	done; true
 
 # ---- wandb ------------------------------------------------------------------
-# An arm is a run name inside a project; of each the newest KEEP runs stay (utilities/cli/wandb_prune.py). The plan
+# An arm is a run name inside a project; of each the newest KEEP runs stay (locascope/cli/wandb_prune.py). The plan
 # changes nothing and reaches wandb over the network only to read; wandb-prune deletes on the server, for good,
 # after you type the number of runs. Both need the environment that has wandb (conda activate locascope).
 # Claude never runs wandb-prune: the user does.
@@ -148,11 +148,11 @@ PREFER ?= newest
 PYTHON ?= python
 
 wandb-plan:
-	$(PYTHON) utilities/cli/wandb_prune.py --projects $(WANDB_PROJECTS) --drop-projects $(WANDB_DROP) $(FORMAL) --strip-prefix $(WANDB_STRIP) --since $(WANDB_SINCE) --since-projects $(WANDB_SINCE_PROJECTS) --keep $(KEEP) --prefer $(PREFER)
+	$(PYTHON) -m locascope.cli.wandb_prune --projects $(WANDB_PROJECTS) --drop-projects $(WANDB_DROP) $(FORMAL) --strip-prefix $(WANDB_STRIP) --since $(WANDB_SINCE) --since-projects $(WANDB_SINCE_PROJECTS) --keep $(KEEP) --prefer $(PREFER)
 
 wandb-prune:
 	@test -n "$(WANDB_PROJECTS)$(WANDB_DROP)" || { echo 'usage: make wandb-prune WANDB_PROJECTS="a b" [WANDB_DROP="c"]'; exit 1; }
-	$(PYTHON) utilities/cli/wandb_prune.py --projects $(WANDB_PROJECTS) --drop-projects $(WANDB_DROP) $(FORMAL) --strip-prefix $(WANDB_STRIP) --since $(WANDB_SINCE) --since-projects $(WANDB_SINCE_PROJECTS) --keep $(KEEP) --prefer $(PREFER) --delete
+	$(PYTHON) -m locascope.cli.wandb_prune --projects $(WANDB_PROJECTS) --drop-projects $(WANDB_DROP) $(FORMAL) --strip-prefix $(WANDB_STRIP) --since $(WANDB_SINCE) --since-projects $(WANDB_SINCE_PROJECTS) --keep $(KEEP) --prefer $(PREFER) --delete
 
 help:
 	sed -n '/^#   make help/,/^#   make lint/p' $(firstword $(MAKEFILE_LIST)) | sed 's/^#   //'

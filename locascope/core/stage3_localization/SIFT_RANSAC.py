@@ -8,12 +8,12 @@ import numpy as np
 import torch
 
 
-from ConfigIdentity import IdentifiedConfig, register             # noqa: E402
-from PatchingLib import QueryPatchContainer                     # noqa: E402
-from ReadGeometry import ReadSpec                              # noqa: E402
-from SlideReader import SlideReader                            # noqa: E402
-from stage2_retrieval.StageInterface import Candidate, CandidateSet  # noqa: E402
-from stage3_localization.StageInterface import (LocalizationResult,  # noqa: E402
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, register             # noqa: E402
+from locascope.core.tiles.PatchingLib import QueryPatchContainer                     # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                              # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                            # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet  # noqa: E402
+from locascope.core.stage3_localization.StageInterface import (LocalizationResult,  # noqa: E402
                                                 LocalizationResultSet)
 
 

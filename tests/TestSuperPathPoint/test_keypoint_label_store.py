@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for training/SuperPathPoint/common/KeypointLabelStore.py.
 
-    python utilities/test_modules/test_keypoint_label_store.py
+    python tests/test_keypoint_label_store.py
 
 No weights, no GPU, no WSI. Temporary directories only.
 
@@ -42,31 +42,17 @@ import os
 import sys
 import tempfile
 
-# `utilities/` holds the one definition of the output roots (`_paths.py`), and
-# `setup_import_paths` -- which puts every other package on the path -- is
-# inside it, so it has to be reachable before anything else is imported.
-#
-# BOTH parents are inserted, and that is deliberate rather than sloppy: this
-# file runs from `utilities/test_modules/` and from
-# `utilities/test_modules/TestSuperPathPoint/`, one level deeper, and inserting
-# both means the move needs no edit here. The one that is not `utilities/` is
-# either the repo root or `test_modules/`; neither holds a `_paths.py`, and
-# `setup_import_paths` puts the repo root on the path anyway.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 
 from types import SimpleNamespace                                # noqa: E402
 
-from common import KeypointLabelStore                             # noqa: E402
-from common.Corpora import Corpus, recipe_config                 # noqa: E402
-from common.KeypointLabelStore import (LabelMeta, LabelMismatch,   # noqa: E402
+from locascope.training.SuperPathPoint.common import KeypointLabelStore                             # noqa: E402
+from locascope.training.SuperPathPoint.common.Corpora import Corpus, recipe_config                 # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import (LabelMeta, LabelMismatch,   # noqa: E402
                                        batch_from_lists, cap_for,
                                        points_from_prob)
 
@@ -331,7 +317,7 @@ _RUNG = dict(wsi_stem='SLIDE_A', ds=4.0)
 def _tree():
     """`Cache.RESULT_DIR` pointed at a temporary directory for the length of a
     test; yields the job the labels are written under."""
-    import Cache                                                  # noqa: PLC0415
+    from locascope.core.cache import Cache                                                  # noqa: PLC0415
     with tempfile.TemporaryDirectory() as tmp:
         saved, Cache.RESULT_DIR = Cache.RESULT_DIR, tmp
         try:

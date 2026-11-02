@@ -4,7 +4,7 @@ pyramid, in the shape `StageInterface.MppEstimator` describes.
     est = KnnEstMpp(KNN_RECIPES['gigapath'], device).build(wsi, mask)
     result = est.estimate(query_img)   # query_img: RGB uint8 np.ndarray
 
-A KNN vote over whichever backbone `cfg.encoder` names (`TileEncoderFunc`'s
+A KNN vote over whichever backbone `cfg.encoder` names (`TileEncoder`'s
 registered name), built internally, the same as `ClassifierEstMpp.py`'s.
 
 WHY `build(wsi)` IS THE EXPENSIVE STEP HERE, unlike `ClassifierEstMpp`'s.
@@ -43,19 +43,19 @@ import torch
 from PIL import Image
 
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
-from PatchingLib import QueryPatchContainer, FeaturesMap                 # noqa: E402
-from SafeSlide import SafeSlide                                         # noqa: E402
-from TileEncoderFunc import encoder_config                              # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
-from TissueMask import TissueMask                        # noqa: E402
-from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
+from locascope.core.tiles.PatchingLib import QueryPatchContainer, FeaturesMap                 # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                         # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config                              # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
+from locascope.core.tiles.TissueMask import TissueMask                        # noqa: E402
+from locascope.core.tiles.TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
                          TileSampler)
 
-from stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
+from locascope.core.stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
                                               routed_level)
-from ReadGeometry import ReadSpec                                        # noqa: E402
-from SlideReader import SlideReader                                     # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                        # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                     # noqa: E402
 
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ class KnnEstMppConfig(IdentifiedConfig):
     '''Which encoder to vote with, which regions count as tissue, and how the
     reference bank is sampled -- three sub-configs, not loose parameters.
 
-    `encoder` is `TileEncoderFunc`'s own registered name (`'gigapath'`,
+    `encoder` is `TileEncoder`'s own registered name (`'gigapath'`,
     `'uni2'`, ...) -- built internally by `KnnEstMpp.__init__`
     (`encoder_config(cfg.encoder).build(device)`), not accepted as an
     already-built `Callable`: each stage builds its own encoder.
@@ -242,8 +242,8 @@ class KnnEstMpp(IdentifiedBuild):
         tree, beside the draw; None without a cache job.'''
         if not getattr(self, 'cache_job', None):
             return None
-        from ConfigIdentity import record                             # noqa: PLC0415
-        from Store import FeatureStore, feature_id                    # noqa: PLC0415
+        from locascope.core.config.ConfigIdentity import record                             # noqa: PLC0415
+        from locascope.core.cache.Store import FeatureStore, feature_id                    # noqa: PLC0415
         sid = self.cfg.sampler_cfg.identity_id()
         entry = TileSampler.draw_address(
             self.cache_job, self.sampler.slide, self.masks.cfg, self.plan
@@ -259,7 +259,7 @@ class KnnEstMpp(IdentifiedBuild):
         cached = self._features_entry()
         self.ref_feats = None
         if cached is not None:
-            from Store import FeatureStore                            # noqa: PLC0415
+            from locascope.core.cache.Store import FeatureStore                            # noqa: PLC0415
             entry, fid, rec = cached
             state, diff = entry.status(fid, rec)
             if state == 'hit':
@@ -293,7 +293,7 @@ class KnnEstMpp(IdentifiedBuild):
         return self.ref_feats
 
     def _save_ref_features(self, entry, fid, rec) -> None:
-        from Store import FeatureMeta, FeatureStore, encoder_names    # noqa: PLC0415
+        from locascope.core.cache.Store import FeatureMeta, FeatureStore, encoder_names    # noqa: PLC0415
         feats = self.ref_feats.detach()
         if feats.dtype not in (torch.float16, torch.float32):
             feats = feats.float()

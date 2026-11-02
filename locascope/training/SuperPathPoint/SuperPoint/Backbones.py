@@ -45,8 +45,8 @@ question in front of it that writing it now would answer by accident:
 transform (resize and centre-crop to `crop_size`, 224) and returns to the host --
 so it cannot be dropped into a training loop that feeds 256 px tiles and wants
 the map on the device. Reaching past it to `_spatial_forward` works and touches
-nothing in `aiNNModel/`, but it is a private method; the alternative is a change
-in `aiNNModel/TileEncoderFunc.py`. That is a decision, not an implementation
+nothing in `locascope/core/`, but it is a private method; the alternative is a change
+in `locascope/core/backbones/TileEncoder.py`. That is a decision, not an implementation
 detail.
 """
 
@@ -58,7 +58,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
-from ConfigIdentity import IdentifiedConfig, register
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, register
 
 
 class VggBlock(nn.Sequential):

@@ -5,7 +5,7 @@ cli/train._compute_loss` -- named after the formula rather than a module
 because what it checks is that the two agree and that both weight the
 regression term.
 
-    python utilities/test_modules/TestRoutingHeads/test_ordinal_loss.py
+    python tests/TestRoutingHeads/test_ordinal_loss.py
 
 No data, no model: hand-built logits whose answer is known.
 
@@ -27,19 +27,15 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import torch                                                     # noqa: E402
 import torch.nn.functional as F                                  # noqa: E402
 
-from training.PrototypicalRoutingHead.Losses import (            # noqa: E402
+from locascope.training.PrototypicalRoutingHead.Losses import (            # noqa: E402
     compute_loss, episode_class_weights)
-from training.ClassifyingRoutingHead.cli.train import _compute_loss      # noqa: E402
+from locascope.training.ClassifyingRoutingHead.train import _compute_loss      # noqa: E402
 
 RUNGS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
 _RESULTS = []

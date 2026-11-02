@@ -7,13 +7,13 @@ WHY THIS IS NOT IN `Backbones.py`
 ----------------------------------
 It was planned there (spec.md 14) and it does not belong there, for a reason
 that has nothing to do with tidiness. An encoder module imports timm and sets
-HF_HOME when it is imported. A top-level import of `aiNNModel` inside
+HF_HOME when it is imported. A top-level import of `locascope.core` inside
 `Backbones.py` would put that on the import path of `KeypointNet.py`, which is imported
 by the VGG student, by the loss tests and by every CPU-only check in
 `test_superpathpoint.py`. None of them want timm, a weights directory, or the
 five seconds.
 
-So this file imports `TileEncoderFunc` at the top -- which is only the base
+So this file imports `TileEncoder` at the top -- which is only the base
 class and the registry, no HF -- and calls `encoder_config(name)` inside
 `build()`, where the one implementation module is imported and nowhere else.
 
@@ -40,7 +40,7 @@ that file -- `cell` is the detector head's prediction block, and
 `UpsampleDecoder`'s rung count is `log2(stride / cell)`), and the forward
 contract is `[0, 1]` images rather than a normalised batch. Those are facts
 about what a keypoint detector needs, so they are stated here rather than
-pushed down into `aiNNModel/`, which has no reason to know what a detector
+pushed down into `locascope/core/`, which has no reason to know what a detector
 cell is.
 
 WHICH ENCODERS CAN DO THIS, AND AT WHAT TILE SIZE
@@ -62,7 +62,7 @@ the code was right about it while the prose was not.
 
 THE FIXED INPUT SIZE IS NOT A REFUSAL, IT IS ONE CALL
 -------------------------------------------------------
-`GigaPathFunc` builds with no `dynamic_img_size`, and prov-gigapath's
+`GigaPath` builds with no `dynamic_img_size`, and prov-gigapath's
 `pretrained_cfg` says `fixed_input_size: true`: `PatchEmbed.forward` then asserts
 the input is exactly 224 (`timm/layers/patch_embed.py:120`). That is a property
 of how the model was CONSTRUCTED, not of the weights, and timm has the public
@@ -102,7 +102,7 @@ already a no-op; only gigapath's removes anything.)
 
 The RESIZE is unnecessary once the crop is gone, because the tile size is not
 handed down from anywhere -- the tile is a centre crop of a 768 px pre-tile
-(`utilities/Store.py`), so asking for a different one costs nothing. Feed
+(`locascope/core/cache/Store.py`), so asking for a different one costs nothing. Feed
 the trunk the tile, at its own pixel grid, and `stride` is the patch exactly.
 
 PATCH 14 CANNOT REACH CELL 8, AND NO TILE SIZE CHANGES THAT
@@ -198,10 +198,10 @@ from dataclasses import dataclass, replace
 import torch
 import torch.nn as nn
 
-from ConfigIdentity import IdentifiedConfig, register
-from TileEncoderFunc import TileEncoder, encoder_config, encoder_names
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, register
+from locascope.core.backbones.TileEncoder import TileEncoder, encoder_config, encoder_names
 
-from common.Interfaces import check_shapes
+from locascope.training.SuperPathPoint.common.Interfaces import check_shapes
 
 
 #: The zero point (ConfigIdentity rule 2).
@@ -230,7 +230,7 @@ class TileEncoderBackboneConfig(IdentifiedConfig):
     """
     method: str = 'tile_encoder'
 
-    #: `TileEncoderFunc.encoder_names()`. Checked at build, not here: naming
+    #: `TileEncoder.encoder_names()`. Checked at build, not here: naming
     #: them in a validator would duplicate a registry that already exists.
     encoder: str = 'conch_vit'
 
@@ -242,7 +242,7 @@ class TileEncoderBackboneConfig(IdentifiedConfig):
     head: str = ''
 
     #: The trunk is frozen, so fp16 costs nothing that is being trained. It is
-    #: `TileEncoderFunc`'s own default for all three encoders and went to
+    #: `TileEncoder`'s own default for all three encoders and went to
     #: production at cos=0.99995 against fp32 (log/TODO.log).
     dtype: str = 'fp16'
 

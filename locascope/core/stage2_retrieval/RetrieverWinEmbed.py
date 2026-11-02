@@ -26,14 +26,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from ConfigIdentity import register
-from SafeSlide import SafeSlide
-from TileEncoderFunc import TileEncoder, TileEncoderConfig, encoder_config
-from stage1_estimation.StageInterface import EstMppResult, weights_path
-from stage2_retrieval.Context import (LATTICES, GridSource, LevelFeatures, QueryFeatures, WindowSearch,
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.slides.SafeSlide import SafeSlide
+from locascope.core.backbones.TileEncoder import TileEncoder, TileEncoderConfig, encoder_config
+from locascope.core.stage1_estimation.StageInterface import EstMppResult, weights_path
+from locascope.core.stage2_retrieval.Context import (LATTICES, GridSource, LevelFeatures, QueryFeatures, WindowSearch,
                                       first_phase_output, top_candidates)
-from stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever, RetrieverConfig
-from stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever, RetrieverConfig
+from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet
 
 
 @register('retriever_winembed')
@@ -98,7 +98,7 @@ class WindowEmbeddings:
 
     def loaded(self, device: Any, pooling: str) -> torch.nn.Module:
         if self.model is None:
-            from Checkpoints import build_rerank_from_checkpoint       # noqa: PLC0415
+            from locascope.core.networks.Checkpoints import build_rerank_from_checkpoint       # noqa: PLC0415
             self.model, self.ckpt = build_rerank_from_checkpoint(weights_path(self.weights), device)
         assert self.ckpt is not None
         if self.ckpt['pooling'] != pooling:

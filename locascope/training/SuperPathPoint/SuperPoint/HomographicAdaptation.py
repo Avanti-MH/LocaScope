@@ -63,12 +63,12 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, enc, register
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig, enc, register
 
-from common.Homography import erode_valid, invert, sample_homography, warp_image
-from common.HomographyConfig import HomographyConfig
-from TileSampler import centre_crop, centre_margin
-from common.Homography import pretile_valid_mask, warp_from_pretile
+from locascope.training.SuperPathPoint.common.Homography import erode_valid, invert, sample_homography, warp_image
+from locascope.training.SuperPathPoint.common.HomographyConfig import HomographyConfig
+from locascope.core.tiles.TileSampler import centre_crop, centre_margin
+from locascope.training.SuperPathPoint.common.Homography import pretile_valid_mask, warp_from_pretile
 
 #: The zero point (ConfigIdentity rule 2). Every value is upstream's, from
 #: `configs/magic-point_coco_export.yaml:12-26` and

@@ -26,18 +26,18 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from BenchCommon import listed_windows
-from GloRet import correspondence_loss, cycle_loss, take_aux
-from stage2_retrieval.Context import top_candidates
-from stage2_retrieval.RetrieverGloRet import amp_context
-from stage2_retrieval.StageInterface import Candidate
+from locascope.cli.bench.BenchCommon import listed_windows
+from locascope.core.networks.GloRet import correspondence_loss, cycle_loss, take_aux
+from locascope.core.stage2_retrieval.Context import top_candidates
+from locascope.core.stage2_retrieval.RetrieverGloRet import amp_context
+from locascope.core.stage2_retrieval.StageInterface import Candidate
 
-from training.GloRet.Full import Split, seeded
-from training.GloRet.Items import Items, level_items
-from training.GloRet.Losses import fov_loss
-from training.GloRet.Profile import note
-from training.GloRet.Steps import StepCfg, apply_step, held_gb, mark_peak, mean_logs, net_input, peak_gb, place_of
-from training.GloRet.Supply import ROTATIONS, Cands, Fov, FovResult, Level, Marks, fov_of, level_of
+from locascope.training.GloRet.Full import Split, seeded
+from locascope.training.GloRet.Items import Items, level_items
+from locascope.training.GloRet.Losses import fov_loss
+from locascope.training.GloRet.Profile import note
+from locascope.training.GloRet.Steps import StepCfg, apply_step, held_gb, mark_peak, mean_logs, net_input, peak_gb, place_of
+from locascope.training.GloRet.Supply import ROTATIONS, Cands, Fov, FovResult, Level, Marks, fov_of, level_of
 
 
 @dataclass(frozen=True)
@@ -329,7 +329,7 @@ def log_step(net: torch.nn.Module, opt: torch.optim.Optimizer, level: Level, fov
             loss.backward(retain_graph=not cfg.gradcache)
     if split is not None:
         import torch.distributed as dist                              # noqa: PLC0415
-        from training.GloRet.Full import flat_grads, set_grads        # noqa: PLC0415
+        from locascope.training.GloRet.Full import flat_grads, set_grads        # noqa: PLC0415
         flat: torch.Tensor = flat_grads(params)
         dist.all_reduce(flat, group=split.group)     # the shares' parts add up
         set_grads(params, flat)

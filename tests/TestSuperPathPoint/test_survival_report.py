@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for Stage B's reporting arithmetic. plan.md P1 ①②⑤.
 
-    python utilities/test_modules/TestSuperPathPoint/test_survival_report.py
+    python tests/TestSuperPathPoint/test_survival_report.py
 
 WHAT THIS BLOCKS
 ==================
@@ -31,18 +31,14 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                           # noqa: E402
 
-from SurvivalAnalysis import NullModel, Report            # noqa: E402
-from SurvivalAnalysis.Patterns import EMPTY, PATTERNS     # noqa: E402
-from SurvivalAnalysis.SurvivalTable import (SurvivalBatch,  # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import NullModel, Report            # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Patterns import EMPTY, PATTERNS     # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.SurvivalTable import (SurvivalBatch,  # noqa: E402
                                                SurvivalMeta)
 
 _RESULTS = []
@@ -348,7 +344,7 @@ def t_the_nearest_detection_has_no_window_in_it():
     this is the assertion that it stays that way: the same points, queried from
     the same place, must give the same distance whatever else is in the tile.
     """
-    from SurvivalAnalysis.SurvivalProcess import nearest_detection
+    from locascope.training.SuperPathPoint.SurvivalAnalysis.SurvivalProcess import nearest_detection
 
     points = np.array([[10.0, 0.0], [200.0, 0.0]])
     score = np.array([0.2, 0.9])

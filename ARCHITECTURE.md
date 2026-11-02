@@ -43,7 +43,7 @@ D 下游（不屬於讀取）
 
 ```mermaid
 flowchart LR
-  subgraph G["共用數字：utilities/ReadGeometry"]
+  subgraph G["共用數字：locascope/core/slides/ReadGeometry"]
     LF["level_for(ds)<br/>選層：不放大"]
     LP["level_px(out, ds, level_ds)<br/>像素數：四捨五入"]
     FG["FovGeometry.of(w, h, ds)<br/>rect / square / read_rect"]
@@ -125,7 +125,7 @@ PatchGrid（有序格點）────────┤   ├─ read(pos, spec, 
 座標一律是 level-0；倍率一律是 ds（相對 level 0）。mpp 只在呼叫端換算一次（`ds = mpp / base_mpp`）。
 
 ```python
-# ── utilities/ReadGeometry.py（ReadSpec 改名，其餘不動）───────────────────
+# ── locascope/core/slides/ReadGeometry.py（ReadSpec 改名，其餘不動）───────────────────
 @dataclass(frozen=True)
 class ReadSpec:                      # 原 CameraSpec，欄位與行為不變
     sensor_w: int; sensor_h: int     # 輸出像素
@@ -139,7 +139,7 @@ class ReadSpec:                      # 原 CameraSpec，欄位與行為不變
 #   levels_up_to 到 max_ds 為止的層                  is_native 這層就是這個 ds
 # level_px / FovGeometry / ReadRect / reserve_margin
 
-# ── utilities/SlideReader.py ──────────────────────────────────────────────
+# ── locascope/core/slides/SlideReader.py ──────────────────────────────────────────────
 @dataclass(frozen=True)
 class ReadPlan:                      # 一次讀取的全部決定，不碰 IO
     rect: ReadRect                   # level-0 範圍（原點 + 要落在 slide 內的範圍）
@@ -256,7 +256,7 @@ stage 3           候選    → reader.read（臨時 ReadSpec） → 無      �
 
 | 動作 | 對象 |
 |---|---|
-| 新增 | `utilities/SlideReader.py`、`test_slide_reader.py`（read + grid） |
+| 新增 | `locascope/core/slides/SlideReader.py`、`test_slide_reader.py`（read + grid） |
 | 大改 | `Camera` → `Render`：不自己讀圖，向 SlideReader 拿原始像素，只負責效果、可重現性和 GT |
 | 改名 | `CameraSpec` → `ReadSpec`；`camera_spec` → `render_spec`；`Corpora.pretile_camera` → `pretile_spec` |
 | 不動 | TileSampler（只拿掉 degrade 的再匯出）、DsLadder、PatchGrid、TissueMask、ReadGeometry 的規則、augment、TileEncoder、CpuBudget、Store |
@@ -292,19 +292,19 @@ stage 2 的特徵經 `stage2_retrieval/Context.py` 用 `read_grid`，stage 3 用
 
 ```
 入口
-├─ utilities/LocaScopePipeline                    stage 2 經 Context.py 用 SlideReader.read_grid，stage 3 用 SlideReader.read
+├─ locascope/core/pipeline                    stage 2 經 Context.py 用 SlideReader.read_grid，stage 3 用 SlideReader.read
 │   ├─ stage 1  mpp 估計        KnnEstMpp / ClassifierEstMpp / PrototypeEstMpp / classic
 │   ├─ stage 2  檢索            Retriever（stage2_retrieval/Retriever.py）：第一階段
 │   │                            RetrieverSlidingWinSimRot / BagOfTiles / TileVote / ClusterBow / WinEmbed，
-│   │                            以及學出來的 GloRet / LogLoRet（RetrieverGloRet.py、aiNNModel/models/GloRet.py，
+│   │                            以及學出來的 GloRet / LogLoRet（RetrieverGloRet.py、locascope/core/networks/GloRet.py，
 │   │                            訓練在 training/GloRet/，arm 名 `GloRet-<ContextEn>-<GlobalEn>`，設計見 stage2_retrieval/proposal.md），
 │   │                            reranker（RerankerScorers / Encode / Neural）接在後面，MultiPhases 串接
 │   │                            retrieve(上游, query) → RetrievalOutput(.candidates = CandidateSet)
 │   └─ stage 3  定位            SiftRansacLocalizer；SuperPathPoint (未實作)
 │   每個 stage 方法在自己的 config 指定 encoder、head、pooling；不同 stage 可以用不同 encoder
 │   stage 2 的兩段式設計見 stage2_retrieval/spec.md
-├─ training/ClassifyingRoutingHead/cli/{train,evaluate}.py  啟動時套用 CpuBudget
-├─ utilities/bench_modules/bench_stage2_retriever  CpuBudget、SlideReader.read_grid、特徵留在 GPU
+├─ training/ClassifyingRoutingHead/{train,evaluate}.py  啟動時套用 CpuBudget
+├─ locascope/cli/bench/bench_stage2_retriever  CpuBudget、SlideReader.read_grid、特徵留在 GPU
 └─ query_sim CLI
 ```
 
@@ -358,8 +358,8 @@ config 的值只寫在一個地方：基礎模組裡的 RECIPES 表。每個 ent
 
 | 表 | 模組 | entry |
 |---|---|---|
-| `MASK_RECIPES` | `utilities/TissueMaskConfig.py` | `none`、`hsv`、`hest`、`uni2_pca`（`--seg`） |
-| `SAMPLER_RECIPES` | `utilities/TileSampler.py` | `lattice`（class 預設寫出來，給 diagnostic 當起點）、`reference-bank`（stage 1 的參考庫、tile bench 的參考 store） |
+| `MASK_RECIPES` | `locascope/core/tiles/TissueMaskConfig.py` | `none`、`hsv`、`hest`、`uni2_pca`（`--seg`） |
+| `SAMPLER_RECIPES` | `locascope/core/tiles/TileSampler.py` | `lattice`（class 預設寫出來，給 diagnostic 當起點）、`reference-bank`（stage 1 的參考庫、tile bench 的參考 store） |
 | `FOV_RECIPES` | `query_sim/FovSupply.py` | `bench`（四個 bench 共用，`--fov`）、`bench-real`（`bench` 但 gap 取自 ki67_with_photo 的真實顯微鏡照片：較暗、無暗角、較銳利、放大 1.12 倍）、`plain`（class 預設寫出來）、`routing-query`、`routing-support-native`（ClassifyingRoutingHead 的兩個相機模板） |
 | `RECIPES` | `training/SuperPathPoint/common/Corpora.py` | `stageA`、`stageB-fOwn`、`stageB-cOwn` |
 | `KNN_RECIPES` | `stage1_estimation/KnnEstMpp.py` | `gigapath`、`uni2`（`--stage1 knn:<名>`） |
@@ -431,7 +431,7 @@ corpus 三個、routing 兩個，config 相等、id 相同；routing data record
 
 ## Cache：每個 job 一棵樹
 
-所有 cache 都在 `result/cache/<made_by>/` 底下的一棵樹裡，`utilities/Cache.py` 是唯一拼路徑的地方。
+所有 cache 都在 `result/cache/<made_by>/` 底下的一棵樹裡，`locascope/core/cache/Cache.py` 是唯一拼路徑的地方。
 `Cache.TREE` 定義哪一層掛在哪一層下面，`Cache.ENTRIES` 定義每種 entry 掛在哪一層：
 
 ```
@@ -486,7 +486,7 @@ Masks/slide=<stem>/mask/                                   所有 trainer 和 be
   3. 同一列算術或同一個 stage 目錄裡 join 就有（`truth_rank_all` 由兩個 in_all 名次推、`in_rank/out_rank`、
      `first/first_rank`、rerank_scores 的框）→ 不存。
   4. 沒有人用 → 不存。
-- **刪除**：`utilities/cli/inspect_cache_store/purge_cache.py --job J --level slide=<s> seg=<id>`
+- **刪除**：`locascope/cli/inspect_cache_store/purge_cache.py --job J --level slide=<s> seg=<id>`
   刪整棵子樹（例如丟掉一個 mask recipe 底下的所有東西），`--entry K --id I` 刪一個 variant；
   預設只列出，`--yes` 才刪。
 

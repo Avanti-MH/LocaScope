@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for training/SuperPathPoint/SuperPoint/HomographicAdaptation.py.
 
-    python utilities/test_modules/test_homographic_adaptation.py
+    python tests/test_homographic_adaptation.py
 
 No weights, no GPU, no WSI. The teacher is a dozen lines at the top of this file
 that answers "wherever this view is brightest", so the whole aggregation runs
@@ -49,30 +49,16 @@ import argparse
 import os
 import sys
 
-# `utilities/` holds the one definition of the output roots (`_paths.py`), and
-# `setup_import_paths` -- which puts every other package on the path -- is
-# inside it, so it has to be reachable before anything else is imported.
-#
-# BOTH parents are inserted, and that is deliberate rather than sloppy: this
-# file runs from `utilities/test_modules/` and from
-# `utilities/test_modules/TestSuperPathPoint/`, one level deeper, and inserting
-# both means the move needs no edit here. The one that is not `utilities/` is
-# either the repo root or `test_modules/`; neither holds a `_paths.py`, and
-# `setup_import_paths` puts the repo root on the path anyway.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
-from common.Homography import invert, sample_homography, valid_mask  # noqa: E402
-from TileSampler import centre_margin, pre_tile_px  # noqa: E402
-from SuperPoint.HomographicAdaptation import HaConfig             # noqa: E402
+from locascope.training.SuperPathPoint.common.Homography import invert, sample_homography, valid_mask  # noqa: E402
+from locascope.core.tiles.TileSampler import centre_margin, pre_tile_px  # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.HomographicAdaptation import HaConfig             # noqa: E402
 
 _RESULTS = []
 
@@ -341,7 +327,7 @@ def t_the_config_and_the_sampler_agree_about_their_options():
     naming would simply not be passed -- the sampler would run on its own
     default while the config said otherwise, silently.
     """
-    from common.Homography import HOMOGRAPHY_DEFAULTS             # noqa: PLC0415
+    from locascope.training.SuperPathPoint.common.Homography import HOMOGRAPHY_DEFAULTS             # noqa: PLC0415
     kwargs = HaConfig().homography_kwargs()
     assert set(kwargs) == set(HOMOGRAPHY_DEFAULTS), (
         set(kwargs) ^ set(HOMOGRAPHY_DEFAULTS))

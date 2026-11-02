@@ -16,10 +16,10 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  training/ClassifyingRoutingHead -- ONE JOB, ONE QUEUE PER ENCODER, then test:
+#  locascope/training/ClassifyingRoutingHead -- ONE JOB, ONE QUEUE PER ENCODER, then test:
 #
 #    [1]  gigapath     baseline 2, every ARMS head:   bal -> ord_a -> ord_b   GPU 0
 #         uni2         baseline 2, every ARMS head:   bal -> ord_a -> ord_b   GPU 1
@@ -113,7 +113,7 @@ WANDB_PROJECT="${WANDB_PROJECT:-classifying-routing-head}"
 # (SLURM_JOB_NAME) -- <job name>-b2-<encoder> / <job name>-b3-<arm> -- and keeps
 # the job id and name in the run's config. Set RUN_NAME to replace the job name.
 RUN_NAME="${RUN_NAME:-}"
-# WANDB_MODE itself is NOT set here -- jobscripts/_env.sh (sourced above)
+# WANDB_MODE itself is NOT set here -- deploy/slurm/_env.sh (sourced above)
 # already exports it project-wide, and train.py's own --wandb-mode default
 # reads it. This file only needs to pass the project/run-name through.
 RUN_NAME_ARG=""
@@ -156,10 +156,8 @@ fi
 # has to know it, not just train.py.
 if [ -z "$OUT" ]; then
     OUT=$(python -c "
-import sys
-sys.path.insert(0, 'utilities')
-import _paths
-print(_paths.job_result_dir('ClassifyingRoutingHead'))
+from locascope.paths import job_result_dir
+print(job_result_dir('ClassifyingRoutingHead'))
 ")
 fi
 mkdir -p "$OUT"
@@ -195,7 +193,7 @@ TRAIN_EXTRA_ARGS=""
 #                           moved to Masks on 2026-10-20)
 #
 # The val and test sets are VAL_DATASET and TEST_DATASET above, virtual datasets
-# written by jobscripts/MakeDataset.sh.
+# written by deploy/slurm/MakeDataset.sh.
 MASK_CACHE_JOB="${MASK_CACHE_JOB:-Masks}"
 # A smoke draws with its own numbers (N_PER_RUNG 4), which no real run can reuse:
 # its draws go to its own cache (Smoke*, what make clean-smoke removes). Its masks
@@ -232,7 +230,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 # independent, so no queue ever waits on another; each writes its own --out
 # ($OUT/<encoder>) and its own log, because cli/train.py rewrites its val_scores
 # files whole and two processes on one file would drop one's rows. The mask and
-# draw caches ARE shared on purpose: their writes are atomic (utilities/Cache.py).
+# draw caches ARE shared on purpose: their writes are atomic (locascope/core/cache/Cache.py).
 #
 # PARALLEL=1 (default): every queue at once, one GPU each (ask for that many).
 # PARALLEL=0: one queue after another on one GPU, writing $OUT itself.
@@ -258,7 +256,7 @@ train_unit () {
     shift 3
     if [ "$E" = "convnext_v2" ]; then B_ARGS="--baseline 3 --heads $B3_ARMS"
     else B_ARGS="--baseline 2 --encoders $E --heads $ARMS"; fi
-    python training/ClassifyingRoutingHead/cli/train.py \
+    python -m locascope.training.ClassifyingRoutingHead.train \
         $B_ARGS \
         --loss "$L" \
         --ordinal-weight "$ORDINAL_WEIGHT" \
@@ -379,7 +377,7 @@ fi
 # point, and evaluate.py loops over CHECKPOINTS, minutes next to training's hours.
 echo ""
 echo "======== [2] evaluate ========"
-python training/ClassifyingRoutingHead/cli/evaluate.py \
+python -m locascope.training.ClassifyingRoutingHead.evaluate \
     --tag "$TAG" \
     --test-dataset "$TEST_DATASET" \
     --n-wsi "$EVAL_N_WSI" \

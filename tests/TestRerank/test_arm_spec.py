@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the name of an arm: `stage2_retrieval/ArmSpec.py`.
 
-    python utilities/test_modules/TestRerank/test_arm_spec.py
+    python tests/TestRerank/test_arm_spec.py
 
 Pure text: no slide, no model, no GPU.
 
@@ -29,13 +29,10 @@ import sys
 from typing import Callable, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
-from stage2_retrieval.ArmSpec import (ArmSpec, ArmSyntaxError, Segment, expand,  # noqa: E402
+from locascope.core.stage2_retrieval.ArmSpec import (ArmSpec, ArmSyntaxError, Segment, expand,  # noqa: E402
                                       is_arm_text, parse_arm, parse_segment)
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
@@ -104,7 +101,7 @@ def t_a_retriever_is_first_and_a_reranker_is_after_it() -> str:
 
 def t_where_a_method_may_stand_is_its_two_flags_and_a_method_may_have_both() -> str:
     from dataclasses import replace                                  # noqa: PLC0415
-    methods = sys.modules['stage2_retrieval.ArmSpec'].METHODS
+    methods = sys.modules['locascope.core.stage2_retrieval.ArmSpec'].METHODS
     assert all(i.retriever or i.reranker for i in methods.values()), 'a method that can stand nowhere'
     both = sorted(m for m, i in methods.items() if i.retriever and i.reranker)
     assert both and all(m.startswith(('GloRet-', 'LogLoRet-')) for m in both), f'only the learned ones take both: {both}'
@@ -122,7 +119,7 @@ def t_where_a_method_may_stand_is_its_two_flags_and_a_method_may_have_both() -> 
 
 
 def t_a_chain_starts_with_a_method_that_takes_the_wsi_or_a_list_and_continues_only_with_a_list() -> str:
-    from stage2_retrieval.MultiPhases import MULTIPHASES_RECIPES, MultiPhasesConfig   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.MultiPhases import MULTIPHASES_RECIPES, MultiPhasesConfig   # noqa: PLC0415
     sliding, dual = MULTIPHASES_RECIPES['uni2-avg-dual'].phases
     MultiPhasesConfig(phases=(sliding,))
     MultiPhasesConfig(phases=(dual,))                    # a list-eating phase first is handed every window
@@ -137,8 +134,8 @@ def t_a_chain_starts_with_a_method_that_takes_the_wsi_or_a_list_and_continues_on
 
 
 def t_the_learned_methods_are_named_for_the_proposal_and_build_their_phases() -> str:
-    from GloRet import CONTEXT_EN as NET_CONTEXT, GLOBAL_EN as NET_GLOBAL, NO_MATCH as NET_NO_MATCH, combo_problem   # noqa: PLC0415
-    spec = sys.modules['stage2_retrieval.ArmSpec']
+    from locascope.core.networks.GloRet import CONTEXT_EN as NET_CONTEXT, GLOBAL_EN as NET_GLOBAL, NO_MATCH as NET_NO_MATCH, combo_problem   # noqa: PLC0415
+    spec = sys.modules['locascope.core.stage2_retrieval.ArmSpec']
     assert (spec.CONTEXT_EN, spec.GLOBAL_EN, spec.NO_MATCH) == (NET_CONTEXT, NET_GLOBAL, NET_NO_MATCH), 'two spellings'
     for context in NET_CONTEXT:
         for global_en in NET_GLOBAL:
@@ -151,8 +148,8 @@ def t_the_learned_methods_are_named_for_the_proposal_and_build_their_phases() ->
     assert 'not a method' in refused('uni2:GloRet-CLSTrans-AttnPool::cls_avg+exact')
     assert 'not a method' in refused('uni2:LogLoRet-SelfAttn-Align::cls_avg+dustbin')
     assert 'needs one of its operations' in refused('uni2:LogLoRet-SelfAttn-AttnPool::cls_avg')
-    from stage2_retrieval.ArmSpec import phase_configs                                                               # noqa: PLC0415
-    from stage2_retrieval.RetrieverGloRet import (RerankerGloRetConfig, RerankerLogLoRetConfig,                     # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import phase_configs                                                               # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverGloRet import (RerankerGloRetConfig, RerankerLogLoRetConfig,                     # noqa: PLC0415
                                                   RetrieverGloRetConfig)
     first = phase_configs(parse_arm('uni2:GloRet-SelfAttn-AttnPool::cls_avg+exact::LogLoRet-GNN-MaskedMean::cls_avg+sinkhorn@10'))
     assert [type(c) for c in first] == [RetrieverGloRetConfig, RerankerLogLoRetConfig]
@@ -208,8 +205,8 @@ def t_a_prefix_is_the_list_after_those_segments() -> str:
 
 def t_an_arm_is_the_config_of_its_chain() -> str:
     import dataclasses                                           # noqa: PLC0415
-    from stage2_retrieval.ArmSpec import config_of_arm, arm_topk   # noqa: PLC0415
-    from stage2_retrieval.MultiPhases import MultiPhasesConfig   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import config_of_arm, arm_topk   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.MultiPhases import MultiPhasesConfig   # noqa: PLC0415
     cfg = config_of_arm(parse_arm('uni2:SlidingWindow::cls_avg+mean@100::Dual::cls_avg+dual::'
                                   'CSLS::grid2x2+csls@30::gigapath:Corr::cls_avg+mnn@7'), raw_topk=1000)
     kinds = [type(p).__name__ for p in cfg.phases]
@@ -240,10 +237,10 @@ def t_an_arm_is_the_config_of_its_chain() -> str:
 
 def t_multiphases_runs_its_phases_and_a_cached_phase_is_not_run() -> str:
     from types import SimpleNamespace                           # noqa: PLC0415
-    from stage2_retrieval.ArmSpec import config_of_arm           # noqa: PLC0415
-    from stage2_retrieval.MultiPhases import MultiPhases         # noqa: PLC0415
-    from stage2_retrieval.StageInterface import Candidate, CandidateSet, RerankedCandidate   # noqa: PLC0415
-    from test_context import cset                                # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import config_of_arm           # noqa: PLC0415
+    from locascope.core.stage2_retrieval.MultiPhases import MultiPhases         # noqa: PLC0415
+    from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet, RerankedCandidate   # noqa: PLC0415
+    from tests.TestRerank.test_context import cset                                # noqa: PLC0415
     import numpy as np                                           # noqa: PLC0415
     cfg = config_of_arm(parse_arm('uni2:SlidingWindow::cls_avg+mean::CandGraph::raw+prominence@3'))
     chain: MultiPhases = MultiPhases(cfg, 'cpu')

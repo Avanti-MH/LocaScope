@@ -47,9 +47,9 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
-from ConfigIdentity import IdentifiedConfig, register
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, register
 
-from SuperPoint.Backbones import VggBlock
+from locascope.training.SuperPathPoint.SuperPoint.Backbones import VggBlock
 
 
 def depth_to_space_prob(logits: torch.Tensor, cell: int) -> torch.Tensor:

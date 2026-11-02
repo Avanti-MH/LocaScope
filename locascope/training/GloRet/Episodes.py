@@ -31,13 +31,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from training.GloRet.Full import FullCfg, Split, glo_step, rank_windows
-from training.GloRet.Items import Items, items_of
-from training.GloRet.Pool import Memory, TopP, make_pool
-from training.GloRet.Rerank import RerankCfg, log_step, rerank_scores
-from training.GloRet.Profile import profiled
-from training.GloRet.Steps import StepCfg, mark_peak, mean_logs, peak_gb
-from training.GloRet.Supply import Fov, Level
+from locascope.training.GloRet.Full import FullCfg, Split, glo_step, rank_windows
+from locascope.training.GloRet.Items import Items, items_of
+from locascope.training.GloRet.Pool import Memory, TopP, make_pool
+from locascope.training.GloRet.Rerank import RerankCfg, log_step, rerank_scores
+from locascope.training.GloRet.Profile import profiled
+from locascope.training.GloRet.Steps import StepCfg, mark_peak, mean_logs, peak_gb
+from locascope.training.GloRet.Supply import Fov, Level
 
 #: a pair scorer over a level's items without a ranking first: the most items it takes in one step (a list is 10^4)
 PAIR_ALL_LIMIT: int = 20000

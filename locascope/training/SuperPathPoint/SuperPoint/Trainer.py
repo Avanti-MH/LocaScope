@@ -57,9 +57,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ConfigIdentity import IdentifiedConfig, record, register
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, record, register
 
-from common.KeypointLabelStore import points_from_prob
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import points_from_prob
 
 #: The zero point (ConfigIdentity rule 2).
 _TRAINER_BASELINE = {
@@ -271,7 +271,7 @@ class Trainer:
         The per-slide keys are `val/<stem>/...`. They are extra columns on the
         same row rather than a second file, so a history CSV stays one table.
         """
-        from SuperPoint.Losses import (detector_ce_per_sample,  # noqa: PLC0415
+        from locascope.training.SuperPathPoint.SuperPoint.Losses import (detector_ce_per_sample,  # noqa: PLC0415
                                        dustbin_and_hit)
 
         self.net.eval()
@@ -467,7 +467,7 @@ def _repeatability(prob, warped_prob, homography, cfg, shift, budget):
     one threshold land at two densities and their margins are on two different
     scales, and nothing in the table says they cannot be compared.
     """
-    from common.Homography import inside, points_input_to_output  # noqa: PLC0415
+    from locascope.training.SuperPathPoint.common.Homography import inside, points_input_to_output  # noqa: PLC0415
 
     hits, decoys, counts, avails, which = [], [], [], [], []
     shape = prob.shape[-2:]

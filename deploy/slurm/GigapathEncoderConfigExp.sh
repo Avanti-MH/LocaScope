@@ -17,13 +17,13 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # Replaces AccuracyV1.sh and the encoder-throughput-sweep task
 # bench_gigapath_infer.py used to run (that call had gone dead, commented
 # out, inside a jobscript later renamed LocatePhotoTimeBreakdown.sh and since
 # deleted). Both python files merged into
-# utilities/bench_modules/bench_gigapath_configs.py on 2026-09-17; EXP picks
+# locascope/cli/bench/bench_gigapath_configs.py on 2026-09-17; EXP picks
 # which of its two modes this jobscript runs.
 #
 #   EXP=accuracy   (default) bench_gigapath_configs.py --mode accuracy
@@ -33,7 +33,7 @@ EXP="${EXP:-accuracy}"
 
 case "$EXP" in
   accuracy)
-    SVS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+    SVS=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003694.svs
     MRXS=/work/u26130998/datasets/Ki67_with_photo/S1104043_G7E_110207_mrxs/S1104043,G7E,110207.mrxs
     TOTAL_PATCHES="${TOTAL_PATCHES:-4096}"
     HEST_DS="${HEST_DS:-4}"
@@ -41,7 +41,7 @@ case "$EXP" in
     SEED="${SEED:-42}"
     BATCH_SIZE="${BATCH_SIZE:-128}"
 
-    python utilities/bench_modules/bench_gigapath_configs.py \
+    python -m locascope.cli.bench.bench_gigapath_configs \
       --mode accuracy \
       --svs             "$SVS" \
       --mrxs            "$MRXS" \
@@ -60,7 +60,7 @@ case "$EXP" in
     COMPARE_PATCHES="${COMPARE_PATCHES:-40960}"
     COMPARE_BS="${COMPARE_BS:-8 16 64 128 512 1024 4096}"
 
-    python utilities/bench_modules/bench_gigapath_configs.py \
+    python -m locascope.cli.bench.bench_gigapath_configs \
       --mode speed \
       --compare \
       --no-wsi \

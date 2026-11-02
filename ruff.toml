@@ -24,7 +24,7 @@ select = [
                 # deliberately throughout for one-line encoder binders
     "F401",     # unused import
     "PLC0415",  # import not at top of module -- the `from X import Y  # noqa: PLC0415`
-                # pattern inside functions (e.g. lazy `from TileEncoderFunc import ...`)
+                # pattern inside functions (e.g. lazy `from TileEncoder import ...`)
     "BLE001",   # bare `except Exception:` -- flagged, not banned; several
                 # call sites noqa it deliberately (e.g. optional wandb import)
 ]

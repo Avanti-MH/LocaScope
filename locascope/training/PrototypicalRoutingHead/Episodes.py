@@ -50,7 +50,7 @@ import numpy as np
 
 # ClassifyingRoutingHead's -- see module docstring. CameraBank/render_row are public
 # there so this import is legitimate reuse.
-from training.ClassifyingRoutingHead.Datasets import (
+from locascope.training.ClassifyingRoutingHead.Datasets import (
     CameraBank, ManifestRow, RUNGS, RenderConfig, render_row)
 
 
@@ -593,7 +593,7 @@ def prefetched(produce: Iterator, depth: int) -> Iterator:
     an exception in `produce` is raised in the caller at the item it failed
     on. The caller must exhaust it (or close it) before touching anything
     `produce` touches, such as the camera bank or the episode rng.
-    `utilities/bench_modules/bench_stage2_retriever.prefetched`, which does
+    `locascope/cli/bench/bench_stage2_retriever.prefetched`, which does
     the same for the window bench's reads."""
     if depth <= 0:
         yield from produce

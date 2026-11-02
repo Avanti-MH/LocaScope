@@ -1,14 +1,14 @@
 '''Stage 3 -- localise inside a candidate. A real package: import
 its modules fully qualified, `from stage3_localization.SIFT_RANSAC import
-SiftRansacLocalizer`. The directory is not on sys.path; see utilities/_paths.py.
+SiftRansacLocalizer`. The directory is not on sys.path; see locascope/paths.py.
 '''
 
-from ConfigIdentity import method_recipe
+from locascope.core.config.ConfigIdentity import method_recipe
 
 #: The stage-3 methods: method -> (module, its recipe table, the localizer).
 #: `--stage3 sift:default`.
 METHODS = {
-    'sift': ('stage3_localization.SIFT_RANSAC', 'SIFT_RECIPES',
+    'sift': ('locascope.core.stage3_localization.SIFT_RANSAC', 'SIFT_RECIPES',
              'SiftRansacLocalizer'),
 }
 

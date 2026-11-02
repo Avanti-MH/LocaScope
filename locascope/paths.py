@@ -1,21 +1,21 @@
-"""Where this project writes, and how its packages find each other.
+"""Where this project reads and writes.
 
-The ONE definition of OUTPUT_ROOT. It sits in utilities/ because that is the
-library layer every package already depends on -- utilities/cli, test_modules
-and bench_modules all point DOWN at it, and none of them points sideways at
-another. What each of those legitimately owns is its default job name, which
-is the argument to job_result_dir.
+The ONE definition of OUTPUT_ROOT and DATA_ROOT. Every other package points DOWN
+at it: none of them defines a root of its own, and what each legitimately owns is
+its default job name, which is the argument to job_result_dir.
 
-It imports os and sys and nothing else on purpose. Files that are careful about
-their startup cost can import this
-without pulling in torch or openslide.
+It imports os and nothing else on purpose. Files that are careful about their
+startup cost can import this without pulling in torch or openslide.
+
+How packages find each other is not decided here (nor anywhere with `sys.path`):
+every module imports by its full name, `locascope.core.cache.Cache`, and an entry
+point is run from the repo root as `python -m locascope.cli.x`.
 """
 
 import os
-import sys
 
-UTILITIES_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(UTILITIES_DIR, '..'))
+#: The repo root: the directory that holds `locascope/`.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 #: Where runs write. One level ABOVE the repo, so that outputs are not inside
 #: the working tree: an `rm -rf` of the checkout, a `git clean`, or a fresh
@@ -33,101 +33,9 @@ DATA_ROOT = os.environ.get(
     'LOCASCOPE_DATA_ROOT', os.path.abspath(os.path.join(PROJECT_ROOT, '..')))
 DATASETS_DIR = os.path.join(DATA_ROOT, 'datasets')
 HOLED_DATASETS_DIR = os.path.join(DATA_ROOT, 'datasets_holed')
-#: Model weights: HF_HOME's default (jobscripts/_env.sh exports the same) and
+#: Model weights: HF_HOME's default (`locascope/__init__.py` sets the same) and
 #: the CONCH checkpoint directory under it.
 MODEL_WEIGHTS_DIR = os.path.join(OUTPUT_ROOT, 'model_weights')
-QUERY_SIM_DIR = os.path.join(PROJECT_ROOT, 'query_sim')
-# stage1_estimation/, stage2_retrieval/ and stage3_localization/ are real
-# packages: imported as `stage2_retrieval.X` off PROJECT_ROOT, so
-# none of them is a sys.path entry and none has a constant here.
-AINM_DIR = os.path.join(PROJECT_ROOT, 'aiNNModel')
-
-#: Generic encoder+head plumbing (`Heads.py`, `common/Head.py`/`Features.py`/
-#: `Checkpoints.py`) shared by any task built on an encoder+head pair --
-#: `training/ClassifyingRoutingHead/` today, `stage1_estimation/ClassifierEstMpp.py`
-#: and the planned retrieval work (GraphNN/tree/reranking NN) after it. Two
-#: entries, not one, for the same reason `AINM_DIR` and `SUPERPATHPOINT_DIR`
-#: are separate from `PROJECT_ROOT`: what goes on sys.path is the directory
-#: whose children are DIRECTLY importable modules, and `Head.py` lives one
-#: level below `Heads.py`, not beside it.
-AINM_MODELS_DIR = os.path.join(AINM_DIR, 'models')
-AINM_MODELS_COMMON_DIR = os.path.join(AINM_MODELS_DIR, 'common')
-
-#: The SuperPathPoint training package, NOT its parent `training/`. What goes on
-#: sys.path is the directory whose children are importable subpackages -- so
-#: `from common.Homography import ...` and `from cli import job_result_dir`
-#: resolve, exactly as `query_sim/` on the path makes `from augment.geometry
-#: import ...` resolve. `training/` itself holds no modules and adding it would
-#: put the useless name `SuperPathPoint` in the import namespace instead.
-SUPERPATHPOINT_DIR = os.path.join(PROJECT_ROOT, 'training', 'SuperPathPoint')
-
-#: Same rule as SUPERPATHPOINT_DIR, same reason: the training package itself,
-#: not `training/`, so `from Datasets import ...` and `from Runtime import
-#: ...` resolve for `Runtime.py`/`cli/train.py`/`cli/evaluate.py`.
-CLASSIFYINGROUTINGHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'ClassifyingRoutingHead')
-
-#: Same rule again -- `training/PrototypicalRoutingHead/spec.md`'s own
-#: package, so its `Pooling.py`/`Runtime.py`/`Losses.py`/`cli/train.py`
-#: resolve each other the same way CLASSIFYINGROUTINGHEAD_DIR's siblings do.
-PROTOTYPICALROUTINGHEAD_DIR = os.path.join(
-    PROJECT_ROOT, 'training', 'PrototypicalRoutingHead')
-
-#: The second phase of stage 2 (`training/RerankHead/spec.md`): same rule again.
-RERANKHEAD_DIR = os.path.join(PROJECT_ROOT, 'training', 'RerankHead')
-
-
-def setup_import_paths(*training_packages: str) -> None:
-    """Make utilities/, query_sim/, aiNNModel/ (+ its models/ and
-    models/common/) and the project root importable -- the root is what makes
-    the stage packages (`stage1_estimation`, `stage2_retrieval`,
-    `stage3_localization`) and `training` importable by their full names --
-    then the named training packages' own directories (`add_training_package`).
-
-    THE ONE PLACE sys.path IS SET. An entry point puts utilities/ on the path
-    by hand (this function lives in it) and calls this; no library module
-    touches sys.path, so what a module can import is decided by the entry
-    that runs it and by nothing else.
-
-    No training package directory is added unless named: the packages each
-    have their own `Runtime.py` / `Datasets.py` / ..., and with all of them
-    on `sys.path` a bare `from Runtime import ...` resolves to whichever comes
-    first, not the caller's sibling. `ClassifyingRoutingHead` and
-    `PrototypicalRoutingHead` are real packages imported by full name
-    (`training/__init__.py`); a SuperPathPoint entry names `'SuperPathPoint'`.
-    """
-    for path in (UTILITIES_DIR, QUERY_SIM_DIR,
-                AINM_DIR, AINM_MODELS_DIR, AINM_MODELS_COMMON_DIR,
-                PROJECT_ROOT):
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    add_training_package(*training_packages)
-
-
-#: `add_training_package`'s own name -> directory map. Keys are the SAME
-#: names `training/<name>/` uses on disk, not a separate vocabulary.
-TRAINING_PACKAGE_DIRS = {
-    'SuperPathPoint': SUPERPATHPOINT_DIR,
-    'ClassifyingRoutingHead': CLASSIFYINGROUTINGHEAD_DIR,
-    'PrototypicalRoutingHead': PROTOTYPICALROUTINGHEAD_DIR,
-    'RerankHead': RERANKHEAD_DIR,
-}
-
-
-def add_training_package(*names: str) -> None:
-    """Put ONE OR MORE training packages' own directories on `sys.path`,
-    by name (`TRAINING_PACKAGE_DIRS`' own keys); see `setup_import_paths`
-    for the bare-`from Runtime import ...` collision this avoids.
-
-    ORDER MATTERS when a caller names more than one: each `insert(0, ...)`
-    pushes the previous ones DOWN, so the LAST name given ends up FIRST in
-    `sys.path` and wins any bare-import collision. Put the caller's OWN
-    package last. Called by `setup_import_paths` with the names it was given.
-    """
-    for name in names:
-        path = TRAINING_PACKAGE_DIRS[name]
-        if path in sys.path:
-            sys.path.remove(path)
-        sys.path.insert(0, path)
 
 
 def encoder_tag(encoder: str, head: str = '') -> str:
@@ -143,7 +51,7 @@ def encoder_tag(encoder: str, head: str = '') -> str:
     two places -- the output path and, for the pooling benches, a CSV column
     naming the arm -- and a tag computed twice is a tag that eventually differs
     in one of them. Takes strings, not an argparse Namespace, so that this file
-    keeps importing os and sys and nothing else.
+    keeps importing os and nothing else.
     """
     return f'{encoder}_{head}' if head else str(encoder)
 

@@ -1,7 +1,7 @@
 '''Classifier head components -- parameterised over `in_dim` so one class
 serves any backbone's width (768 for ConvNeXt V2, 1536 for GigaPath/UNI2, or
 anything else `TileEncoder.model_spec.dim` reports), and over precision
-(`HeadConfig.dtype`) the same way `TileEncoderFunc`'s `ModelConfig.dtype` does
+(`HeadConfig.dtype`) the same way `TileEncoder`'s `ModelConfig.dtype` does
 for a trunk.
 
     LinearHead          `in_dim -> num_classes`, one Linear layer. The main
@@ -326,7 +326,7 @@ class AttentionPoolHead(nn.Module):
     `[N, D]` vector, NOT logits -- chain a classifier after it
     (`common.Head.Head` pairs the two).
 
-    Same role as CONCH's own `AttentionalPooler` (`aiNNModel/ConchVitFunc.py`),
+    Same role as CONCH's own `AttentionalPooler` (`locascope/core/backbones/ConchVit.py`),
     reimplemented small and generic here rather than reused: CONCH's version
     is one specific pretrained module with `d_model`/`context_dim`/`n_head`
     tied to ITS checkpoint's weights, and this one has to work at whatever
@@ -403,14 +403,14 @@ class ResidualMlpBlock(nn.Module):
         return x + self.out_proj(self.out_drop(self.out_act(h)))
 
 
-#: A REGISTERED NAME per classifier, same convention `TileEncoderFunc`'s
+#: A REGISTERED NAME per classifier, same convention `TileEncoder`'s
 #: `_IMPLEMENTATIONS`/`encoder_names`/`encoder_config` use for encoders --
 #: chosen by us and stable, rather than `type(obj).__name__`, which is a
 #: Python implementation detail that moves the moment a class is renamed or
 #: split. `common/Checkpoints.py` stores and reads a classifier by this name,
 #: not by its class name, so a checkpoint's `classifier` field survives a
 #: refactor of `LinearHead` the same way `encoder` surviving a refactor of
-#: `GigaPathFunc` already does. `AttentionPoolHead` is NOT here -- it is a
+#: `GigaPath` already does. `AttentionPoolHead` is NOT here -- it is a
 #: REDUCTION (`common.Head.Head`'s other axis), never a `classifier` value.
 _CLASSIFIER_REGISTRY = {
     'linear':  LinearHead,

@@ -55,7 +55,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ConfigIdentity import IdentifiedConfig, register
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, register
 
 #: The zero point (ConfigIdentity rule 2). Every value is upstream's (`configs/superpoint_coco.yaml:
 #: 42-45`, `super_point.py:73-92`), spec.md 9.

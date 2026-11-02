@@ -17,7 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # =============================================================================
@@ -30,7 +30,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #
 # STEP 3a  build_mask_store.py -- one UNI2-PCA tissue mask per slide, written to
 #          result/cache/masks/ under the segmenter's identity_id(). The mask
-#          costs 3.5 to 6 min of GPU per slide (measured, Uni2PcaSegFunc.LEVEL)
+#          costs 3.5 to 6 min of GPU per slide (measured, Uni2PcaSeg.LEVEL)
 #          and THREE later steps read it: this probe, the pre-tile extraction of
 #          3c, and any bench that wants the regions the training tiles came from.
 #
@@ -96,12 +96,11 @@ KI67=/work/u26130998/datasets/Ki67_with_photo
 # something. When they come back in, it is with
 # `SafeSlide.read_region_valid` masking the invalid area out of HA.
 SLIDES=(
-  "$BRACS/Group_AT/Type_ADH/BRACS_1228.svs"      # train, and the sanity-check
-                                                 # slide every earlier bench ran
-  "$BRACS/Group_MT/Type_DCIS/BRACS_1476.svs"     # train
-  "$BRACS/Group_AT/Type_FEA/BRACS_1936.svs"      # train
+  "$BRACS/Group_AT/Type_ADH/BRACS_1003694.svs"   # train  (was BRACS_1228, no longer on disk)
+  "$BRACS/Group_MT/Type_DCIS/BRACS_1474.svs"     # train
+  "$BRACS/Group_AT/Type_FEA/BRACS_1813.svs"      # train
   "$BRACS/Group_BT/Type_N/BRACS_1579.svs"        # train  (new: Group_BT)
-  "$BRACS/Group_MT/Type_IC/BRACS_1284.svs"       # train  (new: Type_IC)
+  "$BRACS/Group_MT/Type_IC/BRACS_1411.svs"       # train  (new: Type_IC)
   "$KI67/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs"               # train
   "$KI67/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs"               # train
   "$KI67/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs"               # train
@@ -127,7 +126,7 @@ echo ""
 # fit size lives. Overriding it here would give the masks a different seg_id,
 # and probe_tile_yield / the SuperPathPoint corpora -- which read
 # the plain recipe -- would then find no mask at all.
-python utilities/cli/build_cache/build_mask_store.py \
+python -m locascope.cli.build_cache.build_mask_store \
   "${SLIDES[@]}" \
   --seg uni2_pca \
   --workers $WORKERS
@@ -151,7 +150,7 @@ echo ""
 # No --out: both CLIs resolve theirs with job_result_dir(), which prefers
 # SLURM_JOB_NAME, so the mask table and the yield table land in the same
 # result/BuildMaskStore/ without either of them being told where that is.
-python utilities/cli/diagnostics/probe_tile_yield.py
+python -m locascope.cli.diagnostics.probe_tile_yield
 probe=$?
 
 echo ""

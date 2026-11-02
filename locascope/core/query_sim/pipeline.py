@@ -13,14 +13,14 @@ from typing import Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from config import DomainGapConfig
-from augment.color    import (
+from locascope.core.query_sim.config import DomainGapConfig
+from locascope.core.query_sim.augment.color import (
     apply_color, apply_color_temp, apply_brightness_contrast, apply_jpeg,
 )
-from augment.field    import apply_vignette, apply_stage_shift
-from augment.lens     import apply_distortion, apply_defocus, apply_chromatic
-from augment.geometry import apply_rotation, apply_scale
-from augment.noise    import apply_noise
+from locascope.core.query_sim.augment.field import apply_vignette, apply_stage_shift
+from locascope.core.query_sim.augment.lens import apply_distortion, apply_defocus, apply_chromatic
+from locascope.core.query_sim.augment.geometry import apply_rotation, apply_scale
+from locascope.core.query_sim.augment.noise import apply_noise
 
 
 def _as_rgb_uint8(img) -> np.ndarray:

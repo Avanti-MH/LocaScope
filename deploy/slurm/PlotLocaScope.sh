@@ -15,7 +15,7 @@ ml purge
 ml load miniconda3/26.1.1
 ml load cuda/12.6
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # ---------------- Offline figures from a cached run ----------------
 #
@@ -94,7 +94,7 @@ EXTRA="${EXTRA:-}"
 echo "cache job $STAGE_JOB   real=${REAL:-0}   stages $STAGE1 | $STAGE2 | $STAGE3   seg $SEG"
 echo "stage 2: k=${STAGE2_K:-recipe}   stage 3: topk=${STAGE3_TOPK:-recipe}   limit $LIMIT"
 
-python utilities/cli/plot/plot_locascope.py \
+python -m locascope.cli.plot.plot_locascope \
   --datasets $DATASETS --n-wsi "$N_WSI" \
   --sampler-n-per-rung "$PER_LEVEL" \
   --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" --route "$ROUTE" \

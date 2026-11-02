@@ -31,15 +31,15 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from ConfigIdentity import register
-from SafeSlide import SafeSlide
-from TileEncoderFunc import TileEncoder, TileEncoderConfig
-from stage1_estimation.StageInterface import EstMppResult, weights_path
-from stage2_retrieval.Context import (LATTICES, GridSource, LevelFeatures, QueryFeatures, RerankFeatures,
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.slides.SafeSlide import SafeSlide
+from locascope.core.backbones.TileEncoder import TileEncoder, TileEncoderConfig
+from locascope.core.stage1_estimation.StageInterface import EstMppResult, weights_path
+from locascope.core.stage2_retrieval.Context import (LATTICES, GridSource, LevelFeatures, QueryFeatures, RerankFeatures,
                                       ScoringInput, WindowBatch, WindowSearch, first_phase_output,
                                       gather_windows, incoming_table, reranked_output, top_candidates)
-from stage2_retrieval.Retriever import EncoderPool, Extra, RetrievalOutput, Retriever, RetrieverConfig
-from stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, Extra, RetrievalOutput, Retriever, RetrieverConfig
+from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet
 
 SEARCHES: Tuple[str, ...] = ('exact', 'hnsw', 'ivf')
 
@@ -113,7 +113,7 @@ def load_net(weights: str, device: Any, pooling: str, arch: str, method: str,
     """The network of checkpoint `weights`, and its file's record; refused when it is not `arch`, is not the
     `method` the config names (its ContextEn and GlobalEn), has another no-match option than `no_match`, or was
     trained on features of another pooling than the encoder gives."""
-    from Checkpoints import build_rerank_from_checkpoint           # noqa: PLC0415
+    from locascope.core.networks.Checkpoints import build_rerank_from_checkpoint           # noqa: PLC0415
     net, ckpt = build_rerank_from_checkpoint(weights_path(weights), device)
     if ckpt['arch'] != arch:
         raise ValueError(f'{weights} is a {ckpt["arch"]!r} network, this method needs {arch!r}')
@@ -347,7 +347,7 @@ class RetrieverGloRet(Retriever):
         return reranked_output(upstream, cs, table, 'gloret', own)
 
     def tables(self, out: RetrievalOutput, qc: Any) -> Dict[str, List[Dict[str, Any]]]:
-        from stage2_retrieval.Context import score_rows                   # noqa: PLC0415
+        from locascope.core.stage2_retrieval.Context import score_rows                   # noqa: PLC0415
         rows: List[Dict[str, Any]] = score_rows(out, qc) if 'columns' in out.extras else []
         return {'rerank_scores': rows} if rows else {}
 
@@ -407,7 +407,7 @@ class RerankerLogLoRet(Retriever):
         return reranked_output(upstream, cs, table, 'logloret', own)
 
     def tables(self, out: RetrievalOutput, qc: Any) -> Dict[str, List[Dict[str, Any]]]:
-        from stage2_retrieval.Context import score_rows                   # noqa: PLC0415
+        from locascope.core.stage2_retrieval.Context import score_rows                   # noqa: PLC0415
         rows: List[Dict[str, Any]] = score_rows(out, qc) if 'columns' in out.extras else []
         return {'rerank_scores': rows} if rows else {}
 

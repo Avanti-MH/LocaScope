@@ -11,7 +11,7 @@ downsample, so the same gap can be put on any sensor at any objective.
 from dataclasses import dataclass
 from typing import Tuple
 
-from ConfigIdentity import IdentifiedConfig, register
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, register
 
 
 @register('domain-gap')

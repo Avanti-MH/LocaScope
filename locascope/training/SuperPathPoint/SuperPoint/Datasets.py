@@ -61,14 +61,14 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from Cache import wsi_stem_of
-from ConfigIdentity import IdentifiedConfig, register
+from locascope.core.cache.Cache import wsi_stem_of
+from locascope.core.config.ConfigIdentity import IdentifiedConfig, register
 
-from common import KeypointLabelStore
-from common.Homography import inside, points_input_to_output, sample_homography
-from common.HomographyConfig import HomographyConfig
-from TileSampler import centre_crop, centre_margin
-from common.Homography import pretile_valid_mask, warp_from_pretile
+from locascope.training.SuperPathPoint.common import KeypointLabelStore
+from locascope.training.SuperPathPoint.common.Homography import inside, points_input_to_output, sample_homography
+from locascope.training.SuperPathPoint.common.HomographyConfig import HomographyConfig
+from locascope.core.tiles.TileSampler import centre_crop, centre_margin
+from locascope.training.SuperPathPoint.common.Homography import pretile_valid_mask, warp_from_pretile
 
 BALANCE_MODES = ('none', 'align-min', 'loss-weight')
 

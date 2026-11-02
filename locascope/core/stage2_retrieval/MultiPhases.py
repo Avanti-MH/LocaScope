@@ -24,13 +24,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ConfigIdentity import register
-from TileEncoderFunc import encoder_config
-from stage1_estimation.StageInterface import EstMppResult
-from stage2_retrieval.RerankerScorers import RerankerCslsConfig, RerankerDualConfig
-from stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever, RetrieverConfig
-from stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig
-from stage2_retrieval.StageInterface import CandidateSet
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.backbones.TileEncoder import encoder_config
+from locascope.core.stage1_estimation.StageInterface import EstMppResult
+from locascope.core.stage2_retrieval.RerankerScorers import RerankerCslsConfig, RerankerDualConfig
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever, RetrieverConfig
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig
+from locascope.core.stage2_retrieval.StageInterface import CandidateSet
 
 
 @register('multiphases')
@@ -44,7 +44,7 @@ class MultiPhasesConfig(RetrieverConfig):
     VERSION = 1
 
     def __post_init__(self) -> None:
-        from stage2_retrieval import retriever_class                 # noqa: PLC0415
+        from locascope.core.stage2_retrieval import retriever_class                 # noqa: PLC0415
         if not self.phases:
             raise ValueError('a chain has at least one phase')
         length: Optional[int] = None
@@ -72,7 +72,7 @@ class MultiPhases(Retriever):
     def __init__(self, cfg: MultiPhasesConfig, device: Optional[Any] = None, *,
                  encoders: Optional[EncoderPool] = None, multi_gpu: bool = False, read_workers: int = 0,
                  feature_store: Optional[Any] = None) -> None:
-        from stage2_retrieval import retriever_class                 # noqa: PLC0415
+        from locascope.core.stage2_retrieval import retriever_class                 # noqa: PLC0415
         super().__init__(cfg, device, encoders=encoders, multi_gpu=multi_gpu)
         self.cfg: MultiPhasesConfig = cfg
         self.phases: List[Retriever] = [

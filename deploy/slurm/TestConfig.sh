@@ -17,26 +17,26 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
 #  The two config layers every module is named and configured through. No
 #  slide, no model weights.
-#    test_config_identity  utilities/ConfigIdentity.py: identity parts, nested
+#    test_config_identity  locascope/core/config/ConfigIdentity.py: identity parts, nested
 #                          configs, weights_id (content, device, the wrapper),
 #                          the registry, the json round trip
-#    test_config_args      utilities/ConfigArgs.py: one flag per config field,
+#    test_config_args      locascope/core/config/ConfigArgs.py: one flag per config field,
 #                          the sampler's and the camera's flags
 #
-#    sbatch jobscripts/TestConfig.sh
-#    ONLY="test_config_args" sbatch jobscripts/TestConfig.sh
+#    sbatch deploy/slurm/TestConfig.sh
+#    ONLY="test_config_args" sbatch deploy/slurm/TestConfig.sh
 # =============================================================================
 ONLY="${ONLY:-test_config_identity test_config_args}"
 
 status=0
 for t in $ONLY; do
   echo "======== $t ========"
-  python "utilities/test_modules/$t.py"
+  python "tests/$t.py"
   rc=$?
   [ $rc -ne 0 ] && status=$rc
   echo ""

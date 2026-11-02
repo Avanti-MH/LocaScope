@@ -2,9 +2,9 @@
 """show_camera_effects -- every effect of the camera's domain gap on its own, then all of them
 together, on a slide crop and on a checkerboard.
 
-    python utilities/cli/demo/show_camera_effects.py --wsi BRACS_1228
-    python utilities/cli/demo/show_camera_effects.py            # the checkerboard only
-    sbatch jobscripts/ShowCameraEffects.sh
+    python -m locascope.cli.demo.show_camera_effects --wsi BRACS_1003694
+    python -m locascope.cli.demo.show_camera_effects            # the checkerboard only
+    sbatch deploy/slurm/ShowCameraEffects.sh
 
 The effects are `query_sim/pipeline._apply_params`'s own, run through that function (the same
 order, the same lens margin, the same sensor crop) with a parameter set that is neutral except for
@@ -39,17 +39,15 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 _HERE: Path = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent.parent))                          # utilities/
-from _paths import job_result_dir, setup_import_paths                # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                                   # noqa: E402
 from PIL import Image, ImageDraw                                     # noqa: E402
 
-from config import DomainGapConfig                                   # noqa: E402
-from FovSupply import FOV_RECIPES                                    # noqa: E402
-from pipeline import _apply_params, _sample_params                   # noqa: E402
+from locascope.core.query_sim.config import DomainGapConfig                                   # noqa: E402
+from locascope.core.query_sim.FovSupply import FOV_RECIPES                                    # noqa: E402
+from locascope.core.query_sim.pipeline import _apply_params, _sample_params                   # noqa: E402
 
 Params = Dict[str, float]
 
@@ -120,8 +118,8 @@ def checkerboard(side: int = INPUT_SIDE, square: int = 56) -> np.ndarray:
 def slide_crop(wsi_name: str, level: int, seed: int) -> np.ndarray:
     """The most textured of a few random INPUT_SIDE squares of the slide at `level`, skipping
     ones that are mostly glass."""
-    from AccessDatasets import locate                                # noqa: PLC0415
-    from SafeSlide import SafeSlide                                  # noqa: PLC0415
+    from locascope.core.slides.AccessDatasets import locate                                # noqa: PLC0415
+    from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: PLC0415
     wsi = SafeSlide(str(locate(wsi_name).path))
     ds: float = float(wsi.level_downsamples[level])
     width, height = wsi.dimensions

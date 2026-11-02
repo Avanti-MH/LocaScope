@@ -18,20 +18,20 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  The tests of the rerank work (stage 2 phase two, its training, and the base
 #  modules it changed). No slide, no model weights.
 #
-#    sbatch jobscripts/RerankHead/TestRerank.sh
+#    sbatch deploy/slurm/RerankHead/TestRerank.sh
 # =============================================================================
 ONLY="${ONLY:-test_context test_rerank test_neural test_arm_spec test_naming test_retriever_arms test_arm_tables}"
 
 status=0
 for t in $ONLY; do
   echo "======== $t ========"
-  python "utilities/test_modules/TestRerank/$t.py"
+  python "tests/TestRerank/$t.py"
   rc=$?
   [ $rc -ne 0 ] && status=$rc
 done

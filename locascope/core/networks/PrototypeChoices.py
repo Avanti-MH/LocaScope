@@ -1,10 +1,10 @@
 '''The registry of every selectable Stage 2/Stage 3 arm for `training/
-PrototypicalRoutingHead`'s metric-based main line. It lives in aiNNModel so the
-GENERIC checkpoint layer (`aiNNModel/models/common/Checkpoints.py`'s
+PrototypicalRoutingHead`'s metric-based main line. It lives in locascope.core so the
+GENERIC checkpoint layer (`locascope/core/networks/Checkpoints.py`'s
 `build_prototype_from_checkpoint`) can read it too, without importing a
-training package into `aiNNModel/models/` -- the same reason `stage1_estimation/
+training package into `locascope/core/networks/` -- the same reason `stage1_estimation/
 ClassifierEstMpp.py` reads `Heads._CLASSIFIER_REGISTRY`/
-`TileEncoderFunc.encoder_config` rather than anything under `training/`.
+`TileEncoder.encoder_config` rather than anything under `training/`.
 `Runtime.py` re-exports these four names.
 
 Stage 2 is the pipeline `pool -> G (support-context) -> F (query-context)
@@ -17,10 +17,10 @@ sub-stage:
     COLLAPSE_CHOICES          Collapse, `--collapse`: COLLAPSES a support set
                               to one prototype, or (`off`) does not
 
-`identity` is the off switch for G and F (`aiNNModel/models/
+`identity` is the off switch for G and F (`locascope/core/networks/
 ContextEncoders.py`); `COLLAPSE_CHOICES` has a matching `off` entry
 (Collapse skipped, support stays per-member). `ROUTING_HEAD_CHOICES`
-(Stage 3, all THREE now in `aiNNModel/models/PrototypeRoutingHeads.py`)
+(Stage 3, all THREE now in `locascope/core/networks/PrototypeRoutingHeads.py`)
 has: `cosine_tau` (pairs with a collapsed `[K,D]` prototype stack),
 `cosine_logsumexp` (pairs ONLY with `--collapse off`'s per-rung,
 un-collapsed `{rung:[K_r,D]}` -- see `PrototypeRoutingHeads.
@@ -55,13 +55,13 @@ from typing import Callable, Dict, Tuple
 
 import torch.nn as nn
 
-from PrototypeGenerators import (SetTransformerPrototype, SetTransformerConfig,  # noqa: E501
+from locascope.core.networks.PrototypeGenerators import (SetTransformerPrototype, SetTransformerConfig,  # noqa: E501
                                  TrivialPrototype, TrivialPrototypeConfig,
                                  SharedMlpPrototype, SharedMlpConfig,
                                  AttnPoolPrototype, AttnPoolConfig,
                                  PassthroughCollapse)
-from PrototypeRoutingHeads import CosineTauHead, CosineLogSumExpHead, AttnScoreHead
-from ContextEncoders import (IdentityQueryContext,
+from locascope.core.networks.PrototypeRoutingHeads import CosineTauHead, CosineLogSumExpHead, AttnScoreHead
+from locascope.core.networks.ContextEncoders import (IdentityQueryContext,
                              BiLstmSupportContext, BiLstmContextConfig,
                              AttnLstmQueryContext, AttnLstmContextConfig)
 

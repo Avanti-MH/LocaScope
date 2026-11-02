@@ -16,10 +16,10 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  training/PrototypicalRoutingHead -- ONE JOB, 14 TRAINING RUNS, then test:
+#  locascope/training/PrototypicalRoutingHead -- ONE JOB, 14 TRAINING RUNS, then test:
 #
 #    [1]  the BASELINE and one run per mechanism, each the baseline with that
 #         ONE thing changed (RUNS below), so each run answers one question   14
@@ -161,10 +161,8 @@ fi
 
 if [ -z "$OUT" ]; then
     OUT=$(python -c "
-import sys
-sys.path.insert(0, 'utilities')
-import _paths
-print(_paths.job_result_dir('PrototypicalRoutingHead'))
+from locascope.paths import job_result_dir
+print(job_result_dir('PrototypicalRoutingHead'))
 ")
 fi
 mkdir -p "$OUT"
@@ -261,7 +259,7 @@ run_one () {
     echo ""
     RUN_I=$((RUN_I + 1))
     echo "-------- [$RUN_I/$RUN_N] $LABEL: $ENC | $LOSS_NOW | $REUSE | $POOL | $COLLAPSE | $ROUTING_HEAD | ctx $SUPPORT_CONTEXT/$QUERY_CONTEXT | cross ${CROSS:-off} --------"
-    python training/PrototypicalRoutingHead/cli/train.py \
+    python -m locascope.training.PrototypicalRoutingHead.train \
         --train-dataset "$TRAIN_DATASET" \
         --train-stain "$TRAIN_STAIN" \
         --encoder "$ENC" \
@@ -404,7 +402,7 @@ if [ -n "$STARTED" ]; then
     WEIGHTS_ARG="--weights $(echo $NEW_WEIGHTS)"
     rm -f "$STARTED"
 fi
-python training/PrototypicalRoutingHead/cli/evaluate.py \
+python -m locascope.training.PrototypicalRoutingHead.evaluate \
     $WEIGHTS_ARG \
     --test-dataset "$TEST_DATASET" \
     --seg "$SEG" \

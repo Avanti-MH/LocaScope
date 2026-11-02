@@ -15,7 +15,7 @@ rather than what it is.
 
 WHY THE MODULE IS BORROWED AND THE DECODE IS NOT
 -------------------------------------------------
-The network itself is imported from `/work/u26130998/github_repos/SuperPoint/
+The network itself is imported from `$LOCASCOPE_DATA_ROOT/github_repos/SuperPoint/
 superpoint_pytorch.py` rather than re-declared here. Re-declaring it means
 re-typing `VGGBlock`'s conv -> ReLU -> BatchNorm order (which is unusual: the
 activation comes BEFORE the norm, `superpoint_pytorch.py:50-65`), `eps=0.001`,
@@ -64,9 +64,9 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register
 
-from SuperPoint.Decoders import depth_to_space_prob
+from locascope.training.SuperPathPoint.SuperPoint.Decoders import depth_to_space_prob
 
 #: Where the upstream checkout is. `github_repos/SuperPoint` beside this repo by
 #: default -- where the upstream checkouts live (prov-gigapath, UNI, eomt sit
@@ -158,7 +158,7 @@ class SuperPointTeacher(IdentifiedBuild):
         self.device = torch.device(device)
 
         root = _upstream_root(cfg.root)
-        if root not in sys.path:
+        if root not in sys.path:                  # the upstream checkout is not a pip package
             sys.path.insert(0, root)
         try:
             from superpoint_pytorch import SuperPoint       # noqa: PLC0415
@@ -280,9 +280,8 @@ def _upstream_root(explicit: Optional[str]) -> str:
     elif os.environ.get(UPSTREAM_ENV):
         root = os.environ[UPSTREAM_ENV]
     else:
-        here = os.path.dirname(os.path.abspath(__file__))
-        repo = os.path.abspath(os.path.join(here, '..', '..', '..'))
-        root = os.path.join(os.path.dirname(repo), 'github_repos', 'SuperPoint')
+        from locascope.paths import PROJECT_ROOT       # noqa: PLC0415
+        root = os.path.join(os.path.dirname(PROJECT_ROOT), 'github_repos', 'SuperPoint')
     if not os.path.isfile(os.path.join(root, 'superpoint_pytorch.py')):
         raise FileNotFoundError(
             f'{root} does not hold superpoint_pytorch.py. Point '

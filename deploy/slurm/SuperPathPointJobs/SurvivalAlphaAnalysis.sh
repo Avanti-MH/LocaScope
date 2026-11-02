@@ -15,7 +15,7 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  plan.md 2.2① -- calibrate alpha, one bucket (F/R/C) at a time
@@ -42,7 +42,7 @@ if [ -n "$FROM_CSV" ]; then
   TAU_FLOOR="${TAU_FLOOR:-0.0}"
   echo "======== SurvivalAlphaAnalysis (--from-csv) ========"
   echo "  reading  $FROM_CSV"
-  python training/SuperPathPoint/cli/survival_alpha_analysis.py \
+  python -m locascope.training.SuperPathPoint.cli.survival_alpha_analysis \
     --from-csv "$FROM_CSV" \
     --axes $AXES \
     --quantiles $QUANTILES \
@@ -59,7 +59,7 @@ CHECKPOINT="${CHECKPOINT:?set CHECKPOINT=<path to a trained KeypointNet .pt, e.g
 # SMOKE_TEST=1 -- a cheap check before the real (possibly hours-long) run:
 # does the grid-hash merge now in production (`SurvivalProcess.
 # _merge_within_radius`) still agree with its two retired predecessors, on a
-# small, fast, always-registered slide (BRACS_1228 -- NOT whatever WSI_NAME
+# small, fast, always-registered slide (BRACS_1003694 -- NOT whatever WSI_NAME
 # the real run below targets)? Runs `DemoSurvivalAnalysis.sh`'s merge_grid
 # part itself rather than re-deriving its logic, with these parameters fixed
 # (this is the exact invocation that first caught the real-flow skip-guard
@@ -70,18 +70,18 @@ if [ "$SMOKE_TEST" = 1 ]; then
   echo "======== SurvivalAlphaAnalysis smoke test (via DemoSurvivalAnalysis.sh, merge_grid) ========"
   PARTS=merge_grid \
   CHECKPOINT="$CHECKPOINT" \
-  WSI_NAME=BRACS_1228 \
+  WSI_NAME=BRACS_1003694 \
   SKIP_ORIGINAL_ABOVE=50000 \
   PLOT_REAL=1 \
   REAL_FLOW=1 \
   REAL_FLOW_N_TREES=2 \
-  bash jobscripts/SuperPathPointJobs/DemoSurvivalAnalysis.sh
+  bash deploy/slurm/SuperPathPointJobs/DemoSurvivalAnalysis.sh
   exit $?
 fi
 
-# Path/stem are resolved from WSI_NAME via `utilities/AccessDatasets.py` --
+# Path/stem are resolved from WSI_NAME via `locascope/core/slides/AccessDatasets.py` --
 # see that file for the registered names (`AccessDatasets.list_names()`).
-WSI_NAME="${WSI_NAME:?set WSI_NAME=<a name AccessDatasets.py registers, e.g. BRACS_1228>}"
+WSI_NAME="${WSI_NAME:?set WSI_NAME=<a name AccessDatasets.py registers, e.g. BRACS_1003694>}"
 
 TILE="${TILE:-256}"
 RUNGS="${RUNGS:-1.0 2.0 4.0 8.0 16.0}"
@@ -153,7 +153,7 @@ if [ "$ALIVE_METHOD" = scale_extremum ]; then
 fi
 echo ""
 
-python training/SuperPathPoint/cli/survival_alpha_analysis.py \
+python -m locascope.training.SuperPathPoint.cli.survival_alpha_analysis \
   --checkpoint "$CHECKPOINT" \
   --wsi-name "$WSI_NAME" \
   --draw-cache-job "$DRAW_CACHE_JOB" \

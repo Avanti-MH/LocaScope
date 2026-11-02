@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for cli/reeval_density.py -- the matched-budget re-scoring.
 
-    python utilities/test_modules/TestSuperPathPoint/test_reeval_density.py
+    python tests/TestSuperPathPoint/test_reeval_density.py
 
 THIS TEST EXISTS BECAUSE THE THING IT CHECKS FAILS SILENTLY. Two arms
 scored at different point densities are not comparable: the decoy rises with point density, `margin <= 1/decoy`, so
@@ -48,23 +48,19 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
 
-from common.KeypointLabelStore import (nms_max_pool,             # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import (nms_max_pool,             # noqa: E402
                                        points_from_prob)
-from SuperPoint.KeypointNet import KeypointNetConfig             # noqa: E402
-from SuperPoint.Trainer import _match_rate                       # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.KeypointNet import KeypointNetConfig             # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Trainer import _match_rate                       # noqa: E402
 
-from cli.reeval_density import (_cell_of, _channels_of,          # noqa: E402
+from locascope.training.SuperPathPoint.cli.reeval_density import (_cell_of, _channels_of,          # noqa: E402
                                 _descriptor_dim_of)
 
 TILE = 256

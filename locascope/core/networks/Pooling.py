@@ -33,9 +33,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from Features import LayerTokens
-from Head import grid_view, mix_grid
-from Heads import AttentionPoolHead, HeadConfig
+from locascope.core.networks.Features import LayerTokens
+from locascope.core.networks.Head import grid_view, mix_grid
+from locascope.core.networks.Heads import AttentionPoolHead, HeadConfig
 
 POOLING_KINDS = ('avg', 'max', 'attn', 'passthrough', 'cls')
 

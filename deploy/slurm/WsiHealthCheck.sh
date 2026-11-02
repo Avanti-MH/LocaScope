@@ -17,14 +17,14 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
-# Runs write outside the checkout; see utilities/_paths.py
+# Runs write outside the checkout; see locascope/paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # =============================================================================
 # One SLURM job, every WSI diagnostic, in funnel order -- routed through
-# utilities/cli/diagnostics/wsi_health_check.py rather than calling
+# locascope/cli/diagnostics/wsi_health_check.py rather than calling
 # scan_wsi_holes.py alone the way this jobscript (formerly WsiHoles.sh) used
 # to. See that script's own docstring for why the order is
 # metadata -> holes -> mask -> yield, with scale running alongside rather
@@ -35,7 +35,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 #   STOP_AFTER=holes      + the exhaustive block scan below, the slow tier
 #   STOP_AFTER=mask       + tissue-mask validity (GPU for a model SEG)
 #   STOP_AFTER=yield      (default) + tile-yield, needs a mask STORE already
-#                         built by utilities/cli/build_cache/build_mask_store.py
+#                         built by locascope/cli/build_cache/build_mask_store.py
 #   SKIP_SCALE=1          drop the parallel base_mpp/native-rung check
 #
 # GPU line above is only there because the partition wants one -- metadata,
@@ -44,14 +44,14 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # =============================================================================
 
 # ---------------- Parameters ----------------
-# Dataset ids (utilities/AccessDatasets.py dataset_ids()), not raw filesystem
+# Dataset ids (locascope/core/slides/AccessDatasets.py dataset_ids()), not raw filesystem
 # roots -- this is what replaces the old script's own `ls *_mrxs/*.mrxs` glob
 # and its hand-rolled cross-root duplicate-name guard: AccessDatasets already
 # keeps ki67_pure and ki67_with_photo apart by dataset id, and
 # WsiSelection.resolve_wsi_paths carries that id through as `dataset` on every
 # resolved entry, so two datasets sharing a slide NAME no longer collide under
 # one key the way scanning raw roots could.
-#   sbatch --export=ALL,DATASET="ki67_pure" jobscripts/WsiHealthCheck.sh
+#   sbatch --export=ALL,DATASET="ki67_pure" deploy/slurm/WsiHealthCheck.sh
 DATASET="${DATASET:-ki67_pure ki67_with_photo}"
 WSI="${WSI:-}"                  # explicit path(s), combined with DATASET if both set
 
@@ -106,10 +106,7 @@ case "$STOP_AFTER" in holes|mask|yield) run_holes=1 ;; esac
 if [ "$run_holes" = "1" ]; then
     FIRST=$(python - "$DATASET" <<'EOF'
 import sys
-sys.path.insert(0, 'utilities/cli/diagnostics')
-sys.path.insert(0, 'utilities')
-import _paths; _paths.setup_import_paths()
-from WsiSelection import resolve_wsi_paths
+from locascope.cli.diagnostics.WsiSelection import resolve_wsi_paths
 datasets = sys.argv[1].split()
 entries = resolve_wsi_paths(dataset=datasets)
 print(entries[0]['path'] if entries else '')
@@ -169,7 +166,7 @@ fi
 # ---------------- Step 2: the funnel ----------------
 echo ""
 echo "======== wsi_health_check.py  dataset=[$DATASET] stop-after=$STOP_AFTER ========"
-python utilities/cli/diagnostics/wsi_health_check.py "${ARGS[@]}"
+python -m locascope.cli.diagnostics.wsi_health_check "${ARGS[@]}"
 rc=$?
 
 echo ""

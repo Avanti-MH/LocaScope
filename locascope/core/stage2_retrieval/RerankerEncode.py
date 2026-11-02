@@ -17,12 +17,12 @@ from typing import Any, Dict, List, Tuple
 import torch
 import torch.nn.functional as F
 
-from ConfigIdentity import register
-from TileEncoderFunc import TileEncoderConfig
-from stage2_retrieval.Context import ScoringInput, WindowBatch, rotated_query_tiles, tile_vectors
-from stage2_retrieval.Retriever import RetrieverConfig
-from stage2_retrieval.RerankerScorers import ColumnRanker
-from stage2_retrieval.StageInterface import Candidate
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.backbones.TileEncoder import TileEncoderConfig
+from locascope.core.stage2_retrieval.Context import ScoringInput, WindowBatch, rotated_query_tiles, tile_vectors
+from locascope.core.stage2_retrieval.Retriever import RetrieverConfig
+from locascope.core.stage2_retrieval.RerankerScorers import ColumnRanker
+from locascope.core.stage2_retrieval.StageInterface import Candidate
 
 
 def _tile_origins(inp: ScoringInput, c: Candidate, shape: Tuple[int, int],

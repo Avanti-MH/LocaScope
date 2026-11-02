@@ -1,14 +1,14 @@
 # ClassifyingRoutingHead — spec
 
 > **2026-11-02 核對（只列程式碼裡查得到的；正文是 2026-09 的設計與當時的狀態，沒有逐段改）：**
-> - 套件現在是 `Datasets.py`、`Runtime.py`、`cli/{train,evaluate}.py`。通用的 head／checkpoint 元件在 `aiNNModel/models/`
+> - 套件現在是 `Datasets.py`、`Runtime.py`、`cli/{train,evaluate}.py`。通用的 head／checkpoint 元件在 `locascope/core/networks/`
 >   （`Heads.py`、`common/Head.py`、`common/Checkpoints.py`），`stage1_estimation/ClassifierEstMpp.py` 直接用它們
 >   （`Runtime.py` 開頭的 docstring 說明了這個分法）。
 > - 「No rendered corpus on disk」一節是現況：`Datasets.py` 現在只有 manifest（位置）＋ `iterate_epoch` ＋
 >   `render_row`，val／test 與訓練走同一條迴圈。「Caching」「Status (2026-09-16)」「Splits, and what may look at which」「The manifest cache is keyed by a hash」四節（寫的是已刪除的做法）已在 2026-11-02 刪掉。
 > - 程式裡已找不到的名稱：`write_manifest`/`read_manifest`。「Files」一節對 `Datasets.py` 的描述已照現況改過。`_CameraBank`、`_render_row` 現在叫 `CameraBank`、`render_row`；
 >   `RoutingHeadDataset`、`collate_routing_batch`、`iterate_epoch` 還在。
-> - val／test 集是 `utilities/cli/build_cache/make_dataset.py` 寫下的虛擬 dataset（`@pure-train`、`@legacy-val`、`@legacy-test`），
+> - val／test 集是 `locascope/cli/build_cache/make_dataset.py` 寫下的虛擬 dataset（`@pure-train`、`@legacy-val`、`@legacy-test`），
 >   不是由 `--seed` 現算（`cli/train.py`、`cli/evaluate.py` 的 docstring）。
 > - 權重檔名以 `--` 分段、含資料來源與 loss，見「Weight files」一節（已改成現況）。
 
@@ -59,8 +59,8 @@ Siamese, for the same "still reading" reason.
 
 | | Encoder | Trainable |
 |---|---|---|
-| **baseline 2** | GigaPath or UNI2 (`aiNNModel/{GigaPathFunc,Uni2Func}.py`), CLS pooling | **frozen** |
-| **baseline 3** | ConvNeXt V2 Tiny (`aiNNModel/ConvNeXtV2Func.py`, NEW), `convnextv2_tiny.fcmae_ft_in22k_in1k` init | **fine-tuned end-to-end** |
+| **baseline 2** | GigaPath or UNI2 (`locascope/core/{GigaPath,Uni2}.py`), CLS pooling | **frozen** |
+| **baseline 3** | ConvNeXt V2 Tiny (`locascope/core/backbones/ConvNeXtV2.py`, NEW), `convnextv2_tiny.fcmae_ft_in22k_in1k` init | **fine-tuned end-to-end** |
 
 No subspace projection on either arm — raw encoder features straight into the
 head: ranking-by-correlation subspaces lose to the full space, so there is
@@ -180,7 +180,7 @@ the `--merge` key, so the three never overwrite each other.
 `PrototypicalRoutingHead/Losses.compute_loss` is the same three formulas per
 episode; `test_ordinal_loss.py` holds the two to the same numbers.
 
-**Resume** (`--resume-dir`, `aiNNModel/models/common/Resume.py`). Unset:
+**Resume** (`--resume-dir`, `locascope/core/networks/Resume.py`). Unset:
 train from scratch, write nothing. Set: every epoch writes
 `<model>_resume.pt` there -- weights, optimizer, epoch, best scores, the val
 rows so far and every RNG -- and a run that finds one continues after its
@@ -195,16 +195,16 @@ around 2026-09-14; landed on Tiny (28M params, `convnextv2_tiny.
 fcmae_ft_in22k_in1k`) over Nano (15M, no `_in22k` tag available below Nano) —
 final call was Tiny.
 
-### Why `ConvNeXtV2Func.py` is a frozen-only `TileEncoder` and baseline 3 is not built on it
+### Why `ConvNeXtV2.py` is a frozen-only `TileEncoder` and baseline 3 is not built on it
 
-`TileEncoder._run` (`aiNNModel/TileEncoderFunc.py`) is `@torch.no_grad()` —
+`TileEncoder._run` (`locascope/core/backbones/TileEncoder.py`) is `@torch.no_grad()` —
 right for GigaPath/UNI2 (always frozen here) and right for ConvNeXtV2Encoder
 whenever IT is used frozen (e.g. as a 4th arm next to GigaPath/UNI2: a
 natural-image CNN prior instead of a pathology-ViT prior). It cannot be what
 baseline 3 fine-tunes through. Baseline 3's trainable module builds its own
 `nn.Module` from `timm.create_model(ConvNeXtV2EncoderConfig().model.arch,
 pretrained=True, num_classes=0, global_pool='avg')` directly (see
-`aiNNModel/ConvNeXtV2Func.py`'s docstring), reusing the config only for the checkpoint name and the
+`locascope/core/backbones/ConvNeXtV2.py`'s docstring), reusing the config only for the checkpoint name and the
 `TransformConfig` (so preprocessing matches the frozen arm), and trains with
 an ordinary grad-enabled forward pass.
 
@@ -336,8 +336,8 @@ Both are served by one small, additive change to `Camera` rather than two
 different code paths: `capture`/`capture_with_gt` gain an optional `rng`
 parameter (`capture(self, x, y, rotation=None, rng=None)`), used INSTEAD of
 `self._py_rng` for that one call when given, falling back to the existing
-behaviour when it is not — every one of `Camera`'s nine existing callers
-(`bench_offgrid_score.py`, `bench_tile_retrieval.py`, `query_sim/
+behaviour when it is not — every one of `Camera`'s eight remaining callers
+(`bench_offgrid_score.py`, `query_sim/
 generator.py`, ... — see the session log's usage survey) is unaffected.
 `RoutingHeadDataset` then reuses ONE `Camera` per WSI (cheap: the WSI handle
 opens once) for both splits, and only EVAL passes a `rng` derived from the
@@ -443,7 +443,7 @@ their own loop, the same split that already holds between baseline 2 and 3.
 
 fp16 throughout, training and inference both — same default `TileEncoderConfig`
 already uses for every registered encoder (`ModelConfig.dtype = 'fp16'`).
-`aiNNModel/models/Heads.py`'s `HeadConfig.dtype` (`'fp32'` default since the
+`locascope/core/networks/Heads.py`'s `HeadConfig.dtype` (`'fp32'` default since the
 2026-09-16 NaN regression, `'fp16'` still accepted) and its `torch_dtype()`
 helper mirror `ConfigIdentity.ModelConfig.dtype`/`torch_dtype()` exactly —
 duplicated rather than imported, because a head has no `arch`/`source`/
@@ -453,22 +453,22 @@ with `dtype='fp32'` regardless of this default: Adam on fp16 weights ends in
 NaN, mechanism in `HeadConfig.dtype`'s docstring. `--dtype` only sets the
 FROZEN encoder's inference precision in baseline 2; a fine-tuned trunk is
 always fp32, and a checkpoint is rebuilt at the dtype it was trained at, not
-the registry default -- `aiNNModel/models/common/Checkpoints.py`.)
+the registry default -- `locascope/core/networks/Checkpoints.py`.)
 
 ## Encoders available (measured against the installed `timm==1.0.28` /
-`aiNNModel` registry, 2026-09-14 — see session log for the full survey)
+`locascope.core` registry, 2026-09-14 — see session log for the full survey)
 
-| name | `aiNNModel` module | output | dim | notes |
+| name | `locascope.core` module | output | dim | notes |
 |---|---|---|---|---|
-| `gigapath` | `GigaPathFunc.py` | CLS | 1536 | ViT-giant, num_prefix=1 |
-| `uni2` | `Uni2Func.py` | CLS | 1536 | ViT-huge, num_prefix=9 (1 CLS + 8 register) |
-| `conch_vit` | `ConchVitFunc.py` | `attn_pool`(512) or `trunk`(768) | 512/768 | two genuinely different vector spaces; not yet decided whether/which arm joins this comparison |
-| `convnext_v2` | `ConvNeXtV2Func.py` (NEW) | GAP over `[N,768,7,7]` | 768 | Tiny, `fcmae_ft_in22k_in1k` init; frozen-encoder use only, see above |
+| `gigapath` | `GigaPath.py` | CLS | 1536 | ViT-giant, num_prefix=1 |
+| `uni2` | `Uni2.py` | CLS | 1536 | ViT-huge, num_prefix=9 (1 CLS + 8 register) |
+| `conch_vit` | `ConchVit.py` | `attn_pool`(512) or `trunk`(768) | 512/768 | two genuinely different vector spaces; not yet decided whether/which arm joins this comparison |
+| `convnext_v2` | `ConvNeXtV2.py` (NEW) | GAP over `[N,768,7,7]` | 768 | Tiny, `fcmae_ft_in22k_in1k` init; frozen-encoder use only, see above |
 
 ## Files
 
 ```
-aiNNModel/models/           generic encoder+head plumbing, shared by any task
+locascope/core/networks/           generic encoder+head plumbing, shared by any task
                             built on an encoder+head pair (this package, and
                             the planned retrieval work: GraphNN / tree /
                             reranking NN)
@@ -507,20 +507,20 @@ training/ClassifyingRoutingHead/
     Runtime.py            what train.py and evaluate.py BOTH need, so the two
                             cannot drift: BASELINE3_ENCODER/HEAD_CHOICES/
                             heads_for (assembly, task-specific so it stays
-                            here rather than moving to aiNNModel/models/),
+                            here rather than moving to locascope/core/networks/),
                             score (incl. the native/resampled split),
                             wandb_init/wandb_log/wandb_finish/
                             wandb_epoch_metrics, predict (one pass over a
                             split); re-exports Head/HeadConfig/encode_raw/
                             trunk_raw/save_checkpoint/build_from_checkpoint/
-                            weight_filename from aiNNModel/models/(common/)
+                            weight_filename from locascope/core/networks/(common/)
                             so callers need one import line, not two
     cli/
         train.py            trains, selects on val, writes weights/ and
                             val_scores.csv. Never touches test.
         evaluate.py          rebuilds a model from a checkpoint alone and
                             scores it on the test split
-jobscripts/ClassifyingRoutingHead/
+deploy/slurm/ClassifyingRoutingHead/
     ClassifyingRoutingHead.sh
 
 query_sim/camera.py    Camera.capture/capture_with_gt gain an optional `rng`
@@ -579,7 +579,7 @@ returns `(row, patch, label, native)` and `collate_routing_batch` keeps `rows`
 as a plain list, since it is identity rather than a quantity.
 
 The split is at WSI level, so no position from one slide can land on both
-sides. Val and test are the virtual datasets `utilities/cli/build_cache/make_dataset.py`
+sides. Val and test are the virtual datasets `locascope/cli/build_cache/make_dataset.py`
 writes (`@legacy-val`, `@legacy-test`); `train.py` and `evaluate.py` READ them
 rather than re-deriving a split from `--seed`, because a split recomputed from
 a seed is one library version away from quietly putting val slides into test.
@@ -602,7 +602,7 @@ epoch happened to be.
 
 - **Data first**, then the encoder: two trainings of one arm on two datasets
   never overwrite each other. `weight_filename` and `data_tag` in
-  `aiNNModel/models/common/Checkpoints.py` are the definition; `loss` is always
+  `locascope/core/networks/Checkpoints.py` are the definition; `loss` is always
   a segment, `bal` too.
 - **Encoder before head**, because `_paths.encoder_tag(encoder, head)` already
   spells an encoder-plus-head name that way and the result paths follow

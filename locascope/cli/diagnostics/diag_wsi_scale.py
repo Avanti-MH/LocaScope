@@ -17,10 +17,10 @@ Read-only, cheap: opens each WSI once for its pyramid metadata (`base_mpp`,
 no pixel reads.
 
 Usage:
-    python utilities/cli/diagnostics/diag_wsi_scale.py                      # every registered dataset, every WSI
-    python utilities/cli/diagnostics/diag_wsi_scale.py --dataset ki67_pure bracs/test
-    python utilities/cli/diagnostics/diag_wsi_scale.py --wsi /path/to/one.svs /path/to/two.mrxs
-    python utilities/cli/diagnostics/diag_wsi_scale.py --quiet              # summaries only, skip the per-slide/per-rung dump
+    python -m locascope.cli.diagnostics.diag_wsi_scale                      # every registered dataset, every WSI
+    python -m locascope.cli.diagnostics.diag_wsi_scale --dataset ki67_pure bracs/test
+    python -m locascope.cli.diagnostics.diag_wsi_scale --wsi /path/to/one.svs /path/to/two.mrxs
+    python -m locascope.cli.diagnostics.diag_wsi_scale --quiet              # summaries only, skip the per-slide/per-rung dump
 """
 from __future__ import annotations
 
@@ -30,15 +30,12 @@ import os
 import statistics
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                       # noqa: E402
 
-from DsLadder import DEFAULT_RUNGS                                   # noqa: E402
-from SlideReader import SlideReader                                   # noqa: E402
-from SafeSlide import SafeSlide                                      # noqa: E402
-from WsiSelection import resolve_wsi_paths                            # noqa: E402
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS                                   # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                   # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                      # noqa: E402
+from locascope.cli.diagnostics.WsiSelection import resolve_wsi_paths                            # noqa: E402
 
 
 class WsiScaleCheck:
@@ -162,7 +159,7 @@ def main() -> int:
                          'result/<SLURM_JOB_NAME or DiagWsiScale>/base_mpp.csv')
     args = ap.parse_args()
 
-    from AccessDatasets import dataset_ids                          # noqa: PLC0415
+    from locascope.core.slides.AccessDatasets import dataset_ids                          # noqa: PLC0415
     datasets = args.dataset or (None if args.wsi else dataset_ids())
     entries = resolve_wsi_paths(dataset=datasets, wsi=args.wsi)
     print(f'{len(entries)} WSI(s)'

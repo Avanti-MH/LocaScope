@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
-from ReadGeometry import LEVEL_REL_TOL, is_native, level_for, level_px  # noqa: F401
+from locascope.core.slides.ReadGeometry import LEVEL_REL_TOL, is_native, level_for, level_px  # noqa: F401
 
 #: spec.md 6.5. ds 32 is the coarsest rung with measured evidence that tiles
 #: exist at it (Ki67 level 5 and BRACS level 3 both sampled 100/100 at tile 256);
@@ -54,7 +54,7 @@ class RungPlan:
 
     `read_size` is in LEVEL pixels and is what `read_region` wants; `origin` is
     always in level-0 pixels, because that is what openslide takes regardless of
-    level (`utilities/README.md`, coordinate table).
+    level (`locascope/core/README.md`, coordinate table).
     """
     rung_ds:      float     # the requested downsample
     level:        int       # WSI level to read

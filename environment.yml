@@ -1,14 +1,14 @@
 # LocaScope conda environment (精簡版，取代 LocaScope/environment.yml 的 gigapath env)
 #
 # 只保留程式碼實際 import 的套件（trace 自 LocaScope/ 下所有 .py）：
-#   torch / torchvision        核心；HestSegFunc 用 torchvision.models
+#   torch / torchvision        核心；HestSeg 用 torchvision.models
 #   timm (>=1.0.3)             GigaPath / UNI2 / ConvNeXtV2 / CONCH ViT（hf_hub: 載入）
 #   huggingface_hub            timm hf_hub 與 hf_hub_download
 #   safetensors                Store / TissueMask / KeypointLabelStore
 #   numpy, scipy, scikit-learn, faiss-cpu, matplotlib, pillow, opencv-python
-#   pandas                     utilities/cli/plot/plot_locascope.py 的 join table
+#   pandas                     locascope/cli/plot/plot_locascope.py 的 join table
 #   openslide + openslide-python   WSI 讀取
-#   python-dotenv              aiNNModel/*Func.py 讀 HF token
+#   python-dotenv              locascope/core/backbones/*.py 讀 HF token
 #   wandb                      training/*/Runtime.py、SuperPoint/Trainer.py
 #   ruff                       Makefile `make lint`
 #

@@ -20,8 +20,12 @@ from typing import Optional
 
 
 def cpus_available() -> int:
-    """The cpus this process may run on (the job's allocation, not the node's)."""
-    return len(os.sched_getaffinity(0))
+    """The cpus this process may run on (the job's allocation, not the node's). Windows has no
+    affinity call and gives every cpu of the machine."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
 
 
 @dataclass(frozen=True)

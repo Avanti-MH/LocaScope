@@ -2,7 +2,7 @@
 """Stage-1 mpp estimators compared head to head on the same FoVs, every
 method's results a cache entry.
 
-    python utilities/bench_modules/bench_stage1_mpp.py \\
+    python -m locascope.cli.bench.bench_stage1_mpp \\
         --stage1 knn:gigapath knn:uni2 classifier:gigapath-arcface classic:default \\
         --datasets @legacy-test --n-wsi 5
 
@@ -45,7 +45,7 @@ the bank draw's index columns (`index` its row in the draw) and `prototype`,
 the level it went into.
 Each reference bank is a draw entry, its encoded features beside it.
 
-Nothing is scored here: `utilities/cli/metrics/analyze_stage1_metrics.py`
+Nothing is scored here: `locascope/cli/metrics/analyze_stage1_metrics.py`
 takes the same flags, reads these entries and the render's ground truth.
 """
 
@@ -62,19 +62,16 @@ from typing import Any, Dict, List, Tuple
 import torch
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent))                                # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
-sys.path.insert(0, str(_HERE))
+from locascope import paths as _paths                                                       # noqa: E402
 
-import Cache                                                        # noqa: E402
-from CpuBudget import CpuBudget                                     # noqa: E402
-from FovSupply import add_fov_args                                  # noqa: E402
-from SafeSlide import SafeSlide                                     # noqa: E402
-from TissueMaskConfig import (MASK_RECIPES, MaskMaker, add_mask_args,  # noqa: E402
+from locascope.core.cache import Cache                                                        # noqa: E402
+from locascope.host.cpu import CpuBudget                                     # noqa: E402
+from locascope.core.query_sim.FovSupply import add_fov_args                                  # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                     # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import (MASK_RECIPES, MaskMaker, add_mask_args,  # noqa: E402
                               mask_cfg_from_args)
-import stage1_estimation                                            # noqa: E402
-from BenchCommon import (ROLES, Tables, run_stage1, slide_supplies,  # noqa: E402
+from locascope.core import stage1_estimation                                            # noqa: E402
+from locascope.cli.bench.BenchCommon import (ROLES, Tables, run_stage1, slide_supplies,  # noqa: E402
                              stage1_of, stage1_record, status, support_rows)
 
 JOB_NAME = 'Stage1MppBench'
@@ -233,7 +230,7 @@ def main() -> int:
         if device.type == 'cuda':
             torch.cuda.empty_cache()
     masks.close()
-    print('\nscore with utilities/cli/metrics/analyze_stage1_metrics.py and the '
+    print('\nscore with locascope/cli/metrics/analyze_stage1_metrics.py and the '
           'same flags', flush=True)
     return 0
 

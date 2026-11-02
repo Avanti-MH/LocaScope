@@ -24,7 +24,7 @@ the region search, the origin bookkeeping, `mask_ds` from the shape.
 `__call__` survives as the base-class contract and as an escape hatch for a
 caller holding a fitted basis and one level-0 plane. It is not the path.
 
-Ported from `utilities/test_modules/test_EoMT.py`, which took it from
+Ported from `tests/test_EoMT.py`, which took it from
 prov-gigapath's own `demo/gigapath_pca_visualization_timm.ipynb`. That file is a
 spike and says so; this is the half of it that works.
 
@@ -41,7 +41,7 @@ That file has two paths that produce a mask and only one of them means anything:
 
 The distinction is not a preference. EoMT's queries, class head and mask head
 are trained JOINTLY with a backbone; every released weight is for DINOv2 or
-DINOv3 on COCO / ADE20K / Cityscapes (`/work/u26130998/eomt/model_zoo/` holds
+DINOv3 on COCO / ADE20K / Cityscapes (`$LOCASCOPE_DATA_ROOT/eomt/model_zoo/` holds
 exactly `dinov2.md` and `dinov3.md`), so none of them attaches to UNI2's feature
 space -- upstream even flags the class head as dataset-bound with
 `--model.load_ckpt_class_head False`. Training it ourselves would need
@@ -55,7 +55,7 @@ field (`larger_pca_as_fg`) rather than an initialisation.
 
 ALIGNED WITH test_EoMT.encode_batch, NOT WITH TileEncoder.spatial()
 --------------------------------------------------------------------
-`spatial()` (`TileEncoderFunc.py:913`) is this project's dense-feature exit and
+`spatial()` (`TileEncoder.py:913`) is this project's dense-feature exit and
 would be the obvious reuse. It is deliberately NOT used, because it differs from
 the notebook path -- which `test_EoMT.encode_batch:302` follows and whose masks
 are the ones anyone here has actually looked at -- in two places. Everything
@@ -64,7 +64,7 @@ else is the same call:
 
 1. THE TRANSFORM. `_run:754` puts every image through `cfg.transform`: for UNI2
    that is `Resize(224)` then `CenterCrop(224)` then Normalize
-   (`Uni2Func.py:251`). On an exactly-224 square input the geometry is the
+   (`Uni2.py:251`). On an exactly-224 square input the geometry is the
    identity, so at the default tile size this difference does not bite.
 
    At any other tile size it does, and not subtly: a single-int `Resize` scales
@@ -142,11 +142,11 @@ import numpy as np                                          # noqa: E402
 import torch                                                # noqa: E402
 from PIL import Image                                       # noqa: E402
 
-from ConfigIdentity import enc, register                    # noqa: E402
-from ReadGeometry import ReadSpec, level_for                # noqa: E402
-from SlideReader import SlideReader                         # noqa: E402
-from TissueMask import SlideMask                    # noqa: E402
-from TissueSegFunc import (TissueSegConfig, TissueSegmenter,  # noqa: E402
+from locascope.core.config.ConfigIdentity import enc, register                    # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec, level_for                # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                         # noqa: E402
+from locascope.core.tiles.TissueMask import SlideMask                    # noqa: E402
+from locascope.core.backbones.TissueSeg import (TissueSegConfig, TissueSegmenter,  # noqa: E402
                            scanned_rect)
 
 
@@ -173,7 +173,7 @@ LEVEL = 0
 
 # ── reading the slide ─────────────────────────────────────────────────────────
 
-# `scanned_rect` is TissueSegFunc's: one definition of the scanned rectangle
+# `scanned_rect` is TissueSeg's: one definition of the scanned rectangle
 # for every segmenter. It matters more here than for the plane segmenters. On a
 # MIRAX the canvas outside `openslide.bounds-*` is stage travel range holding no
 # image data; tiles over it read nothing, and a ViT handed a blank tile has only
@@ -190,7 +190,7 @@ def tile_saturation(wsi, origin, span, tile: int, ds: float = 32.0) -> np.ndarra
 
     Saturation rather than luminance because glass and a pale section differ far
     more in colour than in brightness -- a fatty area is nearly white and is
-    still tissue, and `TissueSegFunc.mask_hsv` thresholds the same quantity.
+    still tissue, and `TissueSeg.mask_hsv` thresholds the same quantity.
 
     Only a proxy, and only used to CHOOSE what the model looks at. Nothing it
     decides reaches the mask.
@@ -316,7 +316,7 @@ class Uni2PcaSegConfig(TissueSegConfig):
 
     method: str = 'uni2-pca-seg'
 
-    #: Name into `TileEncoderFunc.encoder_config`, so the timm recipe, the
+    #: Name into `TileEncoder.encoder_config`, so the timm recipe, the
     #: normalisation constants and the weights all come from the one table that
     #: knows them. Not 'uni2' by assumption -- gigapath and conch_vit are ViTs
     #: with a patch grid too, and swapping is one flag.
@@ -369,7 +369,7 @@ class Uni2PcaSegConfig(TissueSegConfig):
     #: `_search_tissue_regions` gives thousands of one-cell regions, and
     #: `filtered` then deletes almost all of them.
     #:
-    #: `TissueSegFunc.mask_hsv:80-84` does the same close-then-open with the same
+    #: `TissueSeg.mask_hsv:80-84` does the same close-then-open with the same
     #: 7 for the same reason, which is why the number is 7 rather than a new
     #: guess: a per-pixel or per-cell decision needs a spatial prior and this is
     #: the one already in use here.
@@ -478,9 +478,9 @@ class Uni2PcaSegmenter(TissueSegmenter):
         # os.environ.setdefault('HF_HOME', ...) above its own `import timm`, and
         # huggingface_hub freezes that into module constants when IT is
         # imported -- so an encoder import at the top of a segmenter would make
-        # the SEGMENTER decide where the weights live. TileEncoderFunc's
+        # the SEGMENTER decide where the weights live. TileEncoder's
         # _IMPLEMENTATIONS table documents the same hazard.
-        from TileEncoderFunc import encoder_config
+        from locascope.core.backbones.TileEncoder import encoder_config
 
         encoder = encoder_config(cfg.encoder).build(device)
         trunk = getattr(encoder.model, 'module', encoder.model)
@@ -660,7 +660,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
         input the way `mask_hsv` is and `mask_otsu` is not.
 
         The cell grid is upsampled back to the input's pixel size before
-        returning. `TissueSegFunc.tiled_apply` slices the returned
+        returning. `TissueSeg.tiled_apply` slices the returned
         mask with the INPUT tile's pixel offsets and assigns into a full-size
         array, so a cell-resolution mask raises there on broadcast -- while the
         single-call path would have accepted it and derived a coarser ds from
@@ -781,8 +781,8 @@ class Uni2PcaSegmenter(TissueSegmenter):
         each opening the slide itself from its PATH: an OpenSlide handle carried
         across a fork returns another process's pixels without raising.
         """
-        from ReadGeometry import ReadSpec
-        from SlideReader import SlideReader
+        from locascope.core.slides.ReadGeometry import ReadSpec
+        from locascope.core.slides.SlideReader import SlideReader
 
         reader = SlideReader(_path_of(wsi), workers=self.cfg.workers)
         ds = float(reader.level_downsamples[level])
@@ -803,7 +803,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
         Level 0 only in practice (`LEVEL`), and refused at a non-integer ds:
         `read_grid` reads such a level one region per call, and the region here
         is the whole scanned rectangle."""
-        from SlideReader import SlideReader, integer_downsample
+        from locascope.core.slides.SlideReader import SlideReader, integer_downsample
 
         if not integer_downsample(ds):
             raise ValueError(
@@ -908,8 +908,8 @@ class Uni2PcaSegmenter(TissueSegmenter):
         `slide_pca_mask`: the lattice is `PatchGrid.for_region` of the scanned
         rectangle, floor(span / tile) whole tiles on each axis.
         """
-        from PatchingLib import PatchGrid
-        from TissueMask import TissueRegion
+        from locascope.core.tiles.PatchingLib import PatchGrid
+        from locascope.core.tiles.TissueMask import TissueRegion
 
         if not self.fitted:
             self.fit(wsi, level)
@@ -979,7 +979,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
         the slowest step in the file.
 
         `forward_intermediates` rather than a hand-rolled reshape, for the three
-        reasons `TileEncoderFunc._vit_spatial_forward` gives: it strips
+        reasons `TileEncoder._vit_spatial_forward` gives: it strips
         `num_prefix_tokens` itself -- nine for UNI2, and dropping the wrong
         number would still divide cleanly and give a plausible grid -- it
         derives the grid from the INPUT rather than from `patch_embed.grid_size`,

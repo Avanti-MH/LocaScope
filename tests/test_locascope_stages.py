@@ -4,11 +4,11 @@
 `test_sift_ransac.py`, which each cropped the same kind of query, loaded the
 same kind of encoder, and re-wrote most of the same argparse flags.
 
-    python utilities/test_modules/test_locascope_stages.py --stages 1
-    python utilities/test_modules/test_locascope_stages.py --stages 1,2
-    python utilities/test_modules/test_locascope_stages.py --stages 2,3
-    python utilities/test_modules/test_locascope_stages.py --stages 1,2,3
-    python utilities/test_modules/test_locascope_stages.py --only matcher
+    python tests/test_locascope_stages.py --stages 1
+    python tests/test_locascope_stages.py --stages 1,2
+    python tests/test_locascope_stages.py --stages 2,3
+    python tests/test_locascope_stages.py --stages 1,2,3
+    python tests/test_locascope_stages.py --only matcher
 
 `--only matcher` is the stage 3 ratio matcher against OpenCV's on made-up
 descriptors (what `test_sift_matcher.py` was, merged in): no slide, no model, a
@@ -51,33 +51,30 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Callable, List, Tuple
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import cv2
 import numpy as np
 import torch
-from _paths import job_result_dir, setup_import_paths
-setup_import_paths()
+from locascope.paths import job_result_dir
 
-from PatchingLib import FeaturesMap, QueryPatchContainer             # noqa: E402
-from Store import FeatureMapCache                                   # noqa: E402
-from CpuBudget import CpuBudget                                     # noqa: E402
-from camera import render_spec                                      # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
-from SlideReader import SlideReader                                 # noqa: E402
-from TileEncoderFunc import encoder_config, encoder_names             # noqa: E402
-from TileSampler import SAMPLER_RECIPES, PlanSpec, TileSampler    # noqa: E402
-from FovSupply import FOV_RECIPES                                   # noqa: E402
-from AccessDatasets import list_names, locate                        # noqa: E402
-from Cache import job_name                                           # noqa: E402
-from SafeSlide import SafeSlide                                     # noqa: E402
-from ReadGeometry import ReadSpec, coarser_level                    # noqa: E402
-from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
-from stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig      # noqa: E402
-from stage2_retrieval.RetrieverSlidingWinSimRot import (            # noqa: E402
+from locascope.core.tiles.PatchingLib import FeaturesMap, QueryPatchContainer             # noqa: E402
+from locascope.core.cache.Store import FeatureMapCache                                   # noqa: E402
+from locascope.host.cpu import CpuBudget                                     # noqa: E402
+from locascope.core.query_sim.camera import render_spec                                      # noqa: E402
+from locascope.core.slides.ReadGeometry import REAL_PHOTO_SENSOR                          # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                 # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config, encoder_names             # noqa: E402
+from locascope.core.tiles.TileSampler import SAMPLER_RECIPES, PlanSpec, TileSampler    # noqa: E402
+from locascope.core.query_sim.FovSupply import FOV_RECIPES                                   # noqa: E402
+from locascope.core.slides.AccessDatasets import list_names, locate                        # noqa: E402
+from locascope.core.cache.Cache import job_name                                           # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                     # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec, coarser_level                    # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
+from locascope.core.stage1_estimation.KnnEstMpp import KnnEstMpp, KnnEstMppConfig      # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import (            # noqa: E402
     RetrieverSlidingWinSimRot, RetrieverSlidingWinSimRotConfig, _sim_tensors)
-from stage3_localization.SIFT_RANSAC import (SIFT_RECIPES, SiftRansacLocalizer,  # noqa: E402
+from locascope.core.stage3_localization.SIFT_RANSAC import (SIFT_RECIPES, SiftRansacLocalizer,  # noqa: E402
                                               knn_ratio_matches)
 
 
@@ -274,7 +271,7 @@ def check_sims(retriever, out, wsi, mask, query_np, estimate, args, device) -> b
             dir=job_result_dir('TestLocaScopeStages')) as root:
         # verbose: a miss says why (the record, a meta field, or the geometry);
         # the cache tree is pointed at the temp dir for the length of the check
-        import Cache                                              # noqa: PLC0415
+        from locascope.core.cache import Cache                                              # noqa: PLC0415
         saved_root, Cache.RESULT_DIR = Cache.RESULT_DIR, root
         try:
             store = FeatureMapCache('TestLocaScopeStages',

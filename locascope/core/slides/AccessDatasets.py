@@ -51,7 +51,7 @@ with `select()`, which narrows the registry by dataset, by stain and by what
 each slide's header says (`where=`, a test of its `SlideInfo` in the CATALOG,
 `catalog()`), into a `Selection` that combines (`| & -`), samples and splits
 into disjoint parts; `save_virtual` writes one, once.
-`utilities/cli/build_cache/make_dataset.py` builds the catalog and runs the
+`locascope/cli/build_cache/make_dataset.py` builds the catalog and runs the
 recipes that write them. `virtual_ids()` lists them.
 """
 
@@ -68,9 +68,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
-from Cache import Address, Entry, dataset_key
-from ReadGeometry import is_native, level_for
-from _paths import DATASETS_DIR
+from locascope.core.cache.Cache import Address, Entry, dataset_key
+from locascope.core.slides.ReadGeometry import is_native, level_for
+from locascope.paths import DATASETS_DIR
 
 _BRACS_TEST_ROOT = os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it/BRACS_WSI/test')
 _BRACS_TRAIN_ROOT = os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it/BRACS_WSI/train')
@@ -373,7 +373,7 @@ def build_catalog(datasets: Optional[Sequence[str]] = None, *, refresh: bool = F
     slide no longer on disk leaves it. `opener` opens a slide (`SafeSlide`, whose `base_mpp` is the one
     definition); a test passes its own."""
     if opener is None:
-        from SafeSlide import SafeSlide                                 # noqa: PLC0415
+        from locascope.core.slides.SafeSlide import SafeSlide                                 # noqa: PLC0415
         opener = SafeSlide
     out: Dict[str, Tuple[int, int]] = {}
     for dataset_id in (datasets or dataset_ids()):
@@ -415,7 +415,7 @@ def catalog(datasets: Optional[Sequence[str]] = None) -> List[SlideInfo]:
         rows: Optional[Tuple[Dict[str, str], ...]] = _catalog_rows(dataset_id)
         if rows is None:
             raise FileNotFoundError(f'{dataset_id!r} has no catalog in {catalog_entry().dir}: run '
-                                    f'utilities/cli/build_cache/make_dataset.py --catalog')
+                                    f'locascope/cli/build_cache/make_dataset.py --catalog')
         for r in rows:
             mpp: str = r.get('base_mpp', '')
             out.append(SlideInfo(
@@ -614,7 +614,7 @@ def virtual_record(dataset_id: str) -> Dict[str, Any]:
     stored: Optional[Dict[str, Any]] = vdataset_entry().stored(_virtual_name(dataset_id))
     if stored is None:
         raise KeyError(f'{dataset_id!r} is not a virtual dataset; written: {virtual_ids()} '
-                       f'(utilities/cli/build_cache/make_dataset.py writes them)')
+                       f'(locascope/cli/build_cache/make_dataset.py writes them)')
     return stored
 
 

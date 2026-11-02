@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for utilities/Cache.py -- the tree, addresses and entries, atomic
+"""Tests for locascope/core/cache/Cache.py -- the tree, addresses and entries, atomic
 writes, the sidecar, the slide key. No torch, no slide, temp dirs.
 
-    python utilities/test_modules/test_cache.py
+    python tests/test_cache.py
 """
 
 from __future__ import annotations
@@ -13,12 +13,10 @@ import tempfile
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-import _paths                                                    # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                    # noqa: E402
 
-import Cache                                                     # noqa: E402
-from Cache import (CacheMismatch, atomic_file,          # noqa: E402
+from locascope.core.cache import Cache                                                     # noqa: E402
+from locascope.core.cache.Cache import (CacheMismatch, atomic_file,          # noqa: E402
                    check_source, source_key, wsi_stem_of)
 
 _RESULTS = []

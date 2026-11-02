@@ -12,7 +12,7 @@ Stage 2 把一張 query 對到 WSI 上的候選視窗，分兩階段：
 config 就是同一個 cache entry。本文件以下講的是**方法本身**（演算法、損失、訓練、評估），仍然有效；
 講介面的段落（`RetrievalContext`、`ScoredReranker`、`TwoPhase`、`OutputPolicy`、`UnionRetriever`）
 是重構前的接法，已由 `Retriever.py` 開頭的 docstring 與 `blueprint.md` 第二、三節取代，留在下面只為了說明當初的設計理由。測試用
-`sbatch jobscripts/RerankHead/TestRerank.sh`。標〔待驗證〕的是還沒用資料或程式確認的假設。
+`sbatch deploy/slurm/RerankHead/TestRerank.sh`。標〔待驗證〕的是還沒用資料或程式確認的假設。
 
 | 部分 | 在哪裡 | 測試 |
 |---|---|---|
@@ -22,11 +22,11 @@ config 就是同一個 cache entry。本文件以下講的是**方法本身**（
 | 第一階段：sliding window、F1 到 F4 | `RetrieverSlidingWinSimRot.py`、`RetrieverBagOfTiles.py`、`RetrieverTileVote.py`、`RetrieverClusterBow.py`、`RetrieverWinEmbed.py` | `test_context`、`test_rerank`、`test_neural` |
 | S0 Dual、S1 CSLS、S2 Corr、S6 CandGraph（`ColumnRanker`） | `RerankerScorers.py` | `test_rerank` |
 | S3 Shift、S4 TokenMatch、`xenc` | `RerankerEncode.py` | Shift 有；TokenMatch、`xenc` 需要 slide 與 encoder，由 bench 驗證 |
-| S5 TileGT、S2net、S7；網路與 checkpoint | `RerankerNeural.py`、`aiNNModel/models/RerankHeads.py`、`RerankChoices.py`、`common/Checkpoints.py` | `test_neural` |
+| S5 TileGT、S2net、S7；網路與 checkpoint | `RerankerNeural.py`、`locascope/core/networks/RerankHeads.py`、`RerankChoices.py`、`common/Checkpoints.py` | `test_neural` |
 | 串接與 recipe | `MultiPhases.py`、`ArmSpec.config_of_arm` | `test_arm_spec`、`test_config_identity` |
 | 命名 | `Naming.py` | `test_naming` |
 | 標籤、損失、指標、visit、訓練、S7 擬合 | `training/RerankHead/` | `test_neural` |
-| 評估 | `utilities/bench_modules/RetrieverArms.py`、`ArmTables.py`、`bench_stage2_retriever.py` | `test_retriever_arms`、`test_arm_tables` |
+| 評估 | `locascope/cli/bench/RetrieverArms.py`、`ArmTables.py`、`bench_stage2_retriever.py` | `test_retriever_arms`、`test_arm_tables` |
 | mask 瘦身 | `TissueMask.py`（`SlideMask.save`／`load`，`packbits+zlib`） | — |
 | 巢狀 config 的 tuple | `ConfigIdentity.py` | `test_config_identity` |
 
@@ -42,7 +42,7 @@ config 就是同一個 cache entry。本文件以下講的是**方法本身**（
 |---|---|---|---|
 | **Arch 1　`GloRet-{ContextEn}-{GlobalEn}`**（雙塔） | 推廣 F3 `WinEmbed` | tile → ContextEn → GlobalEn → $q^\top k/\tau$。$k$ 只依賴 window，可 cache，所以能吃整張 slide 的全部窗口（Phase 1），也能吃上游名單（reranker）。ContextEn：`SelfAttn`、`GNN`、`SptSelfAttn`、`Identity`、`CLSTrans`；GlobalEn：`AttnPool`、`MaskedMean`、`CNN`、`GraphPool`、`Align`、`Identity`。搜尋 `exact`（`hnsw`／`ivf` 尚未實作） | `RetrieverGloRet`（第一階段用 `RetrieverGloRetConfig`、接在名單後用 `RerankerGloRetConfig`，兩個 config 建出同一個類別） |
 | **Arch 2　`LogLoRet-{ContextEn}-{GlobalEn}[+no-match]`**（pair 打分器） | 推廣 S5 `TileGT`、S2net `CorrNet` | FoV 與窗口經共用的 ContextEn，雙向 cross-attention，每個 head 的證據（aligned、margin、雙向一致、dustbin、coverage、entropy、match feature）合成一個分數；no-match：`dustbin`／`sinkhorn`／`sigmoid`；證據在 tile 上的聚合 `evidence_agg` 預設 `attn`。分數依賴 query，窗口端不能 cache，所以接在 Phase $\ge 2$ | `RerankerLogLoRet` |
-| **TilePool** | 第一階段的 pooling 欄位 | `cls`、`cls_avg`、`cls_std`、`grid2x2`、`attnpool`（讀 patch token 的可學習池化，三階段訓練） | `aiNNModel/models/GloRet.py` |
+| **TilePool** | 第一階段的 pooling 欄位 | `cls`、`cls_avg`、`cls_std`、`grid2x2`、`attnpool`（讀 patch token 的可學習池化，三階段訓練） | `locascope/core/networks/GloRet.py` |
 
 名稱、arm 文法與合法組合見 `proposal.md` §11；權重在 `<results>/GloRet/weights/<data>--<encoder>--<pooling>--<method>[--<no-match>]--<best|last>.pt`（`ArmSpec.learned_weights`）。
 
@@ -62,10 +62,10 @@ config 就是同一個 cache entry。本文件以下講的是**方法本身**（
 
 | 目的 | 指令 |
 |---|---|
-| 正式矩陣（11 個 job、29 隻 arm） | `jobscripts/GloRet/GloRet.sh` 開頭列出每個 job 的指令（`TOP_P`、`HEADS`、`POOLING`） |
-| attnpool 三階段 | `bash jobscripts/GloRet/GloRetAttnPool.sh`（`JOB=ExpGloRetAttnPool` 為縮小的實驗） |
-| 訓練機制與 arm 的篩選 | `ROUND=1..4 bash jobscripts/GloRet/ExpGloRetScreen.sh`：1 候選與 `--top-p`；2 標籤；3 溫度、學習率、寬度、decoder、輔助 loss；4 十五個 arm（gigapath `cls`） |
-| 測試 | `sbatch jobscripts/GloRet/TestGloRet.sh`（41 項，合成資料） |
+| 正式矩陣（11 個 job、29 隻 arm） | `deploy/slurm/GloRet/GloRet.sh` 開頭列出每個 job 的指令（`TOP_P`、`HEADS`、`POOLING`） |
+| attnpool 三階段 | `bash deploy/slurm/GloRet/GloRetAttnPool.sh`（`JOB=ExpGloRetAttnPool` 為縮小的實驗） |
+| 訓練機制與 arm 的篩選 | `ROUND=1..4 bash deploy/slurm/GloRet/ExpGloRetScreen.sh`：1 候選與 `--top-p`；2 標籤；3 溫度、學習率、寬度、decoder、輔助 loss；4 十五個 arm（gigapath `cls`） |
+| 測試 | `sbatch deploy/slurm/GloRet/TestGloRet.sh`（41 項，合成資料） |
 
 ### 狀態
 
@@ -477,7 +477,7 @@ S6 的警告：通用紋理區會形成一整片高分平台，真位置反而�
 - 做法：同一個 safetensors 檔內改存 `np.packbits` 後再 `zlib` 壓縮的位元組，metadata 加 `mask_encoding`；`load` 依 metadata 解碼，沒有該欄位就視為舊格式（uint8 原樣），**新舊檔案都能讀**。tissue mask 是大片連續區塊，預期壓到數 MB 以內〔待量測：先在 3 張 slide 上量〕。
 - 讀回的陣列與原來逐位元相同，所以 `record_*.json`、mask 的 id、`VERSION` 都不變；測試是「所有現有 mask 轉換後 `np.array_equal`」。
 - `components`（uni2-pca mask 才有，581 到 814 MB）不在這次範圍。
-- 影響的程式只有 `utilities/TissueMask.py` 的 `SlideMask.save` / `load`（讀取端 `TissueMaskConfig.py` 只呼叫 `SlideMask.load`）。
+- 影響的程式只有 `locascope/core/tiles/TissueMask.py` 的 `SlideMask.save` / `load`（讀取端 `TissueMaskConfig.py` 只呼叫 `SlideMask.load`）。
 
 ### P1 到 P3：現做現用，不存本地
 
@@ -500,7 +500,7 @@ S6 的警告：通用紋理區會形成一整片高分平台，真位置反而�
 - 平行度：訓練不用 DDP。多 GPU 節點上用 `--shard I/N` 把 visit 切給 N 個行程，各自訓練獨立的 run（沿用 `PrototypicalRoutingHead.sh` 的 `PARALLEL` 做法）；slide 的讀圖與渲染用 CPU worker。
 - 最佳化：AdamW，lr 3e-4（S5）/ 1e-3（CorrNet）/ 1e-4（F3），weight decay 1e-2，cosine 排程，bf16 autocast，梯度裁剪 1.0；epoch 30。
 - 驗證與選擇：`val` slide，選 `R@K′`（對訓練設定的 (K, K′)）最高者，另存 `last`。
-- 檔名由 `Checkpoints.weights_name` 與 `data_tag(args.train_datasets)` 組成（`training/RerankHead/cli/train.py`）；超參數（含 `pos_iou`、`hit_iou`）記在 `ckpt['args']`，評估時不符就拒絕。
+- 檔名由 `Checkpoints.weights_name` 與 `data_tag(args.train_datasets)` 組成（`locascope/training/RerankHead/train.py`）；超參數（含 `pos_iou`、`hit_iou`）記在 `ckpt['args']`，評估時不符就拒絕。
 - 紀錄：wandb 與 `Runtime.py` 沿用 `PrototypicalRoutingHead`。
 
 ### 資料切分
@@ -510,7 +510,7 @@ S6 的警告：通用紋理區會形成一整片高分平台，真位置反而�
 - 另做跨資料集測試：只用 bracs 訓練、在 ki67 評估，反之亦然。
 - S7 吃 out-of-fold 分數（見 S7）。
 
-## 評估（`utilities/bench_modules/bench_stage2_retriever.py`）
+## 評估（`locascope/cli/bench/bench_stage2_retriever.py`）
 
 原來的 window bench 改名為 stage 2 retriever bench：它當時只比 sliding window 的 encoder × pooling × 算分，
 因為當時只有 sliding window。現在 **arm 是一個 retriever，後面可以接任意多個 reranker**，用一套文法命名
@@ -556,14 +556,14 @@ sliding window 用一次串流掃描算所有 pooling 與算分；其他 retriev
 同一個 reranker 的同一次打分用不同操作切出不同排序。報表另外把每個 `A::R` 對 `A`（它收到的名單）配對。
 
 每個 arm 一個目錄（`run-<id>/<entry 名稱>/<slide>__L<k>.csv`，名稱規則見 `Naming.py`），retriever 與 reranker 的產物不共用檔案；改一個 arm 只重跑那個 arm；
-同一份 `stage2_retriever.csv`、同一張報表。arm 名字帶 encoder，所以 `--encoder uni2` 與 `--encoder gigapath` 兩次 run 的 CSV 可以一起 `--report-only`。
+同一份 `stage2_retriever.csv`、同一張報表。arm 名字帶 encoder，所以 `--encoder uni2` 與 `--encoder gigapath` 兩次 run 的 CSV 可以一起 `analyze_stage2_metrics.py --csv`。
 FoV 從 `supply_for` 取（與 pipeline bench 同一批照片）。job 名是 `Stage2RetrieverBench`；舊名 `WindowRetrievalBench` 的結果與 cache 不動，舊 CSV 當作 whole 模式的 sliding window 讀。
 
 **不再有打包的 recipe**（`cheap`、`heavy`、`union`）：`TWOPHASE_RECIPES` 只留給 pipeline 的 `--stage2 twophase:<recipe>`，bench 不用。
 
 **端到端**：選出最佳鏈後跑 `BenchLocaScope --stage2 twophase:<recipe> --stage3-topk K′`，再用 `AnalyzeLocaScope` 看 stage 2 漏掉率與 funnel。
 
-**單元測試**（`utilities/test_modules/TestRerank/`）：
+**單元測試**（`tests/TestRerank/`）：
 - `WindowBatch.cos` 的平均等於第一階段分數（逐位元一致）。
 - F1 積分圖等於暴力平均；F2 在 `m = ∞` 時等於 slidewin 分數的和。
 - S0 在只有 main 時退化成第一階段。
@@ -583,22 +583,22 @@ FoV 從 `supply_for` 取（與 pipeline bench 同一批照片）。job 名是 `S
 | `stage2_retrieval/ArmSpec.py` | bench 的 arm 文法：`[encoder:]Method::pooling[+op][@K]` 用 `::` 接起來，retriever 在前、reranker 在後；`config_of_arm` |
 | `stage2_retrieval/blueprint.md` | 重構藍圖；附錄是每個方法的詳細資料流（推論與訓練），含張量形狀 |
 | `stage2_retrieval/Retriever{SlidingWinSimRot,BagOfTiles,TileVote,ClusterBow,WinEmbed}.py` | 第一階段（各有 config 與 recipe） |
-| `stage2_retrieval/RetrieverGloRet.py`、`aiNNModel/models/GloRet.py` | `RetrieverGloRet`（Arch 1）、`RerankerGloRet`、`RerankerLogLoRet`（Arch 2）與網路 |
+| `stage2_retrieval/RetrieverGloRet.py`、`locascope/core/networks/GloRet.py` | `RetrieverGloRet`（Arch 1）、`RerankerGloRet`、`RerankerLogLoRet`（Arch 2）與網路 |
 | `training/GloRet/` | 統一訓練框架：`Supply`（FoV、level、標籤）、`Items`、`Pool`、`Full`（Gradient Cache）、`Rerank`、`Episodes`、`Lazy`、`Losses`、`Steps`、`cli/train.py` |
-| `jobscripts/GloRet/*.sh` | `GloRet.sh`（正式矩陣）、`GloRetAttnPool.sh`、`ExpGloRetScreen.sh`、`ExpGloRetFull.sh`、`TestGloRet.sh` |
-| `utilities/test_modules/TestGloRet/` | 測試 |
+| `deploy/slurm/GloRet/*.sh` | `GloRet.sh`（正式矩陣）、`GloRetAttnPool.sh`、`ExpGloRetScreen.sh`、`ExpGloRetFull.sh`、`TestGloRet.sh` |
+| `tests/TestGloRet/` | 測試 |
 | `stage2_retrieval/RerankerScorers.py` | S0、S1、S2（免訓練）、S6 |
 | `stage2_retrieval/RerankerEncode.py` | S3、S4、`xenc` |
 | `stage2_retrieval/RerankerNeural.py` | 載入權重的 S2net、S5、S7 |
 | `stage2_retrieval/MultiPhases.py` | 串接與 recipe 表 |
 | `stage2_retrieval/Naming.py` | entry 的名稱 |
-| `aiNNModel/models/RerankHeads.py` | `TileGT`、`CorrNet`、`CandidateContext`、`TileGTContext`、`WinEmbedder`、`StackNet` |
-| `aiNNModel/models/RerankChoices.py` | 架構 registry |
-| `aiNNModel/models/common/Checkpoints.py` | 新增 `save_rerank_checkpoint` / `build_rerank_from_checkpoint`（只新增函式） |
+| `locascope/core/networks/RerankHeads.py` | `TileGT`、`CorrNet`、`CandidateContext`、`TileGTContext`、`WinEmbedder`、`StackNet` |
+| `locascope/core/networks/RerankChoices.py` | 架構 registry |
+| `locascope/core/networks/Checkpoints.py` | 新增 `save_rerank_checkpoint` / `build_rerank_from_checkpoint`（只新增函式） |
 | `training/RerankHead/` | `Labels.py`、`Visits.py`（visit）、`Embed.py`、`Losses.py`、`Metrics.py`、`Steps.py`、`Usage.py`、`Runtime.py`、`cli/{train,fit_stack}.py` |
-| `utilities/bench_modules/RetrieverArms.py`、`bench_stage2_retriever.py` | 評估（每個 arm 有 whole 與 production 兩種模式） |
-| `jobscripts/RerankHead/*.sh` | `RerankHead.sh`（訓練）、`FitStack.sh`、`TestRerank.sh`；沒有 Prepare job：P1 到 P3 現做現用 |
-| `utilities/test_modules/TestRerank/` | 測試 |
+| `locascope/cli/bench/RetrieverArms.py`、`bench_stage2_retriever.py` | 評估（每個 arm 有 whole 與 production 兩種模式） |
+| `deploy/slurm/RerankHead/*.sh` | `RerankHead.sh`（訓練）、`FitStack.sh`、`TestRerank.sh`；沒有 Prepare job：P1 到 P3 現做現用 |
+| `tests/TestRerank/` | 測試 |
 
 ## 基礎模組改動
 
@@ -610,17 +610,17 @@ FoV 從 `supply_for` 取（與 pipeline bench 同一批照片）。job 名是 `S
 | 檔案 | 改動 | 原因 | 狀態 |
 |---|---|---|---|
 | `environment.yml`、`locascope_environment.yml` | 加 `faiss-cpu==1.13.0` | F2 的 `hnsw` / `ivf` | **已完成**（env 已裝，只新增這一個套件；只有 CPU 版；import 尚未驗證，見單元測試） |
-| `utilities/TissueMask.py` | `SlideMask.save` / `load` 的 mask 編碼（P0） | 瘦身 | 已完成（未測） |
-| `utilities/ConfigIdentity.py` | 支援「巢狀 config 的 tuple」，見下 | `TwoPhase` 的 config | 已完成（未測） |
+| `locascope/core/tiles/TissueMask.py` | `SlideMask.save` / `load` 的 mask 編碼（P0） | 瘦身 | 已完成（未測） |
+| `locascope/core/config/ConfigIdentity.py` | 支援「巢狀 config 的 tuple」，見下 | `TwoPhase` 的 config | 已完成（未測） |
 | `stage2_retrieval/StageInterface.py` | 上面的 `Candidate` 家族、`origin_l0`、`rows()`、`Reranker`、`Retriever.context` | 介面 | 已完成（未測） |
 | `stage2_retrieval/RetrieverSlidingWinSimRot.py` | 新增 `context()`、K 的 recipe；`candidate_set` 的 NMS 向量化（輸出不變，只改效能） | 介面、K 變大時的效能〔待量測〕 | 已完成（未測） |
-| `utilities/LocaScopePipeline.py` | `stage2()` 把 `ctx` 傳給 reranker；reranker 的 recipe 表（可選） | 介面 | 已由 `MultiPhases.py` 取代（`ctx` 傳遞不存在了；chain 的 recipe 表是 `MULTIPHASES_RECIPES`） |
-| `utilities/bench_modules/BenchCommon.py` | `run_stage2` 增加兩個選用 role（`first_phase`、`rerank_scores`）並登記 | 讓 composite 的中間分數落地 | 已完成（未測） |
-| `utilities/bench_modules/bench_locascope.py` | 用 `roles_of(stages)` 取代 `ROLES` | stage 2 的額外 table 進 entry | 已完成（未測） |
-| `utilities/test_modules/test_config_identity.py` | 新 config 的 recipe lint 與 id 測試 | 慣例 | 已完成（未測） |
-| `utilities/_paths.py` | rerank 權重與結果目錄 | 慣例 | 已完成（未測） |
+| `locascope/core/pipeline.py` | `stage2()` 把 `ctx` 傳給 reranker；reranker 的 recipe 表（可選） | 介面 | 已由 `MultiPhases.py` 取代（`ctx` 傳遞不存在了；chain 的 recipe 表是 `MULTIPHASES_RECIPES`） |
+| `locascope/cli/bench/BenchCommon.py` | `run_stage2` 增加兩個選用 role（`first_phase`、`rerank_scores`）並登記 | 讓 composite 的中間分數落地 | 已完成（未測） |
+| `locascope/cli/bench/bench_locascope.py` | 用 `roles_of(stages)` 取代 `ROLES` | stage 2 的額外 table 進 entry | 已完成（未測） |
+| `tests/test_config_identity.py` | 新 config 的 recipe lint 與 id 測試 | 慣例 | 已完成（未測） |
+| `locascope/paths.py` | rerank 權重與結果目錄 | 慣例 | 已完成（未測） |
 
-**不改**：`Cache`、`Store`、`PatchingLib`、`TileEncoderFunc`、`FovSupply`、`TileSampler`。
+**不改**：`Cache`、`Store`、`PatchingLib`、`TileEncoder`、`FovSupply`、`TileSampler`。
 `Truth` / `query_grid_centre` / `matching_rotation` 目前在 `BenchCommon`，訓練要用；先從那裡 import（訓練 import bench 模組在 Prototype 訓練有先例），日後可考慮搬到中性位置。
 
 ### 巢狀 config 的 tuple（決議：支援）

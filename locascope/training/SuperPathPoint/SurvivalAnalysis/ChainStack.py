@@ -38,10 +38,10 @@ from typing import Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
-from TileSampler import centre_crop                          # noqa: E402
-from PatchingLib import PatchGrid, PatchInfo                  # noqa: E402
-from ReadGeometry import ReadSpec                             # noqa: E402
-from SlideReader import SlideReader, degrade_resolution       # noqa: E402
+from locascope.core.tiles.TileSampler import centre_crop                          # noqa: E402
+from locascope.core.tiles.PatchingLib import PatchGrid, PatchInfo                  # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                             # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader, degrade_resolution       # noqa: E402
 
 #: Local on-disk cache for tiles that do NOT come from a `TileSampler` draw --
 #: `CStack`'s descendant reads. NOT a corpus: a corpus is one draw's identity
@@ -63,7 +63,7 @@ from SlideReader import SlideReader, degrade_resolution       # noqa: E402
 
 def _cache_dir(job: str, wsi_stem: str) -> str:
     """`slide=<wsi_stem>/chainstack/` in `job`'s cache tree."""
-    from Cache import Address                                    # noqa: PLC0415
+    from locascope.core.cache.Cache import Address                                    # noqa: PLC0415
     return str(Address(job, slide=wsi_stem).dir / 'chainstack')
 
 
@@ -650,7 +650,7 @@ class CStack:
                               root=mother, tile=256)
 
     PURE GEOMETRY IN `pyramid`/`nearest`, NO PIXEL READ, NO DETECTOR, NO WSI
-    HANDLE -- same contract as `utilities/PatchingLib.PatchGrid`, which it is
+    HANDLE -- same contract as `locascope/core/tiles/PatchingLib.PatchGrid`, which it is
     built on rather than a new tiling scheme (spec.md 3.2 "子嗣格子的切法：
     沿用 PatchGrid，不是新排列"). `read_one`/`read` are the IO half, built on
     `_read_wsi_tile`'s local disk cache (module docstring) rather than a

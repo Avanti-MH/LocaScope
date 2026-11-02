@@ -15,13 +15,13 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
-#  utilities/AccessDatasets.py -- one hand-written naming-convention rule
+#  locascope/core/slides/AccessDatasets.py -- one hand-written naming-convention rule
 #  per DATASET (`_DATASETS`), not one hand-written entry per WSI. Used by
 #  more than one package's cli/, so its test lives flat under
-#  utilities/test_modules/, not any one package's Test<Package>/.
+#  tests/, not any one package's Test<Package>/.
 # =============================================================================
 #
 # 2026-09-11: `list_names()`/`locate()` are themselves directory reads now,
@@ -36,7 +36,7 @@ source jobscripts/_env.sh
 # migration).
 
 echo "======== TestAccessDatasets ========"
-python utilities/test_modules/test_access_datasets.py
+python tests/test_access_datasets.py
 status=$?
 
 echo ""

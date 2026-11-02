@@ -1,11 +1,4 @@
-'''Namespace package only -- `training/ClassifyingRoutingHead/` and `training/
-PrototypicalRoutingHead/` are real Python packages under it so
-their own cross-file imports can be fully-qualified (`from training.
-ClassifyingRoutingHead.Runtime import ...`), so `sys.path` ORDER never has to tell
-the two packages' same-named files apart -- see `utilities/_paths.setup_import_paths`.
-
-`training/SuperPathPoint/` does NOT need this: it has no top-level bare
-file that collides with anything in the other two packages, so it keeps
-using `_paths.add_training_package('SuperPathPoint')` (`sys.path` entry,
-bare imports).
+'''Namespace for the training projects: every project under it is a real Python package, so imports are
+spelled in full (`from locascope.training.ClassifyingRoutingHead.Runtime import ...`) and no `sys.path`
+ORDER ever has to tell two projects' same-named files apart.
 '''

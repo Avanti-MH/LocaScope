@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """The stage 2 retriever bench: which way of finding the window puts the truth first?
 
-    python utilities/bench_modules/bench_stage2_retriever.py --encoder uni2 \
+    python -m locascope.cli.bench.bench_stage2_retriever --encoder uni2 \
         --arms cls cls_avg uni2:BagOfTiles::cls_avg+gap uni2:BagOfTiles::rings3+quad \
                uni2:TileVote::grid2x2+exact uni2:ClusterBow::cls_avg
-    python utilities/bench_modules/bench_stage2_retriever.py --encoder uni2 \
+    python -m locascope.cli.bench.bench_stage2_retriever --encoder uni2 \
         --rerank-on uni2:SlidingWindow::cls+mean --rerankers Dual::cls_avg+dual CSLS::grid2x2+csls \
                     gigapath:Corr::cls_avg+sinkhorn
-    python utilities/bench_modules/bench_stage2_retriever.py --report-only \
-        /work/u26130998/result/Stage2RetrieverBench/uni2/stage2_retriever.csv \
-        /work/u26130998/result/Stage2RetrieverBench/gigapath/stage2_retriever.csv
+    python -m locascope.cli.metrics.analyze_stage2_metrics <the same flags>      # rows, CSV and tables, off the entries
+    python -m locascope.cli.metrics.analyze_stage2_metrics --csv \
+        $LOCASCOPE_OUTPUT_ROOT/result/Stage2RetrieverBench/uni2/stage2_retriever.csv \
+        $LOCASCOPE_OUTPUT_ROOT/result/Stage2RetrieverBench/gigapath/stage2_retriever.csv
+
+This file RUNS: it writes the stage 2 entries and nothing else. Every row, the CSV and every table is
+read off those entries by `cli/metrics/analyze_stage2_metrics.py`, which takes these same flags.
 
 This was the window bench, and it compared pooling x score because the sliding window was the only
 first phase there was. An ARM is now a RETRIEVER and then any number of RERANKERS, named
@@ -52,8 +56,8 @@ The sliding window is streamed: one pass over the level scores every pooling and
 once, keeping nothing of a slide's features. Every other retriever and every reranker runs in the
 ArmEngine on hosts that encode a level once per (encoder, pooling). An arm keeps nothing but its stage 2
 entries (one per phase, named as the pipeline names them, `stage2_retrieval/Naming.py`): its rows are read off
-them (`slide_rows`), by the one definition of an answer and its ranks (`BenchCommon.answers`, `ranked_ranks`,
-`listed_places`), into one `stage2_retriever.csv`. One arm is redone by removing its entries. An arm's name
+them by `analyze_stage2_metrics` (`slide_rows`), by the one definition of an answer and its ranks
+(`BenchCommon.answers`, `ranked_ranks`, `listed_places`), into one `stage2_retriever.csv`. One arm is redone by removing its entries. An arm's name
 carries its encoder, so the CSVs of two runs (`--encoder uni2`,
 `--encoder gigapath`) can be reported together. `SlidingWindow::cls+mean` is the baseline and is always run.
 
@@ -65,7 +69,7 @@ been measured against an alternative at the window level, and retrieval's
 largest failure bucket is "the truth was never proposed" (32.3% of 1404 shots,
 result/BenchLocaScope).
 
-    pooling   cls  cls_avg  cls_std  rings3  grid2x2      (aiNNModel pooling_kinds)
+    pooling   cls  cls_avg  cls_std  rings3  grid2x2      (locascope.core pooling_kinds)
     score     mean  geomean  min                          (how R_q x C_q cosines
                                                            become one number; mean and
                                                            geomean are SlidingWinSimRot's,
@@ -189,7 +193,7 @@ three levels, 100 FoVs each and top-left answers; this section is what runs:
   rank_overlap      rank of the window at the nearest overlap point     [stored]
 
 Everything below is COMPUTED from those five stored numbers, which is why
-`--report-only` can redraw every table without a GPU.
+`analyze_stage2_metrics.py --csv` can redraw every table without a GPU.
 
   hit@k             rank_truth <= k, as a rate over the queries in the group:
                         truth@k(G,a) = |{q in G : rank_truth(q,a) <= k}| / |G|
@@ -344,12 +348,10 @@ import argparse
 import csv
 import dataclasses
 from typing import Any, NamedTuple, Optional, Sequence
-import json
 import math
 import contextlib
 import types
 import queue
-import resource
 import sys
 import threading
 import time
@@ -358,62 +360,46 @@ from types import SimpleNamespace
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
-for _d in ('utilities', 'aiNNModel', 'query_sim', ''):     # '' = the root: stage packages
-    _p = str(_ROOT / _d)
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-import _paths                                                   # noqa: E402
-_paths.setup_import_paths()
 
 import numpy as np                                              # noqa: E402
 import torch                                                    # noqa: E402
 import torch.nn.functional as F                                 # noqa: E402
 
-import Cache                                                     # noqa: E402
-from PatchingLib import (FeaturesMap, PatchGrid, region_grids,  # noqa: E402
+from locascope.core.cache import Cache                                                     # noqa: E402
+from locascope.core.tiles.PatchingLib import (FeaturesMap, PatchGrid, region_grids,  # noqa: E402
                          QueryPatchContainer)
-from CpuBudget import CpuBudget                                  # noqa: E402
-from SlideReader import SlideReader                              # noqa: E402
-from SafeSlide import SafeSlide                                  # noqa: E402
-from TissueMaskConfig import (MASK_RECIPES, MaskMaker,           # noqa: E402
+from locascope.host.cpu import CpuBudget                                  # noqa: E402
+from locascope.host.memory import peak_rss_gb                                 # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                              # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import (MASK_RECIPES, MaskMaker,           # noqa: E402
                               add_mask_args, mask_cfg_from_args)
-from TileEncoderFunc import (add_encoder_args, admissible_poolings,  # noqa: E402
+from locascope.core.backbones.TileEncoder import (add_encoder_args, admissible_poolings,  # noqa: E402
                              encoder_cfg_from_args, encoder_config,
                              encoder_names, pooling_kinds)
-from FovSupply import FOV_RECIPES, FovSupply, add_fov_args       # noqa: E402
-from ReadGeometry import ReadRect, ReadSpec, levels_up_to         # noqa: E402
-from ConfigArgs import config_from_args, describe                # noqa: E402
-from ConfigIdentity import environment, short_id                  # noqa: E402
-from dump_function.RetrievalReport import (K_FIXED, K_FRACTIONS,  # noqa: E402,F401
-                                           attach_baseline, frac_label, grid_table,
-                                           group_by, group_levels, k_at, pct,
-                                           print_level_heading, print_paired, report, truth_rank)
-from stage2_retrieval.RetrieverSlidingWinSimRot import (GEOMEAN_FLOOR, TILE_SIM_ROWS,   # noqa: E402
+from locascope.core.query_sim.FovSupply import FOV_RECIPES, add_fov_args       # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadRect, ReadSpec, levels_up_to         # noqa: E402
+from locascope.core.config.ConfigArgs import config_from_args, describe                # noqa: E402
+from locascope.core.config.ConfigIdentity import environment, short_id                  # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import (GEOMEAN_FLOOR, TILE_SIM_ROWS,   # noqa: E402
                                                         RetrieverSlidingWinSimRot,
                                                         RetrieverSlidingWinSimRotConfig,
                                                         WINDOW_SCORES, SlidingWindowSimilarity,
                                                         window_score, window_score_maps)
-from stage2_retrieval.Context import top_candidates             # noqa: E402
-from stage2_retrieval.MultiPhases import MultiPhasesConfig      # noqa: E402
-from stage2_retrieval.Retriever import EncoderPool              # noqa: E402
-from stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet  # noqa: E402
-from camera import Render                                        # noqa: E402
-from _paths import encoder_tag, job_result_dir                   # noqa: E402
-from BenchCommon import (ANSWER_LATTICES, ORACLE, TRUTH_VERSION, Answer, Answers, Maps, Pools,  # noqa: E402
-                         Tables, answers, answers_of_row, fmt_each, fmt_rate, fmt_time, listed_of_rows,
-                         listed_places, pools_of,
+from locascope.core.stage2_retrieval.Context import top_candidates             # noqa: E402
+from locascope.core.stage2_retrieval.MultiPhases import MultiPhasesConfig      # noqa: E402
+from locascope.core.stage2_retrieval.Retriever import EncoderPool              # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet  # noqa: E402
+from locascope.paths import encoder_tag                                      # noqa: E402
+from locascope.cli.bench.BenchCommon import (ANSWER_LATTICES, ORACLE, TRUTH_VERSION, Answer, Answers, Maps, Pools,  # noqa: E402
+                         Tables, answers, fmt_each, fmt_rate, fmt_time, pools_of,
                          matching_rotation, phase_ids, phase_record, phase_roles, placed_estimate, query_grid_centre,
                          ranked_ranks, require_gpu_if_allocated, run_slides, supply_for, truth_row)
-from ConfigIdentity import file_fingerprint                      # noqa: E402
-from stage2_retrieval.Naming import entry_name, label as window_label   # noqa: E402
-from ArmTables import SlideTables, entries_complete, entry_levels   # noqa: E402
-from RetrieverArms import (FAMILY_METHOD, FAMILY_POOLING, FAMILY_RERANK,  # noqa: E402
-                           MODE_LISTED, MODE_RANKED, ArmEngine, LevelResult,
-                           ListQuery, arm_texts)
-from stage2_retrieval.ArmSpec import (SEP, ArmSpec, expand, is_arm_text,  # noqa: E402
+from locascope.core.stage2_retrieval.Naming import entry_name, label as window_label   # noqa: E402
+from locascope.cli.bench.ArmTables import SlideTables, entries_complete   # noqa: E402
+from locascope.cli.bench.RetrieverArms import ArmEngine, LevelResult, ListQuery  # noqa: E402
+from locascope.core.stage2_retrieval.ArmSpec import (SEP, ArmSpec, expand, is_arm_text,  # noqa: E402
                                       parse_arm, parse_segment)
-from stage1_estimation.StageInterface import weights_path        # noqa: E402
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -497,17 +483,6 @@ def canonical_arm(arm: str, encoder: str) -> str:
 #: Every score is the stage's own (SlidingWinSimRot.WINDOW_SCORES, imported above with GEOMEAN_FLOOR), so
 #: the bench and the pipeline score a window one way and a pipeline run can be set to any of them.
 assert set(SCORES) <= set(WINDOW_SCORES), 'SCORES names a score the stage does not have'
-
-#: K_FIXED and K_FRACTIONS are imported from RetrievalReport, which owns them
-#: along with every statistic computed from them. What the pools look like HERE,
-#: which is what decides whether @0.01% means anything on a given row:
-#:
-#:     L0   pool 18,296..183,833   k = 2..19    a real 0.01% criterion
-#:     L1   pool  3,432.. 10,495   k = 1..2     partly floored
-#:     L2   pool    311..    499   k = 1        truth@1, null 0.20..0.32%
-#:
-#: Read @0.01% in 單片單層 and in the L0 row of 同層跨片; in 全部 it averages a
-#: genuine 0.01% at L0 with truth@1 at L2, which is not one criterion.
 
 #: Furthest a FoV can be from the NEAREST POINT OF ONE GRID. Each grid steps by
 #: TILE on both axes, so the worst position is a cell centre: hypot(128, 128).
@@ -807,7 +782,7 @@ def gate_scored_windows(seed: int = 0) -> tuple:
     picks. The two lists -- window, rank, score -- must be the same, for `mean`,
     `geomean` and `min`. Returns (windows compared, ok)."""
     import types
-    from PatchingLib import region_grids
+    from locascope.core.tiles.PatchingLib import region_grids
     generator = torch.Generator().manual_seed(seed)
     regions = [types.SimpleNamespace(x=1000, y=2000, w=12 * TILE, h=10 * TILE),
                types.SimpleNamespace(x=40000, y=9000, w=9 * TILE, h=9 * TILE)]
@@ -1806,7 +1781,7 @@ def run_slide_level(slide, dataset, stem, level, mask, args, encoder, arms,
     timer.stop(PLACE, len(shots))
     if placed is None:
         return
-    ds, lv, regions, grids, camera, dims, valid = (
+    ds, lv, regions, grids, _, dims, valid = (
         placed.ds, placed.lv, placed.regions, placed.grids, placed.camera, placed.dims, placed.valid)
     skipped = (f'   skipped: {placed.n_no_region} outside every region, '
                f'{placed.n_no_window} with an answer window off the grid'
@@ -1909,176 +1884,6 @@ def placed_levels(slide: SafeSlide, stem: str, levels: Sequence[int], mask: Any,
     return out
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  The rows: read off the stage 2 entries
-#
-#  An arm's rows are not kept anywhere but the cache: every one is read off its entries, by the one
-#  definition of an answer and its ranks (BenchCommon). A ranked row is its first phase's truth (the ranks
-#  it holds); a listed row is the answers' places in its last phase's list (`listed_places`), judged on its
-#  first phase's answers. The FoV's own columns come from the draw and the render table.
-# ══════════════════════════════════════════════════════════════════════════════
-
-class ArmRows(NamedTuple):
-    """How one arm's rows are read off the cache: its text, the entry of its first phase (whose truth judges
-    it) and of its last (whose list it is), its family, the `source` its rows say, its lattices (`grid`), the
-    length its list is cut at (None: all it holds), and whether it has a ranked mode (a first phase that
-    scored every window)."""
-    text: str
-    first: str
-    last: str
-    family: str
-    source: str
-    grid: str
-    cut: Optional[int]
-    ranked: bool
-
-
-def arm_rows_of(streamed_arms: Sequence[Stage2Arm], streamed_rows: dict, engine: Optional[ArmEngine]
-                ) -> list[ArmRows]:
-    """Every arm of the run that has rows: the streamed ones (`streamed_rows`, arm text -> entry) and the
-    engine's."""
-    by_entry: dict = {a.entry_id: a for a in streamed_arms}
-    out: list[ArmRows] = [ArmRows(text, entry_id, entry_id, FAMILY_POOLING, 'stream', by_entry[entry_id].grid,
-                                  None, True)
-                          for text, entry_id in streamed_rows.items()]
-    if engine is not None:
-        for text in engine.arm_names():
-            spec = parse_arm(text)
-            reranker: bool = len(spec.segments) > 1
-            out.append(ArmRows(text, engine.first_entry_of(text), engine.entry_of(text),
-                               FAMILY_RERANK if reranker else FAMILY_METHOD, 'retriever', 'all',
-                               spec.segments[-1].cut or None,
-                               not reranker and spec.retriever.method != 'SlidingWindow'))
-    return out
-
-
-def _entry_table(entry: Any, entry_id: str, role: str) -> dict:
-    """`{FoV index: rows}` of one table of an entry; empty when the entry has no such table."""
-    path = entry.path(role, entry_id, '.csv')
-    out: dict = {}
-    if not path.is_file():
-        return out
-    with open(path, newline='') as handle:
-        for r in csv.DictReader(handle):
-            out.setdefault(int(r['index']), []).append(r)
-    return out
-
-
-def slide_rows(entry: Any, arms: Sequence[ArmRows], *, encoder: str, dataset: str, stem: str, supply: Any,
-               min_sep: float) -> tuple[list, int]:
-    """`(rows, FoVs two entries place differently)` of one slide: for every arm and every FoV its first phase's
-    truth ranks, a ranked row (when the arm has that mode) and a listed row. The answers come from that truth
-    (`answers_of_row`); every first phase places them by the same geometry, and a FoV they disagree on is
-    counted, not silently compared."""
-    path = supply.render_entry.path('render', supply.microscope.cfg.identity_id(), '.csv')
-    with open(path, newline='') as handle:
-        render = {int(r['index']): r for r in csv.DictReader(handle)}
-    metas = {i: s.meta for i, s in enumerate(supply.sampler)}
-    tables: dict = {}
-
-    def table(entry_id: str, role: str) -> dict:
-        if (entry_id, role) not in tables:
-            tables[(entry_id, role)] = _entry_table(entry, entry_id, role)
-        return tables[(entry_id, role)]
-
-    rows: list = []
-    seen: dict = {}                                   # FoV -> its main answer's window, as the first entry put it
-    differ: set = set()
-    for arm in arms:
-        truth: dict = table(arm.first, 'truth')
-        lists: dict = table(arm.last, 'output')
-        for fov, (t, *_) in sorted(truth.items()):
-            found: Optional[Answers] = answers_of_row(t)
-            if found is None or t.get('pool_main', '') == '' or fov not in lists:
-                continue                              # not searched at its own level: nothing to rank
-            if seen.setdefault(fov, (found.main.key, found.main.box)) != (found.main.key, found.main.box):
-                differ.add(fov)
-            pools = Pools(main=int(float(t['pool_main'])),
-                          offset=int(float(t['pool_all'])) - int(float(t['pool_main'])))
-            listed_rows = sorted((r for r in lists[fov] if r.get('rank', '') != ''), key=lambda r: int(r['rank']))
-            first_row = lists[fov][0]
-            ds = float(first_row['ds'])
-            full: bool = arm.grid == 'all'
-            judged: Answers = found if full else found.main_only()
-            score = t.get('truth_main_score', '')
-            columns = dict(
-                # First column on purpose: `--report-only` refuses a CSV set that mixes encoders on this key.
-                encoder=encoder, dataset=dataset, slide=stem, level=int(float(t['truth_level'])), ds=ds,
-                fov_id=fov, pool=pools.main, d_main=round(found.main.dist_l0 / ds, 2),
-                d_overlap=round(found.offset.dist_l0 / ds, 2) if found.offset is not None else '',
-                white_frac=round(float(metas[fov].score), 4), bucket=metas[fov].bucket,
-                rot_deg=float(render[fov]['rot_deg']), scale=round(float(render[fov]['scale']), 4),
-                source=arm.source, grid=arm.grid, family=arm.family, arm=arm.text,
-                truth_rot=found.main.rotation, truth_score=round(float(score), 6) if score != '' else '',
-                seconds=float(first_row.get('t_s') or 0.0))
-            blank = {k: '' for k in RECALL_COLUMNS}
-
-            def row_of(mode: str, ranks: dict, list_len: int) -> dict:
-                recall = ({**{k: ranks[k] for k in RECALL_COLUMNS if k in ranks},
-                           'pool_offset': pools.offset, 'pool_all': pools.all} if full else blank)
-                # rank_overlap repeats rank_main ON PURPOSE: the shared `truth_rank` reads it when the offset
-                # point is the nearer one, and THE answer is the main one
-                return dict(columns, mode=mode, list_len=list_len, rank_main=ranks['rank_main'],
-                            rank_overlap=ranks['rank_main'], **recall)
-
-            if arm.ranked:
-                stored = {k: int(float(t[f'truth_{k}'])) for k in ('rank_main', 'rank_main_in_all',
-                                                                   'rank_offset_in_offset', 'rank_offset_in_all')
-                          if t.get(f'truth_{k}', '') != ''}
-                rows.append(row_of(MODE_RANKED, stored, pools.all))
-            cut_rows = listed_rows if arm.cut is None else listed_rows[:arm.cut]
-            listed = listed_of_rows(cut_rows)
-            ranks = listed_places(listed, judged, pools, float(min_sep) * TILE * ds)
-            rows.append(row_of(MODE_LISTED, ranks, len(listed)))
-    return rows, len(differ)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Derived metrics -- everything reads only the stored integers
-#
-#  They live in utilities/dump_function/RetrievalReport.py because bench_tile_retrieval asks
-#  the same question one scale down and prints the same tables. Two copies of
-#  "@1%" would never have raised: both would print a plausible number under the
-#  same header, and a comparison between the two benches would be quietly
-#  invalid. Moving them was pure relocation -- `--report-only` on the existing
-#  CSV redraws the previous log byte for byte, which is the check that it was.
-# ══════════════════════════════════════════════════════════════════════════════
-
-def write_csv(rows: list, path: Path) -> None:
-    if not rows:
-        print(f'  (nothing to write to {path.name})')
-        return
-    keys = list(dict.fromkeys(k for r in rows for k in r))
-    with open(path, 'w', newline='') as handle:
-        writer = csv.DictWriter(handle, fieldnames=keys, restval='')
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f'  {path}  ({len(rows):,} rows)')
-
-
-def read_rows(paths, quiet: bool = False) -> list:
-    integers = {'level', 'fov_id', 'pool', 'rank_main', 'rank_overlap', 'truth_rot',
-                'list_len', *RECALL_COLUMNS}
-    floats = {'d_main', 'd_overlap', 'white_frac', 'ds', 'rot_deg', 'scale',
-              'truth_score', 'seconds'}
-    rows = []
-    for path in paths:
-        with open(path, newline='') as handle:
-            for raw in csv.DictReader(handle):
-                row = {}
-                for key, value in raw.items():
-                    if key in integers or key in floats:
-                        row[key] = (value if value == '' else
-                                    int(float(value)) if key in integers
-                                    else float(value))
-                    else:
-                        row[key] = value
-                rows.append(row)
-        if not quiet:
-            print(f'  read {path}')
-    return rows
-
-
 #: The code that turns a streamed arm with no pipeline config (a `raw` arm, `min`, `-M`) into its stage 2 entry, in
 #: that entry's record (ConfigIdentity rule 3). Bump it only for a change made to be compared (another formula,
 #: another way of scoring); a bug fix keeps it: remove the entries the bug had made wrong (TODO.log names them)
@@ -2090,295 +1895,19 @@ ROW_VERSION = 2      # 2: also the stage 2 tables (1: every rotation searched, t
 def peak_memory_line() -> str:
     """Peak host RSS of the whole process so far (it only ever rises) and the GPU
     peak since the last call."""
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 2   # KB -> GB
+    rss = peak_rss_gb()
     gpu = ''
     if torch.cuda.is_available():
         gpu = f'  GPU peak {torch.cuda.max_memory_allocated() / 1024 ** 3:.1f} GB'
         torch.cuda.reset_peak_memory_stats()
-    return f'peak RSS {rss:.1f} GB (whole process so far){gpu}'
+    host = f'peak RSS {rss:.1f} GB (whole process so far)' if rss is not None else 'peak RSS n/a'
+    return f'{host}{gpu}'
 
 
-def random_recall(pool_main: int, pool_offset: int, pool_all: int, k: int) -> tuple:
-    """Expected (main, offset, all) recall@k of a RANDOM ranking on these pools.
-
-    One target in a pool of P is in the top k with probability min(1, k/P). Two
-    targets, both in the mixed pool, are both outside it with probability
-    (P-k)(P-k-1) / (P(P-1)), so `all` starts near twice `main` before any
-    scoring happens -- the number the rise from main to all is read against."""
-    one = lambda pool: min(1.0, k / max(1, pool))                     # noqa: E731
-    miss = (max(0, pool_all - k) * max(0, pool_all - k - 1)
-            / max(1, pool_all * (pool_all - 1)))
-    return one(pool_main), one(pool_offset), 1.0 - miss
-
-
-#: Candidate counts a full-grid arm's rows carry beyond `pool` (the main windows):
-#: what the level tables show as extra columns.
-LEVEL_EXTRAS = (('offset windows', 'pool_offset'),
-                ('main+offset windows', 'pool_all'))
-
-
-def recall_block(rows: list, arms, emit=print) -> None:
-    """recall_main / recall_offset / recall_all @k, per full-grid arm, one level.
-
-    `rows` are the full-grid rows of one level. Pools differ between slides, so
-    a fixed k is the axis (it is also what stage 3 pays for), not a fraction.
-    One grid, a group of rows per arm: the three recalls, then the share of the
-    hits that the main window answered first. `random` is the recall of a random
-    ranking on the same pools."""
-    by_arm = group_by(rows, ['arm'])
-    first = next((by_arm[(a,)] for a in arms if (a,) in by_arm), None)
-    if first is None:
-        return
-    body, rules = [], []
-    rand = [[random_recall(r['pool'], r['pool_offset'], r['pool_all'], k)
-             for r in first] for k in K_FIXED]
-    for j, name in enumerate(('main', 'offset', 'all')):
-        body.append(['random' if j == 0 else '', f'recall_{name}']
-                    + [pct(float(np.mean([v[j] for v in rand[i]]))).strip()
-                       for i in range(len(K_FIXED))])
-    rules.append(len(body) - 1)
-    ties = 0
-    for arm in arms:
-        subset = by_arm.get((arm,))
-        if not subset:
-            continue
-        rm = np.array([r['rank_main'] for r in subset])
-        ro = np.array([r['rank_offset_in_offset'] for r in subset])
-        am = np.array([r['rank_main_in_all'] for r in subset])
-        ao = np.array([r['rank_offset_in_all'] for r in subset])
-        best = np.minimum(am, ao)
-        ties += int((am == ao).sum())
-        for j, (label, ranks) in enumerate((('recall_main', rm),
-                                            ('recall_offset', ro),
-                                            ('recall_all', best))):
-            body.append([arm if j == 0 else '', label]
-                        + [pct(float((ranks <= k).mean())).strip() for k in K_FIXED])
-        shares = []
-        for k in K_FIXED:
-            hit = best <= k
-            if not hit.any():
-                shares.append('-')
-                continue
-            from_main = float((am[hit] <= ao[hit]).mean()) * 100
-            shares.append(f'{from_main:.0f}:{100 - from_main:.0f}')
-        body.append(['', 'all: main:offset'] + shares)
-        rules.append(len(body) - 1)
-    grid_table(['arm', 'metric'] + [f'k={k}' for k in K_FIXED], body,
-               aligns='ll' + 'r' * len(K_FIXED), rule_after=rules, emit=emit)
-    n = sum(len(v) for v in by_arm.values())
-    emit(f'main and offset answers tied in the mixed pool on {ties}/{n} '
-         f'(arm, FoV) rows; a tie counts for main')
-
-
-def recall_report(rows: list, arms, emit=print) -> None:
-    """What the offset grid adds: recall of the two answers, per ds.
-
-    Full-grid arms only: a main-only arm has no offset windows to rank. Per level
-    and not over all levels, because k means something different in a pool of a
-    few hundred windows and in one of a hundred thousand."""
-    full = [r for r in rows if r.get('grid') == 'all'
-            and r.get('rank_offset_in_offset') not in ('', None)]
-    if not full:
-        emit('\n(no full-grid arm ran: no main vs offset vs all recall table)')
-        return
-    emit(f'\n{"=" * 90}\nrecall -- main vs offset vs all (main + offset), '
-         f'full-grid arms\n{"=" * 90}')
-    for level, subset in group_levels(full).items():
-        print_level_heading(subset, level, emit=emit, extras=LEVEL_EXTRAS)
-        emit('')
-        recall_block(subset, arms, emit=emit)
-
-
-#: The modes' names in an older CSV.
-OLD_MODES: dict[str, str] = {'whole': MODE_RANKED, 'production': MODE_LISTED}
-
-
-def mode_of(row: dict) -> str:
-    """An older CSV has no `mode` and is all ranked, or names the modes `whole` and `production`."""
-    mode: str = row.get('mode') or MODE_RANKED
-    return OLD_MODES.get(mode, mode)
-
-
-def family_of(row: dict) -> str:
-    """An older CSV has no `family` and is all streamed sliding-window arms."""
-    return row.get('family') or FAMILY_POOLING
-
-
-def normalise(rows: list) -> list:
-    """The rows with every arm in the bench's grammar: an older CSV's `cls_avg+geomean` is
-    `<encoder>:SlidingWindow::cls_avg+geomean`, named by the encoder its rows say."""
-    for r in rows:
-        r['arm'] = canonical_arm(r['arm'], r.get('encoder') or 'uni2')
-        r['mode'] = mode_of(r)
-    return rows
-
-
-def report_arms(rows: list) -> list[str]:
-    """The arms a report shows: the streamed sliding windows, then the other retrievers, then the
-    rerankers, each in the order they first appear."""
-    arms: list[str] = []
-    for family in (FAMILY_POOLING, FAMILY_METHOD, FAMILY_RERANK):
-        arms += dict.fromkeys(r['arm'] for r in rows if family_of(r) == family)
-    return list(dict.fromkeys(arms))
-
-
-def pick_baseline(rows: list, requested: str = '') -> str:
-    """The arm every other is paired with: the one asked for, else `uni2:SlidingWindow::cls+mean`, else
-    the first encoder's. The FoVs are the same whatever the encoder, so any encoder's arm can be the one."""
-    names = {r['arm'] for r in rows if mode_of(r) == MODE_RANKED}
-    if requested:
-        if requested not in names:
-            raise SystemExit(f'--baseline {requested!r} is not an arm of these rows')
-        return requested
-    for encoder in ['uni2'] + [r.get('encoder') or 'uni2' for r in rows]:
-        if baseline_of(encoder) in names:
-            return baseline_of(encoder)
-    raise SystemExit('no `cls+mean` sliding window in these rows to pair the others with')
-
-
-def check_pools(rows: list, baseline: str, emit=print) -> int:
-    """Every arm of a FoV is ranked in the same pools. The retriever-path arms count theirs off the
-    retriever's maps and the streamed arms off the streamed windows; they must be equal, and a FoV where
-    they are not is a place the two do not agree on. Returns how many."""
-    base = {(r['slide'], r['level'], r['fov_id']): (r['pool'], r.get('pool_offset'), r.get('pool_all'))
-            for r in rows if r['arm'] == baseline and mode_of(r) == MODE_RANKED}
-    bad = 0
-    total = 0
-    for r in rows:
-        if family_of(r) == FAMILY_POOLING:
-            continue
-        want = base.get((r['slide'], r['level'], r['fov_id']))
-        if want is None:
-            continue
-        total += 1
-        bad += int((r['pool'], r.get('pool_offset'), r.get('pool_all')) != want)
-    if total:
-        emit(f'pools: {total - bad}/{total} retriever-path rows are ranked in the same pools as the '
-             f'baseline' + ('' if not bad else f'  -- {bad} are NOT: those FoVs are not comparable'))
-    return bad
-
-
-def listed_report(rows: list, arms, emit=print) -> None:
-    """What a listed arm's list could not rank. An answer the list does not hold has rank pool + 1, a miss
-    at every k and f%, so each arm's ceiling is the share of FoVs whose answer is listed at all -- here,
-    in the bench's own terms -- and the lists' length."""
-    by_arm = group_by([r for r in rows if r.get('list_len') not in ('', None)], ['arm'])
-    body = []
-    for arm in arms:
-        subset = by_arm.get((arm,))
-        if not subset:
-            continue
-        main = np.array([r['rank_main'] <= r['pool'] for r in subset])      # the answer nearer the shot
-        if all(r.get('pool_all') not in ('', None) for r in subset):
-            either = np.array([min(r['rank_main_in_all'], r['rank_offset_in_all']) <= r['pool_all']
-                               for r in subset])
-            either_text = pct(float(either.mean())).strip()
-        else:
-            either_text = '-'
-        lengths = np.array([r['list_len'] for r in subset], dtype=float)
-        body.append([arm, len(subset), f'{np.median(lengths):.0f}', pct(float(main.mean())).strip(),
-                     either_text])
-    if not body:
-        return
-    emit(f'\n{"=" * 90}\nlisted -- how much of the answer a list holds at all\n{"=" * 90}')
-    grid_table(['arm', 'FoVs', 'list length (med)', 'nearer answer listed', 'either answer listed'],
-               body, aligns='lrrrr', emit=emit)
-    emit('(listed = the window itself, or one of its rotation within the suppression radius -- the one that '
-         'kept its place; an answer with none is rank pool + 1: a miss at every k and every f%)')
-
-
-def curve_report(rows: list, arms, emit=print) -> None:
-    """How the recall of a listed arm's list grows with its length: `recall_all@K` for each K of `K_CURVE`,
-    per level, for each arm. A list holds its best K as a prefix, so one list gives the whole curve; a K
-    past a level's pool is the level, and an answer not listed is never a hit however large K is. The
-    place to read which K covers the most of the answer without making the list needlessly long."""
-    full = [r for r in rows if r.get('rank_offset_in_offset') not in ('', None)]
-    if not full:
-        return
-    emit(f'\n{"=" * 90}\nrecall_all@K of a listed arm -- how long a list has to be\n{"=" * 90}')
-    for level, subset in group_levels(full).items():
-        print_level_heading(subset, level, emit=emit, extras=LEVEL_EXTRAS)
-        by_arm = group_by(subset, ['arm'])
-        body = []
-        for arm in arms:
-            rs = by_arm.get((arm,))
-            if not rs:
-                continue
-            best = np.array([min(r['rank_main_in_all'], r['rank_offset_in_all']) for r in rs])
-            pool = np.array([r['pool_all'] for r in rs])
-            body.append([arm] + [pct(float((best <= np.minimum(k, pool)).mean())).strip() for k in K_CURVE]
-                        + [f'{np.median([r["list_len"] for r in rs]):.0f}'])
-        grid_table(['arm'] + [f'K={k}' for k in K_CURVE] + ['list (med)'], body,
-                   aligns='l' + 'r' * (len(K_CURVE) + 1), emit=emit)
-
-
-def rerank_report(rows: list, emit=print) -> None:
-    """Each reranker against the list it was given: every arm `A::R` paired with `A`, query by query, in
-    the bench's own terms (wins / losses / ties, win%, ratio, top@f%). Both hold the same windows, so the
-    ceiling is shared and what differs is only where the answer stands in the list."""
-    children: dict[str, list[str]] = {}
-    for arm in report_arms(rows):
-        tokens = arm.split(SEP)
-        if len(tokens) > 2 and any(family_of(r) == FAMILY_RERANK for r in rows if r['arm'] == arm):
-            children.setdefault(SEP.join(tokens[:-2]), []).append(arm)
-    if not children:
-        return
-    emit(f'\n{"=" * 90}\nrerankers against the list they were given (each paired with its own retriever)\n{"=" * 90}')
-    for parent, kids in children.items():
-        subset = [r for r in rows if r['arm'] in [parent, *kids]]
-        paired = attach_baseline(subset, parent)
-        if not paired:
-            continue
-        for level, part in group_levels(paired).items():
-            print_level_heading(part, level, emit=emit, extras=LEVEL_EXTRAS)
-            print_paired(part, f'  {parent}  ->', [parent, *kids], parent, emit=emit)
-
-
-MODE_HEADINGS = {
-    MODE_RANKED: 'RANKED (NMS off) -- every window of the level ranked by the arm\'s score, no suppression: '
-                 'the search itself, only the answer\'s own window counting',
-    MODE_LISTED: 'LISTED (NMS on) -- the longest list an arm hands on, with suppression; a shorter K is its '
-                 'prefix. An answer is its window or a window within the suppression radius (the one '
-                 'that kept its place); with none it is rank pool + 1'}
-
-
-def tabulate(rows: list, per_slide: bool, baseline: str = '', emit=print) -> None:
-    """The whole report: one block per mode, each paired with the baseline; for the listed mode also the
-    recall curve over list length and each reranker against its own retriever."""
-    rows = normalise(rows)
-    base: str = pick_baseline(rows, baseline)
-    emit(f'baseline (every arm is paired with it): {base}')
-    check_pools(rows, base, emit=emit)
-    for mode in (MODE_RANKED, MODE_LISTED):
-        subset = [r for r in rows if mode_of(r) == mode]
-        if not subset:
-            continue
-        emit(f'\n{"#" * 90}\n# {MODE_HEADINGS[mode]}\n{"#" * 90}')
-        arms = report_arms(subset)
-        report(attach_baseline(subset, base), arms, base,
-               per_slide=per_slide, level_extras=LEVEL_EXTRAS, emit=emit)
-        if mode == MODE_RANKED:
-            recall_report(subset, arms, emit=emit)      # main vs offset vs all: a list has no lattice of its own
-        if mode == MODE_LISTED:
-            curve_report(subset, arms, emit=emit)
-            listed_report(subset, arms, emit=emit)
-            rerank_report(subset, emit=emit)
-
-
-def main() -> int:
-    # allow_abbrev=False: the config flags are prefixes of one another, and an
-    # abbreviation would set a different field without a word (see ConfigArgs).
-    parser = argparse.ArgumentParser(
-        description='pooling x window-score, measured through stage 2',
-        allow_abbrev=False)
-    parser.add_argument('csv', nargs='*',
-                        help='with --report-only, the CSVs to re-tabulate')
-    parser.add_argument('--report-only', action='store_true',
-                        help='rebuild every table from stored ranks. No GPU, '
-                             'no WSI, no model -- every metric is derived from '
-                             'rank_main and rank_overlap, so changing the k '
-                             'list or the grouping never costs a GPU hour.')
-
+def add_args(parser: argparse.ArgumentParser) -> None:
+    """Every flag that says what a run is: the slides, the FoVs, the mask, the arms, the encoder. The run
+    (`main`) and `analyze_stage2_metrics` both take them, so one command line gives both the addresses of
+    the same stage 2 entries (the encoder's own fields come with `parse_args`)."""
     # ── which slides ──────────────────────────────────────────────────────────
     # The slides and their FoVs are every bench's (BenchCommon.run_slides,
     # supply_for): the first --n-wsi of each dataset a --datasets id draws from,
@@ -2437,9 +1966,6 @@ def main() -> int:
     parser.add_argument('--rerank-on', nargs='*', default=[], metavar='ARM',
                         help='the retriever arms (`uni2:SlidingWindow::cls+mean`, ...) the --rerankers go '
                              'after; each is also an arm of its own, so a reranker is read against it')
-    parser.add_argument('--baseline', default='',
-                        help='the arm every other is paired with in the report (default `uni2:SlidingWindow'
-                             '::cls+mean`, else the first encoder\'s)')
     parser.add_argument('--k', type=int, default=PRODUCTION_K,
                         help=f'listed mode: the longest list an arm hands on (CONFIG {PRODUCTION_K}). '
                              f'A shorter K is its prefix, so one list gives the recall at every K; a level '
@@ -2450,7 +1976,7 @@ def main() -> int:
                              f'the stage\'s own); 0 keeps the raw top-k')
     parser.add_argument(
         '--encoder', default=ENCODER, choices=encoder_names(),
-        help='which tile encoder (TileEncoderFunc._IMPLEMENTATIONS). Arms this encoder cannot do '
+        help='which tile encoder (TileEncoder._IMPLEMENTATIONS). Arms this encoder cannot do '
              'are dropped by name and printed; see admissible_poolings.')
     parser.add_argument(
         '--head', default=HEAD,
@@ -2482,49 +2008,36 @@ def main() -> int:
                         default=None,
                         help=f'= --encoder-model-dtype fp16 / fp32 (CONFIG '
                              f'{DTYPE}). Run the forward pass under fp16 autocast. Output '
-                             'is fp32 either way (GigaPathFunc.py:174); this is '
+                             'is fp32 either way (GigaPath.py:174); this is '
                              'the precision production already ships, recorded '
                              'in log/TODO.log at cos=0.99995 against fp32 with '
                              'a 5.5x speedup. The NaN that appeared alongside '
                              'it needed Token Merging as well; fp16 on its own '
                              'was clean, which is why one shipped and the other '
                              'was removed (log/MILESTONE.log M3).')
-    parser.add_argument('--per-slide', action=argparse.BooleanOptionalAction,
-                        default=True,
-                        help='print the 單片跨層 tables. Worth having only when '
-                             'the per-level tables show an H&E / Ki67 split')
     parser.add_argument('--shard', default=None, metavar='I/N',
                         help='process only every N-th slide, starting at I '
                              '(0-based), so N processes on N cards share one '
                              'run. They write into the SAME cache (a slide '
                              'belongs to one shard, so no entry is written '
-                             'twice) and none of them writes the CSV: run '
-                             '--assemble once they are all done')
-    parser.add_argument('--assemble', action='store_true',
-                        help='no model, no GPU: read every slide\'s rows off the '
-                             'stage 2 entries the run these arguments describe '
-                             'wrote, write stage2_retriever.csv and print the '
-                             'tables. What a run does at its end, on its own -- '
-                             'after sharded processes, or after a killed run')
+                             'twice); analyze_stage2_metrics reads them all')
     parser.add_argument('--gates-only', action='store_true',
                         help='run the gates on the first slide and stop: the '
                              'checks that take seconds, before a run of hours')
-    parser.add_argument(
-        '--out', default=None,
-        help='output directory, used verbatim. Default: '
-             'result/<SLURM_JOB_NAME or Stage2RetrieverBench>/<encoder>/ -- the '
-             'encoder level is added only to that derived path, so name it '
-             'yourself when you pass one.')
-    # The encoder's fields are flags too, and which fields exist depends on WHICH
-    # encoder: so the name is read first, its config is built, and only then are
-    # its flags added and the whole line parsed.
+
+
+def parse_args(parser: argparse.ArgumentParser, encoder_flags: bool = True) -> argparse.Namespace:
+    """`parser` parsed, with the encoder's fields as flags too. Which fields exist depends on WHICH
+    encoder: so the name is read first, its config is built, and only then are its flags added and the
+    whole line parsed. `args.encoder_base` is that config, before the flags changed it. A caller that
+    reads no encoder (the CSVs of finished runs) passes `encoder_flags=False`."""
+    args: argparse.Namespace
     pre_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     pre_parser.add_argument('--encoder', default=ENCODER)
     pre_parser.add_argument('--head', default=HEAD)
-    pre_parser.add_argument('--report-only', action='store_true')
     pre, _ = pre_parser.parse_known_args()
     encoder_base = None
-    if not pre.report_only:
+    if encoder_flags:
         if pre.encoder not in encoder_names():
             parser.error(f'--encoder {pre.encoder!r}: one of {encoder_names()}')
         encoder_base = encoder_config(
@@ -2532,13 +2045,38 @@ def main() -> int:
             **({'head': pre.head} if pre.head else {})).with_model(dtype=DTYPE)
         add_encoder_args(parser, encoder_base)
     args = parser.parse_args()
+    args.encoder_base = encoder_base
+    return args
 
-    # The tag is a directory, not a filename suffix, added only to the derived
-    # path. An explicit --out is used verbatim.
+
+@dataclasses.dataclass
+class Plan:
+    """What a command line resolves to: the configs, the arms and the address of every stage 2 entry they
+    write. The run writes those entries; `analyze_stage2_metrics` reads them back."""
+    tag: str                                  # the encoder's directory name (encoder_tag)
+    job: str                                  # the job name the cache entries are under
+    fov_run: Any                              # the FoV recipe as this run resolved it (supply_for draws with it)
+    fov_masks: Any                            # MaskMaker of the hest masks the FoVs are placed on
+    cfg: Any                                  # the encoder's config
+    mask_cfg: Any                             # the mask recipe of the run
+    arm_specs: list                           # (pooling, grid) of the streamed sliding windows
+    bases: list                               # their poolings
+    arms: list[str]                           # the streamed arms' names
+    streamed_arms: list[Stage2Arm]
+    streamed_wanted: dict[str, dict]          # entry name -> its record, the streamed arms
+    streamed_rows: dict[str, str]             # the streamed arms that have rows: arm text -> entry name
+    engine: Optional[ArmEngine]
+    engine_wanted: dict[str, dict]            # entry name -> its record, the engine's arms
+    entry_roles: dict[str, tuple]             # entry name -> the tables it holds
+
+
+def resolve(args: argparse.Namespace, parser: argparse.ArgumentParser, device: torch.device) -> Plan:
+    """The run's configs and arms, each resolved once from the flags (what the recipes hold, then the flag
+    that names one field, then the field's own flag), and the entries they write. A bad value is refused
+    here, before anything is built. Builds no model: `device` only goes to the arm engine."""
+    encoder_base = args.encoder_base
+    # The tag is a directory, not a filename suffix, added only to the derived path.
     tag = encoder_tag(args.encoder, args.head)
-    out_dir = Path(args.out or job_result_dir('Stage2RetrieverBench', encoder=tag))
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     fov = FOV_RECIPES[args.fov]
     if fov.rungs != 'native':
         parser.error(f'--fov {args.fov} names its rungs {fov.rungs}; this bench '
@@ -2550,17 +2088,6 @@ def main() -> int:
           f'{args.n_wsi} slides each  ds <= {args.max_ds:g}')
     print(f'scores    {"  ".join(SCORES)}   baseline = {baseline_of(args.encoder)}\n')
 
-    if args.report_only:
-        if not args.csv:
-            parser.error('--report-only needs at least one CSV path')
-        # Any number of CSVs, of any encoders: an arm's name carries its encoder (an older CSV's is
-        # made into the bench's grammar), so a table holds the arms of several runs side by side.
-        rows = read_rows(args.csv)
-        tabulate(rows, args.per_slide, args.baseline)
-        return 0
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    require_gpu_if_allocated(device)
     # The run's configs, each resolved once: what the recipes hold, then the
     # flag that names one field, then the field's own flag. A bad value is
     # refused here by the config's own checks, before anything is built.
@@ -2704,8 +2231,8 @@ def main() -> int:
         for line in describe(config, name):
             print(f'  {line}')
     print()
-    # Every arm keeps nothing but its stage 2 entries; its rows are read off them (`slide_rows`), a slide at a
-    # time, and the CSV is written from those. An arm is redone by removing its entries.
+    # Every arm keeps nothing but its stage 2 entries; its rows are read off them by
+    # analyze_stage2_metrics. An arm is redone by removing its entries.
     streamed_arms = stage2_arms(args, arm_specs)
     streamed_wanted: dict[str, dict] = {a.entry_id: a.rec for a in streamed_arms}
     # the streamed arms that have rows (the scores asked for): arm text -> entry name
@@ -2727,11 +2254,35 @@ def main() -> int:
                                      for a in streamed_arms}
     if engine is not None:
         entry_roles.update(engine.roles())
-    arm_rows = arm_rows_of(streamed_arms, streamed_rows, engine)
+    return Plan(tag=tag, job=Cache.job_name('Stage2RetrieverBench'), fov_run=fov_run,
+                fov_masks=MaskMaker(MASK_RECIPES['hest'], args.fov_mask_cache_job, device), cfg=cfg,
+                mask_cfg=mask_cfg, arm_specs=arm_specs, bases=bases, arms=arms, streamed_arms=streamed_arms,
+                streamed_wanted=streamed_wanted, streamed_rows=streamed_rows, engine=engine,
+                engine_wanted=engine_wanted, entry_roles=entry_roles)
+
+
+def main() -> int:
+    """Runs the arms over the slides and writes their stage 2 entries -- nothing else. The rows, the CSV and
+    the tables are read off those entries by `cli/metrics/analyze_stage2_metrics.py`, with these same flags."""
+    # allow_abbrev=False: the config flags are prefixes of one another, and an
+    # abbreviation would set a different field without a word (see ConfigArgs).
+    parser = argparse.ArgumentParser(
+        description='pooling x window-score, measured through stage 2: writes the stage 2 entries '
+                    '(analyze_stage2_metrics reads them)',
+        allow_abbrev=False)
+    add_args(parser)
+    args = parse_args(parser)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    require_gpu_if_allocated(device)
+    plan = resolve(args, parser, device)
+    tag, job, cfg, mask_cfg = plan.tag, plan.job, plan.cfg, plan.mask_cfg
+    arm_specs, bases, arms, engine = plan.arm_specs, plan.bases, plan.arms, plan.engine
+    streamed_wanted, engine_wanted, entry_roles = plan.streamed_wanted, plan.engine_wanted, plan.entry_roles
+    fov_run, fov_masks = plan.fov_run, plan.fov_masks
 
     selected = run_slides(args)
     shard = None
-    if args.shard and not args.assemble:
+    if args.shard:
         try:
             index, _, count = args.shard.partition('/')
             shard = (int(index), int(count))
@@ -2753,38 +2304,9 @@ def main() -> int:
     for dataset, name, _ in selected:
         print(f'  {dataset:<{width}}{name}')
 
-    job = Cache.job_name('Stage2RetrieverBench')
-    fov_masks = MaskMaker(MASK_RECIPES['hest'], args.fov_mask_cache_job, device)
     mask_job = args.mask_cache_job or job
     print(f'masks     {mask_cfg.seg_id()}  cache {mask_job}')
-    rows: list = []
     failed: list = []
-    differ: int = 0
-
-    def read_rows_of(dataset: str, stem: str, supply: Any, entry: Any) -> None:
-        """The slide's rows, read off its entries, into the run's."""
-        nonlocal differ
-        got, apart = slide_rows(entry, arm_rows, encoder=tag, dataset=dataset, stem=stem, supply=supply,
-                                min_sep=args.min_sep_tiles)
-        rows.extend(got)
-        differ += apart
-        print(f'  {len(got)} rows read off the stage 2 entries'
-              + (f'   {apart} FoV whose answers two entries place differently: their rows compare '
-                 f'other windows' if apart else ''), flush=True)
-
-    if args.assemble:
-        # No model, no GPU: every slide's rows read off the entries the run (or its shards) wrote.
-        for dataset, stem, path in selected:
-            print(f'\n{stem}  ({dataset})', flush=True)
-            try:
-                supply = supply_for(str(path), fov_run, fov_masks, args, job)
-                if supply is not None:
-                    read_rows_of(dataset, stem, supply,
-                                 supply.render_address.on(job).at(stage1=ORACLE).entry('stage2'))
-            except Exception as exc:                          # noqa: BLE001
-                print(f'  {type(exc).__name__}: {exc}')
-                failed.append(stem)
-        return finish_run(rows, failed, differ, None, None, out_dir, args)
 
     encoder = cfg.build(device)
     if RAW in bases and getattr(encoder.model_spec, 'kind', None) != 'tokens':
@@ -2881,7 +2403,6 @@ def main() -> int:
                                  if empty else ''), flush=True)
                 else:
                     print(f'  every entry is there (levels {run_levels})', flush=True)
-                read_rows_of(dataset, stem, supply, entry)
             except Exception as exc:                          # noqa: BLE001
                 import traceback
                 traceback.print_exc()
@@ -2889,34 +2410,22 @@ def main() -> int:
                 failed.append(stem)
             finally:
                 slide.close()
-    return finish_run(rows, failed, differ, shard, engine, out_dir, args)
+    return finish_run(failed, shard, engine)
 
 
-def finish_run(rows: list, failed: list, differ: int, shard: Optional[tuple], engine: Optional[ArmEngine],
-               out_dir: Path, args: argparse.Namespace) -> int:
-    """The CSV and the tables of the slides read (all of them, unless this is one shard of a run: the last
-    step is then `--assemble`), and what failed."""
+def finish_run(failed: list, shard: Optional[tuple], engine: Optional[ArmEngine]) -> int:
+    """What failed. The rows and the tables are `analyze_stage2_metrics`'s, once every shard has finished."""
     print(f'\n{"=" * 78}')
-    if shard is None:
-        # The encoder is in the NAME as well as in every row: the name stops a
-        # second encoder's run from overwriting the first one's numbers, the
-        # column stops the two from being averaged together afterwards.
-        write_csv(rows, out_dir / 'stage2_retriever.csv')
-        if rows:
-            tabulate(rows, args.per_slide, args.baseline)
-    else:
-        print(f'shard {shard[0]}/{shard[1]} done. Once every shard has finished, '
-              f'run the same command with --assemble.')
-    if differ:
-        print(f'\n{differ} FoV(s) whose answers two entries place differently: one geometry should place them, '
-              f'and does not -- look at those entries before reading their rows')
+    if shard is not None:
+        print(f'shard {shard[0]}/{shard[1]} done.')
+    print('the entries are written; analyze_stage2_metrics (the same flags) reads them')
     if engine is not None and engine.failures:
         print(f'\n{len(engine.failures)} arm(s) failed and have no rows (the rest of the run is intact):')
         for arm, why in engine.failures.items():
             print(f'  {arm}   {why}')
     if failed:
         print(f'\n{len(failed)} slide(s) failed: {", ".join(failed)}')
-    return 1 if failed or differ or (engine is not None and engine.failures) else 0
+    return 1 if failed or (engine is not None and engine.failures) else 0
 
 
 if __name__ == '__main__':

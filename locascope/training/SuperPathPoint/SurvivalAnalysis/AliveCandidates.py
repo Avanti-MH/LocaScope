@@ -32,7 +32,7 @@ def alive_absolute_dual_threshold(score: np.ndarray, dist: np.ndarray, *,
         alive[i,j] = (score[i,j] > score_threshold)
                     & (0 <= dist[i,j] <= tau[j])
     """
-    from SurvivalAnalysis.Patterns import alive_from  # noqa: PLC0415
+    from locascope.training.SuperPathPoint.SurvivalAnalysis.Patterns import alive_from  # noqa: PLC0415
     return alive_from(score, dist, score_threshold=score_threshold, tau=tau)
 
 

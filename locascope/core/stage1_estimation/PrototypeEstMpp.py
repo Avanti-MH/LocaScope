@@ -2,7 +2,7 @@
 metric-based checkpoint, in the shape `StageInterface.MppEstimator` describes.
 
     cfg = PrototypeEstMppConfig.from_checkpoint(
-        '/work/u26130998/result/PrototypicalRoutingHead/weights/'
+        '$LOCASCOPE_OUTPUT_ROOT/result/PrototypicalRoutingHead/weights/'
         'pure-train_Ki67--gigapath--cls--G_identity--F_identity--set_transformer--'
         'cosine_tau--cross_off--hold_q_k5--bal--6rung.pt')
     est = PrototypeEstMpp(cfg).build(wsi)
@@ -33,7 +33,7 @@ prototypes/support groups they are handed -- no layer's weight shape is
 tied to a specific K (the "dynamic-K-safe" invariant `training/
 PrototypicalRoutingHead/plan.md`'s own design keeps everywhere). So there is
 no requirement to force a target WSI's reference bank to cover six specific
-magnifications: `native_plans(wsi, tile)` (`utilities/TileSampler.py`'s own
+magnifications: `native_plans(wsi, tile)` (`locascope/core/tiles/TileSampler.py`'s own
 "the ds ladder and the pyramid are different questions... this answers the
 second, which is what a reference bank wants") gives one rung per pyramid
 level THIS slide actually has, and the model classifies among however many
@@ -95,20 +95,20 @@ import openslide
 import torch
 
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
-from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig, register  # noqa: E402
+from locascope.core.tiles.TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
                          TileSampler)
-from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
-from PatchingLib import QueryPatchContainer                              # noqa: E402
-from SafeSlide import SafeSlide                                         # noqa: E402
-from Checkpoints import build_prototype_from_checkpoint                  # noqa: E402
-from Features import encode_raw, trunk_raw                              # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, TissueMaskConfig              # noqa: E402
+from locascope.core.tiles.PatchingLib import QueryPatchContainer                              # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                         # noqa: E402
+from locascope.core.networks.Checkpoints import build_prototype_from_checkpoint                  # noqa: E402
+from locascope.core.networks.Features import encode_raw, trunk_raw                              # noqa: E402
 
-from stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
+from locascope.core.stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
                                               routed_level, weights_path)
-from stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
-from ReadGeometry import ReadSpec                                        # noqa: E402
-from SlideReader import SlideReader                                     # noqa: E402
+from locascope.core.stage1_estimation.FoVVote import vote as fov_vote                                     # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                        # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                     # noqa: E402
 
 
 # ── reference-bank sampling ──────────────────────────────────────────────────

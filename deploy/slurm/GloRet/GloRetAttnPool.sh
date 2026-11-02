@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-#  The arm with TilePool `attnpool` (stage2_retrieval/proposal.md §3.2), on its own: its training is not that of the
+#  The arm with TilePool `attnpool` (locascope/core/stage2_retrieval/proposal.md §3.2), on its own: its training is not that of the
 #  other arms (cls, cls_avg: GloRet.sh), so it is a job chain of its own, with its own job name, log and weights.
 #
 #  Three stages, each a GloRet.sh job that starts when the one before has FINISHED WELL (afterok):
@@ -15,11 +15,11 @@
 #  This file only SUBMITS the three (run it with bash, not sbatch): they are queued, and the log of all three is
 #  log/$JOB (A writes it, B and C append). The weights: <results>/GloRet/weights/pure-train_stage{A,B,C}--...
 #
-#    bash jobscripts/GloRet/GloRetAttnPool.sh                              # 1 node x 8 GPUs a stage, partition 8gpus
-#    NODES=2 GPUS=4 PARTITION=16gpus bash jobscripts/GloRet/GloRetAttnPool.sh   # 2 nodes x 4 GPUs (less /dev/shm a node)
+#    bash deploy/slurm/GloRet/GloRetAttnPool.sh                              # 1 node x 8 GPUs a stage, partition 8gpus
+#    NODES=2 GPUS=4 PARTITION=16gpus bash deploy/slurm/GloRet/GloRetAttnPool.sh   # 2 nodes x 4 GPUs (less /dev/shm a node)
 #    HEADS_A="GloRet-GNN-AttnPool LogLoRet-GNN-AttnPool" HEAD_B=LogLoRet-GNN-AttnPool bash ...
-#    SMOKE=1 bash jobscripts/GloRet/GloRetAttnPool.sh                      # 2 slides, 3 visits, 1 epoch; JOB=SmokeGloRetAttnPool
-#    DRY_RUN=1 bash jobscripts/GloRet/GloRetAttnPool.sh                    # the three sbatch lines; submits nothing
+#    SMOKE=1 bash deploy/slurm/GloRet/GloRetAttnPool.sh                      # 2 slides, 3 visits, 1 epoch; JOB=SmokeGloRetAttnPool
+#    DRY_RUN=1 bash deploy/slurm/GloRet/GloRetAttnPool.sh                    # the three sbatch lines; submits nothing
 #    COMMON_EXTRA="--steps-per-visit 4 --fovs-per-step 16 --episodes 2 --val-fov-per-visit 32" bash ...   # the steps of another run
 #    A_JOB=<job id> AFTER=<job id> bash ...    # stage A is that job already; B and C start after it and after the AFTER job
 #    AFTER=<job id> bash ...                                               # stage A starts only if that job (a test) ended well
@@ -72,7 +72,7 @@ submit() {   # submit <dependency or ""> <open-mode> <heads> <pooling> <extra fl
   local dep="$1" mode="$2" heads="$3" pooling="$4" extra="$5" top="$6"
   local cmd=("${SBATCH[@]}" "--open-mode=$mode")
   [ -n "$dep" ] && cmd+=("--dependency=afterok:$dep")
-  cmd+=(jobscripts/GloRet/GloRet.sh)
+  cmd+=(deploy/slurm/GloRet/GloRet.sh)
   if [ "$DRY_RUN" = "1" ]; then
     echo "HEADS=\"$heads\" POOLING=$pooling TOP_P=\"$top\" EXTRA=\"$COMMON_EXTRA $extra\" ${cmd[*]}" >&2
     echo "dry$RANDOM"

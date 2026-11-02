@@ -17,10 +17,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/_paths.py
+# Runs write outside the checkout; see locascope/paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # CORPUS=result/MultiBatch
@@ -28,10 +28,10 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # # ---------------- Step 1: generate the shot corpus ----------------
 # echo "======== [1/2] multi_batch: generate synthetic shots ========"
-# python query_sim/cli/multi_batch.py \
-#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs \
-#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_FEA/BRACS_1936.svs \
-#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_MT/Type_DCIS/BRACS_1476.svs \
+# python -m locascope.core.query_sim.cli.multi_batch \
+#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003694.svs \
+#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_FEA/BRACS_1813.svs \
+#   /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_MT/Type_DCIS/BRACS_1474.svs \
 #   /work/u26130998/datasets/Ki67_with_photo/S1151088_G7E_111220_mrxs/S1151088,G7E,111220.mrxs \
 #   /work/u26130998/datasets/Ki67_with_photo/S1104233_G7E_110208_mrxs/S1104233,G7E,110208.mrxs \
 #   /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360,G7E,110208.mrxs \
@@ -42,7 +42,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # # ---------------- Step 2: run the 3-stage pipeline over the whole corpus ----------------
 # echo ""
 # echo "======== [2/2] bench_locascope: 3-stage pipeline + metrics + plots ========"
-# python utilities/bench_modules/bench_locascope.py \
+# python -m locascope.cli.bench.bench_locascope \
 #   --gt-csv     $CORPUS/gt.csv \
 #   --images-dir $CORPUS/images \
 #   --out        $BENCH \
@@ -51,26 +51,26 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 
 # cd /work/u26130998/LocaScope
-# python utilities/test_modules/test_EoMT.py \
+# python tests/test_EoMT.py \
 #     --tile-figure /work/u26130998/prov-gigapath/images/01581x_25327y.png \
 #                   /work/u26130998/prov-gigapath/images/01581x_25583y.png \
 #     --wsi /work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003691.svs \
 #           /work/u26130998/datasets/Ki67_with_photo/S1103520_G7E_110126_mrxs/S1103520,G7E,110126.mrxs
 
-# python aiNNModel/models/common/migrate_checkpoint.py \
+# python -m locascope.core.networks.migrate_checkpoint \
 #   /work/u26130998/result/ClassifyingRoutingHead/weights/*mlp*.pt  --write
 
-# python utilities/test_modules/test_cache.py
-# python utilities/test_modules/test_tissue_mask.py
-# python utilities/test_modules/test_tile_sampler.py
-# python utilities/test_modules/test_uni2_pca_seg.py
-# python utilities/test_modules/test_patching_lib.py
-# python utilities/cli/build_cache/make_dataset.py --catalog --recipe pure legacy
-# python utilities/test_modules/test_store.py
-# python utilities/test_modules/TestSuperPathPoint/test_chain_stack.py
-# python utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py
-# sbatch jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh
+# python tests/test_cache.py
+# python tests/test_tissue_mask.py
+# python tests/test_tile_sampler.py
+# python tests/test_uni2_pca_seg.py
+# python tests/test_patching_lib.py
+# python -m locascope.cli.build_cache.make_dataset --catalog --recipe pure legacy
+# python tests/test_store.py
+# python tests/TestSuperPathPoint/test_chain_stack.py
+# python tests/TestSuperPathPoint/test_superpathpoint.py
+# sbatch deploy/slurm/SuperPathPointJobs/TestSuperPathPoint.sh
 # # once those pass, a small real extraction (it prints the corpus key at the top of the log):
-# N=20 DS="1 2 4 8 16" WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_BT/Type_N/BRACS_1598.svs CACHE_JOB=ExtractPreTilesSmoke sbatch jobscripts/SuperPathPointJobs/ExtractPreTiles.sh
-# sbatch jobscripts/PatchingLibTest.sh
-# sbatch jobscripts/TissueMaskTest.sh
+# N=20 DS="1 2 4 8 16" WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_BT/Type_N/BRACS_1598.svs CACHE_JOB=ExtractPreTilesSmoke sbatch deploy/slurm/SuperPathPointJobs/ExtractPreTiles.sh
+# sbatch deploy/slurm/PatchingLibTest.sh
+# sbatch deploy/slurm/TissueMaskTest.sh

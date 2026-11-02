@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """analyze_locascope -- where a bench_locascope run loses its FoVs, stage by stage.
 
-    python utilities/cli/metrics/analyze_locascope.py <bench_locascope's run flags> \\
+    python -m locascope.cli.metrics.analyze_locascope <bench_locascope's run flags> \\
         [--stage-cache-job BenchLocaScope] [--tol-px 16]
-    sbatch jobscripts/AnalyzeLocaScope.sh
+    sbatch deploy/slurm/AnalyzeLocaScope.sh
 
 Reads the cache the bench wrote (the same flags give the same addresses) and runs nothing. It
 needs only the stage-1 route; the oracle route (`bench_locascope --route oracle`, stage 2 given
@@ -77,24 +77,21 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bench_modules'))
+from locascope import paths as _paths                                                       # noqa: E402
 
 import matplotlib                                                   # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                     # noqa: E402
 from matplotlib.patches import FancyBboxPatch                       # noqa: E402
 
-from _paths import job_result_dir                                   # noqa: E402
-from BenchCommon import (ORACLE, Answers, add_run_args, answers_of_row, first_place, listed_of_rows,  # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
+from locascope.cli.bench.BenchCommon import (ORACLE, Answers, add_run_args, answers_of_row, first_place, listed_of_rows,  # noqa: E402
                          matching_rotation,
                          parse_run_args, run_from_args, slide_supplies,
                          stage2_entries, stage_entries)
-from DsLadder import DEFAULT_RUNGS                                  # noqa: E402
-from SafeSlide import SafeSlide                                     # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker                # noqa: E402
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS                                  # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                     # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker                # noqa: E402
 
 JOB_NAME: str = 'AnalyzeLocaScope'
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for `ChainStack`: `FStack`/`RStack`/`CStack`. spec.md 3.2.
 
-    python utilities/test_modules/TestSuperPathPoint/test_chain_stack.py
+    python tests/TestSuperPathPoint/test_chain_stack.py
 
 WHAT THIS BLOCKS
 ==================
@@ -35,12 +35,8 @@ import sys
 import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 from pathlib import Path                                      # noqa: E402
 
@@ -49,11 +45,11 @@ import numpy as np                                           # noqa: E402
 from dataclasses import dataclass                              # noqa: E402
 from types import SimpleNamespace                             # noqa: E402
 
-from TileSampler import PRE_TILE_FACTOR, SampleMeta, pre_tile_px  # noqa: E402
-from common.Corpora import Corpus, recipe_config              # noqa: E402
-from SlideReader import degrade_resolution                     # noqa: E402
-from PatchingLib import PatchInfo                             # noqa: E402
-from SurvivalAnalysis import ChainStack                    # noqa: E402
+from locascope.core.tiles.TileSampler import PRE_TILE_FACTOR, SampleMeta, pre_tile_px  # noqa: E402
+from locascope.training.SuperPathPoint.common.Corpora import Corpus, recipe_config              # noqa: E402
+from locascope.core.slides.SlideReader import degrade_resolution                     # noqa: E402
+from locascope.core.tiles.PatchingLib import PatchInfo                             # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import ChainStack                    # noqa: E402
 FStack, RStack, CStack = ChainStack.FStack, ChainStack.RStack, ChainStack.CStack
 
 _RESULTS = []
@@ -385,7 +381,7 @@ def t_derive_refuses_own_rather_than_guessing():
 def _tree():
     """`Cache.RESULT_DIR` pointed at a temporary directory for the length of a
     test; yields the job the corpora are written under."""
-    import Cache                                                  # noqa: PLC0415
+    from locascope.core.cache import Cache                                                  # noqa: PLC0415
     with tempfile.TemporaryDirectory() as tmp:
         saved, Cache.RESULT_DIR = Cache.RESULT_DIR, tmp
         try:

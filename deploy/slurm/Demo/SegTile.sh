@@ -15,10 +15,10 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
-#  utilities/cli/demo/seg_tile.py -- one (or more) tile in, ONE COMBINED
+#  locascope/cli/demo/seg_tile.py -- one (or more) tile in, ONE COMBINED
 #  quick-look figure per tile out (one panel per METHOD). No mask-cache write,
 #  no whole-slide read except for a uni2 fit -- see seg_tile.py's own module
 #  docstring for why that method alone needs a slide, and how it recovers
@@ -57,7 +57,7 @@ echo "  methods $METHOD"
 echo "  images  $IMAGE"
 echo "  wsi     ${WSI_NAME:-<none -- fallback only, per-tile auto-recovery tried first>}"
 
-python utilities/cli/demo/seg_tile.py \
+python -m locascope.cli.demo.seg_tile \
   --image $IMAGE \
   --method $METHOD \
   ${WSI_NAME:+--wsi-name "$WSI_NAME"} \

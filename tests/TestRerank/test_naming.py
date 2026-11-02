@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for `stage2_retrieval/Naming.py`: one name for a stage 2 entry, whoever writes it.
 
-    python utilities/test_modules/TestRerank/test_naming.py
+    python tests/TestRerank/test_naming.py
 
 No slide, no model, no GPU.
 
@@ -27,18 +27,15 @@ import sys
 from typing import Callable, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
-from TileEncoderFunc import encoder_config                       # noqa: E402
-from stage2_retrieval import METHODS as STAGE_METHODS, recipe    # noqa: E402
-from stage2_retrieval.ArmSpec import METHODS, config_of_arm, parse_arm   # noqa: E402
-from stage2_retrieval.Naming import (METHOD_SLUGS, arm_label, config_label, entry_name, hash_of,   # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config                       # noqa: E402
+from locascope.core.stage2_retrieval import METHODS as STAGE_METHODS, recipe    # noqa: E402
+from locascope.core.stage2_retrieval.ArmSpec import METHODS, config_of_arm, parse_arm   # noqa: E402
+from locascope.core.stage2_retrieval.Naming import (METHOD_SLUGS, arm_label, config_label, entry_name, hash_of,   # noqa: E402
                                      label, slug, stage_name)
-from stage2_retrieval.RetrieverSlidingWinSimRot import (WINDOW_SCORES,   # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import (WINDOW_SCORES,   # noqa: E402
                                                         RetrieverSlidingWinSimRotConfig)
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []

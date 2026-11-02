@@ -1,15 +1,14 @@
 """One definition of every retrieval metric, and the tables that print them.
 
-Two benches ask the same question at two scales -- bench_stage2_retriever scores
-a whole FoV window through stage 2, bench_tile_retrieval scores a single tile
-against a store -- and both want the same answer shape: does this arm beat the
-baseline, and how often is the truth inside a candidate budget.
+An analysis asks: does this arm beat the baseline, and how often is the truth inside a
+candidate budget. `analyze_stage2_metrics` (a FoV window through stage 2) is the one that
+prints these tables today; any analysis of a retrieval at another scale (a single tile
+against a store) takes its numbers from here too.
 
-This file exists so that "@1%" means one thing. When the two benches each held
-their own copy, nothing would have flagged a divergence: both would print a
-column headed @1%, both numbers would look plausible, and a comparison between
-the two benches would be silently invalid. A metric that is defined twice is a
-metric that is eventually defined differently.
+This file exists so that "@1%" means one thing. Were two analyses to hold their own copy,
+nothing would flag a divergence: both would print a column headed @1%, both numbers would
+look plausible, and a comparison between them would be silently invalid. A metric that is
+defined twice is a metric that is eventually defined differently.
 
 What a caller has to supply
 ---------------------------
@@ -70,7 +69,7 @@ The metrics
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, Optional, Sequence
 
 import numpy as np
 
@@ -272,7 +271,6 @@ def print_level_heading(rows: list, level: object,
     that value, and a slide with none shows `-`."""
     by_slide = group_by(rows, ['slide'])
     has_ds = bool(rows) and rows[0].get('ds') not in (None, '')
-    ds_text = f' (ds {float(level):.4g})' if has_ds else ''
     columns = [('main windows', 'pool')] + [
         (h, k) for h, k in extras
         if any(r.get(k) not in (None, '') for r in rows)]

@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional, Tuple
 
-from stage2_retrieval.ArmSpec import ArmSpec, MAIN_ONLY, METHODS, RAW, Segment
+from locascope.core.stage2_retrieval.ArmSpec import ArmSpec, MAIN_ONLY, METHODS, RAW, Segment
 
 #: The word each method is filed under.
 METHOD_SLUGS: Dict[str, str] = {
@@ -110,7 +110,7 @@ def config_label(cfg: Any) -> str:
 
 def arm_label(spec: ArmSpec, raw_topk: int = DEFAULT_LENGTH, min_sep_tiles: float = 1.0) -> str:
     """The label of the LAST phase of the arm: the entry of an arm is its own, never its chain's."""
-    from stage2_retrieval.ArmSpec import phase_configs             # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import phase_configs             # noqa: PLC0415
     return config_label(phase_configs(spec, raw_topk=raw_topk, min_sep_tiles=min_sep_tiles)[-1])
 
 

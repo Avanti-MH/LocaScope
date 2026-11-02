@@ -4,9 +4,9 @@
 步驟。這份是**現在要做什麼、按什麼順序、做到哪**。決定的理由留在這裡，量測的結論
 進 `log/TODO.log`。
 
-> **2026-11-02 核對（只比對文中的檔名與識別字，沒有重讀全文）：** job script 在 `jobscripts/SuperPathPointJobs/`
-> （文中的 `jobscripts/.../PrepareChainStack.sh` 就是 `jobscripts/SuperPathPointJobs/PrepareChainStack.sh`）；
-> `test_chain_stack.py` 在 `utilities/test_modules/TestSuperPathPoint/`。文中的 `_write_rung`、`_pick_record`、
+> **2026-11-02 核對（只比對文中的檔名與識別字，沒有重讀全文）：** job script 在 `deploy/slurm/SuperPathPointJobs/`
+> （文中的 `deploy/slurm/.../PrepareChainStack.sh` 就是 `deploy/slurm/SuperPathPointJobs/PrepareChainStack.sh`）；
+> `test_chain_stack.py` 在 `tests/TestSuperPathPoint/`。文中的 `_write_rung`、`_pick_record`、
 > `_sampler_config_for`、`tiles_chains`、`PreTileMeta` 在程式裡找不到，是當時的名稱。
 > 「做到哪」的狀態字樣是當時的，沒有同步。
 
@@ -257,8 +257,8 @@ ViT 那條多一個要學的隨機模組，結果會混進「upsample 學不學�
 |---|---|
 | `SurvivalAnalysis/ChainStack.py` | 見下 |
 | `test_modules/TestSuperPathPoint/test_chain_stack.py` | 21 個測試：幾何/本地快取（原本在 `test_survival.py` 的部分）+ `own`（`from_tile`/`base_rung`/三個 `from_own`，都對著假 corpus fixture：draw 給定、像素用畫的） |
-| `jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh` | `chain-stack` stage |
-| `cli/prepare_chain_stack.py` / `jobscripts/.../PrepareChainStack.sh` | 一條龍入口，見下 |
+| `deploy/slurm/SuperPathPointJobs/TestSuperPathPoint.sh` | `chain-stack` stage |
+| `cli/prepare_chain_stack.py` / `deploy/slurm/.../PrepareChainStack.sh` | 一條龍入口，見下 |
 
 **三軸的原料怎麼來：**
 
@@ -536,7 +536,7 @@ excess/NullModel 同一個等級**——它是分布層級的比較，沒辦法�
 上」），tau 沒校準之前寫這裡的比對邏輯，跟 2.2 沒校準前就分析六種樣態是同一種錯誤。
 
 `spec.md` §3.2「第三個軸：C（子嗣／組合 stack）」已經把切法定案——沿用
-`utilities/PatchingLib.py` 的 `PatchGrid.from_size(..., overlap=True)`，main 格
+`locascope/core/tiles/PatchingLib.py` 的 `PatchGrid.from_size(..., overlap=True)`，main 格
 精確不重疊密鋪，overlap 格是內角格，跟周圍 4 個 main 格各共用 1/4 面積。子嗣的
 幾何跟抽取本身已經在 2.1 做完（`ChainStack.CStack`），這裡要做的只剩比對邏輯：
 
@@ -691,7 +691,7 @@ hinge。軟標籤是實驗。
   而檔名帶逗號，這已經咬過兩次不同的工具（awk、`val_slides`）。**現在不做**：179 處
   引用、stem 是目錄名的一部分、而且進了 `PreTileMeta` / `LabelMeta` / `StoreMeta` 的
   雜湊 —— 等於整批 cache 作廢重建。等下次有理由重建 cache 時一起。
-- `utilities/test_modules/test_config_identity.py` 沒有任何 jobscript 在跑它。
+- `tests/test_config_identity.py` 沒有任何 jobscript 在跑它。
 - `log/TODO.log` 要補 reference bank 的純玻璃表（刪掉 44 GB 之前要留的五個數字）。
 - ReferenceSampler 退役進 TileSampler：bucket 換成新的七個、jitter 換成
   `OverlapConfig` 的比例、`over` 不帶過去、`ConfigIdentity` 用自我驗證的改名腳本
@@ -704,7 +704,7 @@ hinge。軟標籤是實驗。
   「下一次重訓」兩節重疊——之後要對一次要不要搬到這裡，這次沒動它。
 
 - **2026-11-02 加入（沒動手）：**
-  - 拆 `cli/demo_survival_analysis.py`（2941 行）：五個不相關的 demo（`--parts chains_stack/merge_grid/visualize/scale_diagnostic/scale_synthetic_control`）擠在一個 `main()`。改成 argparse subparsers 或拆檔，一個 demo 一個函式、各自參數群組；先盤點 `jobscripts/SuperPathPointJobs/` 裡的呼叫點（`DemoSurvivalAnalysis.sh`）。
+  - 拆 `cli/demo_survival_analysis.py`（2941 行）：五個不相關的 demo（`--parts chains_stack/merge_grid/visualize/scale_diagnostic/scale_synthetic_control`）擠在一個 `main()`。改成 argparse subparsers 或拆檔，一個 demo 一個函式、各自參數群組；先盤點 `deploy/slurm/SuperPathPointJobs/` 裡的呼叫點（`DemoSurvivalAnalysis.sh`）。
   - `common/KeypointLabelStore.py` 搬上 `Cache.py`：features 與 pre-tile 已併進 `Store.py`、按位址讀，只剩它還是自己一套 tmp+replace／cfg_hash／`find`、`find_one`，寫在 `result/cache/<made_by>_keypoint_labels/`。它的 `pretile_id` 已經是 corpus key，label 與 pre-tile 的配對不受影響。改用 `Cache.cache_root`／`atomic_file`，目錄 `<made_by>_labels/<corpus key>/<slide>/ds<d>/<ha_id>/`，讀端從 corpus 算位址而不是 `find`。
 
 ---
@@ -732,4 +732,4 @@ uniform）的合成高斯斑點，同一套流程（`classical_blur_stack`/`_lap
 
 重跑驗證：
 
-    PARTS=scale_synthetic_control sbatch jobscripts/SuperPathPointJobs/DemoSurvivalAnalysis.sh
+    PARTS=scale_synthetic_control sbatch deploy/slurm/SuperPathPointJobs/DemoSurvivalAnalysis.sh

@@ -2,7 +2,7 @@
 """Figures, statistics and the demo export of a bench_locascope run, offline:
 everything is read from the cache it wrote, nothing runs a stage.
 
-    python utilities/cli/plot/plot_locascope.py <bench_locascope's run flags> \\
+    python -m locascope.cli.plot.plot_locascope <bench_locascope's run flags> \\
         [--stage-cache-job BenchLocaScope] \\
         [--select "level == 0 and s2_hit_rank > 1"] [--sample 20 --seed 0] \\
         [--panels photo,gt,candidates,crop,matches,located,result] \\
@@ -48,7 +48,7 @@ the ANSWER (the verified candidate with the largest confidence) marked on
 names one. The joined table's columns are s1_*, s2_*, s3_* and answer_*, so
 --select reads e.g. "answer_confidence < 0.2" or "answer_retrieval_only == 1".
 
-    python utilities/cli/plot/plot_locascope.py --real --stage-cache-job RealTest \\
+    python -m locascope.cli.plot.plot_locascope --real --stage-cache-job RealTest \\
         --stage3-topk 100 --sample 20 --panels photo,candidates,matches,located,result
 
 PANELS, one row of them per selected FoV: photo, gt (the truth's footprint),
@@ -88,10 +88,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bench_modules'))
+from locascope import paths as _paths                                                       # noqa: E402
 
 import matplotlib                                                   # noqa: E402
 matplotlib.use('Agg')
@@ -99,14 +96,14 @@ import matplotlib.pyplot as plt                                     # noqa: E402
 from matplotlib.lines import Line2D                                 # noqa: E402
 from matplotlib.patches import Patch, Polygon, Rectangle            # noqa: E402
 
-import Cache                                                        # noqa: E402
-from _paths import job_result_dir                                   # noqa: E402
-from AccessDatasets import list_names, locate                       # noqa: E402
-from BenchCommon import (ORACLE, matching_rotation, add_run_args, parse_run_args,  # noqa: E402
+from locascope.core.cache import Cache                                                        # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
+from locascope.core.slides.AccessDatasets import list_names, locate                       # noqa: E402
+from locascope.cli.bench.BenchCommon import (ORACLE, matching_rotation, add_run_args, parse_run_args,  # noqa: E402
                              answers_of_row, first_place, listed_of_rows, run_from_args, slide_supplies,
                              stage2_entries, stage_entries)
-from SafeSlide import SafeSlide                                     # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker                # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                     # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker                # noqa: E402
 
 PANELS = ('photo', 'gt', 'candidates', 'stage1', 'crop', 'matches', 'located', 'result',
           'windows')
@@ -1003,7 +1000,7 @@ def export_demo(runs: dict, sel: pd.DataFrame, stages, args, out: Path) -> Path:
     `tile_sims`); the truth's rank, score, the rank-1 score and the margin.
     Stage 2 has one arm, `cls+mean`."""
     from PIL import Image
-    from Store import encoder_names
+    from locascope.core.cache.Store import encoder_names
     img_dir = out / 'img'
     img_dir.mkdir(parents=True, exist_ok=True)
     scale, k, tile = float(args.demo_scale), int(args.k_windows), int(args.tile_size)

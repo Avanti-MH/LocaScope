@@ -16,18 +16,18 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  aiNNModel/ -- the shared model code, in one job.
+#  locascope/core/ -- the shared model code, in one job.
 #
-#    sbatch jobscripts/TestAiNNModel.sh
-#    ONLY="tile_encoder resume" sbatch jobscripts/TestAiNNModel.sh
-#    ENCODER=uni2 NO_DUAL_LOAD=1 ONLY=encoders sbatch jobscripts/TestAiNNModel.sh
+#    sbatch deploy/slurm/TestAiNNModel.sh
+#    ONLY="tile_encoder resume" sbatch deploy/slurm/TestAiNNModel.sh
+#    ENCODER=uni2 NO_DUAL_LOAD=1 ONLY=encoders sbatch deploy/slurm/TestAiNNModel.sh
 #
-#  The tests live in utilities/test_modules/TestAiNNModel/, named after this script.
+#  The tests live in tests/TestAiNNModel/, named after this script.
 #
-#    tile_encoder  TileEncoderFunc, the template, against fake models (a vector,
+#    tile_encoder  TileEncoder, the template, against fake models (a vector,
 #                  a token and a spatial one): no GPU, seconds. Its last section
 #                  downloads vit_tiny (5 MB) the first time -- if a compute node
 #                  has no network, put the weights in HF_HOME beforehand
@@ -43,7 +43,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #    DTYPE         fp16 or fp32 for the encoders check; default per encoder
 # =============================================================================
 
-TESTS=utilities/test_modules/TestAiNNModel
+TESTS=tests/TestAiNNModel
 ONLY="${ONLY:-tile_encoder resume encoders}"
 
 ENCODERS_ARGS=""
@@ -63,7 +63,7 @@ echo "======== TestAiNNModel  tests: $ONLY ========"
 
 for t in $ONLY; do
   case "$t" in
-    tile_encoder) run "tile_encoder  (TileEncoderFunc, fake models)" \
+    tile_encoder) run "tile_encoder  (TileEncoder, fake models)" \
                     python "$TESTS"/test_tile_encoder.py ;;
     resume)       run "resume  (Resume.py, bit for bit)" \
                     python "$TESTS"/test_resume.py ;;

@@ -5,7 +5,7 @@ episodic, on the `--train-stain` (Ki67) slides of `--train-dataset` (`@pure-trai
 optionally with its slides of the other stain (HE) as a second domain a draw may
 put on either side (`--cross-domain`).
 
-    python training/PrototypicalRoutingHead/cli/train.py --encoder uni2 \
+    python -m locascope.training.PrototypicalRoutingHead.train --encoder uni2 \
         --episode-reuse hold_q --reuse-k auto
 
 EPISODES (`Episodes.py` has the mechanics). Every epoch runs each of the 39
@@ -43,7 +43,7 @@ did and one scores more (`improves_everywhere`), `--6rung.pt` on the full 6-way
 combination's accuracy (mean over datasets), `--native.pt` on the mean over the
 combinations whose every query rendered natively.
 
-RESUME (`aiNNModel/models/common/Resume.py`): with `--resume-dir`, the run's
+RESUME (`locascope/core/networks/Resume.py`): with `--resume-dir`, the run's
 full state is written there every epoch and picked up from on the next start;
 without it nothing is written and training starts from scratch. `--epochs` is
 the total, so a finished run resumes into nothing.
@@ -55,54 +55,51 @@ from __future__ import annotations
 
 import argparse
 import csv
-import fcntl
 import math
 import os
 import random
 import sys
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities'))
-from _paths import setup_import_paths, job_result_dir              # noqa: E402
-setup_import_paths()
+from locascope.paths import job_result_dir   # noqa: E402
+from locascope.host.filelock import locked   # noqa: E402
 
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
-from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, build_manifest, cache_jobs, CameraBank, data_record,
     open_caches,
     RenderConfig, RUNGS)
-from AccessDatasets import by_source, pick_wsi_names, stains        # noqa: E402
-from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
+from locascope.core.slides.AccessDatasets import by_source, pick_wsi_names, stains        # noqa: E402
+from locascope.training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
     HELD_OUT_COMBOS, REUSE_MODES, batch_shape, draw, epoch_schedule,
     episodes_per_epoch,
     group_by_wsi_name, max_feasible_k, pool_by_rung, prefetched, render_draw,
     reuse_pairs,
     training_combos, training_pools, BRACS_RUNGS)
-from training.PrototypicalRoutingHead.Losses import compute_loss     # noqa: E402
-from Pooling import Pooling, PoolingConfig                            # noqa: E402
-from training.PrototypicalRoutingHead.Runtime import (               # noqa: E402
+from locascope.training.PrototypicalRoutingHead.Losses import compute_loss     # noqa: E402
+from locascope.core.networks.Pooling import Pooling, PoolingConfig                            # noqa: E402
+from locascope.training.PrototypicalRoutingHead.Runtime import (               # noqa: E402
     COLLAPSE_CHOICES, ROUTING_HEAD_CHOICES, SUPPORT_CONTEXT_CHOICES,
     QUERY_CONTEXT_CHOICES, wandb_init, wandb_log, wandb_finish, rescore)
-from Checkpoints import data_tag, save_prototype_checkpoint, weights_name   # noqa: E402
-from Features import cat_tokens, encode_raw                          # noqa: E402
-from Heads import resolve_encoder_layers                             # noqa: E402
-from training.ClassifyingRoutingHead.Runtime import MIX_LAYERS               # noqa: E402
-from Resume import ResumeFile, resume_identity                       # noqa: E402
+from locascope.core.networks.Checkpoints import data_tag, save_prototype_checkpoint, weights_name   # noqa: E402
+from locascope.core.networks.Features import cat_tokens, encode_raw                          # noqa: E402
+from locascope.core.networks.Heads import resolve_encoder_layers                             # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Runtime import MIX_LAYERS               # noqa: E402
+from locascope.core.networks.Resume import ResumeFile, resume_identity                       # noqa: E402
 
 
 def build_encoder(name: str, dtype: str, device):
-    '''Same pattern `ClassifyingRoutingHead/cli/train.py`'s `run_baseline2` uses --
+    '''Same pattern `ClassifyingRoutingHead/train.py`'s `run_baseline2` uses --
     `dtype` lives on the nested `ModelConfig`, so it has to go in as a
     `dataclasses.replace` on the CONFIG, not a kwarg `encoder_config` itself
     would raise on.'''
     from dataclasses import replace                                 # noqa: PLC0415
-    from TileEncoderFunc import encoder_config                       # noqa: PLC0415
+    from locascope.core.backbones.TileEncoder import encoder_config                       # noqa: PLC0415
     base_cfg = encoder_config(name)
     cfg = replace(base_cfg, model=replace(base_cfg.model, dtype=dtype))
     return cfg.build(device)
@@ -174,7 +171,7 @@ def episode_forward(rendered, *, encoder, num_prefix: int, pooling,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  held-out validation -- held-out WSI (same split ClassifyingRoutingHead/cli/
+#  held-out validation -- held-out WSI (same split ClassifyingRoutingHead/
 #  train.py reads) x held-out rung combination (Episodes.HELD_OUT_COMBOS)
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -184,8 +181,8 @@ def val_manifests(args, caches, out_dir: Path):
     WSIs each gave (the supply table prints it).
 
     The held-out names are READ from the virtual dataset
-    `utilities/cli/build_cache/make_dataset.py` wrote -- the same one
-    `ClassifyingRoutingHead/cli/train.py`'s `val_rows` reads by default, so both
+    `locascope/cli/build_cache/make_dataset.py` wrote -- the same one
+    `ClassifyingRoutingHead/train.py`'s `val_rows` reads by default, so both
     packages hold out the IDENTICAL slides by construction rather than by two
     derivations happening to agree. The BRACS native filter is applied there,
     by the one writer.
@@ -583,7 +580,7 @@ def _prototype_weight_filename(args, tag: str, episode_reuse: str, reuse_k: int)
         f'{episode_reuse}_k{int(reuse_k)}', args.loss, tag)
 
 
-#: `_merge_val_scores`' merge key -- the role `ClassifyingRoutingHead/cli/train.py`'s
+#: `_merge_val_scores`' merge key -- the role `ClassifyingRoutingHead/train.py`'s
 #: own `(baseline, encoder, head)` plays for ITS `_merge_val_scores`.
 #: `training_framework` identifies WHICH of spec.md's Stage 4 three-way
 #: comparison produced a row -- `'metric_based'` here, a CONSTANT (this file
@@ -607,7 +604,7 @@ def _merge_val_scores(path: Path, out_rows):
     '''Under `--merge`: `out_rows`' own `_IDENTITY_FIELDS` key REPLACES the
     matching rows already in `path` -- a rerun of one arm overwrites that
     arm's history, every OTHER arm's rows already on disk are kept. Same
-    shape as `ClassifyingRoutingHead/cli/train.py`'s own `_merge_val_scores` --
+    shape as `ClassifyingRoutingHead/train.py`'s own `_merge_val_scores` --
     ALL of `PrototypicalRoutingHead`'s runs share one job name (`--out`
     defaults to `job_result_dir('PrototypicalRoutingHead')`, always the
     same directory), so training a second arm (a different `--collapse`,
@@ -955,7 +952,7 @@ def main() -> int:
     ap.add_argument('--val-dataset', default='@legacy-val',
                     help='held-out val, an AccessDatasets id (a virtual @<name>) '
                          'scored per dataset its slides come from -- the same '
-                         'default as ClassifyingRoutingHead/cli/train.py')
+                         'default as ClassifyingRoutingHead/train.py')
     ap.add_argument('--val-n-per-rung', type=int, default=20)
     ap.add_argument('--merge', action='store_true',
                     help="val_scores_per_combo.csv / _per_rung.csv: this run's "
@@ -1014,7 +1011,7 @@ def main() -> int:
     # each beside a second process -- and keeps what is left for torch. Left
     # at torch's default, two processes each ran every cpu's worth of threads
     # and slowed each other (CpuBudget's docstring has the measurements).
-    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    from locascope.host.cpu import CpuBudget                                 # noqa: PLC0415
     budget = CpuBudget.for_job(processes=args.cpu_processes).apply()
     print(f'  {budget.line()}', flush=True)
     # One slide per task (Episodes.render_draw); none below two workers, where
@@ -1329,8 +1326,7 @@ def main() -> int:
     # (the jobscript's PARALLEL=2 trains two at once into this one --out)
     # would each read the file before the other wrote, and one would lose its
     # rows. The lock covers the read and the write of both files.
-    with open(out_dir / '.val_scores.lock', 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(out_dir / '.val_scores.lock', 'w') as lock, locked(lock):
         for name, rows_ in (('val_scores_per_rung.csv', out_rung_rows),
                             ('val_scores_per_combo.csv', out_combo_rows)):
             path = out_dir / name

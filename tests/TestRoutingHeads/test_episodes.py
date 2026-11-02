@@ -2,7 +2,7 @@
 """Tests for training/PrototypicalRoutingHead/Episodes.py -- the mixed-pool
 draws training and validation make.
 
-    python utilities/test_modules/TestRoutingHeads/test_episodes.py
+    python tests/TestRoutingHeads/test_episodes.py
 
 No slide, no model, no GPU: the pools are hand-built ManifestRows whose
 coordinates are chosen so the right answer is known.
@@ -28,16 +28,12 @@ from collections import Counter
 from typing import List
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
-from training.ClassifyingRoutingHead.Datasets import (                    # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Datasets import (                    # noqa: E402
     ManifestRow, pick_wsi_names)
-from training.PrototypicalRoutingHead.Episodes import (          # noqa: E402
+from locascope.training.PrototypicalRoutingHead.Episodes import (          # noqa: E402
     HELD_OUT_COMBOS, batch_shape, draw, epoch_schedule, episodes_per_epoch,
     max_feasible_k, overlaps, pool_by_rung, reuse_pairs, support_native_flags, training_combos)
 

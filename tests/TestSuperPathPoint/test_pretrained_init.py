@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for KeypointNet.upstream_state_dict / load_upstream. spec.md 13.
 
-    python utilities/test_modules/TestSuperPathPoint/test_pretrained_init.py
+    python tests/TestSuperPathPoint/test_pretrained_init.py
     python .../test_pretrained_init.py --with-weights     # needs sp_v6
 
 THIS TEST EXISTS TO BLOCK AN ARM. `--pretrained` is one of the four arms of
@@ -39,17 +39,13 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
-from SuperPoint.KeypointNet import (KeypointNetConfig,           # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.KeypointNet import (KeypointNetConfig,           # noqa: E402
                                     load_upstream,
                                     upstream_state_dict)
 
@@ -268,7 +264,7 @@ def with_weights(device):
     Each is scored against a decoy, and the decoys are different failures:
     a shuffled trunk layer for 1 and 2, the missing /3 for 3.
     """
-    from SuperPoint.Teacher import SuperPointTeacher, TeacherConfig
+    from locascope.training.SuperPathPoint.SuperPoint.Teacher import SuperPointTeacher, TeacherConfig
 
     state, path = SuperPointTeacher.weights_state_dict()
     teacher = TeacherConfig().build(device)

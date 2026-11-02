@@ -21,12 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from ConfigIdentity import register
-from TileEncoderFunc import TileEncoderConfig
-from stage1_estimation.StageInterface import weights_path
-from stage2_retrieval.Context import ColumnTable, ScoreTable, ScoringInput, WindowBatch
-from stage2_retrieval.Retriever import RetrievalOutput, RetrieverConfig
-from stage2_retrieval.RerankerScorers import ColumnRanker
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.backbones.TileEncoder import TileEncoderConfig
+from locascope.core.stage1_estimation.StageInterface import weights_path
+from locascope.core.stage2_retrieval.Context import ColumnTable, ScoreTable, ScoringInput, WindowBatch
+from locascope.core.stage2_retrieval.Retriever import RetrievalOutput, RetrieverConfig
+from locascope.core.stage2_retrieval.RerankerScorers import ColumnRanker
 
 #: The window-level scalars a network is given (`RerankHeads.TileGTCfg.n_global`).
 N_GLOBAL: int = 8
@@ -118,7 +118,7 @@ def stack_features(table: ScoreTable, columns: List[str]) -> torch.Tensor:
 
 
 def _load(weights: str, device: Any) -> Tuple[torch.nn.Module, Dict[str, Any]]:
-    from Checkpoints import build_rerank_from_checkpoint          # noqa: PLC0415
+    from locascope.core.networks.Checkpoints import build_rerank_from_checkpoint          # noqa: PLC0415
     return build_rerank_from_checkpoint(weights_path(weights), device)
 
 

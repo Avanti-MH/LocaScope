@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from AccessDatasets import list_names, locate
+from locascope.core.slides.AccessDatasets import list_names, locate
 
 
 def resolve_wsi_paths(dataset=None, wsi=None) -> list:

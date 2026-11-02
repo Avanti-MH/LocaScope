@@ -3,12 +3,12 @@
 `training/SuperPathPoint/`
 
 > **2026-11-02 核對（只比對了文中的檔名與識別字，沒有重讀全文，也沒有逐段改）：**
-> - job script 在 `jobscripts/SuperPathPointJobs/`（`MakeHaLabels.sh`、`TrainSuperPathPoint.sh`、`TestSuperPathPoint.sh`、
+> - job script 在 `deploy/slurm/SuperPathPointJobs/`（`MakeHaLabels.sh`、`TrainSuperPathPoint.sh`、`TestSuperPathPoint.sh`、
 >   `PrepareChainStack.sh`、`ReEvalSuperPathPoint.sh`、`SurvivalAlphaAnalysis*.sh` 等）；文中的路徑已照這個目錄改過。
 > - 程式現況：`cli/{train_superpathpoint,make_ha_labels,inspect_ha_labels,demo_ha,demo_homography,prepare_chain_stack,reeval_density,
 >   survival_alpha_analysis,demo_survival_analysis}.py`、`common/{Corpora,Homography,HomographyConfig,Interfaces,KeypointLabelStore}.py`、
 >   `SuperPoint/{Backbones,EncoderBackbone,Decoders,Heads,HomographicAdaptation,KeypointNet,Losses,Teacher,Trainer,Datasets}.py`，
->   另有文中沒有的 `SurvivalAnalysis/` 套件。測試在 `utilities/test_modules/TestSuperPathPoint/`。
+>   另有文中沒有的 `SurvivalAnalysis/` 套件。測試在 `tests/TestSuperPathPoint/`。
 > - 還沒做：`SuperPathPointLocalizer`（第 11 節，stage 3 多一個 localizer）和對 SIFT 的 repeatability bench。
 > - `best_region_index`、`best_rotation`、`SlideWinSimRotResult` 是舊 stage 2 結果型別的名字，已被 `CandidateSet`／`LocalizationResultSet` 取代。
 > - 文中的上游參照路徑 `/work/u26130998/github_repos/SuperPoint`、`/work/u26130998/GMR-Conv`、`/work/u26130998/prov-gigapath`
@@ -51,7 +51,7 @@ retrieval 選出的 ds 也可能差一層。一個「在 ±1 層 ds 都還在」
 | 判準 | 在哪裡量 | 通過長什麼樣 | 失敗長什麼樣 |
 |---|---|---|---|
 | **每一輪 HA 值不值得再跑一輪** | held-out tile 的 homography pair，repeatability@τ | 第 r+1 輪贏第 r 輪，且贏的幅度大於「同密度隨機點」誘餌與第 r 輪的差距 | 兩輪差距落在誘餌噪音內 → 停，記進 TODO.log |
-| **detector 有沒有勝過 SIFT** | `utilities/bench_modules/bench_locascope.py`，同一批 189 張真實 query | centre error 的中位數與成功率都不輸 SIFT | 任一項輸 → 這是負面結果，帶著數字進 TODO.log |
+| **detector 有沒有勝過 SIFT** | `locascope/cli/bench/bench_locascope.py`，同一批 189 張真實 query | centre error 的中位數與成功率都不輸 SIFT | 任一項輸 → 這是負面結果，帶著數字進 TODO.log |
 | **解析度頭學到東西沒有** | held-out 存亡表 | 每一階的 AP 贏過「照該階的整體存活率猜」這個常數基線 | 贏不過基線 → 存亡是位置的性質不是外觀的性質，這個頭該砍 |
 | **灰階與 RGB 哪個好** | held-out 兩片，**逐片分開報** | 其中一個在兩片上都贏 | 一片贏一片輸 → 差異是片子的性質，兩片不夠判，記成未決 |
 | **三個 `tile_size` 哪個好** | 固定評估協定（見 6.5）：同一批位置、同一個 τ、真實照片走 1440x1024 | 某一個尺寸在同一協定下贏 | 各自在自己的 tile 上量 → 這個數字不能用，見下 |
@@ -344,7 +344,7 @@ anchor 根本沒有被任何細階 tile 讀過，探測時 `dist` 永遠是 `NON
 鋪滿粗階範圍的細階 tile，取代那一張置中的小 tile，讓粗階 tile 裡任何位置的 anchor
 都有機會被某張真的細階 tile 探測到。
 
-**子嗣格子的切法：沿用 `PatchGrid`，不是新排列。** `utilities/PatchingLib.py:79`
+**子嗣格子的切法：沿用 `PatchGrid`，不是新排列。** `locascope/core/tiles/PatchingLib.py:79`
 的 `PatchGrid.from_size(..., overlap=True)` 已經回答「怎麼切」這件事：main grid
 是精確不重疊的整格，overlap grid 是內角格——每個 overlap 格跟周圍 4 個 main 格
 各共用 1/4 面積（`PatchingLib.py:250-263`：overlap 格的起點是 main 格起點加
@@ -685,7 +685,7 @@ Stage C  --> 一個多了 resolution head 的 checkpoint
 
 Stage B 的表必須記下 detector 的 `identity_id`。否則換一個 detector 重跑，兩張
 表混在同一個目錄裡，而它們量的是不同的東西——這正是 `FeatureStore` 存在的理由
-（`utilities/Store.py` 開頭那段）。
+（`locascope/core/cache/Store.py` 開頭那段）。
 
 ---
 
@@ -701,9 +701,9 @@ training/SuperPathPoint/
     KeypointLabelStore.py      # HA label 落地
   SuperPoint/                  # Stage A
     Backbones.py               # VggBackbone（上游的 VGG，從頭訓）
-    EncoderBackbone.py         # TileEncoderBackbone：aiNNModel 的 TileEncoder
+    EncoderBackbone.py         # TileEncoderBackbone：locascope.core 的 TileEncoder
                                #   當 Backbone 用。獨立一支，因為 import
-                               #   aiNNModel 會設 HF_HOME，而 Backbones.py 在
+                               #   locascope.core 會設 HF_HOME，而 Backbones.py 在
                                #   每一支 CPU 測試的 import 路徑上
     Decoders.py                # DepthToSpaceDecoder / UpsampleDecoder
     Heads.py                   # DescriptorHead
@@ -753,12 +753,12 @@ training/SuperPathPoint/
 |---|---|
 | 模組本身（純邏輯，不 print / 不 plot / 不讀寫結果檔） | 上面那棵樹 |
 | CLI 與診斷工具 | `training/SuperPathPoint/cli/` |
-| 單元測試 | `utilities/test_modules/TestSuperPathPoint/test_*.py`（這個專案的九支；共用模組的測試留在上一層） |
-| 端到端品質量測 | `utilities/bench_modules/bench_*.py` |
-| SLURM jobscript | `jobscripts/` |
+| 單元測試 | `tests/TestSuperPathPoint/test_*.py`（這個專案的九支；共用模組的測試留在上一層） |
+| 端到端品質量測 | `locascope/cli/bench/bench_*.py` |
+| SLURM jobscript | `deploy/slurm/` |
 | 跑出來的任何東西 | `/work/u26130998/result/`，repo 之外 |
 
-測試放 `utilities/test_modules/` 而不是套件內，是因為 CLAUDE.md 已經定了那條規則，
+測試放 `tests/` 而不是套件內，是因為 CLAUDE.md 已經定了那條規則，
 而且它有理由：測試依模組命名、模組搬家測試跟著搬，一個獨立的測試目錄是唯一能讓
 「commit 前把這些全跑一遍」變成一個指令的形狀。
 
@@ -811,7 +811,7 @@ class DescriptorHead(Protocol):
 | 實作 | 說明 |
 |---|---|
 | `VggBackbone` | 上游的 VGG：4 個 conv stage、前 3 個後面各一個 maxpool、stride 8、輸出 **128** 通道。`trainable=True`，從頭訓 |
-| `TileEncoderBackbone` | 包 `aiNNModel/TileEncoderFunc.py` 的 trunk，回傳 `[N,C,H,W]`。`trainable=False`，**只訓 decoder 與 head**。在 `SuperPoint/EncoderBackbone.py`，不在 `Backbones.py` |
+| `TileEncoderBackbone` | 包 `locascope/core/backbones/TileEncoder.py` 的 trunk，回傳 `[N,C,H,W]`。`trainable=False`，**只訓 decoder 與 head**。在 `SuperPoint/EncoderBackbone.py`，不在 `Backbones.py` |
 
 `TileEncoder.spatial()` 在 commit df3a09e 才對 token 模型打開，所以 GigaPath /
 UNI2 / CONCH 現在都給得出空間特徵圖。
@@ -824,7 +824,7 @@ config 的 transform（`Resize(256)` 然後 `CenterCrop(224)`）、`torch.no_gra
 
 要的是 **`TileEncoder.features_with_grad(batch, exit_name='spatial')`**：batch 進、特徵圖
 出，沒有 transform、沒有搬回 host、梯度保留。它是基底上的 public 方法
-（`TileEncoderFunc.py`），所以這邊就是照常 build encoder 然後呼叫它——不包裝、不改
+（`TileEncoder.py`），所以這邊就是照常 build encoder 然後呼叫它——不包裝、不改
 類別、不繼承。
 
 `exit_name` 有兩個值，而且 `spatial` **取代不了** `tokens`：`spatial` 會把 prefix
@@ -835,7 +835,7 @@ token 丟掉，所以一個把 head 接在 CLS 上做 fine-tune 的 trunk，從 
 是 SuperPoint 自己的介面（`stride` 跟 `cell` 是配成一對的，`cell` 是偵測頭的預測
 區塊、`UpsampleDecoder` 的層數是 `log2(stride / cell)`），forward 的約定是吃
 `[0, 1]` 的影像而不是已正規化的 batch。那些是「關鍵點偵測器需要什麼」的事實，所以
-留在這一層講，而不是推到 `aiNNModel/`——那邊沒有理由知道什麼是 detector cell。
+留在這一層講，而不是推到 `locascope/core/`——那邊沒有理由知道什麼是 detector cell。
 
 **哪一個 encoder 做得到，以及在什麼 tile 尺寸下**——只有**一個**數字決定，而且它是
 從模型身上讀出來、不是從 arch 名字推的：`patch_embed.patch_size`。
@@ -852,7 +852,7 @@ token 丟掉，所以一個把 head 接在 CLS 上做 fine-tune 的 trunk，從 
 **名字**讀 patch size，在唯一一個名字裡有 patch size 的 encoder 上剛好會讀反。
 `_patch_stride` 讀的是 `patch_embed.patch_size`，所以程式碼一直是對的，錯的是描述。
 
-**輸入尺寸固定不是一道拒絕，是一次呼叫。** `GigaPathFunc` 建的時候沒給
+**輸入尺寸固定不是一道拒絕，是一次呼叫。** `GigaPath` 建的時候沒給
 `dynamic_img_size`，而 prov-gigapath 的 `pretrained_cfg` 寫著
 `fixed_input_size: true`，所以 `PatchEmbed.forward` 會斷言輸入正好是 224
 （`timm/layers/patch_embed.py:120`）。那是**怎麼建的**的性質，不是權重的性質，而
@@ -1046,7 +1046,7 @@ class KeypointOutput:
 
 ### 5.5 registry
 
-**重用 `utilities/ConfigIdentity.py`，不新發明。**
+**重用 `locascope/core/config/ConfigIdentity.py`，不新發明。**
 
 | 要的東西 | 現成的 |
 |---|---|
@@ -1055,7 +1055,7 @@ class KeypointOutput:
 | 「這個模型是什麼」的短 id | `IdentifiedBuild.identity_id()`（`:254`）、`identity_json()`（`:263`） |
 | 哪些欄位不進雜湊 | `NOT_IDENTITY`（`batch_size` 那類） |
 
-範本是 `aiNNModel/TileEncoderFunc.py:1111` 開始那段「choosing an implementation
+範本是 `locascope/core/backbones/TileEncoder.py:1111` 開始那段「choosing an implementation
 by name」。照著寫一份就好。
 
 換掉一個東西要改哪個檔案，這是這一節的驗收：
@@ -1079,9 +1079,9 @@ by name」。照著寫一份就好。
 
 | 要的 | 用什麼 |
 |---|---|
-| 組織遮罩、region | `utilities/TissueMask.py` |
-| 在組織內取 tile | `utilities/TileSampler.py:58`，`TileInfo(level, x, y, tile_size, mpp)`，x/y 是 level-0 |
-| 安全讀圖 | `utilities/SafeSlide.py`。**讀圖一律走 `read_region_rgb`（`:371`）**，不要 `.convert('RGB')` |
+| 組織遮罩、region | `locascope/core/tiles/TissueMask.py` |
+| 在組織內取 tile | `locascope/core/tiles/TileSampler.py:58`，`TileInfo(level, x, y, tile_size, mpp)`，x/y 是 level-0 |
+| 安全讀圖 | `locascope/core/slides/SafeSlide.py`。**讀圖一律走 `read_region_rgb`（`:371`）**，不要 `.convert('RGB')` |
 
 最後一條不是風格問題。`.convert('RGB')` 只是丟掉 alpha，而沒拍到的像素 RGB 是 0，
 於是每個掃描空洞都變成純黑——`read_region_rgb` 的 docstring 記著這件事讓一個
@@ -1090,7 +1090,7 @@ by name」。照著寫一份就好。
 
 #### 組織分割用哪一個：`test_EoMT.py` 的 PCA 那一半
 
-遮罩不用預設的 HSV，改用 `utilities/test_modules/test_EoMT.py` 裡那套，暫時包成一個
+遮罩不用預設的 HSV，改用 `tests/test_EoMT.py` 裡那套，暫時包成一個
 可用的 SegFunc。有兩件事必須先講清楚，否則會包錯。
 
 **那個檔案裡有兩條 mask 路徑，只有一條能用。** 檔案自己的 docstring（`:40-42`）寫著
@@ -1103,20 +1103,20 @@ is noise**」——講的是 `segment()`（`:218`），EoMT 的頭是隨機初�
 得到、HA 照樣跑完，只是全部長在背景上。**所以要包的是 PCA 那條，不是 EoMT 那條**
 ——即使檔案叫 EoMT。
 
-**它是 slide 分割器，不是逐圖分割器。** `aiNNModel/TissueSegFunc.py` 的契約是
+**它是 slide 分割器，不是逐圖分割器。** `locascope/core/backbones/TissueSeg.py` 的契約是
 `segment_slide(wsi) -> SlideMask`，並分成兩種：plane 分割器（hsv/otsu/hest）
 讀一層、逐圖套 `__call__`，讀取與切塊由 `PlaneSegmenter` 負責；slide 分割器自己
 讀 slide。`slide_pca_mask` 屬於後者：它在分層抽樣的 tile 上擬合一個 PCA、再投影
 每一格。
 
-而且 **PCA 必須整片擬合一次**，這不是實作偏好。`Uni2PcaSegFunc` 的 docstring
+而且 **PCA 必須整片擬合一次**，這不是實作偏好。`Uni2PcaSeg` 的 docstring
 講了為什麼不能逐格：`MinMaxScaler` 把每一格自己的極值映到 0 和 1，所以一格全是
 組織時，它的閾值會落在組織內部。
 
 作法是讓 `Uni2PcaSegmenter` 覆寫 `segment_slide`，產出遮罩與它的 ds（= UNI2 的
 `patch_size` = 14），再由 `TissueMask(wsi, slide_mask)` 建出 region。
 
-包裝的形狀照 `aiNNModel/TissueSegFunc.py`：`@register('...')` 的
+包裝的形狀照 `locascope/core/backbones/TissueSeg.py`：`@register('...')` 的
 `IdentifiedConfig` + `IdentifiedBuild`，於是遮罩的來源自動進 `identity_id`，
 換分割器就換 label store 的路徑。這是必要的——HSV 遮罩和 PCA 遮罩會選出不同的
 region，因此是不同的 tile 集合，因此是不同的 label。
@@ -1164,7 +1164,7 @@ descriptor loss 用。
 
 ### 6.3 HA label 怎麼存
 
-路徑與規矩照 `utilities/Store.py`：
+路徑與規矩照 `locascope/core/cache/Store.py`：
 
 ```
 result/cache/<made_by>_keypoint_labels/<wsi_stem>__ds<d>__<cfg8>.safetensors
@@ -1212,7 +1212,7 @@ M 處有膝點，那就是真實密度；若一路貼著 M，就是在截斷（C
 #### 它不是一串影像運算
 
 `query_sim/augment/` 底下每個 augment 都是一個獨立的影像函式，`apply_rotation`、
-`apply_vignette` 各做各的，`utilities/cli/demo/show_camera_effects.py` 因此可以一格畫一個。**homography 不是
+`apply_vignette` 各做各的，`locascope/cli/demo/show_camera_effects.py` 因此可以一格畫一個。**homography 不是
 那樣。** 它對一個四邊形的四個角做四次擾動，最後解出**一個** 3x3 矩陣
 （`superpoint/models/homographies.py:152-230`）。所以「單獨 demo 一個操作」的意思
 是把另外三個布林開關關掉，不是抽出一個函式來單獨呼叫。
@@ -1262,7 +1262,7 @@ HA 的尺度抖動就會跨過半個 rung，Stage A 的 label 開始混入相鄰
 
 #### `cli/demo_homography.py`
 
-形狀照 `utilities/cli/demo/show_camera_effects.py`：一張多格圖，每格一個操作，加上參數值與其抽樣
+形狀照 `locascope/cli/demo/show_camera_effects.py`：一張多格圖，每格一個操作，加上參數值與其抽樣
 範圍的並排列印（`_print_capture_params` 那個作法）。
 
 不需要模型，不需要 GPU，秒級。這是「昂貴的執行之前那個可以先看一眼的東西」。
@@ -1317,7 +1317,7 @@ warp 與各自的偵測 / 累積的 `mean_prob` / `counts` 圖 / 最後 top-M �
 #### 片子
 
 **12 片，不是最初的 6 片。** 原始計畫是 3 片 HE + 3 片 Ki67，取自這個 repo 其他
-地方已經在用的那一組；`jobscripts/SuperPathPointJobs/BuildMaskStore.sh:74-112`
+地方已經在用的那一組；`deploy/slurm/SuperPathPointJobs/BuildMaskStore.sh:74-112`
 把它擴到 12 片，每次新增都回答一件原本六片答不出來的問題：
 
 | 資料集 | 片 | 新增理由 |
@@ -1503,7 +1503,7 @@ homography 相對於內容的尺度也不同。**所以三個 model 之間的比
 2026-08-26 的語料回來是 475/500，而那個數字被當成玻片的性質讀了。**兩個機制量同一
 件事而互相不知道，就是那個 bug 的形狀。**
 
-取代它的是**七個桶，各帶一個下限與一個上限**（`utilities/TileSampler.RichnessConfig`）：
+取代它的是**七個桶，各帶一個下限與一個上限**（`locascope/core/tiles/TileSampler.RichnessConfig`）：
 
 | 桶 | 背景比 | 下限 | 上限 | 配額 |
 |---|---|---|---|---|
@@ -1593,7 +1593,7 @@ held out」）：
 
 | 用途 | 片 |
 |---|---|
-| train（10） | `BRACS_1228`、`BRACS_1476`、`BRACS_1936`、`BRACS_1579`、`BRACS_1284`、`S1104233`、`S1104360`、`S1151088`、`S1103520`、`S1140701` |
+| train（10） | `BRACS_1003694`、`BRACS_1474`、`BRACS_1813`、`BRACS_1579`、`BRACS_1411`、`S1104233`、`S1104360`、`S1151088`、`S1103520`、`S1140701` |
 | held-out（2） | `BRACS_1598`（seen type）、`S1103627` |
 
 **held-out 換過一次。** 最初 6 片版的 held-out 是 `BRACS_1936`/`S1151088`；擴到 12
@@ -1973,8 +1973,8 @@ if not args.dev and rank == 0:
 ```
 
 `--dev` 關掉，照 GMR-Conv `main.py:396-405`。**不設 offline mode**，理由和
-`jobscripts/_env.sh` 不設 `HF_HUB_OFFLINE` 一樣：安靜的離線比大聲的連線失敗難查。
-計算節點連不出去的話，`WANDB_MODE=offline` 加進 `jobscripts/_env.sh`，一個地方
+`deploy/slurm/_env.sh` 不設 `HF_HUB_OFFLINE` 一樣：安靜的離線比大聲的連線失敗難查。
+計算節點連不出去的話，`WANDB_MODE=offline` 加進 `deploy/slurm/_env.sh`，一個地方
 改完全部。
 
 記什麼：
@@ -2140,9 +2140,9 @@ teacher 是 COCO domain 的權重，H&E 是 out-of-domain，label 的品質是�
 
 | 檔案 | 改什麼 |
 |---|---|
-| `utilities/_paths.py` | 加 `TRAINING_DIR`，納入 `setup_import_paths()` |
-| `jobscripts/SuperPathPointJobs/` | `MakeHaLabels.sh`（array over slides）、`TrainSuperPathPoint.sh`（GPU） |
-| `utilities/test_modules/` | 第 10 節的六個測試 |
+| `locascope/paths.py` | （已不需要：改用完整名稱 import） |
+| `deploy/slurm/SuperPathPointJobs/` | `MakeHaLabels.sh`（array over slides）、`TrainSuperPathPoint.sh`（GPU） |
+| `tests/` | 第 10 節的六個測試 |
 | bench（還沒寫） | repeatability 對 SIFT |
 | `log/TODO.log` | 一筆，含這份 spec 的決定與它們的理由 |
 
@@ -2463,7 +2463,7 @@ normalize 要由呼叫端（這裡是 `Datasets.py`）保證，不是 encoder �
 tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是這個 bit 被
 閾值切出來之前的那個場。於是
 
-    slide_mask = SlideMask.load(path, with_components=True)   # utilities/TissueMask.py
+    slide_mask = SlideMask.load(path, with_components=True)   # locascope/core/tiles/TissueMask.py
     pc1 = slide_mask.components[..., 0]
     # 對每個候選閾值：mask = pc1 > t，close-then-open，量 fraction 與區域數
 
@@ -2506,12 +2506,12 @@ tensor `components`（`[rows, cols, k]` float16，每片 581-814 MB），就是�
 
 | # | 檔案 | 做什麼 |
 |---|---|---|
-| 1 | `utilities/TissueMaskConfig.py`（`MaskMaker`）、`utilities/TissueMask.py`（`SlideMask`） | mask 的 recipe、快取與落地格式。遮罩之外還存 `components` |
-| 2 | `utilities/cli/build_cache/build_mask_store.py` | 對 6 片跑分割器、寫 store |
-| 3 | `utilities/cli/diagnostics/probe_tile_yield.py` | 3b 探針，`(片, ratio, tile, ds)` 216 格 |
+| 1 | `locascope/core/tiles/TissueMaskConfig.py`（`MaskMaker`）、`locascope/core/tiles/TissueMask.py`（`SlideMask`） | mask 的 recipe、快取與落地格式。遮罩之外還存 `components` |
+| 2 | `locascope/cli/build_cache/build_mask_store.py` | 對 6 片跑分割器、寫 store |
+| 3 | `locascope/cli/diagnostics/probe_tile_yield.py` | 3b 探針，`(片, ratio, tile, ds)` 216 格 |
 | 4 | `training/SuperPathPoint/common/Corpora.py`（`Corpus`） | corpus 的位址（一個 draw）、讀 pre-tile；三批具名 corpus 的 recipe |
 
-`SlideMask` 在 `utilities/TissueMask.py`，不在任何分割器裡：產品不 import 產生它的
+`SlideMask` 在 `locascope/core/tiles/TissueMask.py`，不在任何分割器裡：產品不 import 產生它的
 模組，所以存 hsv、hest 或 uni2_pca 的遮罩用同一個格式。
 
 第 2 支薄到只剩 argparse、迴圈、印進度；建構邏輯在 `MaskMaker.slide_mask`（未命中
@@ -2574,18 +2574,18 @@ label，而且不會報錯。
 
 | # | 檔案 |
 |---|---|
-| 20 | `utilities/test_modules/test_tissue_mask.py` |
-| 20b | `utilities/test_modules/test_store.py` |
-| 21 | `utilities/test_modules/TestSuperPathPoint/test_homographic_adaptation.py`（第 10 節那條誘餌檢查） |
-| 22 | `utilities/test_modules/TestSuperPathPoint/test_keypoint_label_store.py` |
-| 23 | `utilities/test_modules/TestSuperPathPoint/test_detector_decoder.py`（depth-to-space 來回） |
-| 23b | `utilities/test_modules/TestSuperPathPoint/test_corpora.py`（第 12 節 3c 的 corpus） |
-| 23c | `utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py`（第 11-19 支） |
-| 23d | `utilities/test_modules/TestSuperPathPoint/test_encoder_backbone.py`（`EncoderBackbone.py`） |
-| 24 | `jobscripts/SuperPathPointJobs/MakeHaLabels.sh` |
-| 25 | `jobscripts/SuperPathPointJobs/TrainSuperPathPoint.sh` |
+| 20 | `tests/test_tissue_mask.py` |
+| 20b | `tests/test_store.py` |
+| 21 | `tests/TestSuperPathPoint/test_homographic_adaptation.py`（第 10 節那條誘餌檢查） |
+| 22 | `tests/TestSuperPathPoint/test_keypoint_label_store.py` |
+| 23 | `tests/TestSuperPathPoint/test_detector_decoder.py`（depth-to-space 來回） |
+| 23b | `tests/TestSuperPathPoint/test_corpora.py`（第 12 節 3c 的 corpus） |
+| 23c | `tests/TestSuperPathPoint/test_superpathpoint.py`（第 11-19 支） |
+| 23d | `tests/TestSuperPathPoint/test_encoder_backbone.py`（`EncoderBackbone.py`） |
+| 24 | `deploy/slurm/SuperPathPointJobs/MakeHaLabels.sh` |
+| 25 | `deploy/slurm/SuperPathPointJobs/TrainSuperPathPoint.sh` |
 
-這八支測試全部掛在 `jobscripts/SuperPathPointJobs/TestSuperPathPoint.sh` 底下，分成六個 stage：
+這八支測試全部掛在 `deploy/slurm/SuperPathPointJobs/TestSuperPathPoint.sh` 底下，分成六個 stage：
 `mask`（`from_mask`）、`store`（三個 store）、`decoder`、`ha`、`student`、
 `backbone`。**沒有一支需要資料、權重或 GPU**——金字塔、玻片、偵測器、ViT 全是檔案
 自己捏的，所以它們可以在 login node 上秒級跑完，而它們擋在前面的那些執行是數小時
@@ -2601,9 +2601,9 @@ label，而且不會報錯。
 |---|---|
 | `test_tile_sampler.py` 的 `pretile` 節、`TestSuperPathPoint/test_corpora.py` | CLAUDE.md 那條「在昂貴的執行之前放一條便宜的斷言」。HA 與訓練讀幾千個 pre-tile、跑數小時，而它會壞的方式沒有一種會拋例外——中心裁切偏一格、讀的 pre-tile 不以 tile 為中心、兩個 corpus 撞同一個位址。都是秒級可釘，釘的是**誘餌**而不是容忍度 |
 | `common/HomographyConfig.py` | 13 個 sampler 選項被 `HaConfig` 與 `PairDatasetConfig` 各要一次。放不進 `common/Homography.py`：那支刻意不在 import 時碰 torch（`warp_image_torch` 自己 lazy import），而 `ConfigIdentity` 會拉 torch 進來，登入節點上跑得動的 demo 就跑不動了 |
-| `utilities/test_modules/TestSuperPathPoint/test_superpathpoint.py` | 第 11-19 支**一支測試都沒有**。它刻意違反「測試以被測 module 命名」那條——被測的不是八個 module，是它們**之間的合約**：`space_to_depth` 對 `depth_to_space_prob`、`check_shapes` 對 backbone、dataset 的 warp 對 loss 的對應遮罩。拆成八個檔，每個檔只會拿到半句話 |
-| `SuperPoint/EncoderBackbone.py` | 原本規劃在 `Backbones.py`（第 12 支）裡。分出來的理由不是整潔：`import aiNNModel` 會執行 `os.environ.setdefault('HF_HOME', ...)`，而 huggingface_hub 是先到先得——把它放進 `Backbones.py` 等於把那個副作用放上 `KeypointNet.py` 的 import 路徑，也就是每一支 CPU 測試的 import 路徑。這支檔案頂層只 import `TileEncoderFunc`（沒有 HF），實作模組是在 `build()` 裡才 import 的 |
-| `utilities/test_modules/TestSuperPathPoint/test_encoder_backbone.py` | 上面那支的測試。假 trunk 而不是真權重，而且假的在這裡是**更強**的測試：這支檔案決定的全是數字，而假 trunk 可以被指使去謊報它們——宣告 stride 16 實際 stride 8——真的 ViT 做不到 |
+| `tests/TestSuperPathPoint/test_superpathpoint.py` | 第 11-19 支**一支測試都沒有**。它刻意違反「測試以被測 module 命名」那條——被測的不是八個 module，是它們**之間的合約**：`space_to_depth` 對 `depth_to_space_prob`、`check_shapes` 對 backbone、dataset 的 warp 對 loss 的對應遮罩。拆成八個檔，每個檔只會拿到半句話 |
+| `SuperPoint/EncoderBackbone.py` | 原本規劃在 `Backbones.py`（第 12 支）裡。分出來的理由不是整潔：`import locascope.core` 會執行 `os.environ.setdefault('HF_HOME', ...)`，而 huggingface_hub 是先到先得——把它放進 `Backbones.py` 等於把那個副作用放上 `KeypointNet.py` 的 import 路徑，也就是每一支 CPU 測試的 import 路徑。這支檔案頂層只 import `TileEncoder`（沒有 HF），實作模組是在 `build()` 裡才 import 的 |
+| `tests/TestSuperPathPoint/test_encoder_backbone.py` | 上面那支的測試。假 trunk 而不是真權重，而且假的在這裡是**更強**的測試：這支檔案決定的全是數字，而假 trunk 可以被指使去謊報它們——宣告 stride 16 實際 stride 8——真的 ViT 做不到 |
 
 ---
 
@@ -2616,9 +2616,9 @@ label，而且不會報錯。
 **被抽出來的東西超過三個而且是同一性質，就開一個 module。** 四個散落的 helper 各自
 待在用它的檔案旁邊，和四個放在一起、有一個共同名字的 helper，差別是後者能被找到。
 
-### 動到既有的 utilities 或 encoder module 就停下來問
+### 動到既有的 locascope/core 或 encoder module 就停下來問
 
-`utilities/` 和 `aiNNModel/` 底下的東西有既有的呼叫端，而這個專案的失效模式一貫是
+`locascope/core/` 和 `locascope/core/` 底下的東西有既有的呼叫端，而這個專案的失效模式一貫是
 「安靜地改變一個別人依賴的行為」。所以：**要改它們，先停止寫程式，問過再動。**
 
 新增檔案不受此限；改既有檔案受。

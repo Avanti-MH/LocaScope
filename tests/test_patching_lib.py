@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Comprehensive tests for utilities/PatchingLib (PatchGrid, PatchInfo, QueryPatchContainer).
+"""Comprehensive tests for locascope/core/tiles/PatchingLib (PatchGrid, PatchInfo, QueryPatchContainer).
 
 Merged from test_patchgrid_index.py, test_patch_info_coords.py, and
 test_tissue_patch_container.py.
@@ -12,9 +12,9 @@ Sections:
 A slide's tiles are read by SlideReader.read_grid, tested in test_slide_reader.
 
 Usage:
-  python utilities/test_modules/test_patching_lib.py
-  python utilities/test_modules/test_patching_lib.py --only grid coords
-  python utilities/test_modules/test_patching_lib.py --only containers --size 64
+  python tests/test_patching_lib.py
+  python tests/test_patching_lib.py --only grid coords
+  python tests/test_patching_lib.py --only containers --size 64
 
 Outputs (under result/TestPatchingLib/ by default):
   patch_grid__index.png
@@ -30,23 +30,16 @@ import os
 import sys
 import tempfile
 
-# _paths holds the one definition of OUTPUT_ROOT for every package, so it lives
-# in utilities/ rather than beside this file. That directory goes on sys.path
-# here, because setup_import_paths -- which puts the rest there -- is inside it.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from PIL import Image as PILImage
 
-from _paths import DATASETS_DIR, job_result_dir, setup_import_paths
+from locascope.paths import DATASETS_DIR, job_result_dir
 
-setup_import_paths()
 
-from PatchingLib import FeaturesMap, PatchGrid, PatchInfo, QueryPatchContainer
-from TissueMask import TissueRegion
+from locascope.core.tiles.PatchingLib import FeaturesMap, PatchGrid, PatchInfo, QueryPatchContainer
+from locascope.core.tiles.TissueMask import TissueRegion
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1001,8 +994,8 @@ def main() -> int:
     ap.add_argument('--query', default=os.path.join(
         DATASETS_DIR, 'Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/2.bmp'))
     ap.add_argument('--roi',
-                    default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
-                            'BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png')
+                    default=os.path.join(DATASETS_DIR, 'histoimage.na.icar.cnr.it',
+                            'BRACS_RoI/latest_version/test/0_N/BRACS_264_N_5.png'))
     ap.add_argument('--out-dir', default=None, help='figure output directory')
     args = ap.parse_args()
     tile = args.tile if args.tile is not None else args.size

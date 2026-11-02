@@ -31,8 +31,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 from scipy.spatial import cKDTree
 
-from common.KeypointLabelStore import points_from_prob        # noqa: E402
-from SurvivalAnalysis.Attribution import NONE                    # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import points_from_prob        # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Attribution import NONE                    # noqa: E402
 
 
 def detect(prob: np.ndarray, cfg, *, score_threshold: float

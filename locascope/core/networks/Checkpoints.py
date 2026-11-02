@@ -12,8 +12,8 @@ from typing import Any, Dict, Optional, Sequence
 
 import torch                                                       # noqa: E402
 
-from Head import Head                                               # noqa: E402
-from Heads import HeadConfig, classifier_class, classifier_name     # noqa: E402
+from locascope.core.networks.Head import Head                                               # noqa: E402
+from locascope.core.networks.Heads import HeadConfig, classifier_class, classifier_name     # noqa: E402
 
 
 #: Between the segments of a weights file's name. A segment keeps its own `_` and `-`
@@ -178,7 +178,7 @@ def build_from_checkpoint(path, device):
     path would differ).
     '''
     from dataclasses import replace                                 # noqa: PLC0415
-    from TileEncoderFunc import encoder_config                      # noqa: PLC0415
+    from locascope.core.backbones.TileEncoder import encoder_config                      # noqa: PLC0415
     ckpt = torch.load(path, map_location='cpu')
     base_cfg = encoder_config(ckpt['encoder'])
     dtype = 'fp32' if not ckpt['frozen'] else ckpt['args'].get('dtype',
@@ -210,7 +210,7 @@ def build_from_checkpoint(path, device):
 #  save/load shape, not a forced fit into the existing one. See that
 #  spec.md's "Open design decisions", 1.
 #
-#  `support_context`/`query_context` (G/F, `aiNNModel/models/
+#  `support_context`/`query_context` (G/F, `locascope/core/networks/
 #  ContextEncoders.py`) have their OWN top-level state/cfg fields, like
 #  `pooling`/`collapse`/`head`: they train real weights (`bilstm`/
 #  `attnlstm`). `extra` is for facts genuinely outside this format's own
@@ -301,13 +301,13 @@ def build_prototype_from_checkpoint(path, device):
     NAME built each one (`support_context_name`/`query_context_name`/
     `collapse_name`/`routing_head_name`). Looked up in `PrototypeChoices`,
     the same four registries `cli/train.py` itself builds from, which lives in
-    `aiNNModel/models/` so the generic checkpoint layer never imports a
+    `locascope/core/networks/` so the generic checkpoint layer never imports a
     training package.
     '''
     from dataclasses import replace                                 # noqa: PLC0415
-    from TileEncoderFunc import encoder_config                      # noqa: PLC0415
-    from Pooling import Pooling, PoolingConfig                       # noqa: PLC0415
-    from PrototypeChoices import (SUPPORT_CONTEXT_CHOICES,            # noqa: PLC0415
+    from locascope.core.backbones.TileEncoder import encoder_config                      # noqa: PLC0415
+    from locascope.core.networks.Pooling import Pooling, PoolingConfig                       # noqa: PLC0415
+    from locascope.core.networks.PrototypeChoices import (SUPPORT_CONTEXT_CHOICES,            # noqa: PLC0415
                                   QUERY_CONTEXT_CHOICES, COLLAPSE_CHOICES,
                                   ROUTING_HEAD_CHOICES)
 
@@ -360,7 +360,7 @@ def save_rerank_checkpoint(path, *, model, arch: str, pooling: str, encoder: str
     `extra` holds what a user of the file needs besides the network: the
     columns a stacker was trained on, the window shapes an embedder was cut for.
     The encoder is frozen throughout, so there is no trunk to save.'''
-    from RerankChoices import hparams_of                            # noqa: PLC0415
+    from locascope.core.networks.RerankChoices import hparams_of                            # noqa: PLC0415
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(dict(arch=arch, hparams=hparams_of(model), state=model.state_dict(),
@@ -373,7 +373,7 @@ def save_rerank_checkpoint(path, *, model, arch: str, pooling: str, encoder: str
 def build_rerank_from_checkpoint(path, device):
     '''`(model, ckpt)`: the network `save_rerank_checkpoint` saved, rebuilt from
     its registry name and hyper-parameters, loaded and in eval mode on `device`.'''
-    from RerankChoices import build_rerank                          # noqa: PLC0415
+    from locascope.core.networks.RerankChoices import build_rerank                          # noqa: PLC0415
     ckpt = torch.load(path, map_location='cpu')
     model = build_rerank(ckpt['arch'], ckpt['hparams']).to(device)
     model.load_state_dict(ckpt['state'])

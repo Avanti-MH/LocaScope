@@ -56,7 +56,7 @@ from typing import Protocol, Sequence, Tuple, runtime_checkable
 
 import numpy as np
 
-from ReadGeometry import coarser_level
+from locascope.core.slides.ReadGeometry import coarser_level
 
 
 @dataclass(frozen=True)
@@ -132,8 +132,8 @@ def reference_bank(wsi, mask, sampler_cfg, tile_size: int, *, masks=None,
     draw's address and makes the mask on a miss -- so `index_<sampler>.csv`
     there says which tiles the bank holds, and a later build reads them back.
     Without, it is drawn in memory: the same plan and config, the same tiles."""
-    from ReadGeometry import ReadSpec                             # noqa: PLC0415
-    from TileSampler import PlanSpec, TileSampler                 # noqa: PLC0415
+    from locascope.core.slides.ReadGeometry import ReadSpec                             # noqa: PLC0415
+    from locascope.core.tiles.TileSampler import PlanSpec, TileSampler                 # noqa: PLC0415
     plan = PlanSpec('native', camera=ReadSpec(int(tile_size), int(tile_size)))
     if cache_job:
         if masks is None:
@@ -150,5 +150,5 @@ def weights_path(weights: str) -> str:
     (`ClassifyingRoutingHead/weights/<file>`), so a recipe holds no mount; an absolute
     path is used as it is."""
     import os                                                     # noqa: PLC0415
-    from _paths import RESULT_DIR                                 # noqa: PLC0415
+    from locascope.paths import RESULT_DIR   # noqa: PLC0415
     return weights if os.path.isabs(weights) else os.path.join(RESULT_DIR, weights)

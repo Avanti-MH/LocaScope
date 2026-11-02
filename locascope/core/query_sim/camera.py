@@ -44,11 +44,11 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from config     import DomainGapConfig                   # noqa: E402
-from pipeline    import read_reach, simulate_with_gt      # noqa: E402
-from ReadGeometry import FovGeometry, ReadSpec           # noqa: E402
-from SafeSlide   import SafeSlide                        # noqa: E402
-from SlideReader import SlideReader                      # noqa: E402
+from locascope.core.query_sim.config import DomainGapConfig                   # noqa: E402
+from locascope.core.query_sim.pipeline import read_reach, simulate_with_gt      # noqa: E402
+from locascope.core.slides.ReadGeometry import FovGeometry, ReadSpec           # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                        # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                      # noqa: E402
 
 
 def rotates_for(cfg: DomainGapConfig, rotation: Optional[float] = None) -> bool:

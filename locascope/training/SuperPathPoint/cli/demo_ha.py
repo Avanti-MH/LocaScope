@@ -69,28 +69,25 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
 import numpy as np                                              # noqa: E402
 import matplotlib                                               # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
-from cli import add_corpus_args, corpus_arg, job_result_dir  # noqa: E402
+from locascope.training.SuperPathPoint.cli import add_corpus_args, corpus_arg, job_result_dir  # noqa: E402
 
 
 import torch                                                    # noqa: E402
 
-from common.Homography import sample_homography                 # noqa: E402
-from common.HomographyConfig import HomographyConfig            # noqa: E402
-from common.KeypointLabelStore import points_from_prob          # noqa: E402
-from TileSampler import centre_crop, centre_margin, pre_tile_px  # noqa: E402
-from common.Homography import warp_from_pretile  # noqa: E402
-from SuperPoint.HomographicAdaptation import HaConfig           # noqa: E402
-from SuperPoint.Teacher import TeacherConfig                    # noqa: E402
+from locascope.training.SuperPathPoint.common.Homography import sample_homography                 # noqa: E402
+from locascope.training.SuperPathPoint.common.HomographyConfig import HomographyConfig            # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import points_from_prob          # noqa: E402
+from locascope.core.tiles.TileSampler import centre_crop, centre_margin, pre_tile_px  # noqa: E402
+from locascope.training.SuperPathPoint.common.Homography import warp_from_pretile  # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.HomographicAdaptation import HaConfig           # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Teacher import TeacherConfig                    # noqa: E402
 
 #: The DEFAULT rungs, the same three as `make_ha_labels.THRESHOLD_LADDER`. Not
 #: imported from it, and that is the one duplication here worth arguing about:
@@ -176,7 +173,7 @@ def read_pre_tile(args) -> tuple:
                                 f'tile #{t.index} at level-0 '
                                 f'({t.meta.x}, {t.meta.y})')
 
-    from demo_homography import wsi_tile                        # noqa: PLC0415
+    from locascope.training.SuperPathPoint.cli.demo_homography import wsi_tile                        # noqa: PLC0415
 
     pre = wsi_tile(args.wsi, args.ds, pre_px, args.seed)
     return pre, f'{os.path.basename(args.wsi)}  ds {args.ds:g}  seed {args.seed}'
@@ -217,8 +214,8 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--wsi',
-                    default='/work/u26130998/datasets/histoimage.na.icar.cnr.it/'
-                            'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs')
+                    default=os.path.join(_paths.DATASETS_DIR, 'histoimage.na.icar.cnr.it',
+                            'BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003694.svs'))
     ap.add_argument('--ds', type=float, default=4.0)
     ap.add_argument('--tile', type=int, default=256)
     # --corpus (None: cut straight off --wsi), --pre-tile-factor, the jobs

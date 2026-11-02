@@ -19,10 +19,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  utilities/bench_modules/bench_stage1_mpp.py, then its analysis
+#  locascope/cli/bench/bench_stage1_mpp.py, then its analysis
 # =============================================================================
 #
 # Every STAGE1 method (<method>:<recipe>: KNN_RECIPES, CLASSIC_RECIPES) and every trained
@@ -38,14 +38,14 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # result/<job>/stage1_<set>.csv (`pure-half-test` for @pure-half-test) and its tables.
 #
 # FoV_Vote.md fixes every risk threshold on val before test is looked at:
-#   DATASETS=@pure-half-val sbatch jobscripts/Benchmarks/Stage1MppBench.sh  fits them
-#   sbatch jobscripts/Benchmarks/Stage1MppBench.sh               reads them back
+#   DATASETS=@pure-half-val sbatch deploy/slurm/Benchmarks/Stage1MppBench.sh  fits them
+#   sbatch deploy/slurm/Benchmarks/Stage1MppBench.sh               reads them back
 # Smoke: LIMIT=5 N_WSI=1 (the first 5 FoVs of each slide; recorded in the
 # entries, so a full run does not take them for its own).
 
 DATASETS="${DATASETS:-@pure-half-test}"   # ran 2026-10-10 on @legacy-val, the val split then
 N_WSI="${N_WSI:-5}"            # per dataset; val and test must match.  ran 2026-10-10: N_WSI=10
-FOV="${FOV:-bench}"            # query_sim/FovSupply.FOV_RECIPES
+FOV="${FOV:-bench}"            # locascope/core/query_sim/FovSupply.FOV_RECIPES
 PER_LEVEL="${PER_LEVEL:-}"     # replaces the recipe's n_per_rung when set
 SEG="${SEG:-hest}"             # the mask the reference banks are drawn on
 STAGE1="${STAGE1:-knn:gigapath knn:uni2 classic:default}"    # recipe methods; STAGE1=none for no one of them
@@ -102,7 +102,7 @@ status=0
 if [ "$BENCH" = "1" ]; then
 if [ "$STAGE1" != "none" ]; then
   echo "======== [memory estimate] (the recipe methods; a checkpoint's is its file's size and the encoder's) ========"
-  python utilities/cli/diagnostics/estimate_method_memory.py --stage1 $STAGE1
+  python -m locascope.cli.diagnostics.estimate_method_memory --stage1 $STAGE1
 fi
 
 echo ""
@@ -110,7 +110,7 @@ echo "======== Stage1MppBench: $STAGE1 + checkpoints $CHECKPOINTS ========"
 echo "  $DATASETS  n_wsi=$N_WSI  fov=$FOV  seg=$SEG  limit=$LIMIT"
 BENCH_ARGS=()
 [ "$SAVE_PHOTOS" = "1" ] && BENCH_ARGS+=(--save-photos)
-python -u utilities/bench_modules/bench_stage1_mpp.py "${ARGS[@]}" "${BENCH_ARGS[@]}"
+python -u -m locascope.cli.bench.bench_stage1_mpp "${ARGS[@]}" "${BENCH_ARGS[@]}"
 status=$?
 fi
 
@@ -121,9 +121,9 @@ echo "======== [analysis] ========"
 VAL_SET=1
 for d in $DATASETS; do case "$d" in *-val) ;; *) VAL_SET=0 ;; esac; done
 if [ "$VAL_SET" = "1" ]; then
-  python utilities/cli/metrics/analyze_stage1_metrics.py "${ARGS[@]}" --fit-thresholds
+  python -m locascope.cli.metrics.analyze_stage1_metrics "${ARGS[@]}" --fit-thresholds
 else
-  python utilities/cli/metrics/analyze_stage1_metrics.py "${ARGS[@]}" --thresholds auto
+  python -m locascope.cli.metrics.analyze_stage1_metrics "${ARGS[@]}" --thresholds auto
 fi
 rc=$?
 [ $status -eq 0 ] && status=$rc

@@ -45,7 +45,7 @@ from typing import Dict, Sequence
 
 import numpy as np
 
-from SurvivalAnalysis.Patterns import EMPTY, PATTERNS, classify
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Patterns import EMPTY, PATTERNS, classify
 
 
 def null_patterns(alive_rate: Sequence[float]) -> Dict[str, float]:

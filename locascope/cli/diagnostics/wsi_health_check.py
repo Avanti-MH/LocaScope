@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """One SLURM job, every WSI diagnostic, in funnel order.
 
-    python utilities/cli/diagnostics/wsi_health_check.py --dataset ki67_pure
-    python utilities/cli/diagnostics/wsi_health_check.py --dataset bracs/test --stop-after holes
-    python utilities/cli/diagnostics/wsi_health_check.py --wsi /path/one.mrxs /path/two.svs --skip-scale
+    python -m locascope.cli.diagnostics.wsi_health_check --dataset ki67_pure
+    python -m locascope.cli.diagnostics.wsi_health_check --dataset bracs/test --stop-after holes
+    python -m locascope.cli.diagnostics.wsi_health_check --wsi /path/one.mrxs /path/two.svs --skip-scale
 
 Five diagnostics already exist in this directory, each answering a different
 question about the same slides:
@@ -35,7 +35,7 @@ holes produced (it builds its own probe/mask), but reading it AFTER holes
 means a reader already knows whether OpenSlideError gaps are the likely
 explanation for whatever mask sees. yield is the deepest and slowest tier,
 and the one with a real prerequisite outside this script -- a mask STORE
-built by utilities/cli/build_cache/build_mask_store.py -- so it runs last
+built by locascope/cli/build_cache/build_mask_store.py -- so it runs last
 and degrades to a clear skip message, never a crash, when that store is
 missing or has nothing for a given slide. scale asks a question none of the
 other four touch (pyramid geometry / base_mpp), so it does not depend on or
@@ -54,7 +54,7 @@ sampler's overlap policy, ...) is what that tool's own CLI is for -- run it
 directly. This script exposes only what a first-pass health check needs:
 --seg for the mask recipe both mask tiers use, and --block/--levels/--sweep
 for holes, because BLOCK decides whether an exhaustive scan fits the SLURM
-walltime at all -- see jobscripts/WsiHealthCheck.sh's own calibration step
+walltime at all -- see deploy/slurm/WsiHealthCheck.sh's own calibration step
 for how to pick it.
 """
 from __future__ import annotations
@@ -64,18 +64,15 @@ import csv
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from _paths import job_result_dir, setup_import_paths               # noqa: E402
-setup_import_paths()
+from locascope.paths import job_result_dir   # noqa: E402
 
-from WsiSelection import resolve_wsi_paths                            # noqa: E402
-from wsi_info import WsiInfoCheck                                     # noqa: E402
-from scan_wsi_holes import WsiHolesScan                               # noqa: E402
-from diag_mask_validity import MaskValidityCheck                      # noqa: E402
-from probe_tile_yield import TileYieldProbe, DEFAULT_MASK_CACHE_JOB     # noqa: E402
-from TissueMaskConfig import MASK_RECIPES                             # noqa: E402
-from diag_wsi_scale import (                                          # noqa: E402
+from locascope.cli.diagnostics.WsiSelection import resolve_wsi_paths                            # noqa: E402
+from locascope.cli.diagnostics.wsi_info import WsiInfoCheck                                     # noqa: E402
+from locascope.cli.diagnostics.scan_wsi_holes import WsiHolesScan                               # noqa: E402
+from locascope.cli.diagnostics.diag_mask_validity import MaskValidityCheck                      # noqa: E402
+from locascope.cli.diagnostics.probe_tile_yield import TileYieldProbe, DEFAULT_MASK_CACHE_JOB     # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES                             # noqa: E402
+from locascope.cli.diagnostics.diag_wsi_scale import (                                          # noqa: E402
     WsiScaleCheck, print_mpp_summary, print_native_summary, write_csv as write_scale_csv)
 
 
@@ -147,7 +144,7 @@ def run_yield(entries: list, out_dir: str, seg: str, mask_cache_job: str) -> lis
     probe = TileYieldProbe(seg=seg, mask_cache_job=mask_cache_job, out_dir=out_dir)
     if not os.path.isdir(probe.seg_dir):
         print(f'  [SKIP] no mask cache at {probe.seg_dir} -- run '
-              f'utilities/cli/build_cache/build_mask_store.py first, or pass '
+              f'locascope/cli/build_cache/build_mask_store.py first, or pass '
               f'--seg/--mask-cache-job. yield answers nothing without it.',
               flush=True)
         return []
@@ -188,7 +185,7 @@ def main() -> int:
     ap.add_argument('--block', type=int, default=4096,
                     help='holes tier: block size in level-0 px. Halving it '
                          'quadruples the reads -- see the walltime table in '
-                         'jobscripts/WsiHealthCheck.sh before lowering this '
+                         'deploy/slurm/WsiHealthCheck.sh before lowering this '
                          'on a large corpus')
     ap.add_argument('--sweep', type=int, default=4,
                     help='holes tier: report block, 2x block, 4x block, ... '

@@ -12,7 +12,7 @@ The read the reserve is checked against is written out independently of
 `read_rect` (`_independent_read`), so a reserve and a read computed by the
 same function cannot pass by agreeing with themselves.
 
-    python utilities/test_modules/test_read_geometry.py
+    python tests/test_read_geometry.py
 """
 from __future__ import annotations
 
@@ -22,17 +22,14 @@ import sys
 import traceback
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
-from DsLadder import RungPlan                                    # noqa: E402
-from ReadGeometry import (ReadSpec, FovGeometry, ReadRect,     # noqa: E402
+from locascope.core.slides.DsLadder import RungPlan                                    # noqa: E402
+from locascope.core.slides.ReadGeometry import (ReadSpec, FovGeometry, ReadRect,     # noqa: E402
                           coarser_level, finer_levels, is_native, level_for,
                           level_px, levels_up_to, nearest_level, reserve_margin)
-from TileSampler import PlanSpec, _margin_of, with_camera       # noqa: E402
+from locascope.core.tiles.TileSampler import PlanSpec, _margin_of, with_camera       # noqa: E402
 
 RUNGS = (1, 2, 4, 8, 16, 32)
 #: A margin, output px, as a still FoV camera reads one (`camera.read_margin`).
@@ -255,7 +252,7 @@ DS_GRID = sorted({0.5, 0.9995, 1.0, 1.0005, 2.0, 3.9, 3.9999, 4.0, 4.004,
 
 
 def _old_nearest(lds, ds):
-    """FROZEN: SafeSlide.nearest_level_for_downsample (TissueSegFunc.nearest_level
+    """FROZEN: SafeSlide.nearest_level_for_downsample (TissueSeg.nearest_level
     was the same arithmetic)."""
     import numpy as np
     d = [float(v) for v in lds]

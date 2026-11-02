@@ -16,7 +16,7 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  2026-09-11: decoy_kind fixed to 'random' (not swept -- the user's own
@@ -75,7 +75,7 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 DECOY_KINDS=(random)
 ALIVE_METHODS=(baseline exp_decay probability_map scale_extremum)
-WSI_NAMES=("BRACS_1228" "BRACS_1476" "S1104233,G7E,110208" "S1151088,G7E,111220")
+WSI_NAMES=("BRACS_1003694" "BRACS_1474" "S1104233,G7E,110208" "S1151088,G7E,111220")
 
 n_wsi=${#WSI_NAMES[@]}
 n_alive=${#ALIVE_METHODS[@]}
@@ -105,5 +105,5 @@ DECOY_KIND="$DECOY_KIND" \
 ALIVE_METHOD="$ALIVE_METHOD" \
 COMBINED_THRESHOLD="$([ "$ALIVE_METHOD" = exp_decay ] && echo "$COMBINED_THRESHOLD")" \
 OUT="$OUT" \
-bash jobscripts/SuperPathPointJobs/SurvivalAlphaAnalysis.sh
+bash deploy/slurm/SuperPathPointJobs/SurvivalAlphaAnalysis.sh
 exit $?

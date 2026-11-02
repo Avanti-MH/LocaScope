@@ -67,19 +67,19 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union
 import numpy as np
 import torch
 
-import stage1_estimation
-import stage2_retrieval
-import stage3_localization
-from SafeSlide                          import SafeSlide                      # noqa: E402
-from TissueMask                         import TissueMask                     # noqa: E402
-from stage1_estimation.StageInterface   import EstMppResult, MppEstimator     # noqa: E402
-from stage2_retrieval.MultiPhases       import MultiPhases                    # noqa: E402
-from stage2_retrieval.Retriever         import RetrievalOutput, Retriever     # noqa: E402
-from stage2_retrieval.StageInterface    import CandidateSet                   # noqa: E402
-from stage3_localization.StageInterface import Localizer, LocalizationResultSet   # noqa: E402
+from locascope.core import stage1_estimation
+from locascope.core import stage2_retrieval
+from locascope.core import stage3_localization
+from locascope.core.slides.SafeSlide import SafeSlide                      # noqa: E402
+from locascope.core.tiles.TissueMask import TissueMask                     # noqa: E402
+from locascope.core.stage1_estimation.StageInterface import EstMppResult, MppEstimator     # noqa: E402
+from locascope.core.stage2_retrieval.MultiPhases import MultiPhases                    # noqa: E402
+from locascope.core.stage2_retrieval.Retriever import RetrievalOutput, Retriever     # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import CandidateSet                   # noqa: E402
+from locascope.core.stage3_localization.StageInterface import Localizer, LocalizationResultSet   # noqa: E402
 
 if TYPE_CHECKING:       # annotations only
-    from TissueMaskConfig import MaskMaker, TissueMaskConfig
+    from locascope.core.tiles.TissueMaskConfig import MaskMaker, TissueMaskConfig
 
 __all__ = ['LocaScopePipeline', 'LocaScopeQueryResult', 'StageSpec',
            'construct_stage']

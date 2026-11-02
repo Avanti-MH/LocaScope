@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Everything that checks `query_sim/camera.py`, in one file.
 
-    python utilities/test_modules/test_camera.py --wsi <slide> [--level 1]
-    python utilities/test_modules/test_camera.py --wsi <slide> --only map seed
+    python tests/test_camera.py --wsi <slide> [--level 1]
+    python tests/test_camera.py --wsi <slide> --only map seed
 
-Run through `jobscripts/TestReadPath.sh`, which resolves slide names and loops.
+Run through `deploy/slurm/TestReadPath.sh`, which resolves slide names and loops.
 
 Placing FoVs is `FovSupply`'s, tested in `test_fov_supply.py`. Each section
 runs on its own and the exit status is the worst of them, so a failing map
@@ -37,26 +37,24 @@ import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent))
 
-from _paths import job_result_dir, setup_import_paths            # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 
 import cv2                                                       # noqa: E402
 
-from camera import Render, render_spec                           # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR as SENSOR             # noqa: E402
-from ReadGeometry import ReadSpec                                # noqa: E402
-from SlideReader import SlideReader                              # noqa: E402
-from pipeline import (_apply_params, _sample_params, lens_margin,  # noqa: E402
+from locascope.core.query_sim.camera import Render, render_spec                           # noqa: E402
+from locascope.core.slides.ReadGeometry import REAL_PHOTO_SENSOR as SENSOR             # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                              # noqa: E402
+from locascope.core.query_sim.pipeline import (_apply_params, _sample_params, lens_margin,  # noqa: E402
                       simulate_with_gt)
-from config import DomainGapConfig                               # noqa: E402
-from SafeSlide import SafeSlide                                  # noqa: E402
-from augment import field, geometry, lens                        # noqa: E402
-from augment.geometry import apply_rotation                      # noqa: E402
+from locascope.core.query_sim.config import DomainGapConfig                               # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.query_sim.augment import field, geometry, lens                        # noqa: E402
+from locascope.core.query_sim.augment.geometry import apply_rotation                      # noqa: E402
 
 
 # ==============================================================================
@@ -831,8 +829,8 @@ class _FakeSlide:
 
 
 def run_fingerprint(args, wsi=None, level_ds=None) -> int:
-    from ConfigIdentity import check_fingerprint, digest
-    from camera import photo_rng
+    from locascope.core.config.ConfigIdentity import check_fingerprint, digest
+    from locascope.core.query_sim.camera import photo_rng
     cam = Render(SlideReader(_FakeSlide()), (96, 64), DomainGapConfig(),
                  ds=2.0, seed=0)
     images, params = [], []

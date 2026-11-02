@@ -119,9 +119,9 @@ same ones on every dataset (a method not scored on a dataset is simply absent fr
 and classic baseline is always drawn.
 
 Usage:
-    python utilities/cli/metrics/analyze_stage1_metrics.py <bench_stage1_mpp flags> \\
+    python -m locascope.cli.metrics.analyze_stage1_metrics <bench_stage1_mpp flags> \\
         --datasets @legacy-val --fit-thresholds
-    python utilities/cli/metrics/analyze_stage1_metrics.py <bench_stage1_mpp flags> \\
+    python -m locascope.cli.metrics.analyze_stage1_metrics <bench_stage1_mpp flags> \\
         --datasets @legacy-test --thresholds auto
 """
 from __future__ import annotations
@@ -135,10 +135,7 @@ import os
 import sys
 from typing import List, Optional, Sequence
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                       # noqa: E402
 
 
 
@@ -227,14 +224,12 @@ def _probs_matrix(rows):
 def rows_from_cache(args) -> list:
     """One row per (FoV, method[, vote rule]) of every hit stage-1 entry the
     flags address, joined with where the FoV was placed."""
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    '..', '..', 'bench_modules'))
-    from BenchCommon import (by_index, read_rows, slide_supplies,  # noqa: PLC0415
+    from locascope.cli.bench.BenchCommon import (by_index, read_rows, slide_supplies,  # noqa: PLC0415
                                  stage1_record)
-    from bench_stage1_mpp import stages_of                        # noqa: PLC0415
-    from DsLadder import DEFAULT_RUNGS                            # noqa: PLC0415
-    from SafeSlide import SafeSlide                               # noqa: PLC0415
-    from TissueMaskConfig import MASK_RECIPES, MaskMaker          # noqa: PLC0415
+    from locascope.cli.bench.bench_stage1_mpp import stages_of                        # noqa: PLC0415
+    from locascope.core.slides.DsLadder import DEFAULT_RUNGS                            # noqa: PLC0415
+    from locascope.core.slides.SafeSlide import SafeSlide                               # noqa: PLC0415
+    from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker          # noqa: PLC0415
 
     job = args.stage_cache_job
     stages = stages_of(args)
@@ -305,7 +300,7 @@ BAR = '=' * 78
 #:
 #: Keyed by `training/ClassifyingRoutingHead/Runtime.HEAD_CHOICES`'s registered names
 #: (a CLASSIFIER_RECIPES name not keyed here draws in the secondary ink). Its
-#: own table: `training/ClassifyingRoutingHead/cli/evaluate.py` colours by classifier
+#: own table: `locascope/training/ClassifyingRoutingHead/evaluate.py` colours by classifier
 #: and marks the reduction by shape (`CLASSIFIER_COLORS`, `head_style`), so
 #: the two reports do not use the same colour for the same head.
 HEAD_RECIPE_COLORS = {
@@ -2036,9 +2031,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False)
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    '..', '..', 'bench_modules'))
-    from bench_stage1_mpp import JOB_NAME, add_args               # noqa: PLC0415
+    from locascope.cli.bench.bench_stage1_mpp import JOB_NAME, add_args               # noqa: PLC0415
     add_args(ap)
     ap.add_argument('--stage-cache-job', default=_paths.job_name(JOB_NAME),
                     help='the bench job whose stage-1 entries are scored. '

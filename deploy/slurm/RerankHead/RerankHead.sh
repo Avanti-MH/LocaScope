@@ -18,20 +18,20 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  training/RerankHead -- the second phase of stage 2 (stage2_retrieval/spec.md)
+#  locascope/training/RerankHead -- the second phase of stage 2 (locascope/core/stage2_retrieval/spec.md)
 #
 #  Several heads are trained in ONE process on the SAME FoVs: a level of a slide
 #  is encoded once and every head trains on it, and nothing of it is kept on disk
 #  (no feature store, no candidate lists: they are made when used).
 #
-#    sbatch jobscripts/RerankHead/RerankHead.sh                       # tilegt, uni2 cls_avg (K = 500 of its list)
-#    ENCODER=gigapath EXTRA="--k 100" sbatch jobscripts/RerankHead/RerankHead.sh
-#    HEADS="tilegt corrnet winembed" TAG=run1 sbatch jobscripts/RerankHead/RerankHead.sh
-#    DRY_RUN=1 bash jobscripts/RerankHead/RerankHead.sh                # the plan; opens nothing
-#    SMOKE=1 sbatch jobscripts/RerankHead/RerankHead.sh                # 2 slides a dataset, 3 visits, 1 epoch
+#    sbatch deploy/slurm/RerankHead/RerankHead.sh                       # tilegt, uni2 cls_avg (K = 500 of its list)
+#    ENCODER=gigapath EXTRA="--k 100" sbatch deploy/slurm/RerankHead/RerankHead.sh
+#    HEADS="tilegt corrnet winembed" TAG=run1 sbatch deploy/slurm/RerankHead/RerankHead.sh
+#    DRY_RUN=1 bash deploy/slurm/RerankHead/RerankHead.sh                # the plan; opens nothing
+#    SMOKE=1 sbatch deploy/slurm/RerankHead/RerankHead.sh                # 2 slides a dataset, 3 visits, 1 epoch
 #
 #  The weights are written to <results>/RerankHead/weights/ and read from there by
 #  a recipe (RerankHead/weights/<file>.pt). One checkpoint per head: `_best` (the
@@ -79,9 +79,9 @@ esac
 # One process per GPU the job was given (`torchrun`): each takes every Nth slide of an epoch, encodes its levels and
 # trains on them, and after every step the gradients are averaged over the processes, so there is one model. With
 # fewer GPUs, ask for them with their share of the CPUs and memory:
-#   sbatch --gpus-per-node=4 --cpus-per-task=48 --mem=800G jobscripts/RerankHead/RerankHead.sh
+#   sbatch --gpus-per-node=4 --cpus-per-task=48 --mem=800G deploy/slurm/RerankHead/RerankHead.sh
 # Two nodes (16 GPUs; the `16gpus` partition) are the same with a torchrun on each node, joined at the first:
-#   sbatch --partition=16gpus --nodes=2 --gpus-per-node=8 --cpus-per-task=96 --mem=1600G jobscripts/RerankHead/RerankHead.sh
+#   sbatch --partition=16gpus --nodes=2 --gpus-per-node=8 --cpus-per-task=96 --mem=1600G deploy/slurm/RerankHead/RerankHead.sh
 GPUS="${SLURM_GPUS_ON_NODE:-1}"
 NODES="${SLURM_NNODES:-1}"
 LAUNCH="python -u"
@@ -99,7 +99,7 @@ export PYTHONUNBUFFERED=1      # under torchrun a process's stdout is a pipe: wi
 export OMP_NUM_THREADS=1       # what torchrun sets anyway; set, it does not print its warning
 export PYTHONWARNINGS="ignore:Plan failed with a cudnnException:UserWarning"   # the tissue segmenter's, once a call
 
-$LAUNCH training/RerankHead/cli/train.py \
+$LAUNCH -m locascope.training.RerankHead.train \
   --heads $HEADS --encoder "$ENCODER" --pooling "$POOLING" --epochs "$EPOCHS" --tag "$TAG" --select-k "$SELECT_K" \
   --n-train-wsi "$N_TRAIN_WSI" --n-val-wsi "$N_VAL_WSI" --read-workers "$READ_WORKERS" $EXTRA
 status=$?

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for training/SuperPathPoint/SuperPoint/Decoders.py.
 
-    python utilities/test_modules/test_detector_decoder.py
+    python tests/test_detector_decoder.py
 
 No weights, no GPU, seconds. Every tensor here is made up.
 
@@ -35,27 +35,13 @@ import argparse
 import os
 import sys
 
-# `utilities/` holds the one definition of the output roots (`_paths.py`), and
-# `setup_import_paths` -- which puts every other package on the path -- is
-# inside it, so it has to be reachable before anything else is imported.
-#
-# BOTH parents are inserted, and that is deliberate rather than sloppy: this
-# file runs from `utilities/test_modules/` and from
-# `utilities/test_modules/TestSuperPathPoint/`, one level deeper, and inserting
-# both means the move needs no edit here. The one that is not `utilities/` is
-# either the repo root or `test_modules/`; neither holds a `_paths.py`, and
-# `setup_import_paths` puts the repo root on the path anyway.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import torch                                                     # noqa: E402
 
-from SuperPoint.Decoders import depth_to_space_prob               # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Decoders import depth_to_space_prob               # noqa: E402
 
 _RESULTS = []
 

@@ -18,10 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
-#  utilities/cli/metrics/analyze_locascope.py -- read-only
+#  locascope/cli/metrics/analyze_locascope.py -- read-only
 #
 #  Where a bench_locascope run loses its FoVs: every FoV in one outcome (success, or the first
 #  stage that failed it), each stage on its own population, stage 3 by inlier count, one row per
@@ -31,8 +31,8 @@ source jobscripts/_env.sh
 #  The run flags are BenchLocaScope.sh's: the same ones give the same cache addresses, so keep
 #  them equal to the bench's (a mismatch shows as "miss" / "stale" lines, never as wrong numbers).
 #
-#    sbatch jobscripts/AnalyzeLocaScope.sh
-#    TOL_PX=8 sbatch jobscripts/AnalyzeLocaScope.sh
+#    sbatch deploy/slurm/AnalyzeLocaScope.sh
+#    TOL_PX=8 sbatch deploy/slurm/AnalyzeLocaScope.sh
 # =============================================================================
 DATASETS="${DATASETS:-@pure-half-test}"   # @pure-half-val: where methods are chosen; @pure-half-test: the choice confirmed
 N_WSI="${N_WSI:-10}"
@@ -46,7 +46,7 @@ STAGE_JOB="${STAGE_JOB:-BenchLocaScope}"   # whose cache is read
 TOL_PX="${TOL_PX:-16}"                     # located = the final answer within this many px of the truth (photo pixels)
 EXTRA="${EXTRA:-}"
 
-python -u utilities/cli/metrics/analyze_locascope.py \
+python -u -m locascope.cli.metrics.analyze_locascope \
   --datasets $DATASETS --n-wsi "$N_WSI" \
   --sampler-n-per-rung "$PER_LEVEL" \
   --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" \

@@ -18,7 +18,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  The tests of the analyses: analyze_locascope (how a stage-2 candidate list is
@@ -26,9 +26,9 @@ source jobscripts/_env.sh
 #  analyze_stage1_metrics on a table of made-up stage-1 rows. No slide, no cache,
 #  no model.
 #
-#    sbatch jobscripts/TestAnalyzeLocaScope.sh
+#    sbatch deploy/slurm/TestAnalyzeLocaScope.sh
 # =============================================================================
-python utilities/test_modules/test_analyze_locascope.py
+python tests/test_analyze_locascope.py
 status=$?
 
 echo ""

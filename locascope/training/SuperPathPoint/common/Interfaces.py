@@ -5,8 +5,8 @@
     class DescriptorHead(Protocol):  a feature map -> dense descriptors
 
 Runtime-checkable Protocols rather than base classes: `TileEncoderBackbone`
-wraps `aiNNModel/TileEncoderFunc.py`, which is not ours to give a base class to,
-and inheritance would put this module in `aiNNModel`'s import path for no gain.
+wraps `locascope/core/backbones/TileEncoder.py`, which is not ours to give a base class to,
+and inheritance would put this module in `locascope.core`'s import path for no gain.
 `check_shapes` below is what actually enforces anything.
 
 `stride` AND `cell` ARE TWO NUMBERS

@@ -1,7 +1,7 @@
 '''What THIS package needs beyond the generic encoder/head plumbing --
 `cli/train.py`'s val/test scoring loop and its wandb logging. The generic
 pieces (head classes, the `Head` assembly, patches->raw-features, checkpoint
-save/load) live in `aiNNModel/models/`: nothing about them is specific to
+save/load) live in `locascope/core/networks/`: nothing about them is specific to
 routing a tile to an mpp rung, and `stage1_estimation/
 ClassifierEstMpp.py` needs the same pieces a training loop does, without
 importing a training package to get them. This file re-exports what
@@ -23,12 +23,12 @@ from typing import Dict, List, Optional, Tuple
 
 import torch                                                        # noqa: E402
 
-from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     RUNGS, RenderConfig, iterate_epoch)
-from Heads import ArcFaceHead, HeadConfig, LinearHead, MlpHead       # noqa: E402
-from Head import Head, grid_view, pooled_view                       # noqa: E402
-from Features import encode_raw, normalise_patches, trunk_raw       # noqa: E402
-from Checkpoints import (build_from_checkpoint, data_tag,          # noqa: E402
+from locascope.core.networks.Heads import ArcFaceHead, HeadConfig, LinearHead, MlpHead       # noqa: E402
+from locascope.core.networks.Head import Head, grid_view, pooled_view                       # noqa: E402
+from locascope.core.networks.Features import encode_raw, normalise_patches, trunk_raw       # noqa: E402
+from locascope.core.networks.Checkpoints import (build_from_checkpoint, data_tag,          # noqa: E402
                          save_checkpoint, weight_filename)
 
 __all__ = [
@@ -152,7 +152,7 @@ def heads_for(requested: List[str], baseline: int) -> List[str]:
 #  wandb -- same idiom as SuperPathPoint/SuperPoint/Trainer.py's
 #  _start_wandb/_log/_finish_wandb: optional dependency, one run per MODEL,
 #  and WANDB_MODE (read as the CLI default, not read here) is what a smoke
-#  run sets to keep this off the server -- see jobscripts/_env.sh.
+#  run sets to keep this off the server -- see deploy/slurm/_env.sh.
 # ══════════════════════════════════════════════════════════════════════════
 
 def wandb_init(project: str, mode: str, name: str, config: Dict,

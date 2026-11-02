@@ -40,18 +40,18 @@ from typing import Callable, Dict, Iterator, Optional, Tuple, Union
 
 import numpy as np
 
-from Cache import Entry                                          # noqa: E402
-from ConfigArgs import add_config_args, config_from_args         # noqa: E402
-from ConfigIdentity import record                                # noqa: E402
-from ReadGeometry import levels_up_to                            # noqa: E402
-from SlideReader import SlideReader                              # noqa: E402
-from TissueMask import TissueMask                                # noqa: E402
-from TileSampler import (SAMPLER_RECIPES, InheritConfig,          # noqa: E402
+from locascope.core.cache.Cache import Entry                                          # noqa: E402
+from locascope.core.config.ConfigArgs import add_config_args, config_from_args         # noqa: E402
+from locascope.core.config.ConfigIdentity import record                                # noqa: E402
+from locascope.core.slides.ReadGeometry import levels_up_to                            # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                              # noqa: E402
+from locascope.core.tiles.TissueMask import TissueMask                                # noqa: E402
+from locascope.core.tiles.TileSampler import (SAMPLER_RECIPES, InheritConfig,          # noqa: E402
                          OverlapConfig, PlanSpec,
                          RichnessConfig, SamplerConfig, TileSampler)
 
-from camera import Render, photo_rng                               # noqa: E402
-from config import DomainGapConfig                                 # noqa: E402
+from locascope.core.query_sim.camera import Render, photo_rng                               # noqa: E402
+from locascope.core.query_sim.config import DomainGapConfig                                 # noqa: E402
 
 
 # ── the recipes -- one name, one corpus of FoVs, wherever it is asked for ─────
@@ -145,7 +145,7 @@ FOV_RECIPES: Dict[str, FovRecipe] = {
                                   on_incomplete='drop'),
             candidates='lattice', max_tries_per_tile=5, reserve_in_region=True),
         rungs='native', max_ds=16.0),
-    # `bench` with the gap of the real microscope photos of ki67_with_photo as `utilities/cli/diagnostics/diag_domain_gap.py`
+    # `bench` with the gap of the real microscope photos of ki67_with_photo as `locascope/cli/diagnostics/diag_domain_gap.py`
     # measured it (2026-10-26, 212 photos of 16 slides, against the scan's own crop of the same tissue): the background
     # 0.25 darker (p10..p90 0.21..0.35), the vignette nearly absent (corner / centre 0.98), as sharp as the scan (0.99), the
     # white point not tinted (R/B 1.015), noise about +0.2 grey levels, and every photo 0.893 of its level's pixel in

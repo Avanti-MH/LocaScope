@@ -19,7 +19,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # ---------------- Real photos through the three stages ----------------
 #
@@ -29,7 +29,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #   result/cache/<job>/slide=/seg=/region=/photos=<id>/
 #       shots/  stage1/  stage1=<s1>/stage2/  .../stage2=<s2>/stage3/
 # and `answer` in stage 3's entry is the position of each photo. See the
-# docstring of utilities/cli/driver/locate_photo.py.
+# docstring of locascope/cli/locate_photo.py.
 #
 # ONE ARRAY TASK PER SLIDE. The pipeline segments the slide (or reads its mask
 # cache) and the retriever encodes the whole level a photo is routed to; all of
@@ -64,8 +64,8 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #   anything else
 #     EXTRA              flags passed to locate_photo.py as they are
 #
-# To run one slide only:  sbatch --array=5 jobscripts/RealTest.sh
-# A smoke run:            LIMIT=3 sbatch --array=4 jobscripts/RealTest.sh
+# To run one slide only:  sbatch --array=5 deploy/slurm/RealTest.sh
+# A smoke run:            LIMIT=3 sbatch --array=4 deploy/slurm/RealTest.sh
 # Bad nodes:              sbatch --exclude=25a-hgpn001,25a-hgpn003,25a-hgpn006 ...
 
 # which photos
@@ -95,7 +95,7 @@ echo "======== real photos  task=${SLURM_ARRAY_TASK_ID:-all}  limit=$LIMIT =====
 echo "stages $STAGE1 | $STAGE2 | $STAGE3   seg $SEG"
 echo "stage 2: k=${STAGE2_K:-recipe}  batch=$STAGE2_BATCH   stage 3: topk=$STAGE3_TOPK"
 
-python utilities/cli/driver/locate_photo.py \
+python -m locascope.cli.locate_photo \
   $SLIDE_ARG \
   --stage1 "$STAGE1" --stage2 "$STAGE2" --stage3 "$STAGE3" \
   --seg "$SEG" --limit "$LIMIT" \
@@ -105,4 +105,4 @@ python utilities/cli/driver/locate_photo.py \
 
 echo ""
 echo "======== done -> result/cache/${SLURM_JOB_NAME:-LocatePhoto}/ ========"
-echo "to plot it: REAL=1 STAGE3_TOPK=$STAGE3_TOPK STAGE2_K=${STAGE2_K} sbatch jobscripts/PlotLocaScope.sh"
+echo "to plot it: REAL=1 STAGE3_TOPK=$STAGE3_TOPK STAGE2_K=${STAGE2_K} sbatch deploy/slurm/PlotLocaScope.sh"

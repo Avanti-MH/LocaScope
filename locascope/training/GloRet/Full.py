@@ -37,13 +37,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from GloRet import take_aux
-from stage2_retrieval.RetrieverGloRet import amp_context
+from locascope.core.networks.GloRet import take_aux
+from locascope.core.stage2_retrieval.RetrieverGloRet import amp_context
 
-from training.GloRet.Items import Items, Pool
-from training.GloRet.Losses import fov_loss
-from training.GloRet.Steps import StepCfg, apply_step, held_gb, mark_peak, mean_logs, net_input, peak_gb
-from training.GloRet.Supply import ROTATIONS, Fov, Level, Marks, Shape, Universe
+from locascope.training.GloRet.Items import Items, Pool
+from locascope.training.GloRet.Losses import fov_loss
+from locascope.training.GloRet.Steps import StepCfg, apply_step, held_gb, mark_peak, mean_logs, net_input, peak_gb
+from locascope.training.GloRet.Supply import ROTATIONS, Fov, Level, Marks, Shape, Universe
 
 
 @dataclass(frozen=True)

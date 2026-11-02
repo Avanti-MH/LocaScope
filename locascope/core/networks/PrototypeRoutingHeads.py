@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from Heads import ResidualMlpBlock
+from locascope.core.networks.Heads import ResidualMlpBlock
 
 
 class CosineTauHead(nn.Module):

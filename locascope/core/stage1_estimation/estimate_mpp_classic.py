@@ -33,15 +33,15 @@ import numpy as np
 import openslide
 
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig             # noqa: E402
-from ReadGeometry import ReadSpec                                        # noqa: E402
-from SafeSlide import SafeSlide                                         # noqa: E402
-from SlideReader import SlideReader                                     # noqa: E402
-from stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig             # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                        # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                         # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                     # noqa: E402
+from locascope.core.stage1_estimation.StageInterface import (EstMppResult, reference_bank,  # noqa: E402
                                               routed_level)
-from TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
+from locascope.core.tiles.TileSampler import (SAMPLER_RECIPES, SamplerConfig,           # noqa: E402
                          TileSampler)
-from TissueMaskConfig import MASK_RECIPES                                # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES                                # noqa: E402
 
 
 def _windowed(gray):

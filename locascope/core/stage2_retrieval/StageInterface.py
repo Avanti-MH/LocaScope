@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Tuple
 
 if TYPE_CHECKING:       # annotations only: nothing here is imported at run time
-    from PatchingLib import PatchGrid
+    from locascope.core.tiles.PatchingLib import PatchGrid
 
 
 #: The rotations a retriever tries, in degrees; the query is turned by these

@@ -17,7 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # wandb writes to the project's own output root, not to $HOME. Offline is the
 # safe default on a compute node with no outbound network; `wandb sync` uploads
@@ -63,7 +63,7 @@ mkdir -p "$WANDB_DIR"
 # `val/<stem>/points_per_view` is logged beside every margin: a margin at an
 # unrecorded density cannot be compared with the next epoch's.
 #
-#   sbatch jobscripts/SuperPathPointJobs/TrainSuperPathPoint.sh      # all four
+#   sbatch deploy/slurm/SuperPathPointJobs/TrainSuperPathPoint.sh      # all four
 #   ARMS="gray gray_pre" sbatch .../TrainSuperPathPoint.sh            # two
 #
 # FOUR ARMS, TWO AXES: channels x initialisation. `_pre` starts from upstream
@@ -216,7 +216,7 @@ for model in $ARMS; do
   esac
 
   run "model_${TILE}_${model}  ($CHANNELS ch${PRETRAINED:+, upstream init}, ${EPOCHS_N}ep x b${BATCH_N})" \
-    python training/SuperPathPoint/cli/train_superpathpoint.py \
+    python -m locascope.training.SuperPathPoint.cli.train_superpathpoint \
       --tile "$TILE" --channels "$CHANNELS" $PRETRAINED \
       --epochs "$EPOCHS_N" --batch-size "$BATCH_N" --lr "$LR" \
       --balance "$BALANCE" \

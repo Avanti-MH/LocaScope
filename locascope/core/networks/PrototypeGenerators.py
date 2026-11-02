@@ -6,7 +6,7 @@ shape:
                                          # pooled support-tile vectors ->
                                          # [D], one vector
 
--- not a per-tile pooling (that is `aiNNModel/models/Pooling.py`'s job,
+-- not a per-tile pooling (that is `locascope/core/networks/Pooling.py`'s job,
 done once per tile BEFORE any of these ever run), a per-SET one. RUNS ONE
 RUNG AT A TIME: support tiles of DIFFERENT rungs must never attend to each
 other (spec.md is explicit about this), so the caller loops the rungs and
@@ -17,7 +17,7 @@ kind `Pooling`'s "same instance for support and query" is.
 ALL Stage 2 arms live HERE, in ONE file, the same organisation
 `PrototypeRoutingHeads.py` uses for Stage 3.
 
-Lives in `aiNNModel/models/`, not the training package, because it is
+Lives in `locascope/core/networks/`, not the training package, because it is
 encoder/head plumbing (a module that turns tile embeddings into a
 prototype), not training logic -- the same line drawn for
 `Heads.py`/`common/Head.py`.
@@ -30,7 +30,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from Heads import AttentionPoolHead, HeadConfig, ResidualMlpBlock
+from locascope.core.networks.Heads import AttentionPoolHead, HeadConfig, ResidualMlpBlock
 
 
 # ══════════════════════════════════════════════════════════════════════════

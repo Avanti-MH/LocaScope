@@ -4,7 +4,7 @@
     mask = seg.segment_slide(wsi)        # SlideMask, via PlaneSegmenter's read
     binary = seg(rgb)                    # one image: [H, W] uint8, 1 = tissue
 
-The contract, the plane read and the model-free methods are TissueSegFunc's. What is here is
+The contract, the plane read and the model-free methods are TissueSeg's. What is here is
 what is HEST's: the frozen baseline its numbers form, the DeepLabV3 the
 checkpoint fits, the Lightning prefix that checkpoint was saved with, and the
 class index that means tissue.
@@ -27,11 +27,15 @@ import torch                                                # noqa: E402
 from PIL import Image                                       # noqa: E402
 from torchvision import transforms                          # noqa: E402
 
-from ConfigIdentity import ModelConfig, file_fingerprint, register  # noqa: E402
-from TissueSegFunc import PlaneSegConfig, PlaneSegmenter    # noqa: E402
+from locascope.core.config.ConfigIdentity import ModelConfig, file_fingerprint, register  # noqa: E402
+from locascope.core.backbones.TissueSeg import PlaneSegConfig, PlaneSegmenter    # noqa: E402
 
 
-_CKPT_DIR = _HERE / 'ckpt'
+from locascope.paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+
+#: The released weights, next to the other model weights, not inside the package: a checkout
+#: (or a second one, on another OS) then finds the same file.
+_CKPT_DIR = Path(MODEL_WEIGHTS_DIR) / 'hest_tissue_seg'
 _HF_REPO  = 'MahmoodLab/hest-tissue-seg'
 _HF_FILE  = 'deeplabv3_seg_v4.ckpt'
 

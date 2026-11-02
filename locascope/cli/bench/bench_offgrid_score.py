@@ -99,9 +99,7 @@ from dataclasses import replace
 import traceback
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))      # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                       # noqa: E402
 
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
@@ -110,18 +108,18 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                     # noqa: E402
 from mpl_toolkits.mplot3d import Axes3D                             # noqa: E402,F401
 
-from PatchingLib import PatchGrid, QueryPatchContainer             # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR, ReadSpec                # noqa: E402
-import Cache                                                        # noqa: E402
-from AccessDatasets import list_names, locate                        # noqa: E402
-from SafeSlide import SafeSlide                                     # noqa: E402
-from TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
-from TileEncoderFunc import encoder_config, encoder_names      # noqa: E402
-from stage2_retrieval.RetrieverSlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
-from camera import Render                                           # noqa: E402
-from SlideReader import SlideReader                                 # noqa: E402
-from FovSupply import FOV_RECIPES                                   # noqa: E402
-from _paths import encoder_tag, job_result_dir                      # noqa: E402
+from locascope.core.tiles.PatchingLib import PatchGrid, QueryPatchContainer             # noqa: E402
+from locascope.core.slides.ReadGeometry import REAL_PHOTO_SENSOR, ReadSpec                # noqa: E402
+from locascope.core.cache import Cache                                                        # noqa: E402
+from locascope.core.slides.AccessDatasets import list_names, locate                        # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                     # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MaskMaker, add_mask_args, mask_cfg_from_args  # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config, encoder_names      # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import SlidingWindowSimilarity        # noqa: E402
+from locascope.core.query_sim.camera import Render                                           # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                 # noqa: E402
+from locascope.core.query_sim.FovSupply import FOV_RECIPES                                   # noqa: E402
+from locascope.paths import encoder_tag, job_result_dir   # noqa: E402
 
 TILE = 256
 
@@ -866,7 +864,7 @@ def main() -> int:
     add_mask_args(parser)
     parser.add_argument(
         '--encoder', default='gigapath', choices=encoder_names(),
-        help='which tile encoder (TileEncoderFunc._IMPLEMENTATIONS).')
+        help='which tile encoder (TileEncoder._IMPLEMENTATIONS).')
     parser.add_argument(
         '--head', default='',
         help="which exit of the model, empty for its own default. Only CONCH "

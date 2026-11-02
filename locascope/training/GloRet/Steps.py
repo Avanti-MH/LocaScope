@@ -10,12 +10,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from BenchCommon import first_place, listed_windows
-from stage2_retrieval.Context import WindowBatch, top_candidates
-from stage2_retrieval.RetrieverGloRet import WindowEncodings, pair_scores_gloret, pair_scores_logloret
-from stage2_retrieval.StageInterface import Candidate
+from locascope.cli.bench.BenchCommon import first_place, listed_windows
+from locascope.core.stage2_retrieval.Context import WindowBatch, top_candidates
+from locascope.core.stage2_retrieval.RetrieverGloRet import WindowEncodings, pair_scores_gloret, pair_scores_logloret
+from locascope.core.stage2_retrieval.StageInterface import Candidate
 
-from training.GloRet.Supply import FovResult
+from locascope.training.GloRet.Supply import FovResult
 
 KS: Tuple[int, ...] = (1, 5, 10, 30, 100, 500)
 

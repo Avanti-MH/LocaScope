@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 '''Keep the latest run of every arm in some wandb projects, and list -- or, with `--delete`, delete -- the rest.
 
-    python utilities/cli/wandb_prune.py --projects prototypical-routing-head classifying-routing-head
-    python utilities/cli/wandb_prune.py --projects prototypical-routing-head --delete
+    python -m locascope.cli.wandb_prune --projects prototypical-routing-head classifying-routing-head
+    python -m locascope.cli.wandb_prune --projects prototypical-routing-head --delete
 
 An ARM is the run's NAME inside its project (`gigapath-tilegt-corrnet-winembed`, `uni2-ki67_pure-...`): the trainers
 name a run after what it trains, so every run of one name is a run of one arm. Of each arm the newest `--keep` runs

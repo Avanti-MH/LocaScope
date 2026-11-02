@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 '''Train both baselines, select on a held-out val set, save weights.
 
-    python training/ClassifyingRoutingHead/cli/train.py            # --baseline all
+    python -m locascope.training.ClassifyingRoutingHead.train            # --baseline all
     python .../train.py --baseline 2 --encoders gigapath
     python .../train.py --baseline 3 --heads linear
     python .../train.py --baseline 2 --heads arcface    # 2-3, baseline 2 only
@@ -23,7 +23,7 @@ THREE SETS, SET BY WSI
     test    cli/evaluate.py's --test-dataset -- NOT touched here at all
 
 The val and test sets are virtual datasets written once by
-`utilities/cli/build_cache/make_dataset.py` (run it first), so which slides
+`locascope/cli/build_cache/make_dataset.py` (run it first), so which slides
 were held out is a recorded fact rather than a consequence of `--seed` -- and
 the same fact for every package that reads it. Val spans BOTH datasets on purpose: selecting on
 it selects for cross-dataset generalisation, which is what this package is for.
@@ -47,7 +47,7 @@ baseline-3 head -- see `Runtime.wandb_init`), logging the SAME rows that go
 into `val_scores.csv`. `--wandb-mode` defaults to the `WANDB_MODE` environment
 variable (`online` if unset), so a smoke run stays off the server with
 `WANDB_MODE=offline` in the environment rather than a flag here -- see
-`jobscripts/_env.sh`.
+`deploy/slurm/_env.sh`.
 
 `best` is by val `level_accuracy` on the val set.
 
@@ -90,33 +90,24 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# _paths holds the one definition of every package's sys.path entry
-# (setup_import_paths) -- utilities/ goes on the path here, by hand, because
-# that function is INSIDE it and this is the one step nothing else can do
-# for this file. Same idiom every test_modules/cli entry point uses.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'utilities'))
-from _paths import setup_import_paths                                  # noqa: E402
-setup_import_paths()
-
 import torch                                                        # noqa: E402
 import torch.nn.functional as F                                     # noqa: E402
 
-import _paths                                                       # noqa: E402
-from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
+from locascope import paths as _paths                                                       # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     NUM_CLASSES, READ_LEVELS, RESAMPLE_FROM, RUNGS, RenderConfig,
     add_cache_args, build_manifest, cache_jobs, class_weights, data_record,
     iterate_epoch,
     open_caches)
-from AccessDatasets import by_source                                 # noqa: E402
-from Heads import HeadConfig, resolve_encoder_layers                # noqa: E402
-from Features import check_layer_tokens                              # noqa: E402
-from training.ClassifyingRoutingHead.Runtime import (                       # noqa: E402
+from locascope.core.slides.AccessDatasets import by_source                                 # noqa: E402
+from locascope.core.networks.Heads import HeadConfig, resolve_encoder_layers                # noqa: E402
+from locascope.core.networks.Features import check_layer_tokens                              # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Runtime import (                       # noqa: E402
     BASELINE3_ENCODER, HEAD_CHOICES, encode_raw, heads_for, predict,
     data_tag, rescore, rescore_by_rung, save_checkpoint, trunk_raw,
     wandb_epoch_metrics, wandb_finish, wandb_init, wandb_log, weight_filename)
-from Head import Head                                                # noqa: E402
-from Resume import ResumeFile, resume_identity                       # noqa: E402
+from locascope.core.networks.Head import Head                                                # noqa: E402
+from locascope.core.networks.Resume import ResumeFile, resume_identity                       # noqa: E402
 
 #: Arguments that change where output goes, how many epochs in total, how it is
 #: logged, or which models this invocation covers -- not what one model IS.
@@ -523,11 +514,11 @@ class _Baseline2Model:
     per encoder while the encoders share one epoch loop.'''
 
     def __init__(self, args, encoder_name: str, caches, device):
-        from TileEncoderFunc import encoder_config               # noqa: PLC0415
+        from locascope.core.backbones.TileEncoder import encoder_config               # noqa: PLC0415
         self.name = encoder_name
         names = heads_for(args.heads, 2)
         # `--dtype` governs the FROZEN ENCODER's inference precision here --
-        # fp16 forward, no gradient, the same case `TileEncoderFunc` was built
+        # fp16 forward, no gradient, the same case `TileEncoder` was built
         # for (cos=0.99995 against fp32, log/TODO.log). It does NOT reach
         # `head_cfg` below: see the comment there for why that is a different
         # question with a fixed answer, not a knob.
@@ -809,7 +800,7 @@ def run_baseline3(args, caches, out_dir, device) -> Tuple[List[Dict], List[Dict]
     sharing one trunk would make the heads' training interfere. Each gets its
     own encoder -- which means loading the checkpoint once per head, the cost
     of the independence.'''
-    from TileEncoderFunc import encoder_config                   # noqa: PLC0415
+    from locascope.core.backbones.TileEncoder import encoder_config                   # noqa: PLC0415
     names = heads_for(args.heads, 3)
     if not names:
         return [], []
@@ -987,11 +978,11 @@ def save_tagged(out_dir, head: Head, encoder, encoder_name: str, frozen: bool,
 
     `optimizer.state_dict()` still travels with every file, for whoever
     wants to fine-tune from one; RESUMING a run is `--resume-dir`'s job
-    (`aiNNModel/models/common/Resume.py`), not these files'.'''
+    (`locascope/core/networks/Resume.py`), not these files'.'''
     best_n_weighted, best_unweighted = best
     wdir = Path(out_dir) / 'weights'
     # `extra`: this package's own label-space facts, which the generic
-    # checkpoint format (`aiNNModel/models/common/Checkpoints.py`) has no
+    # checkpoint format (`locascope/core/networks/Checkpoints.py`) has no
     # opinion about -- see `save_checkpoint`'s own docstring.
     read_tag = train_render_cfg(args).read_tag
 
@@ -1070,7 +1061,7 @@ def _merge_val_scores(path: Path, out_rows: List[Dict]) -> List[Dict]:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    # Names as `TileEncoderFunc._IMPLEMENTATIONS` spells them, so a typo is a
+    # Names as `TileEncoder._IMPLEMENTATIONS` spells them, so a typo is a
     # refusal here rather than a KeyError after the weights start loading.
     # baseline 3's encoder is NOT among these -- it is bound, see
     # BASELINE3_ENCODER.
@@ -1225,7 +1216,7 @@ def main() -> int:
     # Reads WANDB_MODE, same convention as SuperPathPoint/FewShotEoMT's own
     # --wandb-mode: `wandb.init(mode=...)` takes an EXPLICIT argument, which
     # beats the env var, so the default has to read it rather than hardcode a
-    # literal (jobscripts/_env.sh has the full note).
+    # literal (deploy/slurm/_env.sh has the full note).
     ap.add_argument('--wandb-mode', default=os.environ.get('WANDB_MODE', 'online'),
                     choices=('online', 'offline', 'disabled'))
     ap.add_argument('--run-name', default='',
@@ -1249,7 +1240,7 @@ def main() -> int:
     # The render runs in --num-workers DataLoader workers; this process keeps
     # what is left of the cpus. With torch's default it ran 8 threads beside 8
     # workers and its encode took 3x as long (CpuBudget's docstring).
-    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    from locascope.host.cpu import CpuBudget                                 # noqa: PLC0415
     print(f'  {CpuBudget.for_job(processes=args.cpu_processes, workers=args.num_workers).apply().line()}',
           flush=True)
 

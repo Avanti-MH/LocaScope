@@ -21,7 +21,7 @@ from typing import Sequence, Tuple
 
 import numpy as np
 
-from stage2_retrieval.Context import iou_matrix
+from locascope.core.stage2_retrieval.Context import iou_matrix
 
 #: A window's identity and the level-0 point it starts at (`BenchCommon.Answer.key`, `.origin`).
 Key = Tuple[int, str, int, int, int]

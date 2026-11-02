@@ -17,7 +17,7 @@
 # command line, next to the encoder it belongs to:
 #
 #   ENCODER=conch_vit HEAD=trunk sbatch --job-name=ConchStage2RetrieverBench \
-#       jobscripts/Benchmarks/Stage2RetrieverBench.sh
+#       deploy/slurm/Benchmarks/Stage2RetrieverBench.sh
 
 # ---------------- Load modules ----------------
 ml purge
@@ -26,16 +26,16 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
-# Runs write outside the checkout; see utilities/_paths.py
+# Runs write outside the checkout; see locascope/paths.py
 RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 
 # ---------------- the stage 2 retriever bench ---------------------------------
 #
 # An ARM is a retriever and then any number of rerankers, named `[encoder:]Method::pooling[+op][@K]`
-# joined by `::` (stage2_retrieval/ArmSpec.py):
+# joined by `::` (locascope/core/stage2_retrieval/ArmSpec.py):
 #
 #   uni2:SlidingWindow::cls_avg+mean       uni2:BagOfTiles::rings3+quad      uni2:TileVote::cls_avg+hnsw
 #   uni2:ClusterBow::cls_avg               uni2:WinEmbed::cls_avg  (weights trained on that pooling)
@@ -59,9 +59,9 @@ RESULT_ROOT="${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/result"
 # it was given. The sliding window is streamed in one pass; every other arm is an ArmEngine arm. An arm keeps
 # nothing but its stage 2 entries; its rows are read off them into the CSV, and it is redone by removing its entries.
 #
-#   ARMS="cls cls_avg uni2:BagOfTiles::cls_avg+gap uni2:BagOfTiles::rings3+quad" sbatch jobscripts/Benchmarks/Stage2RetrieverBench.sh
+#   ARMS="cls cls_avg uni2:BagOfTiles::cls_avg+gap uni2:BagOfTiles::rings3+quad" sbatch deploy/slurm/Benchmarks/Stage2RetrieverBench.sh
 #   RERANK_ON="uni2:SlidingWindow::cls+mean" RERANKERS="Dual::cls_avg+dual CSLS::grid2x2+csls" ARMS=cls \
-#       sbatch jobscripts/Benchmarks/Stage2RetrieverBench.sh        # k retrievers x h rerankers = k x h arms
+#       sbatch deploy/slurm/Benchmarks/Stage2RetrieverBench.sh        # k retrievers x h rerankers = k x h arms
 #
 # ONE RUN IS ONE ENCODER (ENCODER=uni2 and ENCODER=gigapath are two runs); a reranker may name another
 # encoder. The CSVs of several runs are reported together: MODE=report with the other runs in REPORT_ALSO.
@@ -140,8 +140,8 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # The values are in bench_stage2_retriever.py's CONFIG block, right after its
 # imports (which datasets and how many slides, the encoder, the arms), and in
 # the two recipes it names: the FoV recipe (FOV, default 'bench' --
-# query_sim/FovSupply.FOV_RECIPES: the sampler, the camera, the levels) and the
-# mask recipe (SEG, default hest -- utilities/TissueMaskConfig.MASK_RECIPES).
+# locascope/core/query_sim/FovSupply.FOV_RECIPES: the sampler, the camera, the levels) and the
+# mask recipe (SEG, default hest -- locascope/core/tiles/TissueMaskConfig.MASK_RECIPES).
 #
 # Nothing below sets one of them unless you name it, so the CONFIG block and
 # the recipes are what runs. An environment variable, when set, becomes the
@@ -155,7 +155,7 @@ TAG="$ENCODER${HEAD:+_$HEAD}"
 # has one (`--sampler-richness-caps`, `--camera-noise-sigma`, `--encoder-batch-size`, ...):
 #
 #   EXTRA_ARGS="--sampler-richness-caps 0.15 0.25 0.6 0 0 0 0 --camera-noise-sigma 0" \
-#       sbatch jobscripts/Benchmarks/Stage2RetrieverBench.sh
+#       sbatch deploy/slurm/Benchmarks/Stage2RetrieverBench.sh
 #
 # The slides and FoVs are every bench's: the first N_WSI of each dataset a
 # DATASETS id draws from (default @pure-half-test), one draw per slide across its
@@ -298,7 +298,8 @@ echo "======== mode=$MODE  encoder=$TAG ========"
 echo "out : $OUT/$TAG/stage2_retriever.csv"
 echo ""
 
-BENCH=utilities/bench_modules/bench_stage2_retriever.py
+BENCH=locascope.cli.bench.bench_stage2_retriever            # runs: writes the stage 2 entries
+ANALYZE=locascope.cli.metrics.analyze_stage2_metrics         # reads them: rows, CSV, tables (same flags)
 
 # MODE=report re-tabulates the finished CSV and stops: no model, no slide read,
 # no GPU. The log of this job gets the tables. Ask for a small job, since the
@@ -311,14 +312,14 @@ BENCH=utilities/bench_modules/bench_stage2_retriever.py
 if [ "$MODE" = "report" ]; then
   CSV="$OUT/$TAG/stage2_retriever.csv"
   [ -f "$CSV" ] || CSV="$OUT/$TAG/window_retrieval.csv"     # a run made under the old name
-  python $BENCH --report-only ${PER_SLIDE:+--per-slide} ${BASELINE:+--baseline $BASELINE} "$CSV" $REPORT_ALSO
+  python -m $ANALYZE ${PER_SLIDE:+--per-slide} ${BASELINE:+--baseline $BASELINE} --csv "$CSV" $REPORT_ALSO
   exit $?
 fi
 
 # SHARDS=2 runs two processes, one per card, each taking every other slide. They
 # write into the SAME cache (a slide belongs to one shard, so no entry is
-# written twice) and neither writes the CSV: a third, model-free call does, once
-# both are done. Ask for the cards on the command line -- the #SBATCH lines above
+# written twice) and none of them reads the rows: analyze_stage2_metrics does, once
+# all are done. Ask for the cards on the command line -- the #SBATCH lines above
 # are for one:
 #
 #     SHARDS=2 sbatch --gpus-per-node=2 --cpus-per-task=16 <this script>
@@ -327,7 +328,7 @@ fi
 # summary and the tables.
 SHARDS="${SHARDS:-1}"
 if [ "$SHARDS" -le 1 ]; then
-  python $BENCH $ARGS --out "$OUT/$TAG"
+  python -m $BENCH $ARGS
   status=$?
 else
   LOG="/work/u26130998/log/${SLURM_JOB_NAME:-Stage2RetrieverBench}"
@@ -339,7 +340,7 @@ else
   fi
   pids=()
   for ((i = 0; i < SHARDS; i++)); do
-    CUDA_VISIBLE_DEVICES=$i python $BENCH $ARGS --out "$OUT/$TAG" \
+    CUDA_VISIBLE_DEVICES=$i python -m $BENCH $ARGS \
         --shard "$i/$SHARDS" > "$LOG.shard$i" 2>&1 &
     pids+=($!)
     echo "shard $i/$SHARDS: pid $! on card $i, log $LOG.shard$i"
@@ -348,9 +349,14 @@ else
   for pid in "${pids[@]}"; do
     wait "$pid" || status=1
   done
-  echo "all shards finished (exit $status); assembling"
-  python $BENCH $ARGS --out "$OUT/$TAG" --assemble || status=1
+  echo "all shards finished (exit $status)"
 fi
+
+# The run only writes entries. The rows, the CSV and the tables are read off them, on no card, with the
+# same flags -- after every shard has finished, or after a killed run was submitted again.
+echo ""
+echo "======== analyze_stage2_metrics ========"
+python -m $ANALYZE $ARGS --out "$OUT/$TAG" || status=1
 
 echo ""
 # a recipe keeps its CSV beside the main one (the main one is the rows of whichever run was last)
@@ -378,7 +384,7 @@ echo ""
 echo "  Every metric is derived from two stored integers per (query, arm), so"
 echo "  re-tabulating costs no GPU:"
 echo ""
-echo "    python utilities/bench_modules/bench_stage2_retriever.py --report-only \\"
+echo "    python -m locascope.cli.metrics.analyze_stage2_metrics --csv \\"
 echo "        $OUT/$TAG/stage2_retriever.csv"
 echo ""
 echo "  An arm's name carries its encoder, so the CSVs of several runs (one per encoder)"

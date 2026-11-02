@@ -1,29 +1,11 @@
-"""What a run emits, and the definitions the emissions are printed against.
+"""The benches: scripts that RUN something and write what it computed to the cache.
 
-Figures, tables, summary files -- and, deliberately in the same place, the
-definitions of the metrics and formats those tables carry. `RetrievalReport`
-is the reason the two live together: it is not a printer with metrics attached
-but the ONE definition of what "@1%" means, which two benches at two different
-scales both quote. A format that is defined twice is a format that eventually
-disagrees with itself, and the disagreement shows up as two plausible-looking
-numbers under the same column heading.
+`bench_stage1_mpp` and `bench_stage2_retriever` write the stage 1 and stage 2 entries of a set of
+FoVs; `bench_locascope` runs the whole pipeline. They print the run's progress and its gates and
+nothing more -- every metric, CSV and table is read off the entries afterwards by the scripts of
+`locascope/cli/metrics/` (`analyze_stage1_metrics`, `analyze_stage2_metrics`), which take the bench's
+own flags and compute the same addresses, so a table is redrawn or regrouped without a GPU.
 
-A package rather than another entry in `_paths.setup_import_paths()`, because
-none of the seven importers calls that function -- every one of them inserts
-`utilities/` into sys.path by hand -- so a path entry would have cost the same
-seven edits and bought nothing. `from dump_function.X import ...` says where
-the code lives at the call site instead.
-
-`__init__.py` exists rather than leaning on implicit namespace packages: a
-namespace package MERGES every directory of that name found anywhere on
-sys.path, and this repo puts six directories on it per entry point.
-
-What does NOT belong here
--------------------------
-Anything a stage module imports, because `<N>_<stage>/` is pure logic by the
-repo's own rule and may not pull matplotlib in through the side door. The
-homography code is split along exactly that line: `query_quad` draws, so it
-lives in `_sift_plot` here, while `is_invertible` decides whether an H is
-usable at all and therefore lives in `stage3_localization/SIFT_RANSAC.py`, where
-`SIFT_RANSAC` and `SlideWinSift` can both reach it.
+`BenchCommon` is what the benches share (the slides, the FoV supply, the definition of an answer and
+its ranks); `ArmTables` and `RetrieverArms` are the stage 2 bench's entries and arm engine.
 """

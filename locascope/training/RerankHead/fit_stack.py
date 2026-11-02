@@ -2,7 +2,7 @@
 '''Fit the stacker (S7): one score per candidate from the columns the other
 scorers wrote.
 
-    python training/RerankHead/cli/fit_stack.py \\
+    python -m locascope.training.RerankHead.fit_stack \\
         --arm 'uni2:SlidingWindow::cls_avg+mean@500::Dual::cls_avg+dual::CSLS::cls_avg+csls::Corr::cls_avg+sinkhorn' \\
         --columns first dual csls sinkhorn contrast mnn
 
@@ -35,30 +35,27 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities'))
-from _paths import RESULT_DIR, setup_import_paths                      # noqa: E402
-setup_import_paths()
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities', 'bench_modules'))   # BenchCommon
+from locascope.paths import RESULT_DIR   # noqa: E402
 
 import numpy as np                                                    # noqa: E402
 import torch                                                          # noqa: E402
 
-from CpuBudget import CpuBudget                                        # noqa: E402
-from BenchCommon import require_gpu_if_allocated                      # noqa: E402
-from FovSupply import add_fov_args, fov_from_args                     # noqa: E402
-from RerankChoices import build_rerank                                # noqa: E402
-from Checkpoints import data_tag, save_rerank_checkpoint, weights_name   # noqa: E402
-from stage2_retrieval.ArmSpec import config_of_arm, parse_arm         # noqa: E402
-from stage2_retrieval.Context import ScoreTable, incoming_table, window_boxes   # noqa: E402
-from stage2_retrieval.MultiPhases import MultiPhases                  # noqa: E402
-from stage2_retrieval.RerankerNeural import stack_features            # noqa: E402
+from locascope.host.cpu import CpuBudget                                        # noqa: E402
+from locascope.cli.bench.BenchCommon import require_gpu_if_allocated                      # noqa: E402
+from locascope.core.query_sim.FovSupply import add_fov_args, fov_from_args                     # noqa: E402
+from locascope.core.networks.RerankChoices import build_rerank                                # noqa: E402
+from locascope.core.networks.Checkpoints import data_tag, save_rerank_checkpoint, weights_name   # noqa: E402
+from locascope.core.stage2_retrieval.ArmSpec import config_of_arm, parse_arm         # noqa: E402
+from locascope.core.stage2_retrieval.Context import ScoreTable, incoming_table, window_boxes   # noqa: E402
+from locascope.core.stage2_retrieval.MultiPhases import MultiPhases                  # noqa: E402
+from locascope.core.stage2_retrieval.RerankerNeural import stack_features            # noqa: E402
 
-from training.RerankHead.Labels import LabelConfig, label_windows     # noqa: E402
-from training.RerankHead.Losses import listwise_loss, topk_hinge_loss   # noqa: E402
-from training.RerankHead.Metrics import KS, first_hit_rank, recall_at   # noqa: E402
-from training.RerankHead.Runtime import plain_args                    # noqa: E402
-from training.RerankHead.Visits import FovResult, fov_stream, shape_fn   # noqa: E402
-from training.RerankHead.cli.train import slides_of                   # noqa: E402
+from locascope.training.RerankHead.Labels import LabelConfig, label_windows     # noqa: E402
+from locascope.training.RerankHead.Losses import listwise_loss, topk_hinge_loss   # noqa: E402
+from locascope.training.RerankHead.Metrics import KS, first_hit_rank, recall_at   # noqa: E402
+from locascope.training.RerankHead.Runtime import plain_args                    # noqa: E402
+from locascope.training.RerankHead.Visits import FovResult, fov_stream, shape_fn   # noqa: E402
+from locascope.training.RerankHead.train import slides_of                   # noqa: E402
 
 
 @dataclass

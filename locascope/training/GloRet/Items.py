@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from training.GloRet.Supply import (ROTATIONS, Cands, Fov, Level, Marks, Part, Universe, decode_code, mark,
+from locascope.training.GloRet.Supply import (ROTATIONS, Cands, Fov, Level, Marks, Part, Universe, decode_code, mark,
                                     marks_of)
 
 #: a FoV's pool for a bi-encoder: per rotation the sorted ids of the windows (`Universe` numbering) of that rotation's shape

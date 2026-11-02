@@ -5,7 +5,7 @@
 sources, `WindowBatch`, boxes, on-demand tiles, `separated`, the greedy pass behind
 `min_sep_tiles`) and the sliding window's scores (`RetrieverSlidingWinSimRot.list_windows`).
 
-    python utilities/test_modules/TestRerank/test_context.py
+    python tests/TestRerank/test_context.py
 
 No slide, no model, no GPU: grids are random unit vectors, the "slide" is a
 function of the pixel position, the "encoder" a function of the pixels.
@@ -50,25 +50,21 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', 'bench_modules'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 import torch.nn.functional as F                                  # noqa: E402
 
-from BenchCommon import stored_candidates                        # noqa: E402
-from stage2_retrieval.Context import (GridSource, LevelFeatures, MemorySource,   # noqa: E402
+from locascope.cli.bench.BenchCommon import stored_candidates                        # noqa: E402
+from locascope.core.stage2_retrieval.Context import (GridSource, LevelFeatures, MemorySource,   # noqa: E402
                                       OnDemandTiles, QueryFeatures, SlideLevels, WindowBatch,
                                       box_area, gather_windows, iou_matrix, nearest_window,
                                       separated, window_boxes)
-from stage2_retrieval.Retriever import (BridgeError, EncoderPool, Extra, RetrievalOutput,   # noqa: E402
+from locascope.core.stage2_retrieval.Retriever import (BridgeError, EncoderPool, Extra, RetrievalOutput,   # noqa: E402
                                         Retriever, Uses, check_encoder, take, trunk_id)
-from stage2_retrieval.StageInterface import (Candidate, CandidateSet,  # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import (Candidate, CandidateSet,  # noqa: E402
                                              RerankedCandidate, ShiftedCandidate,
                                              TokenMatchCandidate, VoteCandidate)
 
@@ -445,7 +441,7 @@ def t_retriever_checks_its_upstream_and_the_consumers_topk() -> str:
 
 
 def _est(level: int) -> Any:
-    from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+    from locascope.core.stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
     return EstMppResult(estimated_ds=1.0, estimated_mpp=0.25, chosen_ds=1.0, chosen_mpp=0.25, chosen_level=level)
 
 
@@ -468,7 +464,7 @@ class _Both(Retriever):
 
 
 def t_a_retriever_takes_the_wsi_a_list_or_both_and_run_picks_by_the_upstream() -> str:
-    from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+    from locascope.core.stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
     class_only_wsi: type = type('OnlyWsi', (_Both,), {'UPSTREAM': (EstMppResult,)})
     class_only_list: type = type('OnlyList', (_Both,), {'UPSTREAM': (RetrievalOutput,)})
     class_both: type = type('Both', (_Both,), {'UPSTREAM': (EstMppResult, RetrievalOutput)})
@@ -533,7 +529,7 @@ def t_the_bridge_lock_takes_the_matching_extra_or_nothing_and_refuses_another() 
 
 
 def _enc_cfg(name: str, pooling: str = '', dtype: str = 'fp16') -> Any:
-    from TileEncoderFunc import encoder_config                   # noqa: PLC0415
+    from locascope.core.backbones.TileEncoder import encoder_config                   # noqa: PLC0415
     return encoder_config(name, pooling=pooling).with_model(dtype=dtype)
 
 
@@ -641,8 +637,8 @@ def t_a_grid_source_reads_what_a_memory_source_holding_the_same_tensors_reads() 
 # ── the sliding window ────────────────────────────────────────────────────────
 
 def t_the_sliding_window_scores_every_window_by_its_tile_cosines_and_lists_the_best() -> str:
-    from TileEncoderFunc import encoder_config                   # noqa: PLC0415
-    from stage2_retrieval.RetrieverSlidingWinSimRot import (GEOMEAN_FLOOR,   # noqa: PLC0415
+    from locascope.core.backbones.TileEncoder import encoder_config                   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import (GEOMEAN_FLOOR,   # noqa: PLC0415
                                                             RetrieverSlidingWinSimRotConfig, list_windows)
     mem, ref = make_source(dim=16)
     tensors: List[Tuple[torch.Tensor, torch.Tensor]] = [(ref[(r, 'main')], ref[(r, 'offset')]) for r in range(2)]

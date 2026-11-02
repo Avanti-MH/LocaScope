@@ -2,8 +2,8 @@
 """diag_read_exp -- the read path: how fast it is, flow by flow, and the read
 geometry it rests on.
 
-    python utilities/cli/diagnostics/diag_read_exp.py --slides BRACS_1228 ...
-    sbatch jobscripts/DiagReadExp.sh
+    python -m locascope.cli.diagnostics.diag_read_exp --slides BRACS_1003694 ...
+    sbatch deploy/slurm/DiagReadExp.sh
 
 Times the production read path as it stands -- `SlideReader`, `Render`,
 `FovSupply`, the training `CameraBank` -- on real slides, so a change to any
@@ -54,25 +54,22 @@ import numpy as np
 import torch
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from _paths import job_result_dir, setup_import_paths                 # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-setup_import_paths()
 
-from AccessDatasets import locate                                     # noqa: E402
-from CpuBudget import CpuBudget                                       # noqa: E402
-from ReadGeometry import ReadSpec                                     # noqa: E402
-from SafeSlide import SafeSlide                                       # noqa: E402
-from SlideReader import SlideReader                                   # noqa: E402
-from PatchingLib import region_grids                                  # noqa: E402
-from TileSampler import SAMPLER_RECIPES, PlanSpec, TileSampler        # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker                  # noqa: E402
-from camera import Render, render_spec                                # noqa: E402
-from pipeline import simulate_with_gt                                 # noqa: E402
-from ReadGeometry import REAL_PHOTO_SENSOR                            # noqa: E402
-from FovSupply import FOV_RECIPES, FovSupply                          # noqa: E402
-import training.ClassifyingRoutingHead.Datasets as Datasets                    # noqa: E402
+from locascope.core.slides.AccessDatasets import locate                                     # noqa: E402
+from locascope.host.cpu import CpuBudget                                       # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                     # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                       # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                                   # noqa: E402
+from locascope.core.tiles.PatchingLib import region_grids                                  # noqa: E402
+from locascope.core.tiles.TileSampler import SAMPLER_RECIPES, PlanSpec, TileSampler        # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker                  # noqa: E402
+from locascope.core.query_sim.camera import Render, render_spec                                # noqa: E402
+from locascope.core.query_sim.pipeline import simulate_with_gt                                 # noqa: E402
+from locascope.core.slides.ReadGeometry import REAL_PHOTO_SENSOR                            # noqa: E402
+from locascope.core.query_sim.FovSupply import FOV_RECIPES, FovSupply                          # noqa: E402
+import locascope.training.ClassifyingRoutingHead.Datasets as Datasets                    # noqa: E402
 
 TILE = 256
 RUNGS = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)
@@ -194,7 +191,7 @@ def flow_fov(t, args, name, wsi, mask):
 # ── pca: the UNI2-PCA segmenter's reads, against a frozen WsiTileLoader ─────
 
 class _OldWsiTileSet(torch.utils.data.Dataset):
-    """FROZEN: utilities/WsiTileLoader.WsiTileSet, reduced to the read. The tile at grid (row, col) is read at level-0
+    """FROZEN: the old WsiTileLoader.WsiTileSet, reduced to the read. The tile at grid (row, col) is read at level-0
     origin + (col, row) * round(tile * level_ds), one read_region_rgb per tile,
     on a worker that opens the slide itself."""
 
@@ -239,10 +236,10 @@ def flow_pca(t, args, name, wsi, budget):
     shape as WsiTileLoader.grid_positions'. The projection is compared on its
     first --pca-tiles tiles, not the whole slide."""
     from types import SimpleNamespace
-    from PatchingLib import PatchGrid
-    from TissueMask import TissueRegion
-    from TissueSegFunc import scanned_rect
-    from Uni2PcaSegFunc import LEVEL, Uni2PcaSegmenter
+    from locascope.core.tiles.PatchingLib import PatchGrid
+    from locascope.core.tiles.TissueMask import TissueRegion
+    from locascope.core.backbones.TissueSeg import scanned_rect
+    from locascope.core.backbones.Uni2PcaSeg import LEVEL, Uni2PcaSegmenter
 
     cfg = replace(MASK_RECIPES['uni2_pca'].seg, workers=budget.workers)
     seg = SimpleNamespace(cfg=cfg)           # the two readers use only .cfg
@@ -601,7 +598,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--slides', nargs='+',
-                    default=['BRACS_1228', 'S1104233,G7E,110208'])
+                    default=['BRACS_1003694', 'S1104233,G7E,110208'])
     ap.add_argument('--flows', nargs='+', choices=FLOWS, default=list(TIMING_FLOWS))
     ap.add_argument('--n', type=int, default=6, help='positions per rung / level')
     ap.add_argument('--grid-levels', type=int, nargs='+', default=[0, 1])

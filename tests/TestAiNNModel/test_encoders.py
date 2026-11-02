@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """The three real encoders, asked the same questions.
 
-    python utilities/test_modules/TestAiNNModel/test_encoders.py                  # all three
-    python utilities/test_modules/TestAiNNModel/test_encoders.py --encoder uni2
-    python utilities/test_modules/TestAiNNModel/test_encoders.py --no-dual-load    # skip the 4.5 GB
+    python tests/TestAiNNModel/test_encoders.py                  # all three
+    python tests/TestAiNNModel/test_encoders.py --encoder uni2
+    python tests/TestAiNNModel/test_encoders.py --no-dual-load    # skip the 4.5 GB
 
 test_tile_encoder checks the TEMPLATE against fake models, which is what makes
 it a second. This file checks the implementations against the weights they
-actually load, which no test did: ConchVitFunc went in with 923e9e6 without one
-forward pass through it, and Uni2Func had only ever been exercised by a bench.
+actually load, which no test did: ConchVit went in with 923e9e6 without one
+forward pass through it, and Uni2 had only ever been exercised by a bench.
 
 Every check is either two sources that must agree or a deliberately wrong
 alternative that must be refused. There is one exception, marked where it
@@ -44,27 +44,18 @@ from pathlib import Path
 #: Here it is early enough. Nothing has been imported yet except argparse, os
 #: and sys, none of which touch the hub.
 #:
-#: setdefault, so jobscripts/_env.sh and an exported HF_HOME both still win.
-os.environ.setdefault(
-    'HF_HOME', os.environ.get('LOCASCOPE_MODEL_WEIGHTS',
-                              '/work/u26130998/model_weights'))
-
-# _paths holds the one definition of OUTPUT_ROOT for every package, so it lives
-# in utilities/ rather than beside this file. That directory goes on sys.path
-# here, because setup_import_paths -- which puts the rest there -- is inside it.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+#: setdefault, so deploy/slurm/_env.sh and an exported HF_HOME both still win.
+from locascope.paths import MODEL_WEIGHTS_DIR                          # noqa: E402  (no torch)
+os.environ.setdefault('HF_HOME', os.environ.get('LOCASCOPE_MODEL_WEIGHTS', MODEL_WEIGHTS_DIR))
 
 import torch                                                     # noqa: E402
 import torch.nn.functional as F                                  # noqa: E402
 import numpy as np                                               # noqa: E402
 
-from _paths import setup_import_paths                            # noqa: E402
-setup_import_paths()
 
-from ConfigIdentity import weights_id                            # noqa: E402
-from Features import check_layer_tokens                          # noqa: E402
-from TileEncoderFunc import (admissible_poolings, encoder_config,  # noqa: E402
+from locascope.core.config.ConfigIdentity import weights_id                            # noqa: E402
+from locascope.core.networks.Features import check_layer_tokens                          # noqa: E402
+from locascope.core.backbones.TileEncoder import (admissible_poolings, encoder_config,  # noqa: E402
                              encoder_names, pool_slots, pooling_kinds)
 
 #: The same value the block above put into HF_HOME, read back rather than
@@ -161,7 +152,7 @@ def t_hub_cache_is_the_shared_one():
     the setdefault each encoder module does above its `import timm` only works
     when that module is the first thing in the process to reach the hub. It
     frequently is not. Exporting HF_HOME before python starts is what actually
-    decides, which is what jobscripts/_env.sh is for -- and this file is run by
+    decides, which is what deploy/slurm/_env.sh is for -- and this file is run by
     hand, outside any jobscript.
 
     Reading the frozen constant rather than os.environ is the point: the
@@ -576,7 +567,7 @@ def t_conch_prefixes_and_decoys():
     of the real one, so every trunk key starts with it and _split is right to
     return them. A decoy the code correctly accepts is a broken decoy.
     """
-    import ConchVitFunc as C
+    from locascope.core.backbones import ConchVit as C
     state = torch.load(C._download(), map_location='cpu')
     state = state.get('state_dict', state)
     good = ('visual.trunk.', 'visual.attn_pool_contrast.', 'visual.ln_contrast.')
@@ -596,7 +587,7 @@ def t_conch_weights_stay_local():
     scope this account does not have, so falling through to it is not a slower
     success, it is a GatedRepoError with nothing to say about paths.
     """
-    import ConchVitFunc as C
+    from locascope.core.backbones import ConchVit as C
     path = C._download()
     assert path.exists(), f'{path} does not exist'
     assert str(path).startswith(str(C.CONCH_LOCAL)), \

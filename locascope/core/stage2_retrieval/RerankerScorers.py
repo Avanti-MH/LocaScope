@@ -24,11 +24,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from ConfigIdentity import register
-from TileEncoderFunc import TileEncoder, TileEncoderConfig
-from stage2_retrieval.Context import (LATTICES, RerankFeatures, ScoringInput, WindowBatch, incoming_table,
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.backbones.TileEncoder import TileEncoder, TileEncoderConfig
+from locascope.core.stage2_retrieval.Context import (LATTICES, RerankFeatures, ScoringInput, WindowBatch, incoming_table,
                                       offset_pair_cosines, reranked_output, score_rows)
-from stage2_retrieval.Retriever import EncoderPool, Extra, RetrievalOutput, Retriever, RetrieverConfig, Uses
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, Extra, RetrievalOutput, Retriever, RetrieverConfig, Uses
 
 
 # ══════════════════════════════════════════════════════════════════════════════

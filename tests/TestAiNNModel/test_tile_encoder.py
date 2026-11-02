@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Unit test for the TileEncoderFunc template.
+"""Unit test for the TileEncoder template.
 
-    python utilities/test_modules/TestAiNNModel/test_tile_encoder.py
+    python tests/TestAiNNModel/test_tile_encoder.py
 
 No GPU. About a second, and one 5 MB download the first time -- vit_tiny, for
 the last section only; everything else runs on fakes. Three fake models stand
@@ -18,7 +18,7 @@ model before any of them exist for real.
 The pooling and shape-reader sections at the bottom came from
 what is now test_gigapath_equivalence, and they are here because their SUBJECT
 moved: 923e9e6
-took those functions out of GigaPathFunc into TileEncoderFunc, and the tests
+took those functions out of GigaPath into TileEncoder, and the tests
 stayed behind under a filename naming one encoder. They fit the description
 above unchanged -- fake specs, no weights, a second to run -- and several of
 them describe models this repo does not have: num_prefix=0 is a CNN, and the
@@ -42,17 +42,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
-import _paths                                                   # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                   # noqa: E402
 
 #: BEFORE `import torch`. huggingface_hub freezes HF_HOME into module constants
 #: at its own import, and something here reaches it during `import torch`, so
 #: the setdefault inside each encoder module runs too late to decide anything.
 #: This file downloads vit_tiny for its last section; without this line it goes
 #: to ~/.cache/huggingface instead of the shared weights root.
-#: setdefault, so jobscripts/_env.sh and an exported HF_HOME both still win.
+#: setdefault, so deploy/slurm/_env.sh and an exported HF_HOME both still win.
 os.environ.setdefault('HF_HOME', _paths.MODEL_WEIGHTS_DIR)
 
 import numpy as np                                          # noqa: E402
@@ -60,8 +57,8 @@ import torch                                                # noqa: E402
 import torch.nn.functional as F                             # noqa: E402
 from PIL import Image                                       # noqa: E402
 
-from ConfigIdentity import ModelConfig                      # noqa: E402
-from TileEncoderFunc import (ModelOutputSpec, TileEncoder,       # noqa: E402
+from locascope.core.config.ConfigIdentity import ModelConfig                      # noqa: E402
+from locascope.core.backbones.TileEncoder import (ModelOutputSpec, TileEncoder,       # noqa: E402
                              TileEncoderConfig, TransformConfig,
                              _ring_bins, pool_slots, pooling_kinds)
 
@@ -182,7 +179,7 @@ class TokenConfig(FakeConfig):
     """A token model that HAS decided which token, the way a real one must.
 
     One table entry is the whole of it: '' -> 'cls'. There is no vector_from
-    override here and none in GigaPathFunc or Uni2Func either -- the base
+    override here and none in GigaPath or Uni2 either -- the base
     reduces by cfg.pooling, so an override would be a second copy of that
     decision and, worse, one that ignores cfg.pooling; two of the tests below catch one.
     """
@@ -510,8 +507,8 @@ def t_identity_moves_on_transform():
 # These came from what is now test_gigapath_equivalence, and are here because
 # the code
 # they test moved. 923e9e6 took model_token_spec, _ring_bins and pool_tokens
-# out of GigaPathFunc -- which now holds none of them -- and put them in
-# TileEncoderFunc as _vit_model_spec, _ring_bins, pool_slots and
+# out of GigaPath -- which now holds none of them -- and put them in
+# TileEncoder as _vit_model_spec, _ring_bins, pool_slots and
 # pooling_kinds. The tests did not follow, so for one release the only test of
 # this module's pooling arithmetic lived in a file named after one encoder.
 #
@@ -848,7 +845,7 @@ _TINY = 'vit_tiny_patch16_224'
 
 
 def _tiny_encoder(**over):
-    from GigaPathFunc import GigaPathEncoderConfig
+    from locascope.core.backbones.GigaPath import GigaPathEncoderConfig
     # arch, dtype and weights live on the nested ModelConfig now, so they go
     # through with_model rather than being spelled at the top level.
     model_over = {k: over.pop(k) for k in ('weights',) if k in over}
@@ -916,7 +913,7 @@ def t_weights_field_is_actually_loaded():
 
 def t_identity_moves_only_where_it_should():
     """Which fields reach the hash, checked without loading anything."""
-    from GigaPathFunc import GigaPathEncoderConfig
+    from locascope.core.backbones.GigaPath import GigaPathEncoderConfig
 
     import dataclasses as _dc
     default = GigaPathEncoderConfig()
@@ -1008,7 +1005,7 @@ def t_run_takes_a_list_or_a_uint8_batch_alike():
     assert torch.equal(a, b) and torch.equal(a, c)
 
 
-# ── checkpoint names and the layer mix (aiNNModel/models/common) ─────────────
+# ── checkpoint names and the layer mix (locascope/core/networks/common) ─────────────
 
 def _refused(fn, exc) -> None:
     try:
@@ -1020,7 +1017,7 @@ def _refused(fn, exc) -> None:
 
 def t_a_weights_name_reads_by_segment():
     import fnmatch                                                  # noqa: PLC0415
-    from Checkpoints import NAME_SEP, data_tag, weight_filename, weights_name  # noqa: PLC0415
+    from locascope.core.networks.Checkpoints import NAME_SEP, data_tag, weight_filename, weights_name  # noqa: PLC0415
     assert data_tag(['@pure-train'], 'Ki67') == 'pure-train_Ki67'
     assert data_tag(['bracs/train', 'ki67_pure']) == 'bracs_train+ki67_pure'
     name: str = weight_filename('convnext_v2', False, 'linear', 'best_unweighted',
@@ -1038,7 +1035,7 @@ def t_a_weights_name_reads_by_segment():
 
 
 def _layer_tokens(n: int = 3, t: int = 5, d: int = 8):
-    from Features import LayerTokens                                # noqa: PLC0415
+    from locascope.core.networks.Features import LayerTokens                                # noqa: PLC0415
     torch.manual_seed(0)
     blocks = {1: torch.randn(n, t, d), 3: torch.randn(n, t, d)}
     return LayerTokens(last=blocks[3], layers=blocks), d
@@ -1047,8 +1044,8 @@ def _layer_tokens(n: int = 3, t: int = 5, d: int = 8):
 def t_the_pooling_mix_is_the_heads_mix():
     """Pooling mixes with `Head.mix_grid` -- each block's patch grid through its own LayerNorm, a softmax
     over the blocks -- and pools the mix."""
-    from Head import mix_grid                                       # noqa: PLC0415
-    from Pooling import Pooling, PoolingConfig                      # noqa: PLC0415
+    from locascope.core.networks.Head import mix_grid                                       # noqa: PLC0415
+    from locascope.core.networks.Pooling import Pooling, PoolingConfig                      # noqa: PLC0415
     toks, d = _layer_tokens()
     pool = Pooling(PoolingConfig(kind='avg', in_dim=d, encoder_layers=(1, 3)))
     with torch.no_grad():
@@ -1063,7 +1060,7 @@ def t_the_pooling_mix_is_the_heads_mix():
 
 
 def t_the_pooling_mix_refuses_what_it_cannot_read():
-    from Pooling import Pooling, PoolingConfig                      # noqa: PLC0415
+    from locascope.core.networks.Pooling import Pooling, PoolingConfig                      # noqa: PLC0415
     toks, d = _layer_tokens()
     _refused(lambda: Pooling(PoolingConfig(kind='cls', in_dim=d, encoder_layers=(1, 3))), ValueError)
     mixing = Pooling(PoolingConfig(kind='avg', in_dim=d, encoder_layers=(1, 3)))
@@ -1074,7 +1071,7 @@ def t_the_pooling_mix_refuses_what_it_cannot_read():
 
 
 def t_layer_tokens_stand_in_for_a_tensor():
-    from Features import cat_tokens                                 # noqa: PLC0415
+    from locascope.core.networks.Features import cat_tokens                                 # noqa: PLC0415
     toks, _ = _layer_tokens()
     assert len(toks) == 3
     moved = toks.to('cpu')

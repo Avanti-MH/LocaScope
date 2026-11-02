@@ -42,10 +42,10 @@ over the 1:2.8 bounds rect would stretch the slide sideways and the failures
 could not be read against the regions.
 
 Usage:
-    python utilities/cli/diagnostics/diag_mask_validity.py \\
-        --wsi "/work/u26130998/datasets_holed/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
+    python -m locascope.cli.diagnostics.diag_mask_validity \\
+        --wsi "$LOCASCOPE_DATA_ROOT/datasets_holed/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
         --seg hest --grid 48 --out result/DiagMaskValidity
-    python utilities/cli/diagnostics/diag_mask_validity.py --dataset ki67_pure --seg hsv --grid 24
+    python -m locascope.cli.diagnostics.diag_mask_validity --dataset ki67_pure --seg hsv --grid 24
 
 `--seg` names the recipe (default hest, LocaScopePipeline's own), so the
 panels are the regions the pipeline builds. Match --patch-ds to the level it
@@ -69,16 +69,14 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))                 # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
-from _paths import job_result_dir                                   # noqa: E402
+from locascope import paths as _paths                                                       # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-from TissueMask import TissueMask                      # noqa: E402
-from TissueMaskConfig import add_mask_args, mask_cfg_from_args  # noqa: E402
-from ReadGeometry import nearest_level                  # noqa: E402
-from SlideProbe import SlideProbe, bounds_rect         # noqa: E402
-from WsiSelection import resolve_wsi_paths             # noqa: E402
+from locascope.core.tiles.TissueMask import TissueMask                      # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import add_mask_args, mask_cfg_from_args  # noqa: E402
+from locascope.core.slides.ReadGeometry import nearest_level                  # noqa: E402
+from locascope.cli.diagnostics.SlideProbe import SlideProbe, bounds_rect         # noqa: E402
+from locascope.cli.diagnostics.WsiSelection import resolve_wsi_paths             # noqa: E402
 
 
 # ── Probing ───────────────────────────────────────────────────────────────────
@@ -132,7 +130,7 @@ class MaskValidityCheck:
     def __init__(self, mask_cfg, device=None, grid: int = 48,
                 region_probes: int = 256, patch_tile: int = 256,
                 patch_ds: float = 1.0, dpi: int = 400, out_dir=None):
-        from TissueMaskConfig import MaskMaker                     # noqa: PLC0415
+        from locascope.core.tiles.TissueMaskConfig import MaskMaker                     # noqa: PLC0415
         self.mask_cfg = mask_cfg
         self.masks = MaskMaker(mask_cfg, device=device)
         self.grid = grid

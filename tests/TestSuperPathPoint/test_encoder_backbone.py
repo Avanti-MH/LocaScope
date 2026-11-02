@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for training/SuperPathPoint/SuperPoint/EncoderBackbone.py. spec.md 5.3.
 
-    python utilities/test_modules/test_encoder_backbone.py
-    python utilities/test_modules/test_encoder_backbone.py --with-model
-    python utilities/test_modules/test_encoder_backbone.py --only refusals
+    python tests/test_encoder_backbone.py
+    python tests/test_encoder_backbone.py --with-model
+    python tests/test_encoder_backbone.py --only refusals
 
 NO WEIGHTS unless --with-model. The trunk here is fifteen lines of fake: a conv
 with a stride, wearing the three attributes the backbone reads off a timm ViT
@@ -47,32 +47,18 @@ import os
 import sys
 from dataclasses import dataclass, field, replace
 
-# `utilities/` holds the one definition of the output roots (`_paths.py`), and
-# `setup_import_paths` -- which puts every other package on the path -- is
-# inside it, so it has to be reachable before anything else is imported.
-#
-# BOTH parents are inserted, and that is deliberate rather than sloppy: this
-# file runs from `utilities/test_modules/` and from
-# `utilities/test_modules/TestSuperPathPoint/`, one level deeper, and inserting
-# both means the move needs no edit here. The one that is not `utilities/` is
-# either the repo root or `test_modules/`; neither holds a `_paths.py`, and
-# `setup_import_paths` puts the repo root on the path anyway.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import torch                                                     # noqa: E402
 import torch.nn as nn                                            # noqa: E402
 
-from ConfigIdentity import ModelConfig, register                 # noqa: E402
-from common.Interfaces import Backbone, ShapeMismatch            # noqa: E402
-from SuperPoint.EncoderBackbone import (TileEncoderBackbone,     # noqa: E402
+from locascope.core.config.ConfigIdentity import ModelConfig, register                 # noqa: E402
+from locascope.training.SuperPathPoint.common.Interfaces import Backbone, ShapeMismatch            # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.EncoderBackbone import (TileEncoderBackbone,     # noqa: E402
                                         TileEncoderBackboneConfig)
-from TileEncoderFunc import (ModelOutputSpec, TileEncoder,       # noqa: E402
+from locascope.core.backbones.TileEncoder import (ModelOutputSpec, TileEncoder,       # noqa: E402
                              TileEncoderConfig, TransformConfig)
 
 _RESULTS = []

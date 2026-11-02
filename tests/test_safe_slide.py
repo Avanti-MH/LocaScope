@@ -27,8 +27,8 @@ nothing failed, because nothing ran this file. SafeSlide's own Attributes block
 had drifted the same way and is why `reopens == 1` looked right.
 
 Usage:
-    python utilities/test_modules/test_safe_slide.py
-    python utilities/test_modules/test_safe_slide.py \\
+    python tests/test_safe_slide.py
+    python tests/test_safe_slide.py \\
         --wsi /path/to/other.mrxs --bad-x .. --bad-y .. --bad-w .. --bad-h ..
 
 Defaults describe S1103037: the whole bbox of tissue region index=2 fails,
@@ -39,19 +39,12 @@ import argparse
 import os
 import sys
 
-# _paths holds the one definition of OUTPUT_ROOT for every package, so it lives
-# in utilities/ rather than beside this file. That directory goes on sys.path
-# here, because setup_import_paths -- which puts the rest there -- is inside it.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
-
 import numpy as np
 import openslide
 
-from _paths import HOLED_DATASETS_DIR, setup_import_paths
-setup_import_paths()
+from locascope.paths import HOLED_DATASETS_DIR
 
-from SafeSlide import SafeSlide          # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide          # noqa: E402
 
 
 # ── 0. control: a bare handle really does die ────────────────────────────────

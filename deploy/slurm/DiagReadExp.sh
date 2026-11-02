@@ -18,10 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
-#  utilities/cli/diagnostics/diag_read_exp.py -- read-only
+#  locascope/cli/diagnostics/diag_read_exp.py -- read-only
 #
 #  How fast the read path is, flow by flow, on the same slides every time:
 #    grid      SlideReader.read_grid per level (tiles/s, CpuBudget workers)
@@ -39,18 +39,18 @@ source jobscripts/_env.sh
 #  Best of REPEATS. Run it before and after a change to the read path and
 #  compare the two speed.csv files. Correctness is TestReadPath.sh's.
 #
-#    sbatch jobscripts/DiagReadExp.sh
-#    FLOWS="grid" GRID_LEVELS="1" sbatch --job-name=DiagReadExpGridL1 jobscripts/DiagReadExp.sh
-#    FLOWS="pca" sbatch --job-name=DiagReadExpPca jobscripts/DiagReadExp.sh
-#    FLOWS="s1photo" sbatch --job-name=DiagReadExpS1Photo jobscripts/DiagReadExp.sh
-#    FLOWS="phase" sbatch --job-name=DiagReadPhase jobscripts/DiagReadExp.sh
+#    sbatch deploy/slurm/DiagReadExp.sh
+#    FLOWS="grid" GRID_LEVELS="1" sbatch --job-name=DiagReadExpGridL1 deploy/slurm/DiagReadExp.sh
+#    FLOWS="pca" sbatch --job-name=DiagReadExpPca deploy/slurm/DiagReadExp.sh
+#    FLOWS="s1photo" sbatch --job-name=DiagReadExpS1Photo deploy/slurm/DiagReadExp.sh
+#    FLOWS="phase" sbatch --job-name=DiagReadPhase deploy/slurm/DiagReadExp.sh
 #
 #  Writes nothing to any cache but MASK_CACHE_JOB's mask cache (phase segments
 #  a slide it lacks). Output: log/DiagReadExp/<job>,
 #  result/DiagReadExp/<job>/{speed,phase}.csv
 #  (The log directory must exist before sbatch: mkdir -p log/DiagReadExp.)
 # =============================================================================
-SLIDES="${SLIDES:-BRACS_1228 S1104233,G7E,110208}"
+SLIDES="${SLIDES:-BRACS_1003694 S1104233,G7E,110208}"
 FLOWS="${FLOWS:-grid capture tiles fov}"
 N="${N:-6}"
 GRID_LEVELS="${GRID_LEVELS:-0 1}"
@@ -73,7 +73,7 @@ echo "  flows   $FLOWS   n $N   grid levels $GRID_LEVELS   repeats $REPEATS"
 echo "  cpus allowed $(nproc)"
 echo "  out     $RES_DIR"
 
-python utilities/cli/diagnostics/diag_read_exp.py "${ARGS[@]}"
+python -m locascope.cli.diagnostics.diag_read_exp "${ARGS[@]}"
 rc=$?
 echo ""
 echo "======== done (exit $rc) ========"

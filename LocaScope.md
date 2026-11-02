@@ -1,6 +1,6 @@
 # LocaScope.py — v1 Design
 
-> **這份設計已經實作，只是名字不同。** 實作在 `utilities/LocaScopePipeline.py`
+> **這份設計已經實作，只是名字不同。** 實作在 `locascope/core/pipeline.py`
 > （見 MILESTONE M5）：
 >
 > | 本文件 | 實作 |

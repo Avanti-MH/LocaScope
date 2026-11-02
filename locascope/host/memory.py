@@ -7,7 +7,7 @@ an exact high-water mark, where sacct's MaxRSS is sampled and can miss a
 spike -- which matters when the thing being measured is one allocation that
 lives for a few seconds.
 
-    from _memprobe import mem_line
+    from locascope.host.memory import mem_line
     print(mem_line('after base mask'), flush=True)
 
 Everything here degrades to a shorter line rather than raising: this is
@@ -125,7 +125,22 @@ def rss_bytes() -> Optional[int]:
         with open('/proc/self/statm') as f:
             return int(f.read().split()[1]) * os.sysconf('SC_PAGE_SIZE')
     except (OSError, ValueError, IndexError):
+        pass
+    try:                                     # no /proc (Windows): psutil, when it is installed
+        import psutil                                    # noqa: PLC0415
+        return int(psutil.Process().memory_info().rss)
+    except Exception:                                    # noqa: BLE001
         return None
+
+
+def peak_rss_gb() -> Optional[float]:
+    """Peak resident memory of THIS process so far in GB (it only ever rises), or None where the
+    `resource` module does not exist (Windows)."""
+    try:
+        import resource                                  # noqa: PLC0415
+    except ImportError:
+        return None
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 2   # KB -> GB
 
 
 def vram() -> str:

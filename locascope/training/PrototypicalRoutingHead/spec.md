@@ -1,8 +1,8 @@
 # PrototypicalRoutingHead — spec
 
 > **2026-11-02 核對（正文是 2026-09 的設計，沒有逐段改；現況見 `plan.md`）：** 主線已實作並接進 stage 1
-> （`stage1_estimation/PrototypeEstMpp.py`）。Stage 2／3 的 registry 在 `aiNNModel/models/PrototypeChoices.py`，不在訓練套件裡；
-> Stage 2 的 generator 類別都在 `PrototypeGenerators.py`；通用 checkpoint 在 `aiNNModel/models/common/Checkpoints.py`、
+> （`stage1_estimation/PrototypeEstMpp.py`）。Stage 2／3 的 registry 在 `locascope/core/networks/PrototypeChoices.py`，不在訓練套件裡；
+> Stage 2 的 generator 類別都在 `PrototypeGenerators.py`；通用 checkpoint 在 `locascope/core/networks/Checkpoints.py`、
 > `common/Head.py`。Matching Net 不是檔案也不是 registry 的名字，是一個組合
 > （`--support-context bilstm --query-context attnlstm --collapse off --routing-head cosine_logsumexp`）。
 > Stage 4 的 baseline 入口 2026-09-22 已刪（見 `plan.md`）。正文裡的 `generator_cfg`、`training_arch`
@@ -17,7 +17,7 @@ scanner) needs a fresh set of prototypes, not a fresh training run.
 
 `ClassifyingRoutingHead` is the classifier-head baseline this has to beat, not a step
 towards it. Both sit on the same `stage1_compare` scorecard as `KnnEstMpp`
-(`utilities/bench_modules/bench_stage1_mpp.py`) — see that
+(`locascope/cli/bench/bench_stage1_mpp.py`) — see that
 file's own module docstring for the comparison shape every stage-1 candidate
 is measured on.
 
@@ -32,7 +32,7 @@ pass. Retrofitting that shape to carry two would be the same mistake
 forcing something task-specific to fit a signature that only accidentally
 matched it. What genuinely IS generic (encoder access, the reduction
 primitives, precision handling, checkpoint idioms) lives in
-`aiNNModel/models/` already and is reused from there, per "Files" below.
+`locascope/core/networks/` already and is reused from there, per "Files" below.
 
 ## Task
 
@@ -67,7 +67,7 @@ CSV 欄位、checkpoint 的 key、CLI 參數都照這張表的名字。「arm」
 | episode | episode | 一次抽樣：一組 support 加一組 query，來自 N 個 rung；訓練的單位 |
 | N-way | N-way | 一個 episode 裡有幾個 rung。訓練只用 3、4、5；完整的 6-way 是部署任務，訓練從不練 |
 | rung 組合 | combo | 一個 episode 用到的 rung 子集；`Episodes.HELD_OUT_COMBOS` 是保留給驗證的組合，其中含完整 6-way |
-| 池化 | pooling | 把 tile 的 raw 輸出縮成一個向量：`cls`（預設）／`avg`／`max`／`attn`；passthrough 被拒絕（collapse 需要每個 tile 一個向量）；`aiNNModel/models/Pooling.py` |
+| 池化 | pooling | 把 tile 的 raw 輸出縮成一個向量：`cls`（預設）／`avg`／`max`／`attn`；passthrough 被拒絕（collapse 需要每個 tile 一個向量）；`locascope/core/networks/Pooling.py` |
 | G／F／collapse | G／F／collapse | Stage 2 的三個獨立子階段：G 是 support 的 context、F 是 query 的 context、collapse 把 support 縮成 prototype 或關掉（`off`） |
 | 路由頭 | routing head | Stage 3，拿 query 與 prototype 算每個 rung 的 logit：`cosine_tau`、`cosine_logsumexp`、`attn_score` |
 | 主線／觀察臂 | main line／arm | 在 Stage 2／3 裡，「arm」是一個可選的實作；主線先單獨建、先打分，觀察臂之後一次加一個 |
@@ -90,11 +90,11 @@ See "Working order" in `plan.md` for which arm is built when.
 
 | | |
 |---|---|
-| **Main line** | ONE frozen foundation model (`gigapath` / `uni2` / `conch_vit`, `TileEncoderFunc`'s registry) |
+| **Main line** | ONE frozen foundation model (`gigapath` / `uni2` / `conch_vit`, `TileEncoder`'s registry) |
 | Side arm | mixed foundation models |
 | Side arm | fine-tuned CNN |
 
-No new code here. `Features.encode_raw` (`aiNNModel/models/common/
+No new code here. `Features.encode_raw` (`locascope/core/networks/
 Features.py`) is the entry point, unchanged — it already chunks a batch of
 tiles through a frozen encoder without building a graph, which is exactly
 what BOTH the support set and the query need (many tiles in, one raw
@@ -110,7 +110,7 @@ Matching-Net arm, no fixed prototype at all — see that arm's own entry.
 
 **The pooling step is shared between support and query — this is not
 optional.** `pooled_view`/`grid_view`/`AttentionPoolHead`
-(`aiNNModel/models/common/Head.py`, `Heads.py`) already implement the
+(`locascope/core/networks/Head.py`, `Heads.py`) already implement the
 Avg(GAP)/Attn choice for a SINGLE tile's raw exit; Max and passthrough
 (no pooling, keep the token grid) are the two this project adds. Support
 tiles and the query tile MUST go through the same pooling choice with the
@@ -179,9 +179,9 @@ the extra geometry to represent here.
 
 ### Stage 4 — training and loss
 
-Not in `aiNNModel/models/` — training loops and losses are task-specific by
+Not in `locascope/core/networks/` — training loops and losses are task-specific by
 this repo's own convention (`ClassifyingRoutingHead/Runtime.py`'s own docstring: "task
-specific so it stays here rather than moving to `aiNNModel/models/`"). Lives
+specific so it stays here rather than moving to `locascope/core/networks/`"). Lives
 in this project's own `cli/train.py` + a `Losses.py`.
 
 **Loss — adopted from `ClassifyingRoutingHead/spec.md`'s "Ordinal-aware loss" section
@@ -308,7 +308,7 @@ kind.
 earlier runs and tile by tile with `ClassifyingRoutingHead`) and the K x K one above
 on the test split.
 
-**Resume** (`--resume-dir`, `aiNNModel/models/common/Resume.py`). Unset:
+**Resume** (`--resume-dir`, `locascope/core/networks/Resume.py`). Unset:
 train from scratch, write nothing. Set: write `<run>_resume.pt` there every
 epoch -- trainable modules, optimizer, scheduler, epoch, best scores, the val
 rows so far, and every RNG (python, numpy, torch, cuda, the episode
@@ -368,7 +368,7 @@ computed from it:
 
 Current lean: **build Reptile first.** It needs no second-order gradients
 and no functional-parameter machinery at all, which matters given this
-codebase's fp16-under-Adam NaN history (`HeadConfig.dtype`'s docstring in `aiNNModel/models/Heads.py`) -- the fastest path to a real answer on whether optimization-based
+codebase's fp16-under-Adam NaN history (`HeadConfig.dtype`'s docstring in `locascope/core/networks/Heads.py`) -- the fastest path to a real answer on whether optimization-based
 training helps here at all, with FOMAML as the next step up in fidelity if
 Reptile's result looks worth sharpening, and full MAML last. Not yet a
 final decision.
@@ -377,7 +377,7 @@ final decision.
 
 1. **Checkpoint format — RESOLVED, built 2026-09-20.**
    `Checkpoints.save_checkpoint`/`build_from_checkpoint`
-   (`aiNNModel/models/common/Checkpoints.py`) are shaped around ONE encoder +
+   (`locascope/core/networks/Checkpoints.py`) are shaped around ONE encoder +
    ONE `Head` and have real callers today (`ClassifyingRoutingHead`,
    `stage1_estimation/ClassifierEstMpp.py`) that must not break —
    untouched. Added `save_prototype_checkpoint`/`build_prototype_from_
@@ -386,19 +386,19 @@ final decision.
    carried the same way `head_cfg` already is, `extra: dict` reused
    unchanged as the task-specific escape hatch. `build_prototype_from_
    checkpoint` lazily imports `Pooling`/`SetTransformerPrototype`/
-   `PrototypeRoutingHeads` from `aiNNModel/models/` (never from a training
+   `PrototypeRoutingHeads` from `locascope/core/networks/` (never from a training
    package — see decision 4 below for why that direction matters).
 2. **Stage 2/3 shared cross-attention module — SUPERSEDED.** The one class meant to serve Stage 2's Matching Net AND
    Stage 3's Learnable Arm 2 was never built as its own file. Matching Net became a composition of `ContextEncoders.py`
    (`bilstm` support context, `attnlstm` query context) with `cosine_logsumexp`; the learned cross-attention route is
    `PrototypeRoutingHeads.AttnScoreHead`.
-3. **Set Transformer's own home — RESOLVED, built.** `aiNNModel/models/
+3. **Set Transformer's own home — RESOLVED, built.** `locascope/core/networks/
    PrototypeGenerators.py` (merged there 2026-09-21 with the other Stage 2
    arms, decision 8), same reasoning as 2.
 4. **`Pooling.py`'s home — RESOLVED, moved 2026-09-20.** Built first under
-   `training/PrototypicalRoutingHead/`, moved to `aiNNModel/models/` once
+   `training/PrototypicalRoutingHead/`, moved to `locascope/core/networks/` once
    decision 1's checkpoint code needed to rebuild it: `Checkpoints.py`
-   lives in the GENERIC layer (`aiNNModel/models/common/`), and having it
+   lives in the GENERIC layer (`locascope/core/networks/`), and having it
    import a class from a TASK-SPECIFIC training package would invert the
    dependency direction — the
    generic layer is what task packages depend on, never the reverse.
@@ -410,7 +410,7 @@ final decision.
    (user's own framing): three INDEPENDENT axes stacked together — Stage 4 training regime (baseline / metric-based /
    optimization-based) × Stage 2 (pool → G → F → collapse) × Stage 3 routing head. Built the SEAM, not the cross product.
    - The four registries (`SUPPORT_CONTEXT_CHOICES`/`QUERY_CONTEXT_CHOICES`/`COLLAPSE_CHOICES`/`ROUTING_HEAD_CHOICES`) are
-     in `aiNNModel/models/PrototypeChoices.py`; `Runtime.py` re-exports them, and `cli/train.py` resolves `--support-context`/
+     in `locascope/core/networks/PrototypeChoices.py`; `Runtime.py` re-exports them, and `cli/train.py` resolves `--support-context`/
      `--query-context`/`--collapse`/`--routing-head` through them. The checkpoint records the four names. Each entry is a
      BUILDER FUNCTION, not a `(class, config_class)` tuple `ClassifyingRoutingHead.HEAD_CHOICES`-style: what config shape
      an arm needs is not known before a second entry exists to test it against.
@@ -435,15 +435,15 @@ final decision.
      PrototypicalRoutingHead.Episodes import ...`) and resolves by import
      path alone — no `sys.path` ordering involved, and no future same-named
      file in either package can collide again. `SuperPathPoint` still uses
-     the `add_training_package` mechanism (it has no top-level bare file
-     that collides with anything), see that function's own docstring.
+     the full-name imports (it has no top-level bare file
+     that collides with anything), nothing to configure.
 6. **Held-out validation for the metric-based main line — RESOLVED, built
    2026-09-21.** Both axes needed at once, each resolved by reusing
    something that already existed rather than a new design:
    - **Held-out WSI**: `--eval-datasets` (`bracs/test`/`ki67_with_photo`,
      same defaults) × `wsi_split` pointed at `ClassifyingRoutingHead`'s own cache
      (`result/cache/mpp_routing_head/`) — the EXACT same mechanism
-     `ClassifyingRoutingHead/cli/train.py`'s own `val_rows` uses, so both scripts
+     `ClassifyingRoutingHead/train.py`'s own `val_rows` uses, so both scripts
      read the IDENTICAL held-out WSI names under shared defaults, by
      construction (same file on disk via `wsi_split`'s "EXISTING WINS"
      rule), not by two independent derivations happening to agree.
@@ -460,7 +460,7 @@ final decision.
      stays identical epoch to epoch — same reasoning `ClassifyingRoutingHead.
      predict`'s own `epoch_seed=0` gives.
    - The scoring formula (`score`/`rescore`) is kept in sync with
-     `ClassifyingRoutingHead/cli/train.py`'s own —
+     `ClassifyingRoutingHead/train.py`'s own —
      these were ADDED to this package's own `Runtime.py` (a duplicate of
      `ClassifyingRoutingHead/Runtime.py`'s same-named functions, same bare-name-
      collision reasoning as decision 5's wandb section), not written a
@@ -511,14 +511,14 @@ final decision.
      (this decision's whole point), so naming the Stage 4 axis "arch" would contradict the distinction just established.
 8. **Stage 2's generator classes consolidated into one file — RESOLVED 2026-09-21.** `SetTransformerPrototype`,
    `TrivialPrototype`, `SharedMlpPrototype` (and later `AttnPoolPrototype`) live in ONE file,
-   `aiNNModel/models/PrototypeGenerators.py` — three separate files was never a deliberate choice, just how they got
+   `locascope/core/networks/PrototypeGenerators.py` — three separate files was never a deliberate choice, just how they got
    written one at a time; `PrototypeRoutingHeads.py` already puts every Stage 3 arm in one file. Matching Net is not a
    file: it is a composition (`PrototypeChoices.py`'s docstring).
 
 ## Files
 
 ```
-aiNNModel/models/                    UNCHANGED except the Prototype*/Pooling/ContextEncoders files below
+locascope/core/networks/                    UNCHANGED except the Prototype*/Pooling/ContextEncoders files below
     Pooling.py                        NEW -- the shared support/query pooling
                                      module: Avg/Max/Attn/passthrough, Attn
                                      wraps Heads.AttentionPoolHead. Lives here,
@@ -616,7 +616,7 @@ training/PrototypicalRoutingHead/
                                      episodes, pooled) and K x K (train.py's
                                      val definition), reusing train.py's own
                                      scoring functions
-jobscripts/PrototypicalRoutingHead/
+deploy/slurm/PrototypicalRoutingHead/
     PrototypicalRoutingHead.sh        one job: the nine Stage 2/3 model
                                      combinations x none/hold_s/hold_q (27
                                      runs), the Matching-Net combination

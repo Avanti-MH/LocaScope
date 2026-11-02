@@ -17,7 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # =============================================================================
@@ -36,9 +36,9 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #   inspect   the decision point of spec.md 12 step 5: are these labels worth
 #             training on, or is the answer a different teacher?
 #
-#   STAGE=demo sbatch jobscripts/MakeHaLabels.sh        # runs today
-#   STAGE=measure sbatch jobscripts/MakeHaLabels.sh     # once 3c has finished
-#   sbatch jobscripts/MakeHaLabels.sh                   # all four
+#   STAGE=demo sbatch deploy/slurm/MakeHaLabels.sh        # runs today
+#   STAGE=measure sbatch deploy/slurm/MakeHaLabels.sh     # once 3c has finished
+#   sbatch deploy/slurm/MakeHaLabels.sh                   # all four
 #
 # `demo` and `inspect` answer overlapping questions and are not the same tool.
 # `demo` shows ONE tile in full and needs nothing but the slide; `inspect` is
@@ -122,11 +122,11 @@ N_WSI="${N_WSI:-}"
 
 # The demo cuts its own pre-tile off the slide rather than reading a corpus.
 # Same slide as MEASURE_SLIDE below.
-WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1228.svs
+WSI=/work/u26130998/datasets/histoimage.na.icar.cnr.it/BRACS_WSI/test/Group_AT/Type_ADH/BRACS_1003694.svs
 
 # The measurement's slide and rung. ds 4 is native on both pyramid shapes, so
 # the number is about HA rather than about a resample.
-MEASURE_SLIDE=BRACS_1228
+MEASURE_SLIDE=BRACS_1003694
 MEASURE_DS=4
 MEASURE_TILES=100
 
@@ -154,7 +154,7 @@ for stage in $STAGE; do
 
     measure)
       run "measure  ($MEASURE_TILES tiles, $MEASURE_SLIDE ds $MEASURE_DS, N=$NUM)" \
-        python training/SuperPathPoint/cli/make_ha_labels.py \
+        python -m locascope.training.SuperPathPoint.cli.make_ha_labels \
           --tile "$TILE" --num "$NUM" \
           --score-threshold "$SCORE_THRESHOLD" \
           --threshold-ladder $LADDER \
@@ -174,7 +174,7 @@ for stage in $STAGE; do
       # -- and a reader that asks for one gets an error rather than the other.
       # Rungs already done are skipped; --overwrite is the way to redo them.
       run "labels  (every rung, every slide, N=$NUM)" \
-        python training/SuperPathPoint/cli/make_ha_labels.py \
+        python -m locascope.training.SuperPathPoint.cli.make_ha_labels \
           --tile "$TILE" --num "$NUM" \
           --score-threshold "$SCORE_THRESHOLD" \
           --threshold-ladder $LADDER \
@@ -198,7 +198,7 @@ for stage in $STAGE; do
       # HA export, which is what make_ha_labels cuts at). They nest, so the
       # markers are drawn largest-set-first.
       run "demo  (HA aggregate against single views, num $DEMO_NUM)" \
-        python training/SuperPathPoint/cli/demo_ha.py \
+        python -m locascope.training.SuperPathPoint.cli.demo_ha \
           --wsi "$WSI" --ds "$MEASURE_DS" --tile "$TILE" \
           --view-threshold $SCORE_THRESHOLD \
           --thresholds $LADDER --cut "$SCORE_THRESHOLD" \
@@ -208,7 +208,7 @@ for stage in $STAGE; do
 
     inspect)
       run "inspect  (the decision point, --with-model)" \
-        python training/SuperPathPoint/cli/inspect_ha_labels.py \
+        python -m locascope.training.SuperPathPoint.cli.inspect_ha_labels \
           --with-model --tiles "$INSPECT_TILES" --num "$NUM" \
           --corpus "$CORPUS" --draw-cache-job "$DRAW_CACHE_JOB" \
           --datasets $DATASETS ${N_WSI:+--n-wsi "$N_WSI"}

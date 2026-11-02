@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for utilities/TileSampler.py -- the three axes, and the units.
+"""Tests for locascope/core/tiles/TileSampler.py -- the three axes, and the units.
 
-    python utilities/test_modules/test_tile_sampler.py
-    python utilities/test_modules/test_tile_sampler.py --only overlap
+    python tests/test_tile_sampler.py
+    python tests/test_tile_sampler.py --only overlap
 
 No slide, no model, no data. The mask is a real `TissueMask` built over a
 synthetic `SlideMask`, and the slide is the four attributes `TissueMask` and
@@ -52,25 +52,22 @@ import tempfile
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 
-from DsLadder import RungPlan                                    # noqa: E402
+from locascope.core.slides.DsLadder import RungPlan                                    # noqa: E402
 import dataclasses                                               # noqa: E402
-from ReadGeometry import ReadSpec                              # noqa: E402
-from TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                              # noqa: E402
+from locascope.core.tiles.TileSampler import (InheritConfig, OverlapConfig,           # noqa: E402
                          allocate_targets, bucket_names, spill_order,
                          PlanSpec, RichnessConfig, Sample, SampleMeta,
                          SamplerConfig, TileSampler, assign_buckets,
                          resolution_plan, PRE_TILE_FACTOR, centre_crop,
                          centre_margin, pre_tile_px, native_plans,
                          score_background, FOV_CELL)
-from TissueMask import SlideMask, TissueMask                      # noqa: E402
+from locascope.core.tiles.TissueMask import SlideMask, TissueMask                      # noqa: E402
 
 _RESULTS = []
 
@@ -748,7 +745,7 @@ def t_a_scorer_that_reads_pixels_refuses_rather_than_approximating():
     """`saturation` and `entropy` are registered but unwritten. A mask-derived
     stand-in would BE `background` under a second name, and the two would hand
     identical corpora two different sampler_ids."""
-    from TileSampler import SCORERS
+    from locascope.core.tiles.TileSampler import SCORERS
     for name in ('saturation', 'entropy'):
         try:
             SCORERS[name](None, np.zeros((1, 2)), _plans((1.0,))[0])
@@ -1073,7 +1070,7 @@ def t_a_plain_openslide_handle_is_refused():
 
 def _patchgrid_positions(region, tile, ds, overlap):
     """PatchGrid's positions for one region, converted to level-0."""
-    from PatchingLib import PatchGrid
+    from locascope.core.tiles.PatchingLib import PatchGrid
     w_n, h_n = int(region.w / ds), int(region.h / ds)
     if w_n < tile or h_n < tile:
         return set()
@@ -1233,8 +1230,8 @@ class _FakePlan:
 
 def _with_fake_opener(fn):
     """`fn` with the slide opener faked and the cache under a temp dir."""
-    import Cache
-    import SafeSlide as safe_slide_module
+    from locascope.core.cache import Cache
+    from locascope.core.slides import SafeSlide as safe_slide_module
     original = safe_slide_module.SafeSlide
     safe_slide_module.SafeSlide = _CountingSlideOpener
     _CountingSlideOpener.opens = 0
@@ -1300,7 +1297,7 @@ def t_fingerprint_sampler():
     """Every position, level, bucket and inherit id of one draw, pinned: a
     change in what the sampler picks that forgets to bump the VERSION fails
     here rather than reading as the same corpus."""
-    from ConfigIdentity import check_fingerprint, digest
+    from locascope.core.config.ConfigIdentity import check_fingerprint, digest
     wsi, mask = _one_big_block()
     cfg = _cfg(inherit=InheritConfig(share=0.25))
     s = TileSampler(wsi, mask, cfg).sample(_plans((1.0, 2.0, 4.0)))
@@ -1353,7 +1350,7 @@ def t_the_report_is_the_same_on_a_hit_as_on_a_miss():
 
 def t_a_hit_for_a_different_slide_with_the_same_stem_is_refused():
     def run():
-        from Cache import CacheMismatch
+        from locascope.core.cache.Cache import CacheMismatch
         with tempfile.TemporaryDirectory() as root:
             TileSampler.cached('/data/Group_A/SLIDE_1.svs', _cfg(), _FakePlan(), 'TestJob',
                                masks=_FakeMasks())

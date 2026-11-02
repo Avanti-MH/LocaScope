@@ -20,7 +20,7 @@
 - **baseline** — 從一開始就不是 canonical 的候選，是刻意獨立的對照方法，存在
   的價值是拿來比較，不是要接手 production。
 - **diagnostic** — 拿來回答「系統現在的狀態／行為是什麼」的工具，沒有任何
-  模組 import 它；通常在 `*/cli/` 或 `utilities/test_modules/` 底下。
+  模組 import 它；通常在 `*/cli/` 或 `tests/` 底下。
 
 legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical 同一個責任的候
 選」：legacy 曾經是（或就是被取代前的 canonical），baseline 從來就不是。
@@ -79,5 +79,5 @@ arm 文法 `--stage2 arm:GloRet-{ContextEn}-{GlobalEn}::{TilePool}+{search}`／`
 或 `--stage2 arm:<arm>`（arm 文法見 `ArmSpec.py`，`config_of_arm` 轉成 config）。每一段是自己的 cache entry
 （`Naming.py`，`_after-<上游 hash>`），pipeline 與 bench 同一個 config 就是同一個檔。
 
-- 網路在 `aiNNModel/models/RerankHeads.py`，訓練在 `training/RerankHead/`，評估是
-  `utilities/bench_modules/bench_stage2_retriever.py`（arm 是任何 retriever 串接）。
+- 網路在 `locascope/core/networks/RerankHeads.py`，訓練在 `training/RerankHead/`，評估是
+  `locascope/cli/bench/bench_stage2_retriever.py`（arm 是任何 retriever 串接）。

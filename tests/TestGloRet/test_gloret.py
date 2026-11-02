@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Tests for GloRet and LogLoRet (`stage2_retrieval/proposal.md`): the networks (`aiNNModel/models/GloRet.py`), the
+"""Tests for GloRet and LogLoRet (`stage2_retrieval/proposal.md`): the networks (`locascope/core/networks/GloRet.py`), the
 retrievers that load them (`stage2_retrieval/RetrieverGloRet.py`), and their training (`training/GloRet`: the labels,
 the samples, the losses, the steps, the patch tokens of TilePool `attnpool` and their stages, the resource meter),
 and the small tools that came with it (the wandb plan, the earlier wandb runs of an arm).
 
-    python utilities/test_modules/TestGloRet/test_gloret.py
+    python tests/TestGloRet/test_gloret.py
 
 No slide, no encoder, no GPU: the networks are tiny and untrained, the level is a planted one (the query is a block
 of the main grid, so that window is a perfect match), the tile reads are stand-ins. It sits apart from
 `TestRerank` (the stage 2 re-rankers and RerankHead), so a run of one never overwrites the log of the other:
-`jobscripts/GloRet/TestGloRet.sh`.
+`deploy/slurm/GloRet/TestGloRet.sh`.
 """
 
 from __future__ import annotations
@@ -20,23 +20,18 @@ import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', 'TestRerank'))      # test_context, test_rerank: the stand-in level
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
-from test_context import cset, make_source, unit                 # noqa: E402
-from test_rerank import planted                                  # noqa: E402
-from Checkpoints import build_rerank_from_checkpoint, save_rerank_checkpoint   # noqa: E402
-from RerankChoices import build_rerank                           # noqa: E402
-from stage2_retrieval.Context import GridSource, WindowBatch, top_candidates   # noqa: E402
-from stage2_retrieval.StageInterface import Candidate, CandidateSet            # noqa: E402
+from tests.TestRerank.test_context import cset, make_source, unit                 # noqa: E402
+from tests.TestRerank.test_rerank import planted                                  # noqa: E402
+from locascope.core.networks.Checkpoints import build_rerank_from_checkpoint, save_rerank_checkpoint   # noqa: E402
+from locascope.core.networks.RerankChoices import build_rerank                           # noqa: E402
+from locascope.core.stage2_retrieval.Context import GridSource, WindowBatch, top_candidates   # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet            # noqa: E402
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
 
@@ -55,14 +50,14 @@ DIM = 16
 
 
 def small_cfg(**kw: Any) -> Any:
-    from GloRet import NetCfg                                                     # noqa: PLC0415
+    from locascope.core.networks.GloRet import NetCfg                                                     # noqa: PLC0415
     base = dict(in_dim=16, d=32, d_r=24, layers=1, heads=4, pos_hidden=8, dropout=0.0, d_u=8, score_hidden=16)
     base.update(kw)
     return NetCfg(**base)
 
 
 def t_gloret_every_context_and_global_en_that_exists_runs_on_any_window_shape() -> str:
-    from GloRet import CONTEXT_EN, GLOBAL_EN, GloRetNet, LogLoRetNet, combo_problem  # noqa: PLC0415
+    from locascope.core.networks.GloRet import CONTEXT_EN, GLOBAL_EN, GloRetNet, LogLoRetNet, combo_problem  # noqa: PLC0415
     torch.manual_seed(0)
     made: Dict[int, int] = {1: 0, 2: 0}
     for arch, net_class in ((1, GloRetNet), (2, LogLoRetNet)):
@@ -93,7 +88,7 @@ def t_gloret_every_context_and_global_en_that_exists_runs_on_any_window_shape() 
 
 
 def t_a_window_vector_does_not_depend_on_the_other_windows_in_its_batch() -> str:
-    from GloRet import GloRetNet                                                  # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                  # noqa: PLC0415
     torch.manual_seed(1)
     for context, global_en in (('SelfAttn', 'AttnPool'), ('GNN', 'GraphPool'), ('CLSTrans', 'Identity'),
                                ('SptSelfAttn', 'CNN'), ('Identity', 'MaskedMean'), ('SelfAttn', 'Align')):
@@ -107,7 +102,7 @@ def t_a_window_vector_does_not_depend_on_the_other_windows_in_its_batch() -> str
 
 
 def t_align_compares_tile_to_tile_and_a_pooled_vector_does_not_see_the_order() -> str:
-    from GloRet import GloRetNet                                                  # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                  # noqa: PLC0415
     torch.manual_seed(2)
     feats = torch.randn(1, 20, 16)
     shuffled = feats[:, torch.randperm(20)]
@@ -125,7 +120,7 @@ def t_align_compares_tile_to_tile_and_a_pooled_vector_does_not_see_the_order() -
 
 
 def t_logloret_matches_sum_to_one_a_sinkhorn_plan_keeps_its_marginals_and_the_query_is_shared() -> str:
-    from GloRet import LogLoRetNet, sinkhorn_plan                                 # noqa: PLC0415
+    from locascope.core.networks.GloRet import LogLoRetNet, sinkhorn_plan                                 # noqa: PLC0415
     torch.manual_seed(3)
     fq, fw = torch.randn(1, 20, 16), torch.randn(5, 20, 16)
     scores = {}
@@ -147,7 +142,7 @@ def t_logloret_matches_sum_to_one_a_sinkhorn_plan_keeps_its_marginals_and_the_qu
 
 
 def t_logloret_runs_with_every_aggregation_gets_a_gradient_everywhere_and_the_two_losses_prefer_the_diagonal() -> str:
-    from GloRet import LogLoRetNet, correspondence_loss, cycle_loss               # noqa: PLC0415
+    from locascope.core.networks.GloRet import LogLoRetNet, correspondence_loss, cycle_loss               # noqa: PLC0415
     torch.manual_seed(4)
     for agg in ('mean', 'attn', 'robust'):
         net = LogLoRetNet(small_cfg(evidence_agg=agg))
@@ -166,7 +161,7 @@ def t_logloret_runs_with_every_aggregation_gets_a_gradient_everywhere_and_the_tw
 
 
 def t_gloret_and_logloret_checkpoints_rebuild_the_network_through_the_registry() -> str:
-    from GloRet import GloRetNet, LogLoRetNet                                      # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                      # noqa: PLC0415
     torch.manual_seed(5)
     w, q = torch.randn(4, 20, 16), torch.randn(1, 20, 16)
     with tempfile.TemporaryDirectory() as tmp:
@@ -188,11 +183,10 @@ def t_gloret_and_logloret_checkpoints_rebuild_the_network_through_the_registry()
 
 def t_gloret_gives_a_window_the_same_score_in_both_interfaces_and_logloret_orders_its_list() -> str:
     from dataclasses import replace                                               # noqa: PLC0415
-    from GloRet import GloRetNet, LogLoRetNet                                      # noqa: PLC0415
-    from test_context import _enc_cfg, make_source                                 # noqa: PLC0415
-    from stage2_retrieval.Context import WindowBatch                               # noqa: PLC0415
-    from stage2_retrieval.Retriever import Extra, RetrievalOutput                  # noqa: PLC0415
-    from stage2_retrieval.RetrieverGloRet import (RerankerGloRetConfig, RerankerLogLoRet,   # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                      # noqa: PLC0415
+    from tests.TestRerank.test_context import _enc_cfg                                              # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Retriever import Extra, RetrievalOutput                  # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverGloRet import (RerankerGloRetConfig, RerankerLogLoRet,   # noqa: PLC0415
                                                   RerankerLogLoRetConfig, RetrieverGloRet,
                                                   RetrieverGloRetConfig)
     torch.manual_seed(7)
@@ -226,7 +220,7 @@ def t_gloret_gives_a_window_the_same_score_in_both_interfaces_and_logloret_order
         ranker = RerankerLogLoRet(RerankerLogLoRetConfig(encoder=enc, weights=path, method='LogLoRet-SelfAttn-AttnPool', no_match='dustbin', topk_in=100, reuse=('level_features',),
                                                          batch=4), 'cpu')
         ranker.amp = False
-        from stage2_retrieval.Context import feature_key                           # noqa: PLC0415
+        from locascope.core.stage2_retrieval.Context import feature_key                           # noqa: PLC0415
         upstream = RetrievalOutput(candidates=cs, extras={'level_features': Extra(
             'level_features', feature_key(enc, 256, True), src)})
         out = ranker.run(upstream, None)
@@ -239,8 +233,8 @@ def t_gloret_gives_a_window_the_same_score_in_both_interfaces_and_logloret_order
 
 def t_a_formal_training_deletes_the_earlier_wandb_runs_of_its_arm_and_never_a_running_one() -> str:
     from types import SimpleNamespace                                                 # noqa: PLC0415
-    from training.GloRet import Runtime as GloRuntime                                 # noqa: PLC0415
-    from training.RerankHead import Runtime as RerankRuntime                          # noqa: PLC0415
+    from locascope.training.GloRet import Runtime as GloRuntime                                 # noqa: PLC0415
+    from locascope.training.RerankHead import Runtime as RerankRuntime                          # noqa: PLC0415
     for runtime in (GloRuntime, RerankRuntime):
         deleted: list = []
         asked: list = []
@@ -339,8 +333,8 @@ GLO_T: float = 512.0           # a tile's side in level-0 px of the stand-in gri
 def glo_result(cands: List[Candidate], seed: int = 0, rot: int = 0, dim: int = DIM) -> Any:
     """A `FovResult` on the planted level: the query (rotation 0) is the block of the main grid at (row 3, col 4), so
     the answers are the main window there and the offset window nearest it. `dim`: the width of a grid entry."""
-    from BenchCommon import Answer, Answers                                           # noqa: PLC0415
-    from training.GloRet.Supply import FovResult                                      # noqa: PLC0415
+    from locascope.cli.bench.BenchCommon import Answer, Answers                                           # noqa: PLC0415
+    from locascope.training.GloRet.Supply import FovResult                                      # noqa: PLC0415
     src, ref, _ = planted(dim=dim)
     cs: CandidateSet = cset(cands, n_regions=1)
     x0, y0 = cs.origin_l0(Candidate(0, 'main', 3, 4, 0, 0.0))
@@ -367,7 +361,7 @@ def glo_list(n_other: int = 29, seed: int = 20, with_answer: bool = True) -> Lis
 
 
 def t_a_window_is_an_answer_ignored_or_hard_and_the_wrong_rotations_are_ignored_or_negative_as_set() -> str:
-    from training.GloRet.Supply import Placed, key_code, mark                         # noqa: PLC0415
+    from locascope.training.GloRet.Supply import Placed, key_code, mark                         # noqa: PLC0415
     t = 100.0
     main_key, offset_key = (0, 'main', 5, 5, 0), (0, 'offset', 5, 4, 0)
     answers = [(key_code(main_key), (500.0, 500.0)), (key_code(offset_key), (450.0, 500.0))]
@@ -403,8 +397,8 @@ def t_a_window_is_an_answer_ignored_or_hard_and_the_wrong_rotations_are_ignored_
 
 
 def t_the_zone_is_half_the_fovs_window_each_way_and_the_loss_is_the_one_hot_cross_entropy() -> str:
-    from training.GloRet.Losses import fov_loss, listwise_loss                        # noqa: PLC0415
-    from training.GloRet.Supply import fov_of                                         # noqa: PLC0415
+    from locascope.training.GloRet.Losses import fov_loss, listwise_loss                        # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of                                         # noqa: PLC0415
     res = glo_result(glo_list())                      # the query is 4 rows x 5 columns of 512 px tiles
     fov = fov_of(res)
     assert fov.placed.zone == (0.5 * 5 * 512.0, 0.5 * 4 * 512.0), 'half the width left and right, half the height up and down'
@@ -426,7 +420,7 @@ def t_the_zone_is_half_the_fovs_window_each_way_and_the_loss_is_the_one_hot_cros
 
 
 def t_the_windows_of_a_level_are_numbered_and_their_features_are_the_grid_blocks() -> str:
-    from training.GloRet.Supply import code_of, decode_code, level_of                 # noqa: PLC0415
+    from locascope.training.GloRet.Supply import code_of, decode_code, level_of                 # noqa: PLC0415
     res = glo_result(glo_list())
     level = level_of(res, 'cls')
     assert sorted(level.grids) == [(0, 'main'), (0, 'offset')] and level.tile_l0 == GLO_T
@@ -451,7 +445,7 @@ def t_the_windows_of_a_level_are_numbered_and_their_features_are_the_grid_blocks
 
 
 def t_the_losses_count_the_positives_leave_the_ignored_out_and_give_the_near_windows_the_soft_targets() -> str:
-    from training.GloRet.Losses import fov_loss, listwise_loss, near_targets            # noqa: PLC0415
+    from locascope.training.GloRet.Losses import fov_loss, listwise_loss, near_targets            # noqa: PLC0415
     torch.manual_seed(0)
     logits = torch.randn(10)
     pos = torch.zeros(10, dtype=torch.bool)
@@ -492,8 +486,8 @@ def t_the_losses_count_the_positives_leave_the_ignored_out_and_give_the_near_win
     return 'list loss with the ignored out; w_geo above 0: the zone at the right rotation gets alpha*exp(-d^2/2 sigma^2) and is in the softmax'
 
 def t_a_head_is_named_as_the_proposal_names_it_and_its_weights_are_where_an_arm_reads_them() -> str:
-    from stage2_retrieval.ArmSpec import learned_weights                             # noqa: PLC0415
-    from training.GloRet.cli.train import parse_head, parse_args, weights_file        # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import learned_weights                             # noqa: PLC0415
+    from locascope.training.GloRet.train import parse_head, parse_args, weights_file        # noqa: PLC0415
     a = parse_head('GloRet-SelfAttn-AttnPool')
     b = parse_head('LogLoRet-GNN-GraphPool')
     c = parse_head('LogLoRet-SelfAttn-AttnPool+sinkhorn')
@@ -516,7 +510,7 @@ def t_a_head_is_named_as_the_proposal_names_it_and_its_weights_are_where_an_arm_
 
 
 def t_the_ranks_validation_reads_are_the_benches_places() -> str:
-    from training.GloRet.Steps import recall_at as glo_recall, upstream_rank          # noqa: PLC0415
+    from locascope.training.GloRet.Steps import recall_at as glo_recall, upstream_rank          # noqa: PLC0415
     inf = float('inf')
     lone = glo_list()
     assert upstream_rank(glo_result(lone)) == 1.0
@@ -532,7 +526,7 @@ def t_the_ranks_validation_reads_are_the_benches_places() -> str:
 
 
 def t_attnpool_reads_a_tiles_tokens_flattened_as_it_reads_them_apart_and_is_trained() -> str:
-    from GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
     torch.manual_seed(5)
     p, f = 3, 16
     tokens = torch.randn(4, 20, p, f)
@@ -566,8 +560,7 @@ def t_attnpool_reads_a_tiles_tokens_flattened_as_it_reads_them_apart_and_is_trai
 
 def t_the_token_encoder_drops_the_prefix_and_a_patch_source_offers_the_patch_grids() -> str:
     from types import SimpleNamespace                                                 # noqa: PLC0415
-    from stage2_retrieval.Context import GridSource                                   # noqa: PLC0415
-    from training.GloRet.Patches import POOLING, PatchSource, TokenEncoder            # noqa: PLC0415
+    from locascope.training.GloRet.Patches import POOLING, PatchSource, TokenEncoder            # noqa: PLC0415
     p, f, prefix = 4, 8, 2
 
     class FakeEncoder:
@@ -597,9 +590,8 @@ def t_the_token_encoder_drops_the_prefix_and_a_patch_source_offers_the_patch_gri
 
 def t_a_frozen_attention_pool_turns_a_tiles_tokens_into_the_vector_the_network_would_have_pooled() -> str:
     from types import SimpleNamespace                                                 # noqa: PLC0415
-    from GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
-    from stage2_retrieval.Context import GridSource                                   # noqa: PLC0415
-    from training.GloRet.Patches import (FROZEN_POOLING, PatchSource, PooledTokenEncoder,   # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
+    from locascope.training.GloRet.Patches import (FROZEN_POOLING, PatchSource, PooledTokenEncoder,   # noqa: PLC0415
                                          load_pool)
     torch.manual_seed(8)
     p, f, prefix = 5, 16, 2
@@ -655,8 +647,8 @@ def t_a_frozen_attention_pool_turns_a_tiles_tokens_into_the_vector_the_network_w
 def lazy_world(dim: int = 48) -> Tuple[Any, Any, Any]:
     """The planted level as `(res, the grid-based Level, a TileAccess)`: the access reads a tile as its level-0 origin
     and encodes it to the grid's own vector, so what is gathered on demand can be set against the grid."""
-    from training.GloRet.Lazy import TileAccess                                       # noqa: PLC0415
-    from training.GloRet.Supply import level_of                                       # noqa: PLC0415
+    from locascope.training.GloRet.Lazy import TileAccess                                       # noqa: PLC0415
+    from locascope.training.GloRet.Supply import level_of                                       # noqa: PLC0415
     res = glo_result(glo_list(), dim=dim)
     g = res.cs.grids[0]
     g.grid_rows, g.grid_cols, g.overlap_rows, g.overlap_cols = 40, 40, 39, 39
@@ -679,7 +671,7 @@ def lazy_world(dim: int = 48) -> Tuple[Any, Any, Any]:
 
 
 def t_tokens_on_demand_gather_the_windows_a_levels_grid_would() -> str:
-    from training.GloRet.Lazy import TileTokens, lazy_level_of                         # noqa: PLC0415
+    from locascope.training.GloRet.Lazy import TileTokens, lazy_level_of                         # noqa: PLC0415
     res, full, access = lazy_world()
     lazy = lazy_level_of(res)
     assert sorted(lazy.grids) == sorted(full.grids) and all(g.shape[2] == 0 for g in lazy.grids.values()), \
@@ -709,8 +701,8 @@ def t_tokens_on_demand_gather_the_windows_a_levels_grid_would() -> str:
 
 def t_a_source_that_encodes_on_demand_offers_the_query_tokens_and_how_to_read_a_tile() -> str:
     from types import SimpleNamespace                                                 # noqa: PLC0415
-    from training.GloRet.Lazy import QuerySource, TileAccess                          # noqa: PLC0415
-    from training.GloRet.Patches import PatchSource                                   # noqa: PLC0415
+    from locascope.training.GloRet.Lazy import QuerySource, TileAccess                          # noqa: PLC0415
+    from locascope.training.GloRet.Patches import PatchSource                                   # noqa: PLC0415
     p, f = 3, 8
 
     class FakeEncoder:
@@ -758,7 +750,7 @@ def t_a_source_that_encodes_on_demand_offers_the_query_tokens_and_how_to_read_a_
 
 
 def t_the_usage_meter_reads_the_counters_and_says_what_could_be_handed_back() -> str:
-    from training.GloRet import Usage                                                 # noqa: PLC0415
+    from locascope.training.GloRet import Usage                                                 # noqa: PLC0415
     gpus = Usage.parse_gpus('0, 85, 40000, 143771\n1, 5, 2000, 143771\nbad line\n2, [N/A], 1, 2\n')
     assert [g[0] for g in gpus] == [0, 1] and abs(gpus[0][2] - 41.94304) < 1e-3 and abs(gpus[0][3] - 150.7) < 0.1
     stat = ('cpu  100 0 100 800 0 0 0 0\ncpu0 10 0 10 80 0 0 0 0\ncpu1 30 0 30 20 20 0 0 0\ncpu2 1 0 1 1 1 0 0 0\n')
@@ -780,7 +772,7 @@ def t_the_usage_meter_reads_the_counters_and_says_what_could_be_handed_back() ->
     time.sleep(1.0)
     running.stop()
     assert reports and reports[0]['samples'] >= 1, 'a long run reports as it goes'
-    from training.RerankHead import Usage as RerankUsage                                # noqa: PLC0415
+    from locascope.training.RerankHead import Usage as RerankUsage                                # noqa: PLC0415
     assert RerankUsage.UsageMeter(interval=3600.0).summary()['samples'] == 0, 'RerankHead has its own copy'
     idle = {'host': 'n', 'seconds': 100.0, 'samples': 5, 'cpus': 96, 'cpu_mean': 10.0, 'cpu_peak': 20.0,
             'mem_peak': 100.0, 'mem_limit': 1600.0, 'shm_peak': 1.0,
@@ -802,12 +794,12 @@ def t_the_usage_meter_reads_the_counters_and_says_what_could_be_handed_back() ->
 
 def t_the_gloret_trainer_reports_host_memory_and_a_process_that_fails_leaves_at_once() -> str:
     import subprocess                                                              # noqa: PLC0415
-    from training.GloRet.cli import train as gl_train                              # noqa: PLC0415
+    from locascope.training.GloRet import train as gl_train                              # noqa: PLC0415
     text: str = gl_train.host_memory()
     assert 'host RSS' in text and '/dev/shm' in text, text
     code: str = ('import sys, os\n'
                  f'sys.path[:0] = {[p for p in sys.path if p]!r}\n'
-                 'from training.GloRet.cli import train as t\n'
+                 'from locascope.training.GloRet import train as t\n'
                  'def boom():\n    raise ValueError("planted")\n'
                  't.main = boom\n'
                  'try:\n    t.run()\nexcept ValueError:\n    print("RAISED")\n    sys.exit(0)\n')
@@ -819,7 +811,7 @@ def t_the_gloret_trainer_reports_host_memory_and_a_process_that_fails_leaves_at_
 
 
 def t_a_narrowing_gets_a_decoder_only_when_it_narrows_and_a_mode_is_set() -> str:
-    from GloRet import Decoded, GloRetNet, narrows, take_aux                          # noqa: PLC0415
+    from locascope.core.networks.GloRet import Decoded, GloRetNet, narrows, take_aux                          # noqa: PLC0415
     assert narrows(16, 8, 'ae') and narrows(16, 8, 'vae')
     assert not narrows(8, 8, 'ae') and not narrows(8, 16, 'vae') and not narrows(16, 8, '')
     assert Decoded(8, 8, 'ae').dec is None and Decoded(16, 8, '').dec is None and Decoded(8, 16, 'vae').dec is None
@@ -839,7 +831,7 @@ def t_a_narrowing_gets_a_decoder_only_when_it_narrows_and_a_mode_is_set() -> str
 
 
 def t_the_decoders_loss_is_made_in_training_only_has_a_gradient_and_leaves_the_output_alone() -> str:
-    from GloRet import Decoded, GloRetNet, take_aux                                   # noqa: PLC0415
+    from locascope.core.networks.GloRet import Decoded, GloRetNet, take_aux                                   # noqa: PLC0415
     torch.manual_seed(0)
     x = torch.randn(5, 16)
     for mode in ('ae', 'vae'):
@@ -905,7 +897,7 @@ def with_teacher(res: Any, level: Any, seed: int = 0) -> Any:
 def episode_world(answer_at: Optional[int] = 0, n_other: int = 29, teacher: bool = True) -> Tuple[Any, Any, Any]:
     """`(res, level, fov)` of the planted level with a list whose answer stands at place `answer_at` (None: the list
     holds none) and, with `teacher`, a first phase's score for every window."""
-    from training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
     cands = glo_list(n_other=n_other, with_answer=answer_at is not None)
     if answer_at:
         cands.insert(answer_at, cands.pop(0))
@@ -917,7 +909,7 @@ def episode_world(answer_at: Optional[int] = 0, n_other: int = 29, teacher: bool
 
 
 def t_top_p_is_a_share_or_a_count_and_the_pool_has_a_floor_and_three_regimes() -> str:
-    from training.GloRet.Pool import TopP, parse_top_p                                # noqa: PLC0415
+    from locascope.training.GloRet.Pool import TopP, parse_top_p                                # noqa: PLC0415
     share, count = parse_top_p(['0.05', '2000'])
     assert share == TopP(share=0.05) and count == TopP(count=2000)
     assert parse_top_p(['1.0'])[0] == TopP(share=1.0) and parse_top_p(['1'])[1] == TopP(count=1), 'a point makes a share'
@@ -944,7 +936,7 @@ def t_top_p_is_a_share_or_a_count_and_the_pool_has_a_floor_and_three_regimes() -
 
 
 def t_the_pool_holds_the_answers_the_negatives_that_beat_them_and_then_the_best_of_the_rest() -> str:
-    from training.GloRet.Pool import Memory, make_pool                                # noqa: PLC0415
+    from locascope.training.GloRet.Pool import Memory, make_pool                                # noqa: PLC0415
     n = 40
     rng = np.random.default_rng(0)
     scores = rng.normal(size=n)
@@ -983,7 +975,7 @@ def t_the_pool_holds_the_answers_the_negatives_that_beat_them_and_then_the_best_
 
 
 def t_the_first_phases_scores_of_every_window_come_as_arrays_in_the_order_of_the_universe() -> str:
-    from training.GloRet.Supply import fov_of, level_of, teacher_scores              # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of, level_of, teacher_scores              # noqa: PLC0415
     res = glo_result(glo_list())
     level = level_of(res, 'cls')
     assert teacher_scores(level, res) is None and fov_of(res, level=level).teacher is None, 'no scores: none'
@@ -1005,9 +997,9 @@ def t_the_first_phases_scores_of_every_window_come_as_arrays_in_the_order_of_the
 def direct_pass(net: Any, level: Any, fov: Any, pool: Dict[int, np.ndarray], cache: Dict[Any, Any], step: Any,
                 items: Any = None) -> Any:
     """The loss of one FoV over the windows of `pool`, every window with a graph at once (what a gradient cache must equal)."""
-    from training.GloRet.Items import window_marks                                    # noqa: PLC0415
-    from training.GloRet.Losses import fov_loss                                       # noqa: PLC0415
-    from training.GloRet.Steps import net_input                                       # noqa: PLC0415
+    from locascope.training.GloRet.Items import window_marks                                    # noqa: PLC0415
+    from locascope.training.GloRet.Losses import fov_loss                                       # noqa: PLC0415
+    from locascope.training.GloRet.Steps import net_input                                       # noqa: PLC0415
     logit, rows = [], {'pos': [], 'ignore': [], 'right': [], 'dist': []}
     for rot in (0, 90, 180, 270):
         ids = pool[rot]
@@ -1027,11 +1019,11 @@ def direct_pass(net: Any, level: Any, fov: Any, pool: Dict[int, np.ndarray], cac
 
 
 def t_a_gradient_cache_step_over_a_pool_gives_the_gradient_of_one_pass_over_it() -> str:
-    from GloRet import GloRetNet                                                      # noqa: PLC0415
-    from training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
-    from training.GloRet.Items import level_items                                     # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
-    from training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                      # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items                                     # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
     cases = ((dict(context='SelfAttn', global_en='AttnPool'), 16), (dict(context='Identity', global_en='MaskedMean'), 16),
              (dict(context='Identity', global_en='Align'), 16),
              (dict(context='SelfAttn', global_en='AttnPool', tile_pool='attnpool', in_dim=16), 48))   # 3 patch tokens of 16
@@ -1068,10 +1060,10 @@ def t_a_gradient_cache_step_over_a_pool_gives_the_gradient_of_one_pass_over_it()
 def _split_worker(rank: int, world: int, size: int, gradcache: bool, store: str, out: str) -> None:
     """One process of a group of `size`: the step over a share of the windows of a pool; its gradients go to a file."""
     import torch.distributed as dist                                                  # noqa: PLC0415
-    from GloRet import GloRetNet                                                      # noqa: PLC0415
-    from training.GloRet.Full import FullCfg, glo_step, make_split                    # noqa: PLC0415
-    from training.GloRet.Items import level_items                                     # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                      # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg, glo_step, make_split                    # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items                                     # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
     torch.set_num_threads(1)
     dist.init_process_group('gloo', init_method=f'file://{store}', rank=rank, world_size=world)
     _, level, fov = episode_world(answer_at=None)
@@ -1089,9 +1081,9 @@ def _split_worker(rank: int, world: int, size: int, gradcache: bool, store: str,
 
 
 def t_a_window_split_over_processes_gives_the_same_gradient_with_a_cache_or_without() -> str:
-    from GloRet import GloRetNet                                                      # noqa: PLC0415
-    from training.GloRet.Items import level_items                                     # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                      # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items                                     # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
     _, level, fov = episode_world(answer_at=None)
     cache: dict = {}
     items = level_items(level, fov, cache)
@@ -1116,10 +1108,10 @@ def t_a_window_split_over_processes_gives_the_same_gradient_with_a_cache_or_with
 
 
 def t_the_network_ranks_every_window_as_it_scores_them_one_by_one() -> str:
-    from GloRet import GloRetNet                                                      # noqa: PLC0415
-    from training.GloRet.Full import FullCfg, rank_windows                            # noqa: PLC0415
-    from training.GloRet.Items import level_items                                     # noqa: PLC0415
-    from training.GloRet.Steps import net_input                                       # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                      # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg, rank_windows                            # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items                                     # noqa: PLC0415
+    from locascope.training.GloRet.Steps import net_input                                       # noqa: PLC0415
     torch.manual_seed(1)
     _, level, fov = episode_world(answer_at=None)
     items = level_items(level, fov, {})
@@ -1139,11 +1131,11 @@ def t_the_network_ranks_every_window_as_it_scores_them_one_by_one() -> str:
 
 
 def t_the_rerankers_gradient_cache_gives_the_gradient_of_one_pass_over_its_pool() -> str:
-    from GloRet import LogLoRetNet, correspondence_loss, cycle_loss                    # noqa: PLC0415
-    from training.GloRet.Losses import fov_loss                                       # noqa: PLC0415
-    from training.GloRet.Items import list_items                                      # noqa: PLC0415
-    from training.GloRet.Rerank import RerankCfg, log_step, rerank_scores, score_pairs   # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg, net_input                              # noqa: PLC0415
+    from locascope.core.networks.GloRet import LogLoRetNet, correspondence_loss, cycle_loss                    # noqa: PLC0415
+    from locascope.training.GloRet.Losses import fov_loss                                       # noqa: PLC0415
+    from locascope.training.GloRet.Items import list_items                                      # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import RerankCfg, log_step, rerank_scores, score_pairs   # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg, net_input                              # noqa: PLC0415
     torch.manual_seed(2)
     _, level, fov = episode_world(answer_at=3)
     items = list_items(level, fov, {})
@@ -1199,12 +1191,12 @@ def t_the_rerankers_gradient_cache_gives_the_gradient_of_one_pass_over_its_pool(
 
 
 def t_a_visit_takes_its_steps_in_each_regime_and_a_list_without_an_answer_gets_the_answer_added() -> str:
-    from GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
-    from training.GloRet.Episodes import PoolCfg, run_visit                          # noqa: PLC0415
-    from training.GloRet.Full import FullCfg                                          # noqa: PLC0415
-    from training.GloRet.Pool import Memory, TopP                                     # noqa: PLC0415
-    from training.GloRet.Rerank import RerankCfg                                      # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
+    from locascope.training.GloRet.Episodes import PoolCfg, run_visit                          # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg                                          # noqa: PLC0415
+    from locascope.training.GloRet.Pool import Memory, TopP                                     # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import RerankCfg                                      # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
     torch.manual_seed(0)
     res, level, fov = episode_world(answer_at=None)
     rng = np.random.default_rng(0)
@@ -1245,7 +1237,7 @@ def t_a_visit_takes_its_steps_in_each_regime_and_a_list_without_an_answer_gets_t
         assert count <= out['candidates'] <= count + 6, (count, out)
         assert out['injected'] == 0.0, 'the list holds the answer'
     # a list that holds no answer: the answer is added to the items, the FoV is trained on
-    from training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
     res3 = glo_result(glo_list(with_answer=False))
     level3, fov3 = level_of(res3, 'cls'), fov_of(res3)
     out = run_visit('logloret', 'list', net2, opt2, level3, [fov3], 0, pc, FullCfg(), RerankCfg(), StepCfg(), rng, {}, 1.0, None,
@@ -1272,15 +1264,15 @@ def t_a_visit_takes_its_steps_in_each_regime_and_a_list_without_an_answer_gets_t
 
 def t_a_lazy_level_reads_the_tiles_of_a_window_when_asked_and_a_visit_on_it_trains_like_the_full_one() -> str:
     import copy                                                                       # noqa: PLC0415
-    from GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
-    from training.GloRet import Episodes                                              # noqa: PLC0415
-    from training.GloRet.Episodes import PoolCfg, run_visit                           # noqa: PLC0415
-    from training.GloRet.Full import FullCfg                                          # noqa: PLC0415
-    from training.GloRet.Lazy import gloret_rerank_rank_lazy, lazy_level_of, logloret_rank_lazy   # noqa: PLC0415
-    from training.GloRet.Pool import TopP                                             # noqa: PLC0415
-    from training.GloRet.Rerank import RerankCfg                                      # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg, gloret_rerank_rank, logloret_rank      # noqa: PLC0415
-    from training.GloRet.Supply import fov_of                                         # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
+    from locascope.training.GloRet import Episodes                                              # noqa: PLC0415
+    from locascope.training.GloRet.Episodes import PoolCfg, run_visit                           # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg                                          # noqa: PLC0415
+    from locascope.training.GloRet.Lazy import gloret_rerank_rank_lazy, lazy_level_of, logloret_rank_lazy   # noqa: PLC0415
+    from locascope.training.GloRet.Pool import TopP                                             # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import RerankCfg                                      # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg, gloret_rerank_rank, logloret_rank      # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of                                         # noqa: PLC0415
     torch.manual_seed(4)
     res, full, access = lazy_world()
     lazy = lazy_level_of(res, 'cpu')
@@ -1343,11 +1335,11 @@ def t_a_lazy_level_reads_the_tiles_of_a_window_when_asked_and_a_visit_on_it_trai
 
 
 def t_a_gloret_step_learns_the_planted_window_and_ranks_it_first() -> str:
-    from GloRet import GloRetNet                                                      # noqa: PLC0415
-    from stage2_retrieval.RetrieverGloRet import WindowEncodings                      # noqa: PLC0415
-    from training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
-    from training.GloRet.Items import level_items                                     # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg, gloret_rank                            # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                      # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverGloRet import WindowEncodings                      # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items                                     # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg, gloret_rank                            # noqa: PLC0415
     torch.manual_seed(0)
     res, level, fov = episode_world(answer_at=None)
     items = level_items(level, fov, {})
@@ -1368,10 +1360,10 @@ def t_a_gloret_step_learns_the_planted_window_and_ranks_it_first() -> str:
 
 
 def t_a_logloret_step_learns_the_planted_window_and_reorders_the_list() -> str:
-    from GloRet import LogLoRetNet                                                    # noqa: PLC0415
-    from training.GloRet.Items import list_items                                      # noqa: PLC0415
-    from training.GloRet.Rerank import RerankCfg, log_step                            # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg, logloret_rank, upstream_rank           # noqa: PLC0415
+    from locascope.core.networks.GloRet import LogLoRetNet                                                    # noqa: PLC0415
+    from locascope.training.GloRet.Items import list_items                                      # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import RerankCfg, log_step                            # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg, logloret_rank, upstream_rank           # noqa: PLC0415
     torch.manual_seed(1)
     res, level, fov = episode_world(answer_at=12, teacher=False)
     items = list_items(level, fov, {})
@@ -1389,13 +1381,13 @@ def t_a_logloret_step_learns_the_planted_window_and_reorders_the_list() -> str:
 
 
 def t_a_gloret_and_a_logloret_step_run_on_a_levels_flattened_patch_tokens() -> str:
-    from GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
-    from stage2_retrieval.RetrieverGloRet import WindowEncodings                      # noqa: PLC0415
-    from training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
-    from training.GloRet.Items import level_items, list_items                         # noqa: PLC0415
-    from training.GloRet.Rerank import RerankCfg, log_step                            # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg, gloret_rank, logloret_rank              # noqa: PLC0415
-    from training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverGloRet import WindowEncodings                      # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items, list_items                         # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import RerankCfg, log_step                            # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg, gloret_rank, logloret_rank              # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
     torch.manual_seed(3)
     p, f = 3, 16
     res = glo_result(glo_list(), dim=p * f)
@@ -1419,11 +1411,11 @@ def t_a_gloret_and_a_logloret_step_run_on_a_levels_flattened_patch_tokens() -> s
 
 
 def t_the_steps_add_the_decoders_losses_by_their_weights_and_log_them() -> str:
-    from GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
-    from training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
-    from training.GloRet.Items import level_items, list_items                         # noqa: PLC0415
-    from training.GloRet.Rerank import RerankCfg, log_step                            # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet, LogLoRetNet                                         # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg, glo_step                                # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items, list_items                         # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import RerankCfg, log_step                            # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
     torch.manual_seed(0)
     _, level, fov = episode_world(answer_at=2)
     items = list_items(level, fov, {})
@@ -1443,7 +1435,7 @@ def t_the_steps_add_the_decoders_losses_by_their_weights_and_log_them() -> str:
 
 
 def t_a_head_takes_its_items_and_top_after_its_name_and_its_role_is_how_it_is_trained() -> str:
-    from training.GloRet.cli.train import parse_head                                   # noqa: PLC0415
+    from locascope.training.GloRet.train import parse_head                                   # noqa: PLC0415
     g = parse_head('GloRet-SelfAttn-AttnPool')
     assert (g.items, g.role, g.top, g.variant, g.name) == ('level', 'retriever', None, '', 'GloRet-SelfAttn-AttnPool')
     same = parse_head('GloRet-SelfAttn-AttnPool@items=level')
@@ -1467,8 +1459,8 @@ def t_a_head_takes_its_items_and_top_after_its_name_and_its_role_is_how_it_is_tr
 
 
 def t_a_list_without_a_positive_gets_the_answer_added_and_a_list_with_one_does_not() -> str:
-    from training.GloRet.Items import level_items, list_items                          # noqa: PLC0415
-    from training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items, list_items                          # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
     res, level, fov = episode_world(answer_at=3)
     items = list_items(level, fov, {})
     assert items is not None and items.injected == 0 and items.n == len(fov.listing) and items.pos.any()
@@ -1496,11 +1488,11 @@ def t_a_list_without_a_positive_gets_the_answer_added_and_a_list_with_one_does_n
 
 
 def t_a_gloret_step_over_the_entries_of_a_list_is_one_pass_over_them_and_ranks_them() -> str:
-    from GloRet import GloRetNet                                                      # noqa: PLC0415
-    from training.GloRet.Full import FullCfg, glo_step, rank_windows                  # noqa: PLC0415
-    from training.GloRet.Items import list_items                                      # noqa: PLC0415
-    from training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
-    from training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
+    from locascope.core.networks.GloRet import GloRetNet                                                      # noqa: PLC0415
+    from locascope.training.GloRet.Full import FullCfg, glo_step, rank_windows                  # noqa: PLC0415
+    from locascope.training.GloRet.Items import list_items                                      # noqa: PLC0415
+    from locascope.training.GloRet.Steps import StepCfg                                         # noqa: PLC0415
+    from locascope.training.GloRet.Supply import fov_of, level_of                               # noqa: PLC0415
     res = glo_result(glo_list(with_answer=False))
     level, fov = level_of(res, 'cls'), fov_of(res)
     cache: dict = {}
@@ -1535,13 +1527,13 @@ def t_a_gloret_step_over_the_entries_of_a_list_is_one_pass_over_them_and_ranks_t
 
 
 def net_input_of(x: Any) -> Any:
-    from training.GloRet.Steps import net_input                                       # noqa: PLC0415
+    from locascope.training.GloRet.Steps import net_input                                       # noqa: PLC0415
     return net_input(x)
 
 
 def t_a_head_with_flags_of_its_own_trains_on_its_settings_and_its_own_labels() -> str:
-    from training.GloRet.cli.train import Visit, head_settings, parse_args, parse_head, relabelled   # noqa: PLC0415
-    from training.GloRet.Items import level_items                                     # noqa: PLC0415
+    from locascope.training.GloRet.train import Visit, head_settings, parse_args, parse_head, relabelled   # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items                                     # noqa: PLC0415
     args = parse_args(['--top-p', '1.0'])
     runs = [parse_head('GloRet-SelfAttn-AttnPool'),
             parse_head('GloRet-SelfAttn-AttnPool@w-geo=1.0@soft-target=exponential@sigma=2@ignore-expand=0.25@wrong-rotation=negative@dim=64')]
@@ -1571,7 +1563,7 @@ def t_a_head_with_flags_of_its_own_trains_on_its_settings_and_its_own_labels() -
 
 
 def t_the_hard_negatives_of_a_visit_are_counted_from_its_pools() -> str:
-    from training.GloRet.Episodes import hard_negative_stats                           # noqa: PLC0415
+    from locascope.training.GloRet.Episodes import hard_negative_stats                           # noqa: PLC0415
     # three pools of 100 negatives asked for: none beats the answer, 50 do, 200 do (the pool holds the first 100 of them)
     seen = [(1000, 100, 0, 100, -1.0), (1000, 100, 50, 100, 0.8), (1000, 100, 200, 100, 0.6)]
     out = hard_negative_stats(seen, [2, 2, 4])
@@ -1589,8 +1581,8 @@ def t_the_hard_negatives_of_a_visit_are_counted_from_its_pools() -> str:
 
 def t_a_visit_with_few_fovs_takes_fewer_of_them_in_a_step_so_that_none_is_seen_again_and_again() -> str:
     from dataclasses import replace                                                    # noqa: PLC0415
-    from training.GloRet.Episodes import PoolCfg, fovs_each_step                       # noqa: PLC0415
-    from training.GloRet.Pool import TopP                                              # noqa: PLC0415
+    from locascope.training.GloRet.Episodes import PoolCfg, fovs_each_step                       # noqa: PLC0415
+    from locascope.training.GloRet.Pool import TopP                                              # noqa: PLC0415
     pc = PoolCfg(top=TopP(share=0.1), steps=16, fovs_per_step=8, max_fov_uses=2)
     assert [fovs_each_step(pc, n) for n in (64, 1000, 30, 8, 1)] == [8, 8, 4, 1, 1], 'ceil(uses * FoVs / steps), at most fovs-per-step, at least 1'
     off = replace(pc, max_fov_uses=0)
@@ -1601,7 +1593,7 @@ def t_a_visit_with_few_fovs_takes_fewer_of_them_in_a_step_so_that_none_is_seen_a
 
 def t_the_levels_kept_between_epochs_stay_on_the_card_within_its_budget_and_on_the_host_beyond_it() -> str:
     from types import SimpleNamespace                                                  # noqa: PLC0415
-    from training.GloRet.Supply import CardBudget, MemoryFeatureStore                  # noqa: PLC0415
+    from locascope.training.GloRet.Supply import CardBudget, MemoryFeatureStore                  # noqa: PLC0415
 
     class Feat:
         def __init__(self, n: int, card: bool) -> None:
@@ -1651,7 +1643,7 @@ def t_the_levels_kept_between_epochs_stay_on_the_card_within_its_budget_and_on_t
 
 
 def t_the_memory_marks_read_zero_without_a_card_and_do_not_fail() -> str:
-    from training.GloRet.Steps import begin_visit_peak, held_gb, mark_peak, peak_gb, visit_peak_gb   # noqa: PLC0415
+    from locascope.training.GloRet.Steps import begin_visit_peak, held_gb, mark_peak, peak_gb, visit_peak_gb   # noqa: PLC0415
     begin_visit_peak('cpu')
     mark_peak('cpu')
     assert (peak_gb('cpu'), held_gb('cpu'), visit_peak_gb('cpu')) == (0.0, 0.0, 0.0)
@@ -1659,7 +1651,7 @@ def t_the_memory_marks_read_zero_without_a_card_and_do_not_fail() -> str:
 
 
 def t_the_log_prints_the_hard_negatives_the_memory_and_the_seconds_of_the_pools() -> str:
-    from training.GloRet.LogLayout import hard_line, hard_negatives_block, memory_line, steps_block   # noqa: PLC0415
+    from locascope.training.GloRet.LogLayout import hard_line, hard_negatives_block, memory_line, steps_block   # noqa: PLC0415
     got = {'items': 1000.0, 'k': 100.0, 'ahead': 83.3, 'ratio_med': 0.5, 'ratio_p90': 1.7, 'first': 0.33, 'full': 0.33,
            'padded': 0.5, 'pool': 100.0, 'uses': 2.7}
     text = hard_line(got)
@@ -1676,7 +1668,7 @@ def t_the_log_prints_the_hard_negatives_the_memory_and_the_seconds_of_the_pools(
     joined = '\n'.join(steps)
     assert '250.0' in joined and 'highest GPU memory' in joined and '40.0' in joined and '12.0' in joined, joined
     from types import SimpleNamespace                                                  # noqa: PLC0415
-    from training.GloRet.cli.train import visit_report                                 # noqa: PLC0415
+    from locascope.training.GloRet.train import visit_report                                 # noqa: PLC0415
     visit = SimpleNamespace(key=('slide', 0), level=SimpleNamespace(fovs=[0, 1]))
     seconds = {f'{name}/t_pool': 141.1, f'{name}/t_pool_score': 130.2, f'{name}/t_pool_first': 90.0, f'{name}/t_pool_last': 20.1,
                f'{name}/t_scores': 1.4}
@@ -1688,10 +1680,10 @@ def t_the_log_prints_the_hard_negatives_the_memory_and_the_seconds_of_the_pools(
 
 
 def t_scoring_a_level_shares_the_gathered_windows_and_gives_the_same_scores() -> str:
-    from GloRet import LogLoRetNet                                                     # noqa: PLC0415
-    from stage2_retrieval.Context import gather_windows                               # noqa: PLC0415
-    from training.GloRet.Items import level_items                                     # noqa: PLC0415
-    from training.GloRet.Rerank import RerankCfg, rerank_scores, score_pairs          # noqa: PLC0415
+    from locascope.core.networks.GloRet import LogLoRetNet                                                     # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Context import gather_windows                               # noqa: PLC0415
+    from locascope.training.GloRet.Items import level_items                                     # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import RerankCfg, rerank_scores, score_pairs          # noqa: PLC0415
     torch.manual_seed(5)
     _, level, fov = episode_world(answer_at=3)
     a, b = level_items(level, fov, {}), level_items(level, fov, {})                 # two Items of one shape, as two FoVs of a visit
@@ -1721,8 +1713,8 @@ def t_scoring_a_level_shares_the_gathered_windows_and_gives_the_same_scores() ->
         assert torch.equal(feats, block.reshape(len(sel), shape[0] * shape[1], -1))
     # the candidates made without a Python step per window are the ones the loop made, and the blocks made from the ids are
     # the blocks made from the candidates
-    from training.GloRet.Rerank import level_blocks, window_blocks                    # noqa: PLC0415
-    from training.GloRet.Supply import ROTATIONS                                      # noqa: PLC0415
+    from locascope.training.GloRet.Rerank import level_blocks, window_blocks                    # noqa: PLC0415
+    from locascope.training.GloRet.Supply import ROTATIONS                                      # noqa: PLC0415
     flat = np.arange(a.n)[::3]
     made = a.cands_of(flat)
     wid, rot = a.window_ids()[flat], a.rot[flat]
@@ -1785,8 +1777,8 @@ def _old_logloret_forward(net: Any, fq: Any, fw: Any, shape: Any, s_up: Any = No
 
 
 def t_the_pair_scorer_split_in_query_window_and_pair_sides_gives_the_old_forward() -> str:
-    from GloRet import LogLoRetNet, take_aux                                          # noqa: PLC0415
-    from training.GloRet import Profile                                               # noqa: PLC0415
+    from locascope.core.networks.GloRet import LogLoRetNet, take_aux                                          # noqa: PLC0415
+    from locascope.training.GloRet import Profile                                               # noqa: PLC0415
     shape, b = (2, 3), 5
     for recon in ('', 'vae'):
         for dropout in (0.0, 0.1):

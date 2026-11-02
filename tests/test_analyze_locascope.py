@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for the analyses in `utilities/cli/metrics/`: `analyze_locascope.py` -- how a stage-2 candidate
+"""Tests for the analyses in `locascope/cli/metrics/`: `analyze_locascope.py` -- how a stage-2 candidate
 list is judged (a hit), and that the tables, the report and every figure run on a table of FoVs -- and the
 figures of `analyze_stage1_metrics.py` (the `s1` tests).
 
-    python utilities/test_modules/test_analyze_locascope.py
+    python tests/test_analyze_locascope.py
 
 No slide, no cache, no GPU: candidate lists are small frames, the FoV table is made up, and the stage-1
 table is made-up rows with the columns the real one has (two datasets with the pyramids of BRACS and Ki67,
@@ -39,20 +39,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', 'cli', 'metrics'))
-sys.path.insert(0, os.path.join(_HERE, '..', 'bench_modules'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import pandas as pd                                              # noqa: E402
 
-import analyze_locascope as al                                   # noqa: E402
-from BenchCommon import Answer, Answers                          # noqa: E402
-import analyze_stage1_metrics as s1                              # noqa: E402
+from locascope.cli.metrics import analyze_locascope as al                                   # noqa: E402
+from locascope.cli.bench.BenchCommon import Answer, Answers                          # noqa: E402
+from locascope.cli.metrics import analyze_stage1_metrics as s1                              # noqa: E402
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
 

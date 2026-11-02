@@ -18,7 +18,7 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  plan.md 2.1 -- ONE jobscript.
@@ -37,7 +37,7 @@ source jobscripts/_env.sh
 # only (ad hoc / debugging -- a failure raises straight through instead of
 # being caught and summarised, see prepare_chain_stack.py's module
 # docstring). Path/stem are resolved from the name via
-# `utilities/AccessDatasets.py`, not typed here -- see that file for the
+# `locascope/core/slides/AccessDatasets.py`, not typed here -- see that file for the
 # registered names.
 WSI_NAME="${WSI_NAME:-}"
 
@@ -77,7 +77,7 @@ echo "  tile   $TILE   rungs ${RUNGS}   c-rungs ${C_RUNGS}"
 echo "  draws  result/cache/${DRAW_CACHE_JOB}/"
 echo ""
 
-python training/SuperPathPoint/cli/prepare_chain_stack.py \
+python -m locascope.training.SuperPathPoint.cli.prepare_chain_stack \
   ${WSI_NAME:+--wsi-name "$WSI_NAME"} \
   --tile "$TILE" \
   --rungs $RUNGS \

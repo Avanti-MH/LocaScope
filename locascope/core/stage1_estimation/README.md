@@ -22,7 +22,7 @@
 - **baseline** — 從一開始就不是 canonical 的候選，是刻意獨立的對照方法，存在
   的價值是拿來比較，不是要接手 production。
 - **diagnostic** — 拿來回答「系統現在的狀態／行為是什麼」的工具，沒有任何
-  模組 import 它；通常在 `*/cli/` 或 `utilities/test_modules/` 底下。
+  模組 import 它；通常在 `*/cli/` 或 `tests/` 底下。
 
 legacy 跟 baseline 最容易混——判準是「它曾不曾是跟 canonical 同一個責任的候
 選」：legacy 曾經是（或就是被取代前的 canonical），baseline 從來就不是。
@@ -57,7 +57,7 @@ patch 編碼後去投票。
 
 - **Config**：`KnnEstMppConfig(encoder, mask_cfg, sampler_cfg, k=5, tile_size=256, n_per_level=None)`；
   recipe 表 `KNN_RECIPES`（`gigapath`、`uni2`：`n_per_rung=40, seed=42`）
-  - `encoder`：`TileEncoderFunc` 的註冊名稱（如 `'gigapath'`），建構時自己
+  - `encoder`：`TileEncoder` 的註冊名稱（如 `'gigapath'`），建構時自己
     用這個名稱 build 一個 encoder，不吃外部傳入的物件
   - `mask_cfg`：`TissueMaskConfig`，預設 `MASK_RECIPES['hest']`，決定哪些區域算組織
   - `sampler_cfg`：`TileSampler.SamplerConfig`，決定參考庫怎麼抽（每層抽幾張、seed、
@@ -86,8 +86,8 @@ patch 編碼後去投票。
 
 - **Config**：`ClassifierEstMppConfig(encoder, classifier, reduction, tile_size, weights, vote='mean_probability')`；
   recipe 表 `CLASSIFIER_RECIPES`（`uni2-mlp-ord-b`，`vote='quality_weighted:tissue'`）
-  - `encoder`：`TileEncoderFunc` 的註冊名稱
-  - `classifier`：`aiNNModel/models/Heads.py` 的註冊名稱（`'linear'`/`'mlp'`/`'arcface'`）
+  - `encoder`：`TileEncoder` 的註冊名稱
+  - `classifier`：`locascope/core/networks/Heads.py` 的註冊名稱（`'linear'`/`'mlp'`/`'arcface'`）
   - `reduction`：`'fixed'`（用 encoder 自己的 CLS/GAP）、`'attn'`（學一個
     attention pooling）或 `'clsattn'`（`common.Head.REDUCTIONS`）
   - `weights`：訓練好的 checkpoint 路徑（不進 identity；權重變了由 `weights_id` 反映）

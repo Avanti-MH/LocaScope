@@ -24,12 +24,9 @@ import os
 import sys
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
-from cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
+from locascope.training.SuperPathPoint.cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
                  chainstack_root, job_result_dir)
 
 
@@ -39,15 +36,15 @@ import matplotlib.pyplot as plt                                  # noqa: E402
 import numpy as np                                                # noqa: E402
 import torch                                                       # noqa: E402
 
-import AccessDatasets                                                # noqa: E402
-from SafeSlide import SafeSlide                                    # noqa: E402
-from SurvivalAnalysis import ChainStack, SurvivalProcess           # noqa: E402
-from SurvivalAnalysis.AlphaCalibration import (                    # noqa: E402
+from locascope.core.slides import AccessDatasets                                                # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                    # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import ChainStack, SurvivalProcess           # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.AlphaCalibration import (                    # noqa: E402
     aggregate_curves, aggregate_offset_quantiles, aggregate_pattern_curves,
     alpha_curve, merge_anchors, offset_quantiles_of, pattern_curve,
     probability_map_curve, probability_map_pattern_curve, probe_decoy)
-from SurvivalAnalysis.Patterns import ASCII_NAMES, PATTERNS            # noqa: E402
-from SurvivalAnalysis import AliveCandidates                          # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Patterns import ASCII_NAMES, PATTERNS            # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import AliveCandidates                          # noqa: E402
 
 #: Fixed per-pattern colours, one hand-picked hue per `PATTERNS` entry rather
 #: than matplotlib's `C0`-`C5` cycle -- matches the "六態存活譜" reference
@@ -61,8 +58,8 @@ PATTERN_COLORS = {
     '中間帶':   '#CE9A24',   # mid-band
     '不連續':   '#C0453A',   # flicker
 }
-import prepare_chain_stack                                          # noqa: E402
-from reeval_density import load_arm                                  # noqa: E402
+from locascope.training.SuperPathPoint.cli import prepare_chain_stack                                          # noqa: E402
+from locascope.training.SuperPathPoint.cli.reeval_density import load_arm                                  # noqa: E402
 
 FStack, RStack, CStack = ChainStack.FStack, ChainStack.RStack, ChainStack.CStack
 

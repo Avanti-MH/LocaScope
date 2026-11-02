@@ -41,7 +41,7 @@ openslide knew was never scanned. Downstream cannot tell those apart, which is
 correct: in both cases there is no image there.
 
 Usage:
-    from SafeSlide import SafeSlide
+    from locascope.core.slides.SafeSlide import SafeSlide
 
     wsi = SafeSlide('/path/to/slide.mrxs')
     rgb = wsi.read_region_rgb((x, y), level, (w, h))   # holes come back white

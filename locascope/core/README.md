@@ -1,6 +1,6 @@
 # Utilities — Design Document
 
-這份文件記錄 `utilities/` 裡 **mask 與 patch 兩塊**的設計決策，供下次對話繼續討論用。
+這份文件記錄 `locascope/core/` 裡 **mask 與 patch 兩塊**的設計決策，供下次對話繼續討論用。
 2026-11-02 依現在的程式重寫過：原本寫的 `TissuesRegionsMask`、`RegionPatchMap`、`WsiPatchContainer` 沒有照那個設計實作（見最後一節）。
 細節以程式為準：`TissueMask.py`、`TissueMaskConfig.py`、`PatchingLib.py` 的開頭都有說明。
 
@@ -79,7 +79,7 @@ x, y, w, h : int    # level-0 絕對座標
 **通常不手動建立**：`TissueMaskConfig` 是產出 `TissueMask` 的 recipe（`cfg.build(wsi, device)`；一批 slide 用 `MaskMaker(cfg, ...).mask(wsi)`，segmentation 有 cache）。三個模組一個方向：
 
 ```
-TissueMaskConfig  ->  TissueSegFunc（producer）  ->  TissueMask（product）
+TissueMaskConfig  ->  TissueSeg（producer）  ->  TissueMask（product）
 recipe + cache        slide -> SlideMask             SlideMask + regions
 ```
 product 不 import 另外兩個。兩個 identity：`seg_id` 管 segmentation（決定 raw mask 的 cache 目錄），`region_id` 管之後的 region 處理；改 `min_region_ratio` 只換 `region_id`，不會重切。
@@ -132,7 +132,7 @@ level    : Optional[int] = None
 ## 整體資料流
 
 ```
-segmenter.segment_slide(wsi)                 # TissueSegFunc（aiNNModel/*SegFunc.py）
+segmenter.segment_slide(wsi)                 # TissueSeg（locascope/core/backbones/*Seg.py）
     ↓ SlideMask（mask, origin, span, mask_ds）   ← cache 存這一層
 TissueMask(wsi, slide_mask)                  # connected components -> tissue_regions
     .filtered(r).merged() / .patchable(side)     # region 的 view

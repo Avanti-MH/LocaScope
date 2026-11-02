@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Unit test for utilities/ConfigIdentity, and for every config that uses it.
+"""Unit test for locascope/core/config/ConfigIdentity, and for every config that uses it.
 
-    python utilities/test_modules/test_config_identity.py
+    python tests/test_config_identity.py
 
 No GPU, no model download. The first sections are the machinery on fixtures.
 The `every config` section imports every module that defines an
@@ -22,15 +22,13 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent.parent
-sys.path.insert(0, str(_ROOT / 'utilities'))
-import _paths                                               # noqa: E402
+_ROOT = _HERE.parent
+from locascope import paths as _paths                                               # noqa: E402
 
-_paths.setup_import_paths()
 
 import torch                                                # noqa: E402
 
-import ConfigIdentity as CI                                 # noqa: E402
+from locascope.core.config import ConfigIdentity as CI                                 # noqa: E402
 
 _RESULTS = []
 
@@ -229,7 +227,7 @@ def t_routing_data_record_moves_with_what_makes_the_tiles():
     """A checkpoint's data record (ClassifyingRoutingHead.Datasets.data_record): equal
     for the same data, and naming the field when the tile size or the
     package's DATA_VERSION moves."""
-    import training.ClassifyingRoutingHead.Datasets as D
+    import locascope.training.ClassifyingRoutingHead.Datasets as D
     a = D.data_record(256, 'hest')
     # what every routing-head checkpoint trained at 256 on hest carries (a prototype and a
     # classifier checkpoint were checked for it); a move of its configs into FOV_RECIPES must
@@ -258,10 +256,10 @@ def t_environment_names_the_libraries():
 
 #: Configs with a field that has no default, and the values to build one with.
 def _factories():
-    from GigaPathFunc import GigaPathEncoderConfig
-    from HestSegFunc import HestSegConfig
-    from stage2_retrieval.RerankerScorers import RerankerDualConfig
-    from stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig
+    from locascope.core.backbones.GigaPath import GigaPathEncoderConfig
+    from locascope.core.backbones.HestSeg import HestSegConfig
+    from locascope.core.stage2_retrieval.RerankerScorers import RerankerDualConfig
+    from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig
     return {
         'TissueMaskConfig': lambda c: c(seg=HestSegConfig()),
         'KnnEstMppConfig': lambda c: c(encoder='gigapath'),
@@ -293,31 +291,34 @@ def _factories():
     }
 
 
-_MODULES = ('TileEncoderFunc', 'GigaPathFunc', 'Uni2Func', 'ConchVitFunc',
-            'ConvNeXtV2Func', 'TissueSegFunc', 'HestSegFunc', 'Uni2PcaSegFunc',
-            'TissueMaskConfig', 'TileSampler', 'config',
-            'stage1_estimation.KnnEstMpp', 'stage1_estimation.ClassifierEstMpp',
-            'stage1_estimation.PrototypeEstMpp',
-            'stage1_estimation.estimate_mpp_classic',
-            'stage2_retrieval.Retriever', 'stage2_retrieval.RetrieverSlidingWinSimRot',
-            'stage2_retrieval.RetrieverBagOfTiles', 'stage2_retrieval.RetrieverTileVote',
-            'stage2_retrieval.RetrieverClusterBow', 'stage2_retrieval.RetrieverWinEmbed',
-            'stage2_retrieval.RerankerScorers', 'stage2_retrieval.RerankerEncode',
-            'stage2_retrieval.RerankerNeural', 'stage2_retrieval.MultiPhases',
-            'stage3_localization.SIFT_RANSAC')
-_SUPERPATHPOINT = ('SuperPoint.Backbones', 'SuperPoint.Datasets',
-                   'SuperPoint.Decoders', 'SuperPoint.EncoderBackbone',
-                   'SuperPoint.Heads', 'SuperPoint.HomographicAdaptation',
-                   'SuperPoint.KeypointNet', 'SuperPoint.Losses',
-                   'SuperPoint.Teacher', 'SuperPoint.Trainer',
-                   'common.HomographyConfig')
+_MODULES = ('locascope.core.backbones.TileEncoder', 'locascope.core.backbones.GigaPath',
+            'locascope.core.backbones.Uni2', 'locascope.core.backbones.ConchVit',
+            'locascope.core.backbones.ConvNeXtV2', 'locascope.core.backbones.TissueSeg',
+            'locascope.core.backbones.HestSeg', 'locascope.core.backbones.Uni2PcaSeg',
+            'locascope.core.tiles.TissueMaskConfig', 'locascope.core.tiles.TileSampler',
+            'locascope.core.query_sim.config',
+
+            'locascope.core.stage1_estimation.KnnEstMpp', 'locascope.core.stage1_estimation.ClassifierEstMpp',
+            'locascope.core.stage1_estimation.PrototypeEstMpp',
+            'locascope.core.stage1_estimation.estimate_mpp_classic',
+            'locascope.core.stage2_retrieval.Retriever', 'locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot',
+            'locascope.core.stage2_retrieval.RetrieverBagOfTiles', 'locascope.core.stage2_retrieval.RetrieverTileVote',
+            'locascope.core.stage2_retrieval.RetrieverClusterBow', 'locascope.core.stage2_retrieval.RetrieverWinEmbed',
+            'locascope.core.stage2_retrieval.RerankerScorers', 'locascope.core.stage2_retrieval.RerankerEncode',
+            'locascope.core.stage2_retrieval.RerankerNeural', 'locascope.core.stage2_retrieval.MultiPhases',
+            'locascope.core.stage3_localization.SIFT_RANSAC')
+_SUPERPATHPOINT = ('locascope.training.SuperPathPoint.SuperPoint.Backbones', 'locascope.training.SuperPathPoint.SuperPoint.Datasets',
+                   'locascope.training.SuperPathPoint.SuperPoint.Decoders', 'locascope.training.SuperPathPoint.SuperPoint.EncoderBackbone',
+                   'locascope.training.SuperPathPoint.SuperPoint.Heads', 'locascope.training.SuperPathPoint.SuperPoint.HomographicAdaptation',
+                   'locascope.training.SuperPathPoint.SuperPoint.KeypointNet', 'locascope.training.SuperPathPoint.SuperPoint.Losses',
+                   'locascope.training.SuperPathPoint.SuperPoint.Teacher', 'locascope.training.SuperPathPoint.SuperPoint.Trainer',
+                   'locascope.training.SuperPathPoint.common.HomographyConfig')
 
 
 def _project_configs():
     import importlib
     for name in _MODULES:
         importlib.import_module(name)
-    _paths.add_training_package('SuperPathPoint')
     for name in _SUPERPATHPOINT:
         importlib.import_module(name)
     seen, stack = [], list(CI.IdentifiedConfig.__subclasses__())
@@ -498,10 +499,10 @@ def t_every_identity_field_moves_the_id():
 
 #: Rule 5's exceptions: identity hashing itself, the photo rng's seed (a seed,
 #: not a name), and the frozen copy of that seed in its own test.
-_HASHLIB_ALLOWED = {'utilities/ConfigIdentity.py', 'query_sim/camera.py',
-                    'utilities/test_modules/test_fov_supply.py'}
-_LINT_ROOTS = ('aiNNModel', 'utilities', 'query_sim', 'stage1_estimation',
-               'stage2_retrieval', 'stage3_localization', 'training')
+_HASHLIB_ALLOWED = {'locascope/core/config/ConfigIdentity.py',
+                    'locascope/core/query_sim/camera.py',
+                    'tests/test_fov_supply.py'}
+_LINT_ROOTS = ('locascope',)
 
 
 def t_nothing_else_hashes_for_identity():
@@ -525,14 +526,13 @@ def t_nothing_else_hashes_for_identity():
 
 #: Library modules that may touch sys.path: the one that defines the paths,
 #: and the teacher, which adds an EXTERNAL checkout when it is built.
-_SYS_PATH_ALLOWED = {'utilities/_paths.py',
-                     'training/SuperPathPoint/SuperPoint/Teacher.py'}
+_SYS_PATH_ALLOWED = {'locascope/training/SuperPathPoint/SuperPoint/Teacher.py'}
 
 
 def t_only_entry_points_set_sys_path():
-    """`_paths.setup_import_paths` is the one place sys.path is set, called by
-    the entry point; a library module that inserts a path of its own makes
-    what it can import depend on who imported it first."""
+    """No library module sets sys.path: everything imports by its full name (`locascope....`) from
+    the repo root, and a module that inserts a path of its own makes what it can import depend
+    on who imported it first."""
     import re
     main = re.compile(r'__name__\s*==\s*[\'"]__main__[\'"]')
     found = []
@@ -548,8 +548,8 @@ def t_only_entry_points_set_sys_path():
                 text = path.read_text(errors='replace')
                 if 'sys.path.insert' in text and not main.search(text):
                     found.append(rel)
-    assert not found, (f'library modules setting sys.path: {found}. Only an '
-                       f'entry point sets it, through _paths.setup_import_paths')
+    assert not found, (f'library modules setting sys.path: {found}. Nothing sets '
+                       f'it but an external checkout (_SYS_PATH_ALLOWED)')
 
 
 # ── recipes ───────────────────────────────────────────────────────────────────
@@ -558,22 +558,23 @@ def t_only_entry_points_set_sys_path():
 #: RECIPES), by import name and file. The lint also scans the repo, so a table
 #: added anywhere else fails until it is listed here.
 _RECIPE_MODULES = {
-    'TissueMaskConfig': 'utilities/TissueMaskConfig.py',
-    'TileSampler': 'utilities/TileSampler.py',
-    'FovSupply': 'query_sim/FovSupply.py',
-    'common.Corpora': 'training/SuperPathPoint/common/Corpora.py',
-    'stage1_estimation.KnnEstMpp': 'stage1_estimation/KnnEstMpp.py',
-    'stage1_estimation.ClassifierEstMpp': 'stage1_estimation/ClassifierEstMpp.py',
-    'stage1_estimation.PrototypeEstMpp': 'stage1_estimation/PrototypeEstMpp.py',
-    'stage1_estimation.estimate_mpp_classic':
-        'stage1_estimation/estimate_mpp_classic.py',
-    'stage2_retrieval.RetrieverSlidingWinSimRot': 'stage2_retrieval/RetrieverSlidingWinSimRot.py',
-    'stage2_retrieval.RetrieverBagOfTiles': 'stage2_retrieval/RetrieverBagOfTiles.py',
-    'stage2_retrieval.RetrieverTileVote': 'stage2_retrieval/RetrieverTileVote.py',
-    'stage2_retrieval.RetrieverClusterBow': 'stage2_retrieval/RetrieverClusterBow.py',
-    'stage2_retrieval.RetrieverWinEmbed': 'stage2_retrieval/RetrieverWinEmbed.py',
-    'stage2_retrieval.MultiPhases': 'stage2_retrieval/MultiPhases.py',
-    'stage3_localization.SIFT_RANSAC': 'stage3_localization/SIFT_RANSAC.py',
+    m: m.replace('.', '/') + '.py' for m in (
+        'locascope.core.tiles.TissueMaskConfig',
+        'locascope.core.tiles.TileSampler',
+        'locascope.core.query_sim.FovSupply',
+        'locascope.training.SuperPathPoint.common.Corpora',
+        'locascope.core.stage1_estimation.KnnEstMpp',
+        'locascope.core.stage1_estimation.ClassifierEstMpp',
+        'locascope.core.stage1_estimation.PrototypeEstMpp',
+        'locascope.core.stage1_estimation.estimate_mpp_classic',
+        'locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot',
+        'locascope.core.stage2_retrieval.RetrieverBagOfTiles',
+        'locascope.core.stage2_retrieval.RetrieverTileVote',
+        'locascope.core.stage2_retrieval.RetrieverClusterBow',
+        'locascope.core.stage2_retrieval.RetrieverWinEmbed',
+        'locascope.core.stage2_retrieval.MultiPhases',
+        'locascope.core.stage3_localization.SIFT_RANSAC',
+    )
 }
 
 
@@ -635,7 +636,6 @@ def t_every_recipe_writes_every_field():
     import ast
     import importlib
     import re
-    _paths.add_training_package('SuperPathPoint')
     table = re.compile(r'^\w*RECIPES\s*(:[^=]*)?=', re.M)
     defined = set()
     for top in _LINT_ROOTS:
@@ -673,7 +673,7 @@ def t_no_config_constant_outside_a_recipe_table():
     So every module-level statement that builds a config -- a call to a config
     class, or a `replace` of one -- is a recipe table's entry or nothing."""
     import ast
-    from FovSupply import FovRecipe
+    from locascope.core.query_sim.FovSupply import FovRecipe
     names = {c.__name__ for c in _project_configs()}
     names |= {'FovRecipe', 'ModelConfig', 'replace'}
     assert FovRecipe.__name__ in names
@@ -715,14 +715,14 @@ def t_no_config_constant_outside_a_recipe_table():
 def _recipe_bearing():
     """`{class: defining file}` of every config a recipe table names."""
     import inspect
-    from FovSupply import FovRecipe
-    from HestSegFunc import HestSegConfig
-    from TileSampler import (InheritConfig, OverlapConfig, RichnessConfig,
+    from locascope.core.query_sim.FovSupply import FovRecipe
+    from locascope.core.backbones.HestSeg import HestSegConfig
+    from locascope.core.tiles.TileSampler import (InheritConfig, OverlapConfig, RichnessConfig,
                              SamplerConfig)
-    from TissueMaskConfig import TissueMaskConfig
-    from TissueSegFunc import PlaneSegConfig, TissueSegConfig
-    from Uni2PcaSegFunc import Uni2PcaSegConfig
-    from config import DomainGapConfig
+    from locascope.core.tiles.TissueMaskConfig import TissueMaskConfig
+    from locascope.core.backbones.TissueSeg import PlaneSegConfig, TissueSegConfig
+    from locascope.core.backbones.Uni2PcaSeg import Uni2PcaSegConfig
+    from locascope.core.query_sim.config import DomainGapConfig
     classes = (SamplerConfig, RichnessConfig, OverlapConfig, InheritConfig,
                DomainGapConfig, TissueMaskConfig, TissueSegConfig,
                PlaneSegConfig, HestSegConfig, Uni2PcaSegConfig, FovRecipe)
@@ -825,7 +825,7 @@ def t_cache_paths_are_spelt_in_cache_only():
                 path = Path(dirpath) / name
                 rel = path.relative_to(_ROOT).as_posix()
                 if (not name.endswith('.py') or 'test_modules' in rel
-                        or 'FewShotEoMT' in rel or rel == 'utilities/Cache.py'):
+                        or 'FewShotEoMT' in rel or rel == 'locascope/core/cache/Cache.py'):
                     continue
                 tree = ast.parse(path.read_text(errors='replace'))
                 docs = {id(n.value) for n in ast.walk(tree)
@@ -850,16 +850,15 @@ def t_recipes_equal_the_configs_they_replace():
     cache and checkpoint made under the old spelling stays valid. The exceptions are the
     two samplers commit f7a0774 changed on purpose (lattice, reference-bank), frozen here as
     they now are."""
-    from HestSegFunc import HestSegConfig
-    from TissueMaskConfig import MASK_RECIPES, TissueMaskConfig
-    from TissueSegFunc import PlaneSegConfig
-    from Uni2PcaSegFunc import Uni2PcaSegConfig
-    from TileSampler import (SAMPLER_RECIPES, InheritConfig, OverlapConfig,
+    from locascope.core.backbones.HestSeg import HestSegConfig
+    from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, TissueMaskConfig
+    from locascope.core.backbones.TissueSeg import PlaneSegConfig
+    from locascope.core.backbones.Uni2PcaSeg import Uni2PcaSegConfig
+    from locascope.core.tiles.TileSampler import (SAMPLER_RECIPES, InheritConfig, OverlapConfig,
                              RichnessConfig, SamplerConfig)
-    from FovSupply import FOV_RECIPES
-    from config import DomainGapConfig
-    _paths.add_training_package('SuperPathPoint')
-    from common.Corpora import RECIPES as CORPORA
+    from locascope.core.query_sim.FovSupply import FOV_RECIPES
+    from locascope.core.query_sim.config import DomainGapConfig
+    from locascope.training.SuperPathPoint.common.Corpora import RECIPES as CORPORA
 
     def same(name, new, old):
         assert new == old, f'{name}: {new} != {old}'

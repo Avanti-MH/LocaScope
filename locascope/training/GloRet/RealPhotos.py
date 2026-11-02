@@ -27,15 +27,15 @@ import pandas as pd
 import torch
 from PIL import Image
 
-import _paths
-from AccessDatasets import locate
-from BenchCommon import Answers, answers, placed_estimate
-from SafeSlide import SafeSlide
-from TissueMaskConfig import MASK_RECIPES, MaskMaker
-from stage2_retrieval.Retriever import RetrievalOutput
-from stage2_retrieval.StageInterface import ROTATIONS, CandidateSet
+from locascope import paths as _paths
+from locascope.core.slides.AccessDatasets import locate
+from locascope.cli.bench.BenchCommon import Answers, answers, placed_estimate
+from locascope.core.slides.SafeSlide import SafeSlide
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker
+from locascope.core.stage2_retrieval.Retriever import RetrievalOutput
+from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, CandidateSet
 
-from training.GloRet.Supply import FovResult, tick
+from locascope.training.GloRet.Supply import FovResult, tick
 
 PHOTO_SUFFIXES: Tuple[str, ...] = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
 SAME_PX: float = 24.0        # level-0 px: the answer of the arm and the checklist's place are the same place within this

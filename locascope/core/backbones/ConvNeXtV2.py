@@ -6,7 +6,7 @@
     slots   = encoder.pooled(tiles, 'rings3')
 
 The contract, the batch loop, the identity surface, `variant`, the poolings and
-every exit are TileEncoderFunc's -- same as GigaPath and UNI2. What is
+every exit are TileEncoder's -- same as GigaPath and UNI2. What is
 different here is what is different about a CNN: there is no CLS token and no
 prefix, so the model's own answer to "what is the one vector for this tile" is
 the GLOBAL AVERAGE of its last feature map, not a selected token.
@@ -18,7 +18,7 @@ Measured, not assumed: `NormMlpClassifierHead(pool_type='')` sets
 `global_pool` to a no-op and `fc` to `nn.Identity()` the moment `num_classes=0`
 is also passed -- confirmed by constructing the model and reading
 `m.head.global_pool` / `type(m.head.fc)` directly. Keeping the map intact rather
-than pooling it inside the model is what lets `TileEncoderFunc._pool`'s own
+than pooling it inside the model is what lets `TileEncoder._pool`'s own
 rank-4 branch ("[B, C, H, W] -> flatten -> pooling_kinds") handle GAP / rings
 / grid for this CNN with the SAME code that already does it for a ViT's
 feature map -- nothing CNN-specific had to be written for that part.
@@ -59,16 +59,16 @@ from typing import Tuple
 
 _HERE = Path(__file__).resolve().parent
 
-# Same reasoning and same ordering constraint as GigaPathFunc.py /
-# Uni2Func.py: this MUST stay above `import timm`, because huggingface_hub
+# Same reasoning and same ordering constraint as GigaPath.py /
+# Uni2.py: this MUST stay above `import timm`, because huggingface_hub
 # freezes HF_HOME into module constants the moment IT is imported, and timm
 # imports huggingface_hub. Repeated here rather than shared for the same
 # reason those two repeat it: a helper would have to run before THIS module's
 # `import timm`, and nothing enforces that ordering across files.
-from _paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+from locascope.paths import MODEL_WEIGHTS_DIR, PROJECT_ROOT   # noqa: E402
 os.environ.setdefault('HF_HOME', MODEL_WEIGHTS_DIR)
 
-_DOTENV = _HERE.parent / '.env'
+_DOTENV = Path(PROJECT_ROOT) / '.env'
 if _DOTENV.exists():
     from dotenv import load_dotenv
     load_dotenv(_DOTENV)          # override=False: an exported value still wins
@@ -80,8 +80,8 @@ if _DOTENV.exists():
 import timm  # noqa: E402
 import torch  # noqa: E402
 
-from ConfigIdentity import ModelConfig, register  # noqa: E402
-from TileEncoderFunc import (ModelOutputSpec, TileEncoder,  # noqa: E402
+from locascope.core.config.ConfigIdentity import ModelConfig, register  # noqa: E402
+from locascope.core.backbones.TileEncoder import (ModelOutputSpec, TileEncoder,  # noqa: E402
                              TileEncoderConfig, TransformConfig)
 
 
@@ -120,7 +120,7 @@ class ConvNeXtV2EncoderConfig(TileEncoderConfig):
     #: '' -> 'gap' is this model's own answer, not a default: with no prefix
     #: token, slot 0 -- the tile's single summary vector -- IS the global
     #: average of the last feature map (SUMMARY_SLOT[False] == 'gap'; see
-    #: TileEncoderFunc.pool_slots). 'cls'/'cls_avg'/'cls_std' are absent on
+    #: TileEncoder.pool_slots). 'cls'/'cls_avg'/'cls_std' are absent on
     #: purpose: those need a prefix token distinct from the patch average, and
     #: this model has none.
     #:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for utilities/ConfigArgs.py -- one command-line flag per field of a
+"""Tests for locascope/core/config/ConfigArgs.py -- one command-line flag per field of a
 frozen dataclass config, and the `<config>_from_args` that use it.
 
-    python utilities/test_modules/test_config_args.py
+    python tests/test_config_args.py
 
 No slide, no model, no GPU. The mechanism is checked on made-up dataclasses that
 carry every field type it claims to handle; the real sampler and camera configs
@@ -32,17 +32,13 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from _paths import setup_import_paths                        # noqa: E402
 
-setup_import_paths()
 
-import ConfigArgs as C                                         # noqa: E402
-from TileSampler import (InheritConfig, OverlapConfig,         # noqa: E402
+from locascope.core.config import ConfigArgs as C                                         # noqa: E402
+from locascope.core.tiles.TileSampler import (InheritConfig, OverlapConfig,         # noqa: E402
                          RichnessConfig, SamplerConfig)
-from config import DomainGapConfig                             # noqa: E402
+from locascope.core.query_sim.config import DomainGapConfig                             # noqa: E402
 
 _RESULTS = []
 

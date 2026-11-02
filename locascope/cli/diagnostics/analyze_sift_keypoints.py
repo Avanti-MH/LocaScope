@@ -12,13 +12,13 @@ SlideReader, so the query image and the WSI crop are the exact pair SIFT
 would have been handed.
 
 Usage:
-    python utilities/cli/diagnostics/analyze_sift_keypoints.py \\
+    python -m locascope.cli.diagnostics.analyze_sift_keypoints \\
         --gt-csv     result/MultiBatch/gt.csv \\
         --images-dir result/MultiBatch/images \\
         --case BRACS_1936_L0_syn00000.png \\
         --case BRACS_1936_L0_syn00007.png \\
         --case S1137178,G7E,110926_L0_syn00000.png \\
-        --photo /work/u26130998/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/1.bmp \\
+        --photo $LOCASCOPE_DATA_ROOT/datasets/Ki67_with_photo/S1104360_G7E_110208_mrxs/S1104360_ki67/1.bmp \\
         --out result/SiftKeypointStudy
 
 Outputs, in --out:
@@ -47,13 +47,11 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # utilities/
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
-from _paths import job_result_dir                                   # noqa: E402
+from locascope import paths as _paths                                                       # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-from ReadGeometry import ReadSpec                    # noqa: E402
-from SlideReader import SlideReader                  # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                    # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                  # noqa: E402
 
 BFMATCHER_LIMIT = 1 << 18       # 262144, the cv2 assertion this study is about
 

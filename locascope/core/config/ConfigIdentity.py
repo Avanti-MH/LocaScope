@@ -642,7 +642,7 @@ def method_recipe(spec: str, methods: Dict[str, Tuple[str, str, str]]):
 
     `methods` is a stage package's own table, method -> (module, the recipe
     table's name in it, the class the config builds); the module is imported
-    only when its method is asked for, as `TileEncoderFunc._IMPLEMENTATIONS`
+    only when its method is asked for, as `TileEncoder._IMPLEMENTATIONS`
     does for encoders."""
     import importlib                                              # noqa: PLC0415
     method, sep, name = str(spec).partition(':')

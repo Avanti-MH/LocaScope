@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for aiNNModel/Uni2PcaSegFunc.py.
+"""Tests for locascope/core/backbones/Uni2PcaSeg.py.
 
-    python utilities/test_modules/test_uni2_pca_seg.py
-    python utilities/test_modules/test_uni2_pca_seg.py --with-model
-    python utilities/test_modules/test_uni2_pca_seg.py --with-model --wsi slide.svs
+    python tests/test_uni2_pca_seg.py
+    python tests/test_uni2_pca_seg.py --with-model
+    python tests/test_uni2_pca_seg.py --with-model --wsi slide.svs
 
 Three tiers, and only the first runs everywhere:
 
@@ -52,20 +52,16 @@ import dataclasses
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import numpy as np                                              # noqa: E402
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths()
 
-from ConfigIdentity import config_from, registered              # noqa: E402
-from Uni2PcaSegFunc import (Uni2PcaSegConfig,                   # noqa: E402
+from locascope.core.config.ConfigIdentity import config_from, registered              # noqa: E402
+from locascope.core.backbones.Uni2PcaSeg import (Uni2PcaSegConfig,                   # noqa: E402
                             Uni2PcaSegmenter,
                             stratified_positions, tile_saturation)
-from TissueSegFunc import scanned_rect                          # noqa: E402
+from locascope.core.backbones.TissueSeg import scanned_rect                          # noqa: E402
 
 _RESULTS = []
 
@@ -132,7 +128,7 @@ def t_registered_under_its_name():
     """`config_from('uni2-pca-seg')` reaches this class.
 
     The registry fills by import side effect, so the usual failure is not a typo
-    but a module nobody imported -- which is why `TissueSegFunc` names this
+    but a module nobody imported -- which is why `TissueSeg` names this
     module at its own bottom. Importing THIS test imports the module directly,
     so what is actually checked here is that the decorator name and the
     `method` default agree.
@@ -387,13 +383,13 @@ def t_mask_ds_is_the_patch_size(seg):
     """Everything reads at level 0, so the mask lands at ds = cell_px = 14.
 
     Not a parameter and not a choice: `slide_pca_mask`'s "nothing here chooses a
-    resolution, the patch grid does". `Uni2PcaSegFunc.LEVEL` records the measurement.
+    resolution, the patch grid does". `Uni2PcaSeg.LEVEL` records the measurement.
 
     14 is FINER than the ds 32 hsv masks in use, which is what makes the
     granularity worry moot: a 256 px tile at ds 1 spans 18 cells, so
     `tissue_ratio` has room to be a knob.
     """
-    from Uni2PcaSegFunc import LEVEL
+    from locascope.core.backbones.Uni2PcaSeg import LEVEL
 
     assert LEVEL == 0, f'LEVEL is {LEVEL}; this check assumes level 0'
     assert seg.mask_ds == seg._cell_px, (seg.mask_ds, seg._cell_px)
@@ -441,7 +437,7 @@ def t_fit_report_is_not_degenerate(seg):
 def t_tiling_is_invariant_and_refitting_is_not(seg, wsi, args):
     """One call over a plane == four calls over its quadrants. THE check.
 
-    This is the property that makes a tiled read (`TissueSegFunc.tiled_apply`)
+    This is the property that makes a tiled read (`TissueSeg.tiled_apply`)
     sound for this segmenter's `__call__`, and it holds only because the PCA
     was fitted in `fit`. `mask_otsu` documents the boundary: a threshold taken
     from each tile's own histogram thresholds blank glass against its own
@@ -456,7 +452,7 @@ def t_tiling_is_invariant_and_refitting_is_not(seg, wsi, args):
     """
     from sklearn.decomposition import PCA
     from sklearn.preprocessing import MinMaxScaler
-    from Uni2PcaSegFunc import _GpuProjection
+    from locascope.core.backbones.Uni2PcaSeg import _GpuProjection
 
     cfg = seg.cfg
     level = seg.fit_report['level']
@@ -547,7 +543,7 @@ def t_fit_report_agrees_with_mask_ds(seg, wsi, args):
 def t_mask_is_binary_and_full_size(seg, wsi, args):
     """uint8, values in {0, 1}, and the input's spatial size.
 
-    `TissueSegFunc.tiled_apply` slices the returned mask with the INPUT tile's pixel
+    `TissueSeg.tiled_apply` slices the returned mask with the INPUT tile's pixel
     offsets and assigns into a full-size array, so anything smaller raises there
     on broadcast -- while the single-call path would have accepted a coarse mask
     and derived a coarser ds from its shape. A cell-resolution return would
@@ -646,7 +642,7 @@ def main():
         print('\n[slide]  skipped -- pass --wsi to fit and run the tiling checks')
         return _report()
 
-    from SafeSlide import SafeSlide
+    from locascope.core.slides.SafeSlide import SafeSlide
 
     print(f'\n[slide]  {os.path.basename(args.wsi)}')
     wsi = SafeSlide(args.wsi)

@@ -6,7 +6,7 @@
     slots   = encoder.pooled(tiles, 'grid2x2')
 
 The contract, the batch loop, the identity surface, `variant`, `pooling_kinds`
-and the shape reader behind `model_spec` are all TileEncoderFunc's -- the last
+and the shape reader behind `model_spec` are all TileEncoder's -- the last
 two moved there when this file was written, because they read a spec and a
 tensor and know nothing about whichever ViT produced them.
 
@@ -62,7 +62,7 @@ two agree on everything else -- Resize(224) makes the shorter side 224 and the
 CenterCrop is then a no-op, so crop_pct is 1.0 either way -- and differ only in
 the resampling filter.
 
-The config takes the LIBRARY path, bilinear, for the reason GigaPathFunc
+The config takes the LIBRARY path, bilinear, for the reason GigaPath
 gives for taking prov-gigapath's code over its config.json: the code is what
 produced the published numbers, and the metadata is a claim about the weights
 rather than a measurement of them. Pin it against the shipped pipeline before
@@ -82,24 +82,24 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 
-# MUST stay above `import timm`, for the reason GigaPathFunc spells out in
+# MUST stay above `import timm`, for the reason GigaPath spells out in
 # full: huggingface_hub freezes HF_HOME into module-level constants at import
 # time, and timm imports huggingface_hub. Repeated here rather than shared,
 # because the constraint is "before THIS module's timm import" and a module
 # that has to be imported first to be effective is a rule with no enforcement.
 #
-# The same value GigaPathFunc and ConchVitFunc set, and that is the point: the
+# The same value GigaPath and ConchVit set, and that is the point: the
 # freeze happens at the first huggingface_hub import in the process, which is
-# often neither of them. GigaPathFunc carries the full argument.
-from _paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+# often neither of them. GigaPath carries the full argument.
+from locascope.paths import MODEL_WEIGHTS_DIR, PROJECT_ROOT   # noqa: E402
 os.environ.setdefault('HF_HOME', MODEL_WEIGHTS_DIR)
 
-_DOTENV = _HERE.parent / '.env'
+_DOTENV = Path(PROJECT_ROOT) / '.env'
 if _DOTENV.exists():
     from dotenv import load_dotenv
     load_dotenv(_DOTENV)          # override=False: an exported value still wins
 
-# HF_TOKEN_UNI2 if it is set, else the shared HF_TOKEN. GigaPathFunc carries the
+# HF_TOKEN_UNI2 if it is set, else the shared HF_TOKEN. GigaPath carries the
 # full reasoning: gated approval is per ACCOUNT, and this one is MahmoodLab's
 # while prov-gigapath's is not. Written back into HF_TOKEN because timm's hub
 # path is what downloads here and HF_TOKEN is the only name it reads.
@@ -110,8 +110,8 @@ import timm  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
-from ConfigIdentity import ModelConfig, enc, register  # noqa: E402
-from TileEncoderFunc import (TileEncoder,  # noqa: E402
+from locascope.core.config.ConfigIdentity import ModelConfig, enc, register  # noqa: E402
+from locascope.core.backbones.TileEncoder import (TileEncoder,  # noqa: E402
                              TileEncoderConfig, TransformConfig,
                              pooling_kinds)
 

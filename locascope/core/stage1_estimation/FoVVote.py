@@ -217,14 +217,14 @@ def vote(name: str, probs: torch.Tensor, *, rungs: Optional[Sequence[float]] = N
 # patches AND their probabilities, so one call shape serves both.
 
 def tissue_weights(probs: torch.Tensor, patches: Sequence) -> torch.Tensor:
-    '''Share of each patch's pixels that are tissue, by `TissueSegFunc.
+    '''Share of each patch's pixels that are tissue, by `TissueSeg.
     mask_hsv` -- the `hsv` mask recipe's own per-pixel rule, so no threshold
     is invented here. A patch of blank glass weighs 0.
 
     The doc's warning applies: a coarse-rung patch spans more slide and
     meets more background, so this weight can correlate with scale.
     `diagnose` reports corr(w, expected log-rung) to show whether it does.'''
-    from TissueSegFunc import mask_hsv                       # noqa: PLC0415
+    from locascope.core.backbones.TissueSeg import mask_hsv                       # noqa: PLC0415
     w = [float(mask_hsv(np.ascontiguousarray(p)).mean()) for p in patches]
     return torch.tensor(w, dtype=probs.dtype, device=probs.device)
 

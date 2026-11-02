@@ -3,10 +3,10 @@
 size/downsample/mpp, and (by default) every raw openslide property.
 
 Usage:
-    python utilities/cli/diagnostics/wsi_info.py <wsi_path>            # original, single-file calling convention
-    python utilities/cli/diagnostics/wsi_info.py --wsi <path> [<path> ...]
-    python utilities/cli/diagnostics/wsi_info.py --dataset ki67_pure bracs/test
-    python utilities/cli/diagnostics/wsi_info.py --dataset bracs/test --no-properties --out result/wsi_info.csv
+    python -m locascope.cli.diagnostics.wsi_info <wsi_path>            # original, single-file calling convention
+    python -m locascope.cli.diagnostics.wsi_info --wsi <path> [<path> ...]
+    python -m locascope.cli.diagnostics.wsi_info --dataset ki67_pure bracs/test
+    python -m locascope.cli.diagnostics.wsi_info --dataset bracs/test --no-properties --out result/wsi_info.csv
 """
 from __future__ import annotations
 
@@ -15,15 +15,12 @@ import csv
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                       # noqa: E402
 
 import openslide                                                    # noqa: E402
 
-from SlideProbe import get_mpp                                       # noqa: E402
-from WsiSelection import resolve_wsi_paths                            # noqa: E402
+from locascope.cli.diagnostics.SlideProbe import get_mpp                                       # noqa: E402
+from locascope.cli.diagnostics.WsiSelection import resolve_wsi_paths                            # noqa: E402
 
 
 class WsiInfoCheck:

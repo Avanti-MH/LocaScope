@@ -25,12 +25,9 @@ build/
 .DS_Store
 
 # Model checkpoints (large binaries)
-aiNNModel/ckpt/*.ckpt
-aiNNModel/ckpt/*.pt
-aiNNModel/ckpt/*.pth
-training/checkpoints/*.ckpt
-training/checkpoints/*.pt
-training/checkpoints/*.pth
+*.ckpt
+*.pt
+*.pth
 
 # Results / outputs
 results/
@@ -38,7 +35,7 @@ result/
 *.png
 *.jpg
 
-# wandb run directories (jobscripts/_env.sh points WANDB_DIR outside the
+# wandb run directories (deploy/slurm/_env.sh points WANDB_DIR outside the
 # checkout, but a local/manual run without that env var still writes here)
 wandb/
 

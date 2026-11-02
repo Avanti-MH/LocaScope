@@ -6,7 +6,7 @@
     slots   = encoder.pooled(tiles, 'grid2x2')
 
 The contract, the batch loop, the identity surface, `variant`, the poolings and
-every exit are TileEncoderFunc's. What is left here is what is GigaPath's: its
+every exit are TileEncoder's. What is left here is what is GigaPath's: its
 numbers, the CLS as the answer to "which token is the feature", and which
 poolings its 14x14 grid admits.
 
@@ -46,16 +46,16 @@ _HERE = Path(__file__).resolve().parent
 #
 # ONE cache for every encoder, not one per model. Freezing happens at the FIRST
 # huggingface_hub import in the process, and that is usually not this module --
-# bench_stage2_retriever reaches transformers through TissueSegFunc before any
+# bench_stage2_retriever reaches transformers through TissueSeg before any
 # encoder is named -- so with three different defaults the winner was whichever
 # module happened to be imported first. Agreeing on one value makes that race
 # harmless: whoever wins, the answer is the same directory. `setdefault`, so an
-# exported HF_HOME still overrides all three; see jobscripts/_env.sh, which
+# exported HF_HOME still overrides all three; see deploy/slurm/_env.sh, which
 # exports it before python starts and is the part that actually decides.
-from _paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+from locascope.paths import MODEL_WEIGHTS_DIR, PROJECT_ROOT   # noqa: E402
 os.environ.setdefault('HF_HOME', MODEL_WEIGHTS_DIR)
 
-_DOTENV = _HERE.parent / '.env'
+_DOTENV = Path(PROJECT_ROOT) / '.env'
 if _DOTENV.exists():
     from dotenv import load_dotenv
     load_dotenv(_DOTENV)          # override=False: an exported value still wins
@@ -69,7 +69,7 @@ if _DOTENV.exists():
 # It is written back into HF_TOKEN because that is the only name timm and
 # huggingface_hub read: this module never passes token= anywhere, the download
 # happens inside timm.create_model. Overwriting is safe for the same reason
-# TileEncoderFunc._IMPLEMENTATIONS imports one module at a time -- one encoder
+# TileEncoder._IMPLEMENTATIONS imports one module at a time -- one encoder
 # per process, so there is no second reader to confuse.
 #
 # Repeated in each implementation rather than shared, for the reason the block
@@ -82,12 +82,12 @@ import timm  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
-from ConfigIdentity import ModelConfig, register  # noqa: E402
-from TileEncoderFunc import (ModelOutputSpec, TileEncoder,  # noqa: E402
+from locascope.core.config.ConfigIdentity import ModelConfig, register  # noqa: E402
+from locascope.core.backbones.TileEncoder import (ModelOutputSpec, TileEncoder,  # noqa: E402
                              TileEncoderConfig, TransformConfig)
 # Re-exported, not owned -- see the "Tokens and pooling" section below for why
 # they moved and why this line has to stay.
-from TileEncoderFunc import (SUMMARY_SLOT, _ring_bins,  # noqa: E402,F401
+from locascope.core.backbones.TileEncoder import (SUMMARY_SLOT, _ring_bins,  # noqa: E402,F401
                              pool_slots, pooling_kinds)
 
 
@@ -148,8 +148,8 @@ class GigaPathEncoderConfig(TileEncoderConfig):
 # `x[:, 0]` (timm/layers/pool1d.py:global_pool_nlc), so 196 of the 197 tokens are
 # discarded. `pooling_kinds` lets a caller keep them and try other reductions
 # offline, without re-encoding and without editing the model. It is defined in
-# TileEncoderFunc, because it reads a spec and a tensor and nothing else, and
-# re-exported here for the callers that import it from GigaPathFunc.
+# TileEncoder, because it reads a spec and a tensor and nothing else, and
+# re-exported here for the callers that import it from GigaPath.
 
 
 # ── Encoder ──────────────────────────────────────────────────────────────────

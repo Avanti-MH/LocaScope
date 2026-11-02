@@ -22,8 +22,8 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 
-from Features import LayerTokens                                    # noqa: E402
-from Heads import AttentionPoolHead, HeadConfig                      # noqa: E402
+from locascope.core.networks.Features import LayerTokens                                    # noqa: E402
+from locascope.core.networks.Heads import AttentionPoolHead, HeadConfig                      # noqa: E402
 
 #: Every reduction a `Head` knows.
 REDUCTIONS = ('fixed', 'attn', 'clsattn')

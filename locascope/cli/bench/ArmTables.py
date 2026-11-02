@@ -22,7 +22,7 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from BenchCommon import Tables, status
+from locascope.cli.bench.BenchCommon import Tables, status
 
 
 # ── what a slide has ──────────────────────────────────────────────────────────

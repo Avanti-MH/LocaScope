@@ -10,12 +10,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from RerankChoices import build_rerank
-from stage2_retrieval.RerankerNeural import N_GLOBAL, N_PAIR, N_SCALAR, NeuralInputs
+from locascope.core.networks.RerankChoices import build_rerank
+from locascope.core.stage2_retrieval.RerankerNeural import N_GLOBAL, N_PAIR, N_SCALAR, NeuralInputs
 
-from training.RerankHead.Losses import rerank_loss
-from training.RerankHead.Metrics import first_hit_rank
-from training.RerankHead.Visits import FovData, FovResult, full_inputs
+from locascope.training.RerankHead.Losses import rerank_loss
+from locascope.training.RerankHead.Metrics import first_hit_rank
+from locascope.training.RerankHead.Visits import FovData, FovResult, full_inputs
 
 NEURAL_ARCHS: Tuple[str, ...] = ('tilegt', 'tilegt_ctx', 'corrnet')
 

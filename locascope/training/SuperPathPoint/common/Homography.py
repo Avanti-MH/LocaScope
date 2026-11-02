@@ -30,7 +30,7 @@ TWO CONVENTIONS, AND WHY THEY ARE SPELLED OUT IN THE FUNCTION NAMES
    `points[:, ::-1]` on the way in and again on the way out, because its
    keypoint maps come from `tf.scatter_nd` in image-index order.
 
-   LocaScope is (x, y) everywhere: `utilities/README.md`'s coordinate table,
+   LocaScope is (x, y) everywhere: `locascope/core/README.md`'s coordinate table,
    `PatchInfo.x/y`, `TissueRegion.x/y`, `Camera.output_to_level0(x, y, u, v)`.
    Carrying upstream's order into this repo would put two conventions in one
    codebase, so the order is converted HERE, once, and never again.

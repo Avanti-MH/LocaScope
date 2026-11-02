@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for `utilities/AccessDatasets.py`.
+"""Tests for `locascope/core/slides/AccessDatasets.py`.
 
-    python utilities/test_modules/test_access_datasets.py
+    python tests/test_access_datasets.py
 
 `AccessDatasets.py` is used by more than one package (SuperPathPoint's cli/
 today, potentially others later), which is why this test sits in the flat
@@ -28,14 +28,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from _paths import setup_import_paths                        # noqa: E402
 
-setup_import_paths()
 
-import AccessDatasets as AD                                    # noqa: E402
+from locascope.core.slides import AccessDatasets as AD                                    # noqa: E402
 
 _RESULTS = []
 
@@ -74,8 +70,8 @@ def t_stains_covers_every_dataset():
 # ── 2. locate ────────────────────────────────────────────────────────────────
 
 def t_locate_returns_the_registered_entry():
-    entry = AD.locate('BRACS_1228')
-    if entry.stain != 'HE' or not entry.path.endswith('BRACS_1228.svs'):
+    entry = AD.locate('BRACS_1003694')
+    if entry.stain != 'HE' or not entry.path.endswith('BRACS_1003694.svs'):
         raise AssertionError(f'unexpected entry: {entry}')
     return f'{entry.name}: stain={entry.stain}'
 
@@ -84,7 +80,7 @@ def t_locate_unknown_name_raises_and_lists_known_names():
     try:
         AD.locate('not_a_real_slide')
     except KeyError as e:
-        if 'BRACS_1228' not in str(e):
+        if 'BRACS_1003694' not in str(e):
             raise AssertionError('KeyError should list known names') from e
         return 'KeyError names the known slides, does not guess'
     raise AssertionError('expected KeyError, got no exception')
@@ -123,23 +119,23 @@ def t_locate_ki67_pure_has_no_photos_companion():
 
 
 def t_locate_with_dataset_kwarg_scopes_the_search():
-    entry = AD.locate('BRACS_1228', dataset='bracs/test')
-    if entry.name != 'BRACS_1228':
+    entry = AD.locate('BRACS_1003694', dataset='bracs/test')
+    if entry.name != 'BRACS_1003694':
         raise AssertionError(f'unexpected entry: {entry}')
     try:
-        AD.locate('BRACS_1228', dataset='ki67_pure')
+        AD.locate('BRACS_1003694', dataset='ki67_pure')
     except KeyError:
         return 'dataset= scopes the search to just that one dataset'
-    raise AssertionError('expected KeyError -- BRACS_1228 is not in ki67_pure')
+    raise AssertionError('expected KeyError -- BRACS_1003694 is not in ki67_pure')
 
 
 def t_locate_group_type_hint_skips_the_glob_and_still_finds_the_slide():
     """`group_type` is `bracs/test`'s own narrowing hint -- goes straight
     to the exact path instead of globbing the whole split, but must land on
     the SAME entry the unhinted search finds."""
-    hinted = AD.locate('BRACS_1228', dataset='bracs/test',
+    hinted = AD.locate('BRACS_1003694', dataset='bracs/test',
                        group_type='Group_AT/Type_ADH')
-    unhinted = AD.locate('BRACS_1228', dataset='bracs/test')
+    unhinted = AD.locate('BRACS_1003694', dataset='bracs/test')
     if hinted.path != unhinted.path:
         raise AssertionError(f'hinted path {hinted.path} != unhinted path '
                              f'{unhinted.path}')
@@ -151,12 +147,12 @@ def t_locate_wrong_group_type_hint_is_a_miss_not_a_crash():
     is just a miss (KeyError, same as any unfound name) -- it is a search
     shortcut, not a second identity `name` has to also satisfy."""
     try:
-        AD.locate('BRACS_1228', dataset='bracs/test',
+        AD.locate('BRACS_1003694', dataset='bracs/test',
                  group_type='Group_BT/Type_N')
     except KeyError:
         return 'wrong group_type resolves to not-found, not an exception'
     raise AssertionError('expected KeyError for a group_type that does not '
-                         'actually hold BRACS_1228')
+                         'actually hold BRACS_1003694')
 
 
 def t_locate_kwargs_without_dataset_raises():
@@ -164,7 +160,7 @@ def t_locate_kwargs_without_dataset_raises():
     hint FOR -- passing it without `dataset=` must not be silently
     ignored."""
     try:
-        AD.locate('BRACS_1228', group_type='Group_AT/Type_ADH')
+        AD.locate('BRACS_1003694', group_type='Group_AT/Type_ADH')
     except ValueError:
         return 'kwargs without dataset= correctly rejected, not ignored'
     raise AssertionError('expected ValueError')
@@ -189,7 +185,7 @@ def t_locate_finds_a_bracs_train_slide():
 
 def t_locate_unknown_dataset_id_raises():
     try:
-        AD.locate('BRACS_1228', dataset='not_a_real_dataset')
+        AD.locate('BRACS_1003694', dataset='not_a_real_dataset')
     except KeyError as e:
         if 'not a registered dataset id' not in str(e):
             raise AssertionError(f'wrong KeyError: {e}')
@@ -212,7 +208,7 @@ def t_locate_raises_when_name_is_ambiguous_across_datasets():
                       list_fn=real_bracs.list_fn)
     AD._DATASETS.append(dup)
     try:
-        AD.locate('BRACS_1228')
+        AD.locate('BRACS_1003694')
     except KeyError as e:
         if 'more than one dataset' not in str(e):
             raise AssertionError(f'wrong KeyError: {e}')
@@ -299,7 +295,7 @@ def t_pick_wsi_names_a_cap_of_all_changes_nothing():
 
 def t_pick_wsi_names_is_the_one_datasets_py_uses():
     """`Datasets.py` and AccessDatasets share one function."""
-    import training.ClassifyingRoutingHead.Datasets as D               # noqa: PLC0415
+    import locascope.training.ClassifyingRoutingHead.Datasets as D               # noqa: PLC0415
     assert D.pick_wsi_names is AD.pick_wsi_names
 
 
@@ -307,7 +303,7 @@ def t_pick_wsi_names_is_the_one_datasets_py_uses():
 
 from typing import Any, Dict, Iterator, List, Optional, Tuple       # noqa: E402
 
-import Cache                                                         # noqa: E402
+from locascope.core.cache import Cache                                                         # noqa: E402
 
 
 @contextlib.contextmanager

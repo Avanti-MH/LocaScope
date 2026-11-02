@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the stage 2 cache entries a phase writes, the pipeline's and the stage 2 bench's alike:
-`utilities/bench_modules/BenchCommon.py` (`write_phase`, `truth_rows`, `phase_ids`, `phase_record`,
-`stage_hexid`) and `utilities/bench_modules/ArmTables.py` (a slide's sink, completeness).
+`locascope/cli/bench/BenchCommon.py` (`write_phase`, `truth_rows`, `phase_ids`, `phase_record`,
+`stage_hexid`) and `locascope/cli/bench/ArmTables.py` (a slide's sink, completeness).
 
-    python utilities/test_modules/TestRerank/test_arm_tables.py
+    python tests/TestRerank/test_arm_tables.py
 
 No slide, no model, no GPU: lists are arrays, the geometry is a slide with no mask, the cache a temporary
 directory.
@@ -38,30 +38,25 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', 'bench_modules'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
-import Cache                                                     # noqa: E402
-from ArmTables import SlideTables, entries_complete, entry_levels   # noqa: E402
-from BenchCommon import (Stage, Tables, Truth, phase_ids, phase_record, phase_roles,   # noqa: E402
+from locascope.core.cache import Cache                                                     # noqa: E402
+from locascope.cli.bench.ArmTables import SlideTables, entries_complete, entry_levels   # noqa: E402
+from locascope.cli.bench.BenchCommon import (Stage, Tables, Truth, phase_ids, phase_record, phase_roles,   # noqa: E402
                          stage_hexid, weights_of_config, write_phase)
-from PatchingLib import QueryPatchContainer                      # noqa: E402
-from stage2_retrieval.ArmSpec import config_of_arm, parse_arm    # noqa: E402
-from stage2_retrieval.Context import SlideLevels, nearest_window  # noqa: E402
-from stage2_retrieval.MultiPhases import MultiPhases             # noqa: E402
-from stage2_retrieval.RerankerScorers import ColumnRanker        # noqa: E402
-from stage2_retrieval.Retriever import Extra, RetrievalOutput    # noqa: E402
-from stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRot   # noqa: E402
-from stage2_retrieval.StageInterface import Candidate, CandidateSet, RerankedCandidate   # noqa: E402
-from test_context import TILE, _Slide                            # noqa: E402
+from locascope.core.tiles.PatchingLib import QueryPatchContainer                      # noqa: E402
+from locascope.core.stage2_retrieval.ArmSpec import config_of_arm, parse_arm    # noqa: E402
+from locascope.core.stage2_retrieval.Context import SlideLevels, nearest_window  # noqa: E402
+from locascope.core.stage2_retrieval.MultiPhases import MultiPhases             # noqa: E402
+from locascope.core.stage2_retrieval.RerankerScorers import ColumnRanker        # noqa: E402
+from locascope.core.stage2_retrieval.Retriever import Extra, RetrievalOutput    # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRot   # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet, RerankedCandidate   # noqa: E402
+from tests.TestRerank.test_context import TILE, _Slide                            # noqa: E402
 
 _RESULTS: List[Tuple[str, Optional[BaseException]]] = []
 
@@ -196,7 +191,7 @@ def t_b_a_reranker_writes_its_windows_and_columns_and_no_truth() -> str:
     scores = window_scores(1)
     up: RetrievalOutput = first_output([Candidate(0, 'main', 2, 3, 0, 0.9), Candidate(0, 'main', 5, 5, 0, 0.8)],
                                        scores, tile_sims=False)
-    from stage2_retrieval.Context import ColumnTable, ScoreTable, reranked_output   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Context import ColumnTable, ScoreTable, reranked_output   # noqa: PLC0415
     table: ScoreTable = ScoreTable(2)
     for name, values in (('in', [0.9, 0.8]), ('first', [0.9, 0.8]), ('first_rank', [1.0, 2.0]), ('dual', [0.1, 0.7])):
         table.put(name, torch.tensor(values))
@@ -363,8 +358,8 @@ def t_i_an_arms_rows_are_read_off_its_entries() -> str:
     answer's place in the list (the first phase's, a reranker's, one cut at @K), judged on the first phase's
     answers; the FoV's columns are the draw's and the render table's."""
     import types
-    import bench_stage2_retriever as bench                            # noqa: PLC0415
-    from stage2_retrieval.Context import ScoreTable, reranked_output  # noqa: PLC0415
+    from locascope.cli.metrics import analyze_stage2_metrics as analyze                         # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Context import ScoreTable, reranked_output  # noqa: PLC0415
     old: str = Cache.RESULT_DIR
     try:
         with tempfile.TemporaryDirectory() as root:
@@ -390,11 +385,11 @@ def t_i_an_arms_rows_are_read_off_its_entries() -> str:
                 render_entry=types.SimpleNamespace(path=lambda role, rid, ext: render),
                 microscope=types.SimpleNamespace(cfg=types.SimpleNamespace(identity_id=lambda: 'g')),
                 sampler=[types.SimpleNamespace(meta=types.SimpleNamespace(score=0.25, bucket='b'))] * 8)
-            arms = [bench.ArmRows('win', 'first', 'first', 'pooling', 'stream', 'all', None, True),
-                    bench.ArmRows('rr', 'first', 'second', 'reranker', 'retriever', 'all', None, False),
-                    bench.ArmRows('cut', 'first', 'first', 'method', 'retriever', 'all', 1, False),
-                    bench.ArmRows('win-M', 'first', 'first', 'pooling', 'stream', 'main', None, True)]
-            rows, differ = bench.slide_rows(entry, arms, encoder='uni2', dataset='d', stem='S', supply=supply,
+            arms = [analyze.ArmRows('win', 'first', 'first', 'pooling', 'stream', 'all', None, True),
+                    analyze.ArmRows('rr', 'first', 'second', 'reranker', 'retriever', 'all', None, False),
+                    analyze.ArmRows('cut', 'first', 'first', 'method', 'retriever', 'all', 1, False),
+                    analyze.ArmRows('win-M', 'first', 'first', 'pooling', 'stream', 'main', None, True)]
+            rows, differ = analyze.slide_rows(entry, arms, encoder='uni2', dataset='d', stem='S', supply=supply,
                                             min_sep=1.0)
     finally:
         Cache.RESULT_DIR = old

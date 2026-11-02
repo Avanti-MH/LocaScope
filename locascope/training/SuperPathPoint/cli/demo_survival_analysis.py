@@ -6,12 +6,12 @@ default). spec.md 3.2, plan.md 2.1②.
     python training/SuperPathPoint/cli/demo_survival_analysis.py --parts chains_stack
     python training/SuperPathPoint/cli/demo_survival_analysis.py --parts merge_grid
     python training/SuperPathPoint/cli/demo_survival_analysis.py --parts merge_grid \
-        --checkpoint <.pt> --wsi-name BRACS_1228 --real-flow
+        --checkpoint <.pt> --wsi-name BRACS_1003694 --real-flow
     python training/SuperPathPoint/cli/demo_survival_analysis.py --parts visualize
     python training/SuperPathPoint/cli/demo_survival_analysis.py --parts visualize \
-        --checkpoint <.pt> --wsi-name BRACS_1228 --c-rungs 4 8 16
+        --checkpoint <.pt> --wsi-name BRACS_1003694 --c-rungs 4 8 16
     python training/SuperPathPoint/cli/demo_survival_analysis.py --parts scale_diagnostic \
-        --checkpoint <.pt> --wsi-name BRACS_1228 --n-scale-tiles 10
+        --checkpoint <.pt> --wsi-name BRACS_1003694 --n-scale-tiles 10
 
 The parts share `--wsi-name`/`--tile`/`--c-rungs`/`--chainstack-cache-job`/`--out` and nothing
 else, so this file keeps them as independent functions (`_run_chains_stack`,
@@ -182,14 +182,11 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
-from cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
+from locascope.training.SuperPathPoint.cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
                  chainstack_root, job_result_dir)
 
 
@@ -204,19 +201,19 @@ from matplotlib.patches import Rectangle                        # noqa: E402
 import numpy as np                                              # noqa: E402
 import cv2                                                       # noqa: E402
 
-import AccessDatasets                                              # noqa: E402
-from SafeSlide import SafeSlide                                  # noqa: E402
-from SlideReader import SlideReader                              # noqa: E402
-from ReadGeometry import ReadSpec                                # noqa: E402
-from SurvivalAnalysis import ChainStack, SurvivalProcess          # noqa: E402
+from locascope.core.slides import AccessDatasets                                              # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                              # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import ChainStack, SurvivalProcess          # noqa: E402
 FStack, RStack, CStack = ChainStack.FStack, ChainStack.RStack, ChainStack.CStack
-from SurvivalAnalysis.AlphaCalibration import merge_anchors        # noqa: E402
-from SurvivalAnalysis.AliveCandidates import (                     # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.AlphaCalibration import merge_anchors        # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.AliveCandidates import (                     # noqa: E402
     probe_via_probability_map, alive_probability_map, _bilinear_sample)
-from SurvivalAnalysis.Patterns import ASCII_NAMES, alive_from, classify  # noqa: E402
-import prepare_chain_stack                                        # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Patterns import ASCII_NAMES, alive_from, classify  # noqa: E402
+from locascope.training.SuperPathPoint.cli import prepare_chain_stack                                        # noqa: E402
 
-DEFAULT_WSI_NAME = 'BRACS_1228'
+DEFAULT_WSI_NAME = 'BRACS_1003694'
 
 
 # =============================================================================
@@ -691,8 +688,8 @@ def _load_real_points(args) -> Tuple[np.ndarray, float, str]:
     model-free.
     """
     import torch                                                  # noqa: PLC0415
-    from SurvivalAnalysis import SurvivalProcess                    # noqa: PLC0415
-    from reeval_density import load_arm                              # noqa: PLC0415
+    from locascope.training.SuperPathPoint.SurvivalAnalysis import SurvivalProcess                    # noqa: PLC0415
+    from locascope.training.SuperPathPoint.cli.reeval_density import load_arm                              # noqa: PLC0415
 
     if not args.wsi_name:
         raise SystemExit('--wsi-name is required with --checkpoint')
@@ -744,10 +741,10 @@ def _run_real_flow_comparison(args) -> Dict[str, Tuple[Optional[dict], float,
     aggregated curves can then only come from the merge implementation, not
     from a different random decoy.
     """
-    import survival_alpha_analysis as saa                          # noqa: PLC0415
+    from locascope.training.SuperPathPoint.cli import survival_alpha_analysis as saa                          # noqa: PLC0415
     import torch                                                    # noqa: PLC0415
-    from SurvivalAnalysis import SurvivalProcess                    # noqa: PLC0415
-    from reeval_density import load_arm                                # noqa: PLC0415
+    from locascope.training.SuperPathPoint.SurvivalAnalysis import SurvivalProcess                    # noqa: PLC0415
+    from locascope.training.SuperPathPoint.cli.reeval_density import load_arm                                # noqa: PLC0415
 
     if not args.wsi_name:
         raise SystemExit('--wsi-name is required with --real-flow')
@@ -2014,7 +2011,7 @@ def _run_visualize_real_example(args, out_dir: str) -> None:
              'data example figure (synthetic GIFs still saved)')
         return
     import torch                                                  # noqa: PLC0415
-    from reeval_density import load_arm                              # noqa: PLC0415
+    from locascope.training.SuperPathPoint.cli.reeval_density import load_arm                              # noqa: PLC0415
 
     wsi_name = args.wsi_name or DEFAULT_WSI_NAME
     entry = AccessDatasets.locate(wsi_name)
@@ -2519,7 +2516,7 @@ def _run_scale_diagnostic(args, out_dir: str) -> None:
                          'trained KeypointNet .pt) -- it runs the real '
                          'detector, there is no synthetic-only mode here')
     import torch                                                  # noqa: PLC0415
-    from reeval_density import load_arm                              # noqa: PLC0415
+    from locascope.training.SuperPathPoint.cli.reeval_density import load_arm                              # noqa: PLC0415
 
     wsi_name = args.wsi_name or DEFAULT_WSI_NAME
     entry = AccessDatasets.locate(wsi_name)
@@ -2909,7 +2906,7 @@ def main():
     ap.add_argument('--n-synthetic-points', type=int, default=2917,
                     help='[scale_synthetic_control] how many known-radius '
                          'blobs -- 2917 matches the pooled anchor count '
-                         'scale_diagnostic reported on BRACS_1228 with the '
+                         'scale_diagnostic reported on BRACS_1003694 with the '
                          'default --n-scale-tiles; override to match '
                          'whatever a different scale_diagnostic run '
                          'actually produced')

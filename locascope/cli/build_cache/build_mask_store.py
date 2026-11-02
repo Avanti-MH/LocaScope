@@ -2,8 +2,8 @@
 """Pre-warm the mask cache: segment every named slide once, so a later job that
 samples from it never waits on the GPU for a mask.
 
-    python utilities/cli/build_cache/build_mask_store.py --seg uni2_pca <wsi-path>...
-    python utilities/cli/build_cache/build_mask_store.py --seg hest --wsi-names Ki67_pure_0001 ...
+    python -m locascope.cli.build_cache.build_mask_store --seg uni2_pca <wsi-path>...
+    python -m locascope.cli.build_cache.build_mask_store --seg hest --wsi-names Ki67_pure_0001 ...
 
 Outputs:
     result/cache/<cache-job>/slide=<slide>/mask/mask_<seg_id>.safetensors + record_<seg_id>.json
@@ -18,7 +18,7 @@ step with the first.
 
 WHY PRE-WARM AT ALL
 -------------------
-UNI2-PCA costs 3.5 to 6 minutes of GPU per slide (measured, `Uni2PcaSegFunc.
+UNI2-PCA costs 3.5 to 6 minutes of GPU per slide (measured, `Uni2PcaSeg.
 LEVEL`) and HEST is seconds to minutes. A training job that misses on its first
 epoch spends that inside its own walltime, on the card it reserved for the
 encoder. Running this first moves the cost to a job that does nothing else.
@@ -41,21 +41,15 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..'),
-          os.path.join(_HERE, '..', '..', '..', 'aiNNModel')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+from locascope.paths import job_result_dir   # noqa: E402
 
-from _paths import job_result_dir, setup_import_paths            # noqa: E402
-
-setup_import_paths()
 
 import torch                                                    # noqa: E402
 
-from AccessDatasets import locate                                 # noqa: E402
-from Cache import job_name, wsi_stem_of                            # noqa: E402
-from SafeSlide import SafeSlide                                  # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
+from locascope.core.slides.AccessDatasets import locate                                 # noqa: E402
+from locascope.core.cache.Cache import job_name, wsi_stem_of                            # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
 
 #: The measured tissue fractions on this project's own slides, for reading the
 #: printed number against. BRACS from test_EoMT's stratified_positions docstring
@@ -69,7 +63,7 @@ def main():
     ap.add_argument('wsi', nargs='*', default=[],
                     help='one or more slide PATHS')
     ap.add_argument('--wsi-names', nargs='*', default=[],
-                    help='one or more utilities/AccessDatasets.py names '
+                    help='one or more locascope/core/slides/AccessDatasets.py names '
                         '(e.g. Ki67_pure_0001), resolved to paths -- an '
                         'alternative to the positional paths, not a '
                         'replacement; the two lists are concatenated')
@@ -89,7 +83,7 @@ def main():
     ap.add_argument('--larger-pca-as-fg', action=argparse.BooleanOptionalAction,
                     default=None,
                     help='which side of PC1 is tissue. Decided by '
-                         'utilities/cli/diagnostics/inspect_pca_seg.py and now the config'
+                         'locascope/cli/diagnostics/inspect_pca_seg.py and now the config'
                          "'s own default, so this flag is here to override it "
                          'rather than to repeat it. default=None and not False: '
                          'a CLI default that restates a config default is a '

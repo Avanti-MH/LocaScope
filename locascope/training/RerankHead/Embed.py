@@ -18,12 +18,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from stage2_retrieval.StageInterface import CandidateSet
+from locascope.core.stage2_retrieval.StageInterface import CandidateSet
 
-from training.RerankHead.Labels import Boxes, LabelConfig, label_windows
-from training.RerankHead.Losses import pool_softmax_loss
-from training.RerankHead.Metrics import first_hit_rank
-from training.RerankHead.Visits import FovResult, shape_fn
+from locascope.training.RerankHead.Labels import Boxes, LabelConfig, label_windows
+from locascope.training.RerankHead.Losses import pool_softmax_loss
+from locascope.training.RerankHead.Metrics import first_hit_rank
+from locascope.training.RerankHead.Visits import FovResult, shape_fn
 
 ROTATIONS: Tuple[int, ...] = (0, 90, 180, 270)
 
@@ -138,9 +138,9 @@ def embed_rank(model: nn.Module, res: FovResult, pooling: str, label_cfg: LabelC
     `state` is one dict per scoring pass: it keeps the embeddings (`RetrieverWinEmbed.WindowEmbeddings`), and
     so the embedding of the level's windows, across the FoVs of a visit."""
     from dataclasses import replace                                               # noqa: PLC0415
-    from stage2_retrieval.Context import top_candidates, window_boxes             # noqa: PLC0415
-    from stage2_retrieval.RetrieverWinEmbed import WindowEmbeddings               # noqa: PLC0415
-    from stage2_retrieval.StageInterface import Candidate                         # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Context import top_candidates, window_boxes             # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverWinEmbed import WindowEmbeddings               # noqa: PLC0415
+    from locascope.core.stage2_retrieval.StageInterface import Candidate                         # noqa: PLC0415
     model.eval()
     if state.get('model') is not model:
         embeddings: WindowEmbeddings = WindowEmbeddings('', 256)

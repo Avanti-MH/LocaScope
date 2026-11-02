@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """EoMT with a UNI2 backbone: everything in one file, on purpose, for now.
 
-    python utilities/test_modules/test_EoMT.py
-    python utilities/test_modules/test_EoMT.py --img 518 --num-q 100
-    python utilities/test_modules/test_EoMT.py --image /path/to/tile.png
+    python tests/test_EoMT.py
+    python tests/test_EoMT.py --img 518 --num-q 100
+    python tests/test_EoMT.py --image /path/to/tile.png
 
 A SPIKE, not a settled test. It sits in test_modules because that is where it
 was asked for; it does not test one module, it stands up a pipeline across two
@@ -14,7 +14,7 @@ What is imported and what is copied
 -----------------------------------
 The rule is one line: code that needs no change is imported, code that needs a
 change is copied here and changed, with the original line numbers so a reader
-can diff rather than trust. Same convention as ConchVitFunc.
+can diff rather than trust. Same convention as ConchVit.
 
     IMPORTED   models/eomt.py        204 lines, unchanged. It reaches the
                                      backbone only through a list of attribute
@@ -54,30 +54,24 @@ from typing import Optional
 #: BEFORE torch. huggingface_hub freezes HF_HOME into module constants at its
 #: own import and something reaches it during `import torch`, so a setdefault
 #: further down is too late and 2.7 GB comes down again into $HOME.
-os.environ.setdefault(
-    'HF_HOME', os.environ.get('LOCASCOPE_MODEL_WEIGHTS',
-                              '/work/u26130998/model_weights'))
+from locascope.paths import DATA_ROOT, MODEL_WEIGHTS_DIR                          # noqa: E402  (no torch)
+os.environ.setdefault('HF_HOME', os.environ.get('LOCASCOPE_MODEL_WEIGHTS', MODEL_WEIGHTS_DIR))
 
 #: The eomt clone, so `from models.eomt import EoMT` resolves -- eomt.py itself
 #: does `from models.scale_block import ScaleBlock`, so its root has to be here
 #: rather than its models/ directory.
-_EOMT = Path(os.environ.get('EOMT_ROOT', '/work/u26130998/eomt'))
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..'))
-for _d in (_EOMT,):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
+_EOMT = Path(os.environ.get('EOMT_ROOT', os.path.join(DATA_ROOT, 'eomt')))
+if str(_EOMT) not in sys.path:
+    sys.path.insert(0, str(_EOMT))
 
-import numpy as np                                               # noqa: E402
+import numpy as np                                             # noqa: E402
 import timm                                                      # noqa: E402
 import torch                                                     # noqa: E402
 import torch.nn as nn                                            # noqa: E402
 
-from _paths import (encoder_tag, job_result_dir,                 # noqa: E402
-                    setup_import_paths)
-setup_import_paths()
+from locascope.paths import encoder_tag, job_result_dir                   # noqa: E402
 
-from TileEncoderFunc import encoder_config                       # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config                       # noqa: E402
 from models.eomt import EoMT                                     # noqa: E402
 
 
@@ -377,7 +371,7 @@ class TileSet(torch.utils.data.Dataset):
 
     def _slide(self):
         if self._wsi is None:
-            from SafeSlide import SafeSlide
+            from locascope.core.slides.SafeSlide import SafeSlide
             self._wsi = SafeSlide(self.path, warn=False)
         return self._wsi
 
@@ -434,7 +428,7 @@ def tile_saturation(wsi, origin, span, tile: int, ds: float = 32.0):
     The cheap content signal, and it costs one read_region rather than one per
     tile. Saturation and not luminance because glass and a pale section differ
     far more in colour than in brightness -- a fatty area is nearly white and is
-    still tissue, and TissueSegFunc's own hsv method thresholds the same thing.
+    still tissue, and TissueSeg's own hsv method thresholds the same thing.
 
     Only a proxy, and only used to CHOOSE what the model looks at. Nothing it
     decides reaches the mask.
@@ -529,7 +523,7 @@ def slide_pca_mask(enc, path: str, args, dev):
     """
     from sklearn.decomposition import PCA
     from sklearn.preprocessing import MinMaxScaler
-    from SafeSlide import SafeSlide
+    from locascope.core.slides.SafeSlide import SafeSlide
 
     wsi = SafeSlide(path)
     (ox, oy), (sw, sh) = slide_bounds(wsi, args.limit_bounds)

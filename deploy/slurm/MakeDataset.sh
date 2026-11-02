@@ -15,19 +15,19 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
-#  utilities/cli/build_cache/make_dataset.py -- the catalog and the virtual
+#  locascope/cli/build_cache/make_dataset.py -- the catalog and the virtual
 #  datasets (`@<name>`), in AccessDatasets' own cache, result/cache/Datasets/,
 #  whatever this job is called.
 #
-#    sbatch jobscripts/MakeDataset.sh                              # the catalog
-#    ARGS="--catalog --datasets bracs/test --refresh" sbatch jobscripts/MakeDataset.sh
-#    ARGS="--catalog --recipe pure" sbatch jobscripts/MakeDataset.sh   # the catalog, then a recipe's @-datasets
-#    ARGS="--list" sbatch jobscripts/MakeDataset.sh                # what is written, checked
+#    sbatch deploy/slurm/MakeDataset.sh                              # the catalog
+#    ARGS="--catalog --datasets bracs/test --refresh" sbatch deploy/slurm/MakeDataset.sh
+#    ARGS="--catalog --recipe pure" sbatch deploy/slurm/MakeDataset.sh   # the catalog, then a recipe's @-datasets
+#    ARGS="--list" sbatch deploy/slurm/MakeDataset.sh                # what is written, checked
 # =============================================================================
 
 ARGS="${ARGS:---catalog}"
 echo "======== make_dataset.py $ARGS ========"
-python utilities/cli/build_cache/make_dataset.py $ARGS
+python -m locascope.cli.build_cache.make_dataset $ARGS

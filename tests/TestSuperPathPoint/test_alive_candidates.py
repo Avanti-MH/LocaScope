@@ -2,7 +2,7 @@
 """Tests for `SurvivalAnalysis/AliveCandidates.py`. AlphaSelectionNotes.md
 section 14/15.
 
-    python utilities/test_modules/TestSuperPathPoint/test_alive_candidates.py
+    python tests/TestSuperPathPoint/test_alive_candidates.py
 
 PURE, NO GPU, NO NET, NO REAL SLIDE -- every function here takes arrays a
 human can construct by hand. This is the ONLY verification these four
@@ -19,16 +19,12 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
 import numpy as np                                            # noqa: E402
 
-from SurvivalAnalysis import AliveCandidates as AL             # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import AliveCandidates as AL             # noqa: E402
 
 _RESULTS = []
 
@@ -46,7 +42,7 @@ def check(name, fn):
 # ── 0. baseline (delegation, not a second implementation) ───────────────────
 
 def t_baseline_delegates_to_patterns_alive_from():
-    from SurvivalAnalysis.Patterns import alive_from
+    from locascope.training.SuperPathPoint.SurvivalAnalysis.Patterns import alive_from
     score = np.array([[0.5, 0.02]])
     dist = np.array([[1.0, 5.0]])
     tau = np.array([2.0, 2.0])

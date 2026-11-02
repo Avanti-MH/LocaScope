@@ -19,25 +19,25 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  training/GloRet -- GloRet (Arch 1, a bi-encoder) and LogLoRet (Arch 2, a pair scorer) of
-#  stage2_retrieval/proposal.md, on synthetic FoVs made as they are used.
+#  locascope/training/GloRet -- GloRet (Arch 1, a bi-encoder) and LogLoRet (Arch 2, a pair scorer) of
+#  locascope/core/stage2_retrieval/proposal.md, on synthetic FoVs made as they are used.
 #
 #  Several heads are trained in ONE process on the SAME FoVs: a level of a slide is encoded once and every head
 #  trains on it. A head is the proposal's name: GloRet-{ContextEn}-{GlobalEn}, or
 #  LogLoRet-{ContextEn}-{GlobalEn}[+{dustbin|sinkhorn|sigmoid}] (the no-match option is trained in).
 #
-#    HEADS="GloRet-SelfAttn-AttnPool LogLoRet-SelfAttn-AttnPool" sbatch jobscripts/GloRet/GloRet.sh
-#    HEADS="GloRet-SelfAttn-AttnPool" EXTRA="--epochs 5" sbatch jobscripts/GloRet/GloRet.sh
-#    DRY_RUN=1 bash jobscripts/GloRet/GloRet.sh                 # the plan; opens nothing
-#    SMOKE=1 sbatch -J SmokeGloRet jobscripts/GloRet/GloRet.sh   # 2 slides a dataset, 3 visits, 1 epoch; weights in result/SmokeGloRet/
+#    HEADS="GloRet-SelfAttn-AttnPool LogLoRet-SelfAttn-AttnPool" sbatch deploy/slurm/GloRet/GloRet.sh
+#    HEADS="GloRet-SelfAttn-AttnPool" EXTRA="--epochs 5" sbatch deploy/slurm/GloRet/GloRet.sh
+#    DRY_RUN=1 bash deploy/slurm/GloRet/GloRet.sh                 # the plan; opens nothing
+#    SMOKE=1 sbatch -J SmokeGloRet deploy/slurm/GloRet/GloRet.sh   # 2 slides a dataset, 3 visits, 1 epoch; weights in result/SmokeGloRet/
 #
 #  A LogLoRet trains on the list a sliding window makes at the size of a retrieval (--raw-topk 10000 windows; the list the
 #  pooling cannot tell from the answer; POOLING=cls for the sliding window's cls list) and a step scores a pool of it
 #  (TOP_P: an integer, the entries of the list), validation re-orders the first 100. Change them with
-#    EXTRA="--raw-topk 1000 --val-keep 100" TOP_P="1.0 1000" sbatch jobscripts/GloRet/GloRet.sh
+#    EXTRA="--raw-topk 1000 --val-keep 100" TOP_P="1.0 1000" sbatch deploy/slurm/GloRet/GloRet.sh
 #
 #  EVERY HEAD IS TRAINED THE SAME WAY, what differs is its scorer (GloRet: a vector a window; LogLoRet: a pair at a time). What
 #  its softmax is over, and what it is validated as, are the head's to say, after its name:
@@ -56,7 +56,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #    A  the coarse levels (ds >= 4), whose tiles are few: their patch tokens (0.6 MB a tile) are kept in host memory
 #       between epochs; 16 GPUs hold the training set (about 83 GB a process, estimated):
 #         POOLING=attnpool HEADS="GloRet-SelfAttn-AttnPool LogLoRet-SelfAttn-AttnPool" \
-#           EXTRA="--min-ds 4 --tag stageA" sbatch --partition=16gpus --nodes=4 --gpus-per-node=4 ... jobscripts/GloRet/GloRet.sh
+#           EXTRA="--min-ds 4 --tag stageA" sbatch --partition=16gpus --nodes=4 --gpus-per-node=4 ... deploy/slurm/GloRet/GloRet.sh
 #    B  the fine levels (ds <= 2), the LogLoRet re-trained from stage A on the list of 10000, the pool and all; only the
 #       tiles under the windows a visit scores are read and encoded (--on-demand), so a level need not fit the card:
 #         POOLING=attnpool HEADS="LogLoRet-SelfAttn-AttnPool" \
@@ -79,7 +79,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  not one head each. The elements' logs must be told apart on the command line (-o/-e override the ones above):
 #
 #    HEAD_GROUPS="GloRet-SelfAttn-AttnPool GloRet-GNN-GraphPool; LogLoRet-SelfAttn-AttnPool LogLoRet-GNN-GraphPool" \
-#      sbatch --array=0-1 -o '/work/u26130998/log/%x.%a' -e '/work/u26130998/log/%x.%a' jobscripts/GloRet/GloRet.sh
+#      sbatch --array=0-1 -o '/work/u26130998/log/%x.%a' -e '/work/u26130998/log/%x.%a' deploy/slurm/GloRet/GloRet.sh
 #
 #  Element i writes log/<job>.<i> and, with several GPUs, log/<job>.<i>.r<rank> and log/<job>.<i>.ranks.
 #  `--array=0-1%1` runs them one after the other; the project's 32-GPU cap (and the running-jobs-per-user cap of the
@@ -92,23 +92,23 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #  ignore zone 0.5, wrong rotations ignored, no soft targets, no decoder loss.
 #
 #   1. TilePool attnpool, gigapath, on its own (three stages; GloRet-SelfAttn-AttnPool and the LogLoRet that learns the pool):
-#        bash jobscripts/GloRet/GloRetAttnPool.sh
+#        bash deploy/slurm/GloRet/GloRetAttnPool.sh
 #   2. gigapath cls, GloRet and LogLoRet together (15 heads; the first of each is also a cell of 3):
 #        TOP_P="1.0 2000" ENCODER=gigapath POOLING=cls HEADS="GloRet-SelfAttn-AttnPool GloRet-SelfAttn-MaskedMean GloRet-SelfAttn-CNN \
 #          GloRet-SelfAttn-Align GloRet-SptSelfAttn-AttnPool GloRet-SptSelfAttn-CNN GloRet-SptSelfAttn-Align \
 #          GloRet-Identity-AttnPool GloRet-Identity-CNN GloRet-Identity-Align GloRet-GNN-GraphPool GloRet-CLSTrans-Identity \
 #          LogLoRet-SelfAttn-AttnPool+dustbin LogLoRet-SelfAttn-AttnPool+sinkhorn LogLoRet-SelfAttn-AttnPool+sigmoid" \
-#          sbatch -J GloRetGigaCls jobscripts/GloRet/GloRet.sh
+#          sbatch -J GloRetGigaCls deploy/slurm/GloRet/GloRet.sh
 #   3. {uni2, gigapath} x {cls, cls_avg, grid2x2}: the other five cells, two heads each (the same as in 2 for gigapath cls):
-#        TOP_P="1.0 2000" ENCODER=uni2 POOLING=cls HEADS="GloRet-SelfAttn-AttnPool LogLoRet-SelfAttn-AttnPool+dustbin" sbatch -J GloRetUni2Cls jobscripts/GloRet/GloRet.sh
+#        TOP_P="1.0 2000" ENCODER=uni2 POOLING=cls HEADS="GloRet-SelfAttn-AttnPool LogLoRet-SelfAttn-AttnPool+dustbin" sbatch -J GloRetUni2Cls deploy/slurm/GloRet/GloRet.sh
 #        (-J GloRetUni2ClsAvg / GloRetUni2Grid with POOLING=cls_avg / grid2x2; -J GloRetGigaClsAvg / GloRetGigaGrid with ENCODER=gigapath)
 #      The search of GloRet (exact | hnsw | ivf) is the retriever's, not trained: hnsw and ivf are TODO in
-#      stage2_retrieval/RetrieverGloRet.py, the weights are the same.
+#      locascope/core/stage2_retrieval/RetrieverGloRet.py, the weights are the same.
 #   4. d (--dim, the width after W_in) and d_r (--embed-dim, the retrieval vector) of gigapath cls, GloRet-SelfAttn-AttnPool:
 #      1024 and no change (1536: nothing is compressed, so a decoder loss would not exist). The weights' names do not hold
 #      the width: --tag keeps them apart (arm names for them: when the ablation is done).
-#        TOP_P=1.0 ENCODER=gigapath POOLING=cls HEADS=GloRet-SelfAttn-AttnPool EXTRA="--dim 1024 --embed-dim 1024 --tag d1024" sbatch -J GloRetDim1024 jobscripts/GloRet/GloRet.sh
-#        TOP_P=1.0 ENCODER=gigapath POOLING=cls HEADS=GloRet-SelfAttn-AttnPool EXTRA="--dim 1536 --embed-dim 1536 --tag d1536" sbatch -J GloRetDim1536 jobscripts/GloRet/GloRet.sh
+#        TOP_P=1.0 ENCODER=gigapath POOLING=cls HEADS=GloRet-SelfAttn-AttnPool EXTRA="--dim 1024 --embed-dim 1024 --tag d1024" sbatch -J GloRetDim1024 deploy/slurm/GloRet/GloRet.sh
+#        TOP_P=1.0 ENCODER=gigapath POOLING=cls HEADS=GloRet-SelfAttn-AttnPool EXTRA="--dim 1536 --embed-dim 1536 --tag d1536" sbatch -J GloRetDim1536 deploy/slurm/GloRet/GloRet.sh
 #      Each of these takes 8 GPUs (and the project 32 at most): send them as the GPUs free up, not all at once.
 # =============================================================================
 HEADS="${HEADS:-GloRet-SelfAttn-AttnPool}"
@@ -166,9 +166,9 @@ fi
 # One process per GPU the job was given (`torchrun`): each takes every Nth slide of an epoch, encodes its levels and
 # trains on them, and after every step the gradients are averaged over the processes, so there is one model per head.
 # With fewer GPUs, ask for them with their share of the CPUs and memory:
-#   sbatch --gpus-per-node=1 --cpus-per-task=12 --mem=200G jobscripts/GloRet/GloRet.sh
+#   sbatch --gpus-per-node=1 --cpus-per-task=12 --mem=200G deploy/slurm/GloRet/GloRet.sh
 # Two nodes (16 GPUs; the `16gpus` partition) are the same with a torchrun on each node, joined at the first:
-#   sbatch --partition=16gpus --nodes=2 --gpus-per-node=8 --cpus-per-task=96 --mem=1600G jobscripts/GloRet/GloRet.sh
+#   sbatch --partition=16gpus --nodes=2 --gpus-per-node=8 --cpus-per-task=96 --mem=1600G deploy/slurm/GloRet/GloRet.sh
 GPUS="${SLURM_GPUS_ON_NODE:-1}"
 NODES="${SLURM_NNODES:-1}"
 LAUNCH="python -u"
@@ -183,7 +183,7 @@ export PYTHONUNBUFFERED=1      # under torchrun a process's stdout is a pipe: wi
 export OMP_NUM_THREADS=1       # what torchrun sets anyway; set, it does not print its warning
 export PYTHONWARNINGS="ignore:Plan failed with a cudnnException:UserWarning"   # the tissue segmenter's, once a call
 
-$LAUNCH training/GloRet/cli/train.py \
+$LAUNCH -m locascope.training.GloRet.train \
   --heads $HEADS --encoder "$ENCODER" --pooling "$POOLING" --epochs "$EPOCHS" \
   --n-train-wsi "$N_TRAIN_WSI" --n-val-wsi "$N_VAL_WSI" --top-p $TOP_P $EXTRA
 status=$?

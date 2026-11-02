@@ -1,7 +1,7 @@
 """TissueMask -- a slide's tissue mask, the regions found in it, and the
 questions both can answer. Plain data: nothing here segments.
 
-    slide_mask = segmenter.segment_slide(wsi)      # TissueSegFunc: the producer
+    slide_mask = segmenter.segment_slide(wsi)      # TissueSeg: the producer
     mask = TissueMask(wsi, slide_mask)             # raw connected components
     mask = mask.filtered(0.01).merged()            # a recipe's region prep
     view = mask.patchable(256 * 4)                 # regions that fit one tile
@@ -40,8 +40,8 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file
 
-from Cache import CacheMismatch, atomic_file
-from ReadGeometry import ReadSpec
+from locascope.core.cache.Cache import CacheMismatch, atomic_file
+from locascope.core.slides.ReadGeometry import ReadSpec
 
 
 # Ceiling on what may be handed to cv2.connectedComponentsWithStats in one call.
@@ -487,7 +487,7 @@ class TissueMask:
         not mask px, so the resample is what keeps the backdrop at the mask's
         scale.
         """
-        from SlideReader import SlideReader                    # noqa: PLC0415
+        from locascope.core.slides.SlideReader import SlideReader                    # noqa: PLC0415
         H, W = self.main_mask.shape
         reader = SlideReader(getattr(wsi, 'slide', wsi), resize='area')
         ds = min(self.mask_ds_x, self.mask_ds_y)

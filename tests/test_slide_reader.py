@@ -1,8 +1,8 @@
 """test_slide_reader -- SlideReader against the slide itself.
 
-    python utilities/test_modules/test_slide_reader.py --wsi <path> [--level 1]
+    python tests/test_slide_reader.py --wsi <path> [--level 1]
 
-Run through `jobscripts/TestReadPath.sh`. Needs a slide; no GPU, no model.
+Run through `deploy/slurm/TestReadPath.sh`. Needs a slide; no GPU, no model.
 
     read   one position. A native read is `read_region_rgb` of the same
            rectangle, untouched; a read off the slide is None; a forced level
@@ -29,18 +29,15 @@ import sys
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 
-from ReadGeometry import ReadSpec                                # noqa: E402
-from SafeSlide import SafeSlide                                  # noqa: E402
-from SlideReader import SlideReader, degrade_resolution          # noqa: E402
-from PatchingLib import region_grids                             # noqa: E402
+from locascope.core.slides.ReadGeometry import ReadSpec                                # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader, degrade_resolution          # noqa: E402
+from locascope.core.tiles.PatchingLib import region_grids                             # noqa: E402
 
 TILE = 256
 TEXTURE = 2.0       # the decoy's mean |diff| that says "not blank glass"

@@ -2,7 +2,7 @@
 """spec.md 12 step 4: run Homographic Adaptation over a corpus.
 
     python training/SuperPathPoint/cli/make_ha_labels.py --datasets @legacy-val
-    python training/SuperPathPoint/cli/make_ha_labels.py --wsi BRACS_1228 --limit 100
+    python training/SuperPathPoint/cli/make_ha_labels.py --wsi BRACS_1003694 --limit 100
 
 Outputs (under each slide's draw of the corpus in this job's cache tree,
 .../draw=<sampler>/labels/; --labels-cache-job), one variant per rung:
@@ -49,24 +49,21 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
-from cli import (add_corpus_args, add_labels_args, add_slides_args,  # noqa: E402
+from locascope.training.SuperPathPoint.cli import (add_corpus_args, add_labels_args, add_slides_args,  # noqa: E402
                  corpus_arg, job_result_dir, labels_root, slides_from_args)
 
 
 import numpy as np                                                # noqa: E402
 import torch                                                      # noqa: E402
 
-from Cache import wsi_stem_of                                     # noqa: E402
-from common import KeypointLabelStore                # noqa: E402
-from common.KeypointLabelStore import (LabelMeta, batch_from_lists,  # noqa: E402
+from locascope.core.cache.Cache import wsi_stem_of                                     # noqa: E402
+from locascope.training.SuperPathPoint.common import KeypointLabelStore                # noqa: E402
+from locascope.training.SuperPathPoint.common.KeypointLabelStore import (LabelMeta, batch_from_lists,  # noqa: E402
                                        cap_for, points_from_prob)
-from SuperPoint.HomographicAdaptation import HaConfig              # noqa: E402
-from SuperPoint.Teacher import TeacherConfig                       # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.HomographicAdaptation import HaConfig              # noqa: E402
+from locascope.training.SuperPathPoint.SuperPoint.Teacher import TeacherConfig                       # noqa: E402
 
 
 #: Upstream's HA EXPORT value, `magic-point_coco_export.yaml:9`, which is the

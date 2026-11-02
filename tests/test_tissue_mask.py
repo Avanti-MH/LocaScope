@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Tests for the three mask modules, one direction:
 
-    TissueMaskConfig  ->  TissueSegFunc (producer)  ->  TissueMask (product)
+    TissueMaskConfig  ->  TissueSeg (producer)  ->  TissueMask (product)
     recipe + cache        slide -> SlideMask            SlideMask + regions
 
-    python utilities/test_modules/test_tissue_mask.py              # synthetic only
-    python utilities/test_modules/test_tissue_mask.py --wsi <slide> \\
+    python tests/test_tissue_mask.py              # synthetic only
+    python tests/test_tissue_mask.py --wsi <slide> \\
         [--seg hsv hest uni2_pca] [--sweep] [--ops] [--tiling]      # + a figure
 
 The synthetic half needs no weights, no GPU and no slide: the slides and the
@@ -25,7 +25,7 @@ WHAT THE SYNTHETIC HALF DEFENDS
                      origin and resolution; lengths never shifted by the origin;
                      no negative index wrapping to the far corner; views that
                      cannot leak into the mask they came from
-    TissueSegFunc    the level picked by ratio, not by openslide's strict rule;
+    TissueSeg    the level picked by ratio, not by openslide's strict rule;
                      a tiled read that equals the whole read; a method that does
                      not run reading nothing
     TissueMaskConfig a cache that serves the wrong mask (two recipes, one
@@ -46,22 +46,20 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
 
-from _paths import job_result_dir, setup_import_paths            # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 
-from Cache import CacheMismatch                                  # noqa: E402
-from TissueMask import SlideMask, TissueMask, TissueRegion       # noqa: E402
-from TissueMaskConfig import (MASK_RECIPES, MaskMaker,           # noqa: E402
+from locascope.core.cache.Cache import CacheMismatch                                  # noqa: E402
+from locascope.core.tiles.TissueMask import SlideMask, TissueMask, TissueRegion       # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import (MASK_RECIPES, MaskMaker,           # noqa: E402
                               TissueMaskConfig, add_mask_args,
                               mask_cfg_from_args)
-from TissueSegFunc import (PlaneSegConfig, TissueSegConfig,      # noqa: E402
+from locascope.core.backbones.TissueSeg import (PlaneSegConfig, TissueSegConfig,      # noqa: E402
                            TissueSegmenter, plane_geometry, tiled_apply)
-from ReadGeometry import nearest_level                           # noqa: E402
+from locascope.core.slides.ReadGeometry import nearest_level                           # noqa: E402
 
 _RESULTS = []
 
@@ -407,7 +405,7 @@ def t_slide_mask_components():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TissueSegFunc -- the producer
+#  TissueSeg -- the producer
 # ══════════════════════════════════════════════════════════════════════════════
 
 def t_seg_level_is_nearest_by_ratio():
@@ -489,14 +487,14 @@ def _textured_slide():
 
 
 def t_fingerprint_plane_segmenter():
-    from ConfigIdentity import check_fingerprint, digest
+    from locascope.core.config.ConfigIdentity import check_fingerprint, digest
     sm = PlaneSegConfig('hsv', seg_chunk_px=20_000,
                         read_chunk_px=20_000).build().segment_slide(_textured_slide())
     return check_fingerprint(PlaneSegConfig, digest(np.asarray(sm.mask)), FP_PLANE)
 
 
 def t_fingerprint_region_prep():
-    from ConfigIdentity import check_fingerprint, digest
+    from locascope.core.config.ConfigIdentity import check_fingerprint, digest
     wsi = _textured_slide()
     sm = PlaneSegConfig('hsv').build().segment_slide(wsi)
     regions = MASK_RECIPES['hsv'].regions(wsi, sm)
@@ -508,9 +506,9 @@ def t_fingerprint_region_prep():
 def t_fingerprint_slide_reader():
     """A native read, a shrink through each filter, a forced level: the pixels
     every cache made of slide pixels is made of."""
-    from ConfigIdentity import check_fingerprint, digest
-    from ReadGeometry import ReadSpec
-    from SlideReader import SlideReader
+    from locascope.core.config.ConfigIdentity import check_fingerprint, digest
+    from locascope.core.slides.ReadGeometry import ReadSpec
+    from locascope.core.slides.SlideReader import SlideReader
     wsi = _textured_slide()
     reads = [SlideReader(wsi, resize=r).read(380, 290, ReadSpec(96, 64), ds,
                                              level=lv)
@@ -645,7 +643,7 @@ def t_cfg_seg_fields_move_seg_id_and_not_region_id():
 def t_cfg_weights_content_moves_seg_id():
     """A finetune overwritten IN PLACE under the same path. The path cannot see
     it and a cache hit builds no model to hash, so the key reads the file."""
-    from HestSegFunc import HestSegConfig                        # noqa: PLC0415
+    from locascope.core.backbones.HestSeg import HestSegConfig                        # noqa: PLC0415
     with tempfile.TemporaryDirectory() as root:
         path = os.path.join(root, 'finetune.ckpt')
         with open(path, 'wb') as handle:
@@ -664,7 +662,7 @@ def t_cfg_weights_content_moves_seg_id():
 @contextlib.contextmanager
 def _cache_job():
     """A job name whose cache lives in a temp dir for the length of a test."""
-    import Cache
+    from locascope.core.cache import Cache
     saved = Cache.RESULT_DIR
     with tempfile.TemporaryDirectory() as tmp:
         Cache.RESULT_DIR = tmp
@@ -817,7 +815,7 @@ def real_slide(args):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt                              # noqa: PLC0415
     import torch                                                 # noqa: PLC0415
-    from SafeSlide import SafeSlide                              # noqa: PLC0415
+    from locascope.core.slides.SafeSlide import SafeSlide                              # noqa: PLC0415
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     recipes = {}

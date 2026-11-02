@@ -29,11 +29,11 @@ from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from SurvivalAnalysis import SurvivalProcess                      # noqa: E402
-from SurvivalAnalysis.Attribution import NONE                      # noqa: E402
-from SurvivalAnalysis.Patterns import PATTERNS, alive_from, classify  # noqa: E402
-from SurvivalAnalysis.NullModel import alive_rate_of, null_patterns  # noqa: E402
-from SurvivalAnalysis.AliveCandidates import (                     # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import SurvivalProcess                      # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Attribution import NONE                      # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.Patterns import PATTERNS, alive_from, classify  # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.NullModel import alive_rate_of, null_patterns  # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis.AliveCandidates import (                     # noqa: E402
     probe_via_probability_map, alive_probability_map,
     alive_scale_local_extremum)
 

@@ -19,7 +19,7 @@ ml load miniconda3/26.1.1
 ml load cuda/12.6
 
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  cli/demo_survival_analysis.py -- merged 2026-09-11 from two standalone
@@ -57,7 +57,7 @@ source jobscripts/_env.sh
 PARTS="${PARTS:-chains_stack merge_grid visualize}"
 
 # ── shared ───────────────────────────────────────────────────────────────
-# Path/stem resolved from WSI_NAME via `utilities/AccessDatasets.py`.
+# Path/stem resolved from WSI_NAME via `locascope/core/slides/AccessDatasets.py`.
 # chains_stack defaults to BRACS_1228 if unset; merge_grid only needs it
 # with CHECKPOINT or REAL_FLOW.
 WSI_NAME="${WSI_NAME:-}"
@@ -141,7 +141,7 @@ OUT="${OUT:-}"
 echo "======== DemoSurvivalAnalysis ========"
 echo "  parts  $PARTS"
 echo "  slide  ${WSI_NAME:-<part default>}   tile $TILE   c-rungs $C_RUNGS"
-python training/SuperPathPoint/cli/demo_survival_analysis.py \
+python -m locascope.training.SuperPathPoint.cli.demo_survival_analysis \
   --parts $PARTS \
   ${WSI_NAME:+--wsi-name "$WSI_NAME"} \
   --tile "$TILE" \

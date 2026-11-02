@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for utilities/Store.py -- feature stores and the feature-map cache.
+"""Tests for locascope/core/cache/Store.py -- feature stores and the feature-map cache.
 
-    python utilities/test_modules/test_store.py
-    python utilities/test_modules/test_store.py --with-model [--only-model]
+    python tests/test_store.py
+    python tests/test_store.py --with-model [--only-model]
 
 The unit tests need no slide, no model, no GPU: every store lives in a
 temporary directory, the encoder and the container are stand-ins, and the
@@ -41,24 +41,21 @@ from pathlib import Path
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
 
-from _paths import setup_import_paths                            # noqa: E402
 
-setup_import_paths()
 
 import numpy as np                                               # noqa: E402
 import torch                                                     # noqa: E402
 
-from PatchingLib import FeaturesMap, WsiFeaturesMap              # noqa: E402
-import Cache                                                     # noqa: E402
-from Cache import Address                                        # noqa: E402
-from Store import (FeatureMapCache, FeatureStore as FS,          # noqa: E402
+from locascope.core.tiles.PatchingLib import FeaturesMap, WsiFeaturesMap              # noqa: E402
+from locascope.core.cache import Cache                                                     # noqa: E402
+from locascope.core.cache.Cache import Address                                        # noqa: E402
+from locascope.core.cache.Store import (FeatureMapCache, FeatureStore as FS,          # noqa: E402
                    PooledFeatures, feature_id, StoreMismatch,
                    from_store_tensors, geometry_mismatch, raw_layout,
                    to_store_tensors)
-from PatchingLib import region_grids                             # noqa: E402
-from TissueMask import TissueRegion                              # noqa: E402
+from locascope.core.tiles.PatchingLib import region_grids                             # noqa: E402
+from locascope.core.tiles.TissueMask import TissueRegion                              # noqa: E402
 
 _RESULTS = []
 
@@ -586,12 +583,12 @@ def _row(name, comparison, gap):
 
 def run_precision(args) -> int:
     import csv
-    from AccessDatasets import locate
-    from SafeSlide import SafeSlide
-    from TileEncoderFunc import admissible_poolings, encoder_config, pooling_kinds
-    import Cache
-    from TissueMaskConfig import MASK_RECIPES, MaskMaker
-    from _paths import job_result_dir
+    from locascope.core.slides.AccessDatasets import locate
+    from locascope.core.slides.SafeSlide import SafeSlide
+    from locascope.core.backbones.TileEncoder import admissible_poolings, encoder_config, pooling_kinds
+    from locascope.core.cache import Cache
+    from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker
+    from locascope.paths import job_result_dir
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     cfg = encoder_config(args.encoder, batch_size=args.batch_size).with_model(dtype='fp16')

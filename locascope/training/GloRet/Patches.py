@@ -20,12 +20,12 @@ from typing import Any, Callable, Dict, Optional
 
 import torch
 
-from ReadGeometry import ReadSpec
-from stage2_retrieval.Context import GridSource, WindowSearch, encode_query
-from stage2_retrieval.Retriever import Extra, RetrievalOutput
-from stage2_retrieval.StageInterface import Candidate, CandidateSet
+from locascope.core.slides.ReadGeometry import ReadSpec
+from locascope.core.stage2_retrieval.Context import GridSource, WindowSearch, encode_query
+from locascope.core.stage2_retrieval.Retriever import Extra, RetrievalOutput
+from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet
 
-from training.GloRet.Lazy import QuerySource, TileAccess
+from locascope.training.GloRet.Lazy import QuerySource, TileAccess
 
 #: The pooling a patch-token source is read through (`GridSource.pooling`, the weights' file name, `NetCfg.tile_pool`).
 POOLING: str = 'attnpool'

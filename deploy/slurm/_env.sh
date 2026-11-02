@@ -11,7 +11,7 @@
 # Each encoder module therefore does os.environ.setdefault('HF_HOME', ...) above
 # its `import timm`, which is correct for the process that imports the encoder
 # first -- and that process is the exception. bench_stage2_retriever imports
-# TissueSegFunc, which imports HestSegFunc, which imports transformers, which
+# TissueSeg, which imports HestSeg, which imports transformers, which
 # imports huggingface_hub, all before the encoder module is named. The constants
 # were frozen to ~/.cache/huggingface, and 2.6 GB of UNI2 was re-downloaded on
 # 2026-08-21 while a complete copy sat in /work.
@@ -28,7 +28,7 @@
 # It lives in /work rather than $HOME because $HOME is a small quota and the
 # weights are ~7 GB before CONCH. LOCASCOPE_OUTPUT_ROOT is honoured for the same
 # reason _paths.py honours it -- one knob moves everything a run touches.
-export HF_HOME="${HF_HOME:-${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/model_weights}"
+export HF_HOME="${HF_HOME:-${LOCASCOPE_OUTPUT_ROOT:-$(dirname "$PWD")}/model_weights}"
 
 # Offline runs are NOT set here. A missing weight file would then fail with a
 # connection error rather than downloading, and the first run of a new encoder
@@ -39,7 +39,7 @@ export HF_HOME="${HF_HOME:-${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/model_weigh
 # wandb: writing outside the checkout, and WANDB_MODE made to work
 # ---------------------------------------------------------------------------
 # WANDB_MODE IS DELIBERATELY NOT SET HERE. A real run streams, and normal2
-# nodes DO reach api.wandb.ai -- `jobscripts/SuperPathPointJobs/
+# nodes DO reach api.wandb.ai -- `deploy/slurm/SuperPathPointJobs/
 # TrainSuperPathPoint.sh` records that, verified 2026-08-28 after the opposite
 # assumption had been written there as a fact and cost one run. Offline is for
 # a smoke run, not for the project.
@@ -61,7 +61,13 @@ export HF_HOME="${HF_HOME:-${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/model_weigh
 # to the CURRENT DIRECTORY -- which is the repo, since jobscripts are submitted
 # from the checkout. That put 101 MB of run output inside the working tree by
 # 2026-09-16, against the rule that everything a run produces lives
-# under /work/u26130998 where an `rm -rf` of the tree or a `git clean` cannot
+# outside the checkout where an `rm -rf` of the tree or a `git clean` cannot
 # take it and nothing can be staged by accident. Same knob, same reason, as
 # HF_HOME above.
-export WANDB_DIR="${WANDB_DIR:-${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}}"
+export WANDB_DIR="${WANDB_DIR:-${LOCASCOPE_OUTPUT_ROOT:-$(dirname "$PWD")}}"
+
+# The repo root on PYTHONPATH. Every module imports by its full name (`locascope.core.cache.Cache`).
+# Entry points start as `python -m locascope.cli.x`, which already puts the working directory (the repo
+# root: jobs are submitted from the checkout) on sys.path; the tests are still started by path
+# (`python tests/test_x.py`), which puts only the test's own directory there, so the repo root stays here.
+export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"

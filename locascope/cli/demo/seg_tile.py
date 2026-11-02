@@ -5,15 +5,15 @@ read except for `--method uni2`, which needs one to FIT its PCA basis first
 (see below).
 
 Neither existing tool answers "what would these methods say about this one
-tile": `utilities/cli/build_cache/build_mask_store.py` always fits + segments
-a WHOLE slide and always writes the result to the mask cache; `utilities/cli/
+tile": `locascope/cli/build_cache/build_mask_store.py` always fits + segments
+a WHOLE slide and always writes the result to the mask cache; `locascope/cli/
 diagnostics/inspect_pca_seg.py` is uni2-pca-seg only, and whole-slide too.
 This is the direct, no-cache, any-combination-of-the-four-methods way to look
 at one or more tiles.
 
-    python utilities/cli/demo/seg_tile.py --image tile.png --method hsv
-    python utilities/cli/demo/seg_tile.py --image tile.png --method hest
-    python utilities/cli/demo/seg_tile.py --image a.png b.png \\
+    python -m locascope.cli.demo.seg_tile --image tile.png --method hsv
+    python -m locascope.cli.demo.seg_tile --image tile.png --method hest
+    python -m locascope.cli.demo.seg_tile --image a.png b.png \\
         --method uni2 hest hsv otsu
 
 Outputs (in result/<SLURM_JOB_NAME or SegTile>/ unless --out):
@@ -46,7 +46,7 @@ tile's own slide cannot be recovered. If a uni2 fit cannot be resolved for a
 given tile (no folder match and no --wsi-name), that tile's uni2 panel is
 skipped with a printed note rather than failing the whole run.
 
-METHOD CHOICES -- TissueSegFunc.py's own table has the full contract
+METHOD CHOICES -- TissueSeg.py's own table has the full contract
 =======================================================================
     'hsv'    saturation/value thresholds. No model, no fit, per-pixel.
     'otsu'   Otsu on grayscale, excluding near-black. No model, no fit.
@@ -57,9 +57,9 @@ METHOD CHOICES -- TissueSegFunc.py's own table has the full contract
              this tool.
     'hest'   DeepLabV3 + ResNet-50 (MahmoodLab/hest-tissue-seg). No fit --
              fully convolutional, any tile size, one forward pass.
-    'uni2'   Uni2PcaSegFunc's PCA-on-UNI2-features method -- see above.
+    'uni2'   Uni2PcaSeg's PCA-on-UNI2-features method -- see above.
              Costs 3.5-6 minutes of GPU per slide fit
-             (`Uni2PcaSegFunc.LEVEL`'s own measurement), once per DISTINCT
+             (`Uni2PcaSeg.LEVEL`'s own measurement), once per DISTINCT
              slide in the batch, not once per tile.
 """
 
@@ -73,11 +73,6 @@ from dataclasses import replace
 from typing import Dict, Optional
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..'),
-          os.path.join(_HERE, '..', '..', '..', 'aiNNModel')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 import numpy as np                                               # noqa: E402
 import matplotlib                                                 # noqa: E402
 matplotlib.use('Agg')
@@ -85,13 +80,12 @@ import matplotlib.pyplot as plt                                  # noqa: E402
 import torch                                                      # noqa: E402
 from PIL import Image                                             # noqa: E402
 
-from _paths import job_result_dir, setup_import_paths            # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-setup_import_paths()
 
-from AccessDatasets import locate                                 # noqa: E402
-from SafeSlide import SafeSlide                                   # noqa: E402
-from TissueMaskConfig import MASK_RECIPES                          # noqa: E402
+from locascope.core.slides.AccessDatasets import locate                                 # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                   # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES                          # noqa: E402
 
 
 #: `{slide}__ds{ds}__t{tile}__{hash}` -- the tile cache folder-naming

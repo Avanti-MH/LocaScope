@@ -25,10 +25,10 @@ from typing import TYPE_CHECKING, Dict, Iterator, Optional, Protocol, Tuple, Uni
 
 import numpy as np
 
-from stage2_retrieval.StageInterface import Candidate, CandidateSet
+from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet
 
 if TYPE_CHECKING:       # annotations only
-    from SafeSlide import SafeSlide
+    from locascope.core.slides.SafeSlide import SafeSlide
 
 
 @dataclass(frozen=True)

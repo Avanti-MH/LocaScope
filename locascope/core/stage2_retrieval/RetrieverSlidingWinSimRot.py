@@ -32,15 +32,15 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
-from ConfigIdentity import register
-from PatchingLib import FeaturesMap
-from SafeSlide import SafeSlide
-from TileEncoderFunc import TileEncoder, TileEncoderConfig, encoder_config
-from stage1_estimation.StageInterface import EstMppResult
-from stage2_retrieval.Context import (LevelFeatures, QueryFeatures, WindowSearch, first_phase_output,
+from locascope.core.config.ConfigIdentity import register
+from locascope.core.tiles.PatchingLib import FeaturesMap
+from locascope.core.slides.SafeSlide import SafeSlide
+from locascope.core.backbones.TileEncoder import TileEncoder, TileEncoderConfig, encoder_config
+from locascope.core.stage1_estimation.StageInterface import EstMppResult
+from locascope.core.stage2_retrieval.Context import (LevelFeatures, QueryFeatures, WindowSearch, first_phase_output,
                                       top_candidates)
-from stage2_retrieval.Retriever import EncoderPool, Extra, RetrievalOutput, Retriever, RetrieverConfig
-from stage2_retrieval.StageInterface import Candidate, CandidateSet
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, Extra, RetrievalOutput, Retriever, RetrieverConfig
+from locascope.core.stage2_retrieval.StageInterface import Candidate, CandidateSet
 
 
 # ── the window kernel ─────────────────────────────────────────────────────────

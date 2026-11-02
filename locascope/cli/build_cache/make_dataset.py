@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 '''Build what AccessDatasets reads besides the slides themselves: the catalog, and the virtual datasets.
 
-    python utilities/cli/build_cache/make_dataset.py --catalog                    # every registered dataset
-    python utilities/cli/build_cache/make_dataset.py --catalog --datasets bracs/test --refresh
-    python utilities/cli/build_cache/make_dataset.py --recipe pure                # writes @pure-train, @pure-val, @pure-test
-    python utilities/cli/build_cache/make_dataset.py --recipe pure-half           # @pure-val in two: @pure-half-val, @pure-half-test
-    python utilities/cli/build_cache/make_dataset.py --catalog --recipe pure         # the catalog first, then that
-    python utilities/cli/build_cache/make_dataset.py --list                       # what is written, checked
-    python utilities/cli/build_cache/make_dataset.py --bracs-prune                # what slimming BRACS deletes
+    python -m locascope.cli.build_cache.make_dataset --catalog                    # every registered dataset
+    python -m locascope.cli.build_cache.make_dataset --catalog --datasets bracs/test --refresh
+    python -m locascope.cli.build_cache.make_dataset --recipe pure                # writes @pure-train, @pure-val, @pure-test
+    python -m locascope.cli.build_cache.make_dataset --recipe pure-half           # @pure-val in two: @pure-half-val, @pure-half-test
+    python -m locascope.cli.build_cache.make_dataset --catalog --recipe pure         # the catalog first, then that
+    python -m locascope.cli.build_cache.make_dataset --list                       # what is written, checked
+    python -m locascope.cli.build_cache.make_dataset --bracs-prune                # what slimming BRACS deletes
 
 Both live in AccessDatasets' own cache, `result/cache/<DATASETS_JOB>/`, whatever this job is called: every job
 reads the same catalog and the same `@val`.
@@ -33,15 +33,12 @@ import sys
 from itertools import combinations
 from typing import Callable, Dict, List, Sequence, Tuple
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from _paths import DATASETS_DIR, setup_import_paths                    # noqa: E402
-setup_import_paths()
+from locascope.paths import DATASETS_DIR   # noqa: E402
 
-from AccessDatasets import (DATASETS_JOB, Member, Selection, SlideInfo, build_catalog,  # noqa: E402
+from locascope.core.slides.AccessDatasets import (DATASETS_JOB, Member, Selection, SlideInfo, build_catalog,  # noqa: E402
                             dataset_ids, locate, save_virtual, select, vdataset_entry, virtual_ids,
                             virtual_record)
-import AccessDatasets                                               # noqa: E402
+from locascope.core.slides import AccessDatasets                                               # noqa: E402
 
 
 # ── the recipes ──────────────────────────────────────────────────────────────

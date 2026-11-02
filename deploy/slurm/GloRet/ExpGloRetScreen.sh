@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-#  The experiments of the training mechanisms and of the arms (stage2_retrieval/proposal.md §9, §10), at a size to compare
+#  The experiments of the training mechanisms and of the arms (locascope/core/stage2_retrieval/proposal.md §9, §10), at a size to compare
 #  them on: gigapath cls, 20 slides of each training dataset, 4 epochs, the validation FoVs 32 a visit (more, so that two
 #  settings that differ by a few points can be told from noise).
 #
@@ -19,14 +19,14 @@
 #
 #  Rounds 2 to 4 take the winner of round 1 for GloRet's and LogLoRet's --top-p: G_TOP (default 0.05) and L_TOP (2000).
 #  TilePool attnpool is not a head of these jobs (its tokens do not fit them): its experiment is
-#      JOB=ExpGloRetAttnPool N_TRAIN_WSI=20 N_VAL_WSI=10 NODES=2 GPUS=4 PARTITION=16gpus TIME=24:00:00 bash jobscripts/GloRet/GloRetAttnPool.sh
+#      JOB=ExpGloRetAttnPool N_TRAIN_WSI=20 N_VAL_WSI=10 NODES=2 GPUS=4 PARTITION=16gpus TIME=24:00:00 bash deploy/slurm/GloRet/GloRetAttnPool.sh
 #
-#    ROUND=1 bash jobscripts/GloRet/ExpGloRetScreen.sh      # one job name, re-sent over itself: its log is overwritten, its
+#    ROUND=1 bash deploy/slurm/GloRet/ExpGloRetScreen.sh      # one job name, re-sent over itself: its log is overwritten, its
 #                                                           # weights (result/ExpGloRetScreen/) are named by round (--tag) and head
-#    DRY_RUN=1 ROUND=2 bash jobscripts/GloRet/ExpGloRetScreen.sh   # the sbatch line; submits nothing
+#    DRY_RUN=1 ROUND=2 bash deploy/slurm/GloRet/ExpGloRetScreen.sh   # the sbatch line; submits nothing
 #    AFTER=<job id> ROUND=1 bash ...                       # starts only if that job (TestGloRet) ended well
 #
-#  A step with --top-p 1.0 costs every window of the level whatever the number of FoVs (training/GloRet/Full.py), so a visit
+#  A step with --top-p 1.0 costs every window of the level whatever the number of FoVs (locascope/training/GloRet/Full.py), so a visit
 #  here is 6 steps of 16 FoVs, not the 16 steps of 8 of a formal run. There is no `make clean-exp`: rm -rf result/ExpGloRetScreen.
 # =============================================================================
 ROUND="${ROUND:-1}"
@@ -66,7 +66,7 @@ export EXTRA="--tag round$ROUND --fov-per-visit 64 --steps-per-visit 4 --fovs-pe
 CMD=(sbatch -J "$JOB" --partition=8gpus --time="${TIME:-24:00:00}" --nodes=1 --gpus-per-node=4 --cpus-per-task=48 --mem=800G
      --exclude="$EXCLUDE")
 [ -n "${AFTER:-}" ] && CMD+=(--dependency="afterok:$AFTER")      # AFTER=<job id>: start only when that job ended well (a test)
-CMD+=(jobscripts/GloRet/GloRet.sh)
+CMD+=(deploy/slurm/GloRet/GloRet.sh)
 echo "round $ROUND: $(echo $HEADS | wc -w) heads, --top-p $TOP_P, $EPOCHS epochs of $N_TRAIN_WSI slides a dataset"
 if [ "$DRY_RUN" = "1" ]; then
   echo "HEADS=\"$HEADS\""

@@ -492,7 +492,7 @@ $$
 
 ### 9.4 TilePool = `attnpool` 的訓練流程
 
-patch token 約 0.6 MB 一個 tile（196 × 1536 × fp16），不能像 `cls`／`cls_avg` 那樣把整個 level 快取，所以與其他 arm 的流程不同，獨立成三個階段（`jobscripts/GloRet/GloRetAttnPool.sh`）：
+patch token 約 0.6 MB 一個 tile（196 × 1536 × fp16），不能像 `cls`／`cls_avg` 那樣把整個 level 快取，所以與其他 arm 的流程不同，獨立成三個階段（`deploy/slurm/GloRet/GloRetAttnPool.sh`）：
 
 1. **階段 A**：只在粗 level（ds $\ge 4$）訓練，patch token 放 host 記憶體；GloRet 與 LogLoRet。
 2. **階段 B**：目的是**訓練不用看整個細 level**。細 level（ds $\le 2$）上，LogLoRet 以 SlideWin 的 top-10000 名單、GloRet 以 `@items=list` 當 reranker 繼續訓練（起點為 A 的權重）；池化層一併微調。level 是 lazy 的（`Lazy.LazyLevel`）：只在某個窗被用到時才讀並編碼它底下的 tile。pool 的選法與其他階段**完全相同**（§9.5）：warm-up 期間由 teacher（名單順序）選，之後（或沒有 warm-up）由網路自己對名單條目評分來選；評分時讀到的 tile 只用一次就丟（不保留），被選中的 pool 的 tile 讀一次並保留到這個 visit 結束。名單裡沒有正例的 FoV 在 lazy level 上不補答案（答案的 token 沒有讀），整個跳過。
@@ -558,7 +558,7 @@ patch token 約 0.6 MB 一個 tile（196 × 1536 × fp16），不能像 `cls`／
 3. Arch 1 作 Phase 1，對照 SlideWin 的 $R@100$。
 4. Arch 2 作 Phase 2：逐項加入 evidence（global → aligned/margin → bi → coverage/dustbin → match feature）。
 5. Exact vs ANN（僅 Arch 1）。
-6. 基本組合（每個 job 的指令記在 `jobscripts/GloRet/GloRet.sh` 開頭）：
+6. 基本組合（每個 job 的指令記在 `deploy/slurm/GloRet/GloRet.sh` 開頭）：
    - attnpool 單獨（gigapath，`GloRet-SelfAttn-AttnPool`，三階段）。
    - $d$ 消融（gigapath `cls`，`GloRet-SelfAttn-AttnPool`）：$d=d_r=1024$ 與不壓縮（$d=d_r=1536$，AE／VAE 自動失效）。
    - {uni2, gigapath} × {`cls`, `cls_avg`, `grid2x2`}：每格 `GloRet-SelfAttn-AttnPool`（搜尋後端 `exact`／`hnsw`／`ivf` 不重訓）與 `LogLoRet-SelfAttn-AttnPool+dustbin`。
@@ -578,7 +578,7 @@ patch token 約 0.6 MB 一個 tile（196 × 1536 × fp16），不能像 `cls`／
 
    每項要報 R@1／R@10／R@500，並依 ds 層級拆開（ds≥4 的 R@500 飽和，以 R@1／R@10 比較）。
 
-   **怎麼比**：一個設定就是一個 head（`Name@w-geo=1.0@sigma=2`，旗標見 `train.py` 的 `HEAD_FLAGS`；§9.5 的 `@items`、`@top`），同一個 job 的所有 head 吃同一批 FoV、同一份 level 編碼、同一個驗證集，所以是配對比較。`jobscripts/GloRet/ExpGloRetScreen.sh` 的 `ROUND=1` 是候選與 `--top-p`，`2` 是標籤，`3` 是溫度、學習率、寬度、decoder 與 LogLoRet 的輔助 loss，`4` 是上面 gigapath `cls` 的十五個 arm；規模：每個資料集 20 張 slide、4 個 epoch、驗證每個 visit 32 個 FoV（n 夠大才分得出幾個百分點的差）。2 到 4 輪用第 1 輪贏的 `--top-p`（`G_TOP`、`L_TOP`）。attnpool 不在這些 job 裡（token 放不進），它的實驗是 `GloRetAttnPool.sh` 的縮小版（`JOB=ExpGloRetAttnPool`），階段 C 的設定與第 4 輪相同，才有可比性。
+   **怎麼比**：一個設定就是一個 head（`Name@w-geo=1.0@sigma=2`，旗標見 `train.py` 的 `HEAD_FLAGS`；§9.5 的 `@items`、`@top`），同一個 job 的所有 head 吃同一批 FoV、同一份 level 編碼、同一個驗證集，所以是配對比較。`deploy/slurm/GloRet/ExpGloRetScreen.sh` 的 `ROUND=1` 是候選與 `--top-p`，`2` 是標籤，`3` 是溫度、學習率、寬度、decoder 與 LogLoRet 的輔助 loss，`4` 是上面 gigapath `cls` 的十五個 arm；規模：每個資料集 20 張 slide、4 個 epoch、驗證每個 visit 32 個 FoV（n 夠大才分得出幾個百分點的差）。2 到 4 輪用第 1 輪贏的 `--top-p`（`G_TOP`、`L_TOP`）。attnpool 不在這些 job 裡（token 放不進），它的實驗是 `GloRetAttnPool.sh` 的縮小版（`JOB=ExpGloRetAttnPool`），階段 C 的設定與第 4 輪相同，才有可比性。
 
 ---
 

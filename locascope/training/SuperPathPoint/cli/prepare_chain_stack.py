@@ -4,7 +4,7 @@
     python training/SuperPathPoint/cli/prepare_chain_stack.py \
         --wsi <path> --wsi-stem <stem>              # one slide
     python training/SuperPathPoint/cli/prepare_chain_stack.py
-        # no --wsi -- all 12 slides of the corpus (see _CORPUS_SLIDES)
+        # no --wsi -- all 12 slides of the corpus (see corpus_slides)
 
 Decides which corpus each axis reads, then calls that axis's `from_own()` --
 the enumeration and lazy read logic lives in `ChainStack.py`
@@ -13,7 +13,7 @@ is not in the cache yet is drawn by that call (`Corpora.Corpus.draw`).
 
 ONE JOB, 12 SLIDES -- `--wsi`/`--wsi-stem` OMITTED, NOT A FLAG.
 ================================================================================
-Omitting BOTH runs `_CORPUS_SLIDES` -- the same 12 slides `BuildMaskStore.sh`
+Omitting BOTH runs `corpus_slides()` -- the same 12 slides `BuildMaskStore.sh`
 builds masks for and `stageA` covers -- one after another in the same
 process. Passing `--wsi` means exactly one slide.
 
@@ -49,32 +49,31 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', '..', '..', 'utilities'))
-import _paths                                                     # noqa: E402
-_paths.setup_import_paths('SuperPathPoint')
+from locascope import paths as _paths                                                     # noqa: E402
 
-from cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
+from locascope.training.SuperPathPoint.cli import (add_chainstack_args, add_corpus_args,  # noqa: E402
                  chainstack_root, corpus_from_args)
 
-import AccessDatasets                                              # noqa: E402
-from SafeSlide import SafeSlide                                   # noqa: E402
-from SurvivalAnalysis import ChainStack                           # noqa: E402
-from common.Corpora import AXIS_RECIPE, Corpus                    # noqa: E402
+from locascope.core.slides import AccessDatasets                                              # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                   # noqa: E402
+from locascope.training.SuperPathPoint.SurvivalAnalysis import ChainStack                           # noqa: E402
+from locascope.training.SuperPathPoint.common.Corpora import AXIS_RECIPE, Corpus                    # noqa: E402
 
 #: The 12-slide corpus (spec.md 13), by NAME -- `AccessDatasets.locate(name)`
 #: resolves the path. MUST STAY IN SYNC with `BuildMaskStore.sh`'s `SLIDES`
 #: array (bash, so it hardcodes paths). Each name is what the mask and
 #: draw caches key the slide by.
 _CORPUS_SLIDE_NAMES = [
-    'BRACS_1228', 'BRACS_1476', 'BRACS_1936', 'BRACS_1579', 'BRACS_1284',
+    'BRACS_1003694', 'BRACS_1474', 'BRACS_1813', 'BRACS_1579', 'BRACS_1411',
     'S1104233,G7E,110208', 'S1104360,G7E,110208', 'S1151088,G7E,111220',
     'S1103520,G7E,110126', 'S1140701,G7E,111018',
     'BRACS_1598',                 # held out
     'S1103627,G7E,110127',        # held out
 ]
-_CORPUS_SLIDES = [(name, AccessDatasets.locate(name).path)
-                 for name in _CORPUS_SLIDE_NAMES]
+def corpus_slides() -> list[tuple[str, str]]:
+    """`(name, path)` of the corpus slides, looked up when asked for: a missing slide stops the run that needs
+    the corpus, not the import of this module (which `survival_alpha_analysis` and the demo only borrow from)."""
+    return [(name, AccessDatasets.locate(name).path) for name in _CORPUS_SLIDE_NAMES]
 
 
 def add_axis_corpus_args(ap) -> None:
@@ -162,7 +161,7 @@ def main():
     ap.add_argument('--wsi', default=None,
                     help='one slide only. Omit together with --wsi-stem to '
                          'build the whole 12-slide corpus instead '
-                         '(_CORPUS_SLIDES)')
+                         '(corpus_slides)')
     ap.add_argument('--wsi-stem', default=None)
     add_corpus_args(ap, corpus=False)
     ap.add_argument('--rungs', type=float, nargs='+',
@@ -189,9 +188,9 @@ def main():
     if args.wsi is not None:
         slides = [(args.wsi_stem, args.wsi)]
     else:
-        slides = _CORPUS_SLIDES
+        slides = corpus_slides()
         print(f'no --wsi given -- building the full {len(slides)}-slide '
-              f'corpus (spec.md 13, _CORPUS_SLIDES)', flush=True)
+              f'corpus (spec.md 13, corpus_slides)', flush=True)
 
     batch = len(slides) > 1
     results = {}

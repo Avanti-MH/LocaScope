@@ -71,7 +71,7 @@ stage 1  EstMppResult
   證明這點。pipeline 不開 level store／feature store。
 - **答案怎麼算只有一份定義**：答案是哪格、排第幾、名單裡的位置，只在 `BenchCommon`（`answers`、`ranked_ranks`、`listed_places`），
   bench、pipeline 的 truth、analyze、plot 都用它。bench 不另存評分列：`result/Stage2RetrieverBench/<encoder>/stage2_retriever.csv` 每張 slide
-  從 cache 的 entry 讀出（`--assemble` 只讀 cache 重組，`--report-only` 讀這個 csv 出報表）。一個 entry 存什麼，準則見 `ARCHITECTURE.md`「entry 存什麼」。
+  從 cache 的 entry 讀出（`cli/metrics/analyze_stage2_metrics.py` 用 bench 的同一組旗標讀 cache 重組出 rows，寫 csv 與報表；`--csv` 則直接讀現成的 csv）。一個 entry 存什麼，準則見 `ARCHITECTURE.md`「entry 存什麼」。
 
 ---
 
@@ -346,4 +346,4 @@ logit = 視窗向量 · query 向量 / 溫度            對象是「整層所�
 ### A.4 要記得的兩個限制
 
 - reranker 的**訓練候選只來自 sliding window 的名單**（`uni2-avg-k500`，`cls_avg+mean`）。新 bench 允許把 TileGT 接在別的 retriever 的名單後面，那是訓練與使用的候選分布不同。
-- `training/RerankHead/cli/train.py` 的 encoder 與 pooling 由 `--encoder`（`uni2`、`gigapath`）和 `--pooling`（預設 `cls_avg`）指定，heads 讀同一個 pooling；`--k`（預設 500）是訓練用的名單長度。
+- `locascope/training/RerankHead/train.py` 的 encoder 與 pooling 由 `--encoder`（`uni2`、`gigapath`）和 `--pooling`（預設 `cls_avg`）指定，heads 讀同一個 pooling；`--k`（預設 500）是訓練用的名單長度。

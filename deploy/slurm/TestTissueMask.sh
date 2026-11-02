@@ -17,12 +17,12 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 
 # =============================================================================
-# utilities/test_modules/test_uni2_pca_seg.py without a slide (config,
-# helpers), then utilities/test_modules/test_tissue_mask.py: the synthetic
+# tests/test_uni2_pca_seg.py without a slide (config,
+# helpers), then tests/test_tissue_mask.py: the synthetic
 # tests first (they must pass before any figure is drawn), then one figure of
 # what each --seg recipe makes of $WSI.
 #
@@ -42,9 +42,9 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # name if it is not one. Ki67 names contain commas, so do NOT put WSI_NAME=...
 # inside --export=... (comma splits). Export in the shell instead:
 #   WSI_NAME='S1104043,G7E,110207' SEG='hsv hest' \
-#     sbatch --export=ALL,WSI_NAME,SEG jobscripts/TestTissueMask.sh
+#     sbatch --export=ALL,WSI_NAME,SEG deploy/slurm/TestTissueMask.sh
 WSI_NAME="${WSI_NAME:-S1104233,G7E,110208}"
-WSI=$(python -c 'import sys; sys.path.insert(0, "utilities"); from AccessDatasets import locate; print(locate(sys.argv[1]).path)' "$WSI_NAME") \
+WSI=$(python -c 'import sys; from locascope.core.slides.AccessDatasets import locate; print(locate(sys.argv[1]).path)' "$WSI_NAME") \
   || { echo "could not resolve $WSI_NAME"; exit 1; }
 SEG="${SEG:-hsv hest uni2_pca}"
 # 1000 = Uni2PcaSegConfig's own fit_tiles, i.e. the production mask. This used
@@ -73,11 +73,11 @@ REGION_IDX="${REGION_IDX:---no-region-index}"   # alternative: --region-index
 # ---------------- Run ----------------
 # test_uni2_pca_seg's slide-free tier first: config, helpers. Seconds.
 echo "======== test_uni2_pca_seg ========"
-python utilities/test_modules/test_uni2_pca_seg.py
+python tests/test_uni2_pca_seg.py
 status=$?
 echo ""
 echo "======== test_tissue_mask ========"
-python utilities/test_modules/test_tissue_mask.py \
+python tests/test_tissue_mask.py \
   --wsi "$WSI" \
   --seg $SEG --pca-fit-tiles $PCA_FIT_TILES \
   $OPS    --ops-patch-tile $OPS_PATCH_TILE --ops-patch-ds $OPS_PATCH_DS \

@@ -58,8 +58,8 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from ConfigIdentity import IdentifiedBuild, IdentifiedConfig, enc, parts_of
-from stage2_retrieval.StageInterface import CandidateSet
+from locascope.core.config.ConfigIdentity import IdentifiedBuild, IdentifiedConfig, enc, parts_of
+from locascope.core.stage2_retrieval.StageInterface import CandidateSet
 
 if TYPE_CHECKING:       # annotations only
     import numpy as np
@@ -291,7 +291,7 @@ class Retriever(IdentifiedBuild):
     def takes_wsi(cls) -> bool:
         """True when the class takes stage 1's estimate and finds the slide's windows itself (the WSI
         interface)."""
-        from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+        from locascope.core.stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
         return EstMppResult in cls.UPSTREAM
 
     @classmethod
@@ -303,7 +303,7 @@ class Retriever(IdentifiedBuild):
         """The whole list (`list_limit` long, or every window there is when fewer exist). By default the
         upstream's type picks `run_wsi` or `run_candidates`; a subclass with one interface may override `run`
         instead."""
-        from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+        from locascope.core.stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
         if isinstance(upstream, EstMppResult):
             return self.run_wsi(upstream, query)
         return self.run_candidates(upstream, query)
@@ -323,8 +323,8 @@ class Retriever(IdentifiedBuild):
         rotation the query fits at, on both lattices. The list carries no extras and no order. It is a
         candidate per window -- some millions for a large slide -- which is what the WSI interface exists to
         avoid."""
-        from stage2_retrieval.Context import SlideLevels              # noqa: PLC0415
-        from stage2_retrieval.StageInterface import Candidate         # noqa: PLC0415
+        from locascope.core.stage2_retrieval.Context import SlideLevels              # noqa: PLC0415
+        from locascope.core.stage2_retrieval.StageInterface import Candidate         # noqa: PLC0415
         tile: int = int(getattr(self.cfg, 'tile_size', 256))
         overlap: bool = bool(getattr(self.cfg, 'overlap', True))
         if self.wsi is None:

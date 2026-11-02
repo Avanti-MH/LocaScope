@@ -17,20 +17,20 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
-#  utilities/test_modules/test_cache.py -- utilities/Cache.py: the cache tree,
+#  tests/test_cache.py -- locascope/core/cache/Cache.py: the cache tree,
 #  addresses and entries, atomic writes, the record, the slide key.
-#  utilities/test_modules/test_store.py -- utilities/Store.py: addresses,
+#  tests/test_store.py -- locascope/core/cache/Store.py: addresses,
 #  validation, the feature-map cache, pre-tile rungs. No slide, no model.
 #
-#    sbatch jobscripts/TestStore.sh                    the unit tests
-#    WITH_MODEL=1 sbatch jobscripts/TestStore.sh       + how far a pooling computed
+#    sbatch deploy/slurm/TestStore.sh                    the unit tests
+#    WITH_MODEL=1 sbatch deploy/slurm/TestStore.sh       + how far a pooling computed
 #                                                      live is from the same one
 #                                                      taken from a stored raw
 #                                                      output, on real tiles
-#    ONLY_MODEL=1 sbatch jobscripts/TestStore.sh       just that measurement
+#    ONLY_MODEL=1 sbatch deploy/slurm/TestStore.sh       just that measurement
 #  ENCODER (default uni2), TILES (per slide and level, default 200), LEVELS, SLIDES,
 #  SEG (default hest), MASK_CACHE_JOB (default Masks: the shared hest masks are
 #  reused; empty = this job's own cache).
@@ -52,13 +52,13 @@ MASK_CACHE_JOB="${MASK_CACHE_JOB-Masks}"
 [ -n "${LEVELS:-}" ] && ARGS+=(--levels $LEVELS)
 
 echo "======== test_cache.py ========"
-python utilities/test_modules/test_cache.py
+python tests/test_cache.py
 rc=$?
 [ $rc -ne 0 ] && status=$rc
 
 echo ""
 echo "======== test_store.py ${ARGS[*]} ========"
-python utilities/test_modules/test_store.py "${ARGS[@]}"
+python tests/test_store.py "${ARGS[@]}"
 rc=$?
 [ $rc -ne 0 ] && status=$rc
 

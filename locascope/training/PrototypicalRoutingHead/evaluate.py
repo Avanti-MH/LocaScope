@@ -11,9 +11,9 @@ two ways, into two pairs of CSVs:
                held-out combination, K support x K query batches, rung ->
                combo -> dataset -> total means.
 
-    python training/PrototypicalRoutingHead/cli/evaluate.py
+    python -m locascope.training.PrototypicalRoutingHead.evaluate
 
-Separate from `train.py` on purpose, same reasoning `ClassifyingRoutingHead/cli/
+Separate from `train.py` on purpose, same reasoning `ClassifyingRoutingHead/
 evaluate.py`'s own module docstring gives: the test set is the slides
 of the two datasets `train.py`'s val set did NOT take, and it is meant to be looked at once a
 question is settled, not once per training run.
@@ -28,7 +28,7 @@ logic against the test set would be the same mistake in a new file.
 
 AS MANY SLIDES AS VAL, DEEPER: `--n-wsi 10 --n-per-rung 50` (val: the same 10
 slides of each dataset, `--val-n-per-rung 20`) -- every slide of `@pure-half-test`,
-the same depth `ClassifyingRoutingHead/cli/evaluate.py`'s own defaults use.
+the same depth `ClassifyingRoutingHead/evaluate.py`'s own defaults use.
 
 ONLY the full 6-way combo (`tuple(RUNGS)`, `Episodes.HELD_OUT_COMBOS`'s own
 third entry) -- not the 3-way/4-way probes. Those are compositional-
@@ -38,7 +38,7 @@ generalise), and mixing the probes back in here would just re-measure, at
 greater depth, a question val already answers.
 
 `--tag` (`nargs='+'`, default ALL THREE: `6rung`/`native`/`best`) -- unlike
-`ClassifyingRoutingHead/cli/evaluate.py`'s `best`/`last`/`best_unweighted`, this
+`ClassifyingRoutingHead/evaluate.py`'s `best`/`last`/`best_unweighted`, this
 project's three checkpoint-selection criteria (`save_tagged`'s own
 docstring) do not always agree on which epoch wins, so scoring only one by
 default would silently answer "which epoch under ONE of three criteria" --
@@ -69,23 +69,21 @@ from types import SimpleNamespace
 from typing import Dict, List, Sequence
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities'))
-from _paths import setup_import_paths, job_result_dir              # noqa: E402
-setup_import_paths()
+from locascope.paths import job_result_dir   # noqa: E402
 
 import torch                                                        # noqa: E402
 
-from training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
+from locascope.training.ClassifyingRoutingHead.Datasets import (                      # noqa: E402
     add_cache_args, build_manifest, data_record, open_caches, RUNGS,
     RenderConfig,
     CameraBank)
-from AccessDatasets import by_source                                 # noqa: E402
-from training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
+from locascope.core.slides.AccessDatasets import by_source                                 # noqa: E402
+from locascope.training.PrototypicalRoutingHead.Episodes import (              # noqa: E402
     HELD_OUT_COMBOS, group_by_wsi_name, max_feasible_k, pool_by_rung,
     render_episode, sample_val_episode)
-from Checkpoints import build_prototype_from_checkpoint              # noqa: E402
+from locascope.core.networks.Checkpoints import build_prototype_from_checkpoint              # noqa: E402
 # Reused, not reimplemented -- see this module's own docstring.
-from train import (encode_group, pair_forward, val_episode_detail,  # noqa: E402
+from locascope.training.PrototypicalRoutingHead.train import (encode_group, pair_forward, val_episode_detail,  # noqa: E402
                    combo_report, kxk_report, score_kxk, _auto_int)
 
 
@@ -98,7 +96,7 @@ def test_manifests(args, caches, out_dir: Path):
     THE FIRST `args.n_wsi` of each dataset in the test set's order (`by_source`),
     not a fresh draw -- the virtual dataset already shuffled once, so a prefix is a sample, and the
     SAME sample every time without a second seed to keep in step with the
-    first (`ClassifyingRoutingHead/cli/evaluate.py`'s own `test_rows` reasoning).
+    first (`ClassifyingRoutingHead/evaluate.py`'s own `test_rows` reasoning).
     The set is READ (`--test-dataset`; it refuses when it was never written): one derived
     here could disagree with the one `train.py` selected checkpoints on.
     '''
@@ -201,7 +199,7 @@ def main() -> int:
 
     # One process: it renders in `workers` threads of the job's cpus and
     # keeps what is left for torch (train.py's split).
-    from CpuBudget import CpuBudget                                 # noqa: PLC0415
+    from locascope.host.cpu import CpuBudget                                 # noqa: PLC0415
     budget = CpuBudget.for_job().apply()
     print(f'  {budget.line()}', flush=True)
     render_pool = (ThreadPoolExecutor(max_workers=budget.workers)
@@ -289,7 +287,7 @@ def main() -> int:
         num_prefix = int(encoder.model_spec.num_prefix)
         extra = ckpt.get('extra', {})
         # Everything else the episodes are made of (Datasets.data_record).
-        from ConfigIdentity import record_diff                    # noqa: PLC0415
+        from locascope.core.config.ConfigIdentity import record_diff                    # noqa: PLC0415
         stale = record_diff(extra.get('data'), data_record(args.tile, args.seg))
         if stale:
             raise ValueError(

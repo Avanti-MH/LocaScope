@@ -37,10 +37,10 @@ as broken. SlideProbe replaces the handle on each failure, which is also why
 `reopens` equals the number of broken blocks.
 
 Usage:
-    python utilities/cli/diagnostics/scan_wsi_holes.py \\
-        --wsi-path "/work/u26130998/datasets_holed/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
+    python -m locascope.cli.diagnostics.scan_wsi_holes \\
+        --wsi-path "$LOCASCOPE_DATA_ROOT/datasets_holed/S1103037_G7E_110122_mrxs/S1103037,G7E,110122.mrxs" \\
         --levels 0,1,2,3,4 --block 4096 --out result/WsiHoles
-    python utilities/cli/diagnostics/scan_wsi_holes.py --dataset ki67_pure bracs/test
+    python -m locascope.cli.diagnostics.scan_wsi_holes --dataset ki67_pure bracs/test
 
 Figure: one ROW per slide, one COLUMN per level.
 
@@ -59,10 +59,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-from _paths import job_result_dir, setup_import_paths               # noqa: E402
-setup_import_paths()
+from locascope.paths import job_result_dir   # noqa: E402
 
 import numpy as np
 import openslide
@@ -70,8 +67,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from SlideProbe import SlideProbe, bounds_rect                       # noqa: E402
-from WsiSelection import resolve_wsi_paths                            # noqa: E402
+from locascope.cli.diagnostics.SlideProbe import SlideProbe, bounds_rect                       # noqa: E402
+from locascope.cli.diagnostics.WsiSelection import resolve_wsi_paths                            # noqa: E402
 
 
 def scan(probe: SlideProbe, x0: int, y0: int, w: int, h: int,

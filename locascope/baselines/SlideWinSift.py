@@ -65,9 +65,9 @@ from typing import Callable, List, Optional
 import cv2
 import numpy as np
 
-from ReadGeometry import ReadSpec
-from SafeSlide import SafeSlide
-from SlideReader import SlideReader
+from locascope.core.slides.ReadGeometry import ReadSpec
+from locascope.core.slides.SafeSlide import SafeSlide
+from locascope.core.slides.SlideReader import SlideReader
 
 # The one exception to the dependency list above. is_invertible lives with the
 # other RANSAC caller, and reaching it pulls stage3_localization -> stage2_retrieval ->
@@ -75,7 +75,7 @@ from SlideReader import SlideReader
 # has exactly one importer, cli/driver/slide_win_sift.py:80, and it is the brute-force
 # baseline rather than anything the pipeline runs, so the import cost buys
 # convenience at no risk to production.
-from stage3_localization.SIFT_RANSAC import is_invertible          # noqa: E402
+from locascope.core.stage3_localization.SIFT_RANSAC import is_invertible          # noqa: E402
 
 
 # A homography needs 4 correspondences. Below this, findHomography either

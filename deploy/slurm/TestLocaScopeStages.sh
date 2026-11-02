@@ -18,10 +18,10 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # Replaces THREE jobscripts, one per test file that merged into
-# utilities/test_modules/test_locascope_stages.py: KnnEstiMppTestBench.sh
+# tests/test_locascope_stages.py: KnnEstiMppTestBench.sh
 # (test_gigapath_knn_esti_mpp.py), SlideWinTest.sh (test_gigapath_slide_win_
 # sim.py) and SiftRansacTest.sh (test_sift_ransac.py). One jobscript per
 # merged file, same as the python side -- not three jobscripts each
@@ -67,7 +67,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 # ---------------- Parameters ----------------
 # A val slide (every one has a mask in the Masks cache) and one FoV
 # drawn on it at RUNG -- nothing is segmented. PICK_SEED picks both.
-DATASET="${DATASET:-@legacy-val}"   # both stains; written by jobscripts/MakeDataset.sh
+DATASET="${DATASET:-@legacy-val}"   # both stains; written by deploy/slurm/MakeDataset.sh
 RUNG="${RUNG:-1}"
 PICK_SEED="${PICK_SEED:-0}"
 SENSOR="1440 1024"
@@ -98,22 +98,22 @@ BASE_ARGS="
 
 if [ "$FILTER_SWEEP" -eq 1 ]; then
   echo "======== [1/4] overlap + filter ========"
-  python utilities/test_modules/test_locascope_stages.py \
+  python tests/test_locascope_stages.py \
     --stages 1,2 $BASE_ARGS --overlap --filter
 
   echo "======== [2/4] overlap + no-filter ========"
-  python utilities/test_modules/test_locascope_stages.py \
+  python tests/test_locascope_stages.py \
     --stages 1,2 $BASE_ARGS --overlap --no-filter
 
   echo "======== [3/4] no-overlap + filter ========"
-  python utilities/test_modules/test_locascope_stages.py \
+  python tests/test_locascope_stages.py \
     --stages 1,2 $BASE_ARGS --no-overlap --filter
 
   echo "======== [4/4] no-overlap + no-filter ========"
-  python utilities/test_modules/test_locascope_stages.py \
+  python tests/test_locascope_stages.py \
     --stages 1,2 $BASE_ARGS --no-overlap --no-filter
 else
-  python utilities/test_modules/test_locascope_stages.py \
+  python tests/test_locascope_stages.py \
     --stages "$STAGES" $BASE_ARGS --overlap --filter
 fi
 status=$?

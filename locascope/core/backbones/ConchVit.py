@@ -37,7 +37,7 @@ line numbers of the original, so a reader can diff rather than trust.
                weights_id different in every process -- so no store filename
                would ever repeat. Only the vision half is built here.
 
-Upstream, verified in /work/u26130998/CONCH
+Upstream, verified in $LOCASCOPE_DATA_ROOT/CONCH
 -------------------------------------------
     coca_model.py:76-83      the trunk's constructor arguments
     coca_model.py:86         trunk.forward = trunk.forward_features (and why
@@ -80,25 +80,25 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 
-# MUST stay above `import timm`, for the reason GigaPathFunc spells out in full:
+# MUST stay above `import timm`, for the reason GigaPath spells out in full:
 # huggingface_hub freezes HF_HOME into module-level constants at import time,
 # and timm imports huggingface_hub.
 #
-# The same value the other two set, for the reason GigaPathFunc spells out: the
+# The same value the other two set, for the reason GigaPath spells out: the
 # first huggingface_hub import in the process wins, and it is rarely this one.
 # This names the root; the hub CACHE is the `hub/` under it, content-addressed
 # blobs plus snapshot symlinks. CONCH_LOCAL is a sibling of that `hub/`, holding
 # the files under their own names. Same root, two layouts, and only the first
 # one huggingface_hub knows how to read.
-from _paths import MODEL_WEIGHTS_DIR                    # noqa: E402
+from locascope.paths import MODEL_WEIGHTS_DIR, PROJECT_ROOT   # noqa: E402
 os.environ.setdefault('HF_HOME', MODEL_WEIGHTS_DIR)
 
-_DOTENV = _HERE.parent / '.env'
+_DOTENV = Path(PROJECT_ROOT) / '.env'
 if _DOTENV.exists():
     from dotenv import load_dotenv
     load_dotenv(_DOTENV)          # override=False: an exported value still wins
 
-# HF_TOKEN_CONCH if it is set, else the shared HF_TOKEN. GigaPathFunc carries
+# HF_TOKEN_CONCH if it is set, else the shared HF_TOKEN. GigaPath carries
 # the full reasoning: gated approval is per ACCOUNT, and MahmoodLab's says
 # nothing about prov-gigapath's. Written back into HF_TOKEN so that _download's
 # explicit token= and anything else reading the environment agree -- one name,
@@ -109,8 +109,8 @@ if os.environ.get('HF_TOKEN_CONCH'):
 import torch  # noqa: E402
 from torch import nn  # noqa: E402
 
-from ConfigIdentity import ModelConfig, enc, register, weights_id  # noqa: E402
-from TileEncoderFunc import (TileEncoder,  # noqa: E402
+from locascope.core.config.ConfigIdentity import ModelConfig, enc, register, weights_id  # noqa: E402
+from locascope.core.backbones.TileEncoder import (TileEncoder,  # noqa: E402
                              TileEncoderConfig, TransformConfig)
 
 

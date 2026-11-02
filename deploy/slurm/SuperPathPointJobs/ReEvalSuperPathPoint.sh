@@ -17,7 +17,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
+source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 
 # =============================================================================
 #  Re-score the four trained arms at a MATCHED point budget
@@ -74,7 +74,7 @@ source jobscripts/_env.sh    # HF_HOME; must be exported before python starts
 #   * six pairwise comparisons on two held-out slides. One arm ahead on one
 #     slide and behind on the other is UNDECIDED, not a small win
 #
-#   sbatch jobscripts/SuperPathPointJobs/ReEvalSuperPathPoint.sh
+#   sbatch deploy/slurm/SuperPathPointJobs/ReEvalSuperPathPoint.sh
 #   ARMS="gray gray_pre" sbatch .../ReEvalSuperPathPoint.sh
 #   EPOCH_TAG=epoch021 sbatch .../ReEvalSuperPathPoint.sh
 #
@@ -107,7 +107,7 @@ echo "  budgets $BUDGETS"
 echo "  models  $MODELS_ROOT"
 echo ""
 
-python training/SuperPathPoint/cli/reeval_density.py \
+python -m locascope.training.SuperPathPoint.cli.reeval_density \
   --models-root "$MODELS_ROOT" \
   --arms $ARMS \
   --tile "$TILE" \

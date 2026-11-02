@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Locate real microscope photos in their own slide: the mainstream run, with
 no ground truth. The stage tables of every photo land in the cache, as the
-bench's do for synthetic FoVs (utilities/bench_modules/bench_locascope.py).
+bench's do for synthetic FoVs (locascope/cli/bench/bench_locascope.py).
 
-    python utilities/cli/driver/locate_photo.py \\
+    python -m locascope.cli.locate_photo \\
         --stage1 knn:gigapath --stage2 slidewin:gigapath --stage3 sift:default
 
     --slide-index N     only the Nth slide of ki67_with_photo (a Slurm array task)
@@ -16,7 +16,7 @@ no val / test split here. A slide's photos are the folder `entry.related
 
 STAGES: each one is `<method>:<recipe>` from its package's table, and every
 recipe field is a `--stageN-<field>` flag, as in the bench. The stages are the
-pipeline's (utilities/LocaScopePipeline.py), so a method that honours its
+pipeline's (locascope/core/pipeline.py), so a method that honours its
 stage's interface runs here without a change.
 
 CACHE: a slide's photos are one `photos=<id>` level of the job's tree (the id
@@ -57,19 +57,16 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import numpy as np
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # utilities/
-import _paths                                                        # noqa: E402
-_paths.setup_import_paths()
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bench_modules'))
+from locascope import paths as _paths                                                        # noqa: E402
 
-import Cache                                                         # noqa: E402
-from AccessDatasets import list_names, locate                          # noqa: E402
-from ConfigIdentity import short_id                                    # noqa: E402
-from CpuBudget import CpuBudget                                        # noqa: E402
-from TissueMaskConfig import MaskMaker, add_mask_args                  # noqa: E402
-from stage2_retrieval.StageInterface import CandidateSet               # noqa: E402
-from stage3_localization.StageInterface import LocalizationResultSet   # noqa: E402
-from BenchCommon import (ROLES, RunClock, Shot, Stage, fmt_each, fmt_rate,  # noqa: E402
+from locascope.core.cache import Cache                                                         # noqa: E402
+from locascope.core.slides.AccessDatasets import list_names, locate                          # noqa: E402
+from locascope.core.config.ConfigIdentity import short_id                                    # noqa: E402
+from locascope.host.cpu import CpuBudget                                        # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MaskMaker, add_mask_args                  # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import CandidateSet               # noqa: E402
+from locascope.core.stage3_localization.StageInterface import LocalizationResultSet   # noqa: E402
+from locascope.cli.bench.BenchCommon import (ROLES, RunClock, Shot, Stage, fmt_each, fmt_rate,  # noqa: E402
                          fmt_time, parse_run_args, require_gpu_if_allocated, run_from_args, run_slide_stages, status,
                          write_rows)
 

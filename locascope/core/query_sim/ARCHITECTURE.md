@@ -1,12 +1,12 @@
 # query_sim — Microscope FOV Simulator
 
 > **2026-11-02：這份是 M4 當初的整合設計，下面只留現在還有對應程式的部分。** `region_type` 被 M4.2 實測否決，見 `log/MILESTONE.log` 與 `log/TODO.log`。
-> 讀取是 `utilities/SlideReader`；`camera.py` 的 `Render` 只負責效果和 GT，見專案根目錄的 `ARCHITECTURE.md`。
+> 讀取是 `locascope/core/slides/SlideReader`；`camera.py` 的 `Render` 只負責效果和 GT，見專案根目錄的 `ARCHITECTURE.md`。
 >
 > **現在 `query_sim/` 實際有的**：`config.py`（`DomainGapConfig`）、`record.py`（`FOVRecord`）、`augment/{color,field,geometry,lens,noise}.py`、
 > `pipeline.py`（`simulate_with_gt`、`lens_margin`、`read_reach`）、`camera.py`（`Render`、`render_spec`、`read_margin`、`photo_rng`）、
-> `FovSupply.py`（`FovSupply`、`FOV_RECIPES`），沒有 `__init__.py`。批量生成是 `FovSupply` 加 `utilities/bench_modules`，單張 demo 是
-> `utilities/cli/demo/show_camera_effects.py`。
+> `FovSupply.py`（`FovSupply`、`FOV_RECIPES`），沒有 `__init__.py`。批量生成是 `FovSupply` 加 `locascope/cli/bench`，單張 demo 是
+> `locascope/cli/demo/show_camera_effects.py`。
 
 ---
 

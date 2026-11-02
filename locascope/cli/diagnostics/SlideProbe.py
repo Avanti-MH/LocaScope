@@ -1,6 +1,6 @@
 """Shared low-level WSI-probing primitives for this directory's diagnostics.
 
-Lives IN `cli/diagnostics/`, not up in `utilities/`, because every caller so
+Lives IN `cli/diagnostics/`, not up in `locascope/core/`, because every caller so
 far is a diagnostic in this directory -- the production pipeline
 (`SafeSlide`, `TissueMask`, ...) has its own, DELIBERATELY DIFFERENT
 way of reading a slide's scale (`SafeSlide.base_mpp` averages mpp-x/mpp-y

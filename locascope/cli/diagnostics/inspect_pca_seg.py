@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which side of PC1 is tissue -- and is PC1 tissue at all?
 
-    python utilities/cli/diagnostics/inspect_pca_seg.py <wsi>... [--fit-tiles 200] [--workers 8]
+    python -m locascope.cli.diagnostics.inspect_pca_seg <wsi>... [--fit-tiles 200] [--workers 8]
 
 Outputs (in result/<SLURM_JOB_NAME or InspectPcaSeg>/):
     pca_seg_polarity__<slide>_L0.png
@@ -47,7 +47,7 @@ asks, and it does NOT mean the mask is correct. Nothing here measures that.
 
 NO MAGNIFICATION FLAG, BECAUSE THE SEGMENTER HAS NO MAGNIFICATION
 ------------------------------------------------------------------
-The segmenter reads level 0, and `Uni2PcaSegFunc.LEVEL` records the
+The segmenter reads level 0, and `Uni2PcaSeg.LEVEL` records the
 measurement: whole slide, every tile, ~3.5 min for BRACS_1003691 and ~5.8 min
 for a Ki67, so no cost justifies reading coarser.
 
@@ -72,25 +72,19 @@ import sys
 from dataclasses import replace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..'),
-          os.path.join(_HERE, '..', '..', '..', 'aiNNModel')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 import numpy as np                                              # noqa: E402
 import matplotlib                                               # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
-from _paths import job_result_dir, setup_import_paths           # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-setup_import_paths()
 
 import cv2                                                      # noqa: E402
 import torch                                                    # noqa: E402
 
-from SafeSlide import SafeSlide                                  # noqa: E402
-from TissueMaskConfig import MASK_RECIPES                        # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES                        # noqa: E402
 
 
 
@@ -292,7 +286,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('wsi', nargs='+', help='one or more slides')
     # NO --plane-ds, --level or --crop. The segmenter reads at level 0 and
-    # produces a ds 14 mask over the whole slide; see Uni2PcaSegFunc.LEVEL.
+    # produces a ds 14 mask over the whole slide; see Uni2PcaSeg.LEVEL.
     ap.add_argument('--workers', type=int, default=8,
                     help='DataLoader workers for reading tiles. 0 reads in the '
                          'parent, which is right on a login node and wrong for '

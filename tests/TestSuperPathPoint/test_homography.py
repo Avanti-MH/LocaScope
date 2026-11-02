@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for training/SuperPathPoint/common/Homography.py.
 
-    python utilities/test_modules/test_homography.py
-    python utilities/test_modules/test_homography.py --only direction torch
-    python utilities/test_modules/test_homography.py --draws 500
+    python tests/test_homography.py
+    python tests/test_homography.py --only direction torch
+    python tests/test_homography.py --draws 500
 
 No model, no GPU, no WSI, no figures -- seconds. The figure that shows the same
 facts to a human is `training/SuperPathPoint/cli/demo_homography.py`; a test says
@@ -38,30 +38,13 @@ import argparse
 import os
 import sys
 
-# _paths holds the one definition of OUTPUT_ROOT and of where each package
-# lives; that directory goes on sys.path here because setup_import_paths --
-# which puts the rest there, SuperPathPoint included -- is inside it.
-# `utilities/` holds the one definition of the output roots (`_paths.py`), and
-# `setup_import_paths` -- which puts every other package on the path -- is
-# inside it, so it has to be reachable before anything else is imported.
-#
-# BOTH parents are inserted, and that is deliberate rather than sloppy: this
-# file runs from `utilities/test_modules/` and from
-# `utilities/test_modules/TestSuperPathPoint/`, one level deeper, and inserting
-# both means the move needs no edit here. The one that is not `utilities/` is
-# either the repo root or `test_modules/`; neither holds a `_paths.py`, and
-# `setup_import_paths` puts the repo root on the path anyway.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..'))
-sys.path.insert(0, os.path.join(_HERE, '..', '..'))
 
 import numpy as np                                              # noqa: E402
 
-from _paths import setup_import_paths                           # noqa: E402
 
-setup_import_paths('SuperPathPoint')
 
-from common.Homography import (HOMOGRAPHY_DEFAULTS,             # noqa: E402
+from locascope.training.SuperPathPoint.common.Homography import (HOMOGRAPHY_DEFAULTS,             # noqa: E402
                                identity, inside, invert,
                                points_input_to_output,
                                points_output_to_input,
@@ -355,7 +338,7 @@ def t_torch_path_matches_cv2():
         import torch
     except ImportError:
         return 'skipped -- torch not importable'
-    from common.Homography import warp_image_torch
+    from locascope.training.SuperPathPoint.common.Homography import warp_image_torch
 
     rng = np.random.default_rng(3)
     shape = (128, 128)

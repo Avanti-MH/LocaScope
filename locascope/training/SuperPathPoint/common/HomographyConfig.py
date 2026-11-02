@@ -37,9 +37,9 @@ from typing import Dict
 
 import numpy as np
 
-from ConfigIdentity import IdentifiedConfig
+from locascope.core.config.ConfigIdentity import IdentifiedConfig
 
-from common.Homography import HOMOGRAPHY_DEFAULTS
+from locascope.training.SuperPathPoint.common.Homography import HOMOGRAPHY_DEFAULTS
 
 #: The zero point (ConfigIdentity rule 2): upstream's export values, which are
 #: also the field defaults below.

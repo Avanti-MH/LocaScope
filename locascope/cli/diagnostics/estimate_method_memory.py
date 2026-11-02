@@ -31,7 +31,7 @@ pooling is a cheap step on top of the same forward activations, so the peak
 this reports is the same either way.
 
 Usage:
-    python utilities/cli/diagnostics/estimate_method_memory.py \\
+    python -m locascope.cli.diagnostics.estimate_method_memory \\
         --stage1 knn:gigapath knn:uni2 classifier:gigapath-arcface --batch 128
 """
 from __future__ import annotations
@@ -40,15 +40,12 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-import _paths                                                       # noqa: E402
-_paths.setup_import_paths()
+from locascope import paths as _paths                                                       # noqa: E402
 
 import numpy as np                                                  # noqa: E402
 import torch                                                        # noqa: E402
 
-import stage1_estimation                                            # noqa: E402
+from locascope.core import stage1_estimation                                            # noqa: E402
 
 
 def _bytes(n) -> str:

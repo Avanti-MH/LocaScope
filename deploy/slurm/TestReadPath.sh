@@ -18,7 +18,7 @@ ml load cuda/12.6
 
 # ---------------- Activate environment ----------------
 conda activate locascope
-source jobscripts/_env.sh
+source deploy/slurm/_env.sh
 
 # =============================================================================
 #  Everything that gets pixels off a slide, position to photo. One jobscript
@@ -52,15 +52,15 @@ source jobscripts/_env.sh
 #  is MIRAX and steps 2x. A test on one format leaves the other's level
 #  arithmetic unexercised.
 #
-#    sbatch jobscripts/TestReadPath.sh
-#    SLIDES="BRACS_1228" LEVELS=0 sbatch jobscripts/TestReadPath.sh
-#    ONLY="map seed" sbatch jobscripts/TestReadPath.sh      # test_camera sections
-#    NO_SLIDES=1 sbatch jobscripts/TestReadPath.sh          # the slide-free tests only
+#    sbatch deploy/slurm/TestReadPath.sh
+#    SLIDES="BRACS_1003694" LEVELS=0 sbatch deploy/slurm/TestReadPath.sh
+#    ONLY="map seed" sbatch deploy/slurm/TestReadPath.sh      # test_camera sections
+#    NO_SLIDES=1 sbatch deploy/slurm/TestReadPath.sh          # the slide-free tests only
 #
 #  Output: the log; test_camera's augment section writes
 #  result/<job>/augment_equivalence_<slide>.csv. Nothing goes to any cache.
 # =============================================================================
-SLIDES="${SLIDES:-BRACS_1228 S1104233,G7E,110208}"
+SLIDES="${SLIDES:-BRACS_1003694 S1104233,G7E,110208}"
 LEVELS="${LEVELS:-0 1}"
 CAMERA_LEVEL="${CAMERA_LEVEL:-1}"
 SEED="${SEED:-0}"
@@ -82,18 +82,17 @@ run() {
     rc=$?
     [ $rc -ne 0 ] && status=$rc
 }
-run utilities/test_modules/test_read_geometry.py
-run utilities/test_modules/test_tile_sampler.py
-run utilities/test_modules/test_camera.py --only fingerprint
+run tests/test_read_geometry.py
+run tests/test_tile_sampler.py
+run tests/test_camera.py --only fingerprint
 # SafeSlide against the one slide with a known hole (its own default).
-[ -n "$SLIDES" ] && run utilities/test_modules/test_safe_slide.py
+[ -n "$SLIDES" ] && run tests/test_safe_slide.py
 for name in $SLIDES; do
     # locate() raises KeyError listing every known name if this one is not
     # found, which is a better failure than the test reading the wrong tissue.
     path=$(python - "$name" <<'EOF'
 import sys
-sys.path.insert(0, 'utilities')
-from AccessDatasets import locate
+from locascope.core.slides.AccessDatasets import locate
 print(locate(sys.argv[1]).path)
 EOF
     ) || { echo "  could not resolve $name"; status=1; continue; }
@@ -101,11 +100,11 @@ EOF
     echo "======== $name ========"
     echo "  $path"
     for lv in $LEVELS; do
-        run utilities/test_modules/test_slide_reader.py --wsi "$path" --level "$lv"
+        run tests/test_slide_reader.py --wsi "$path" --level "$lv"
     done
-    run utilities/test_modules/test_camera.py --wsi "$path" --level "$CAMERA_LEVEL" \
+    run tests/test_camera.py --wsi "$path" --level "$CAMERA_LEVEL" \
         --seed "$SEED" --shots "$SHOTS" "${CAMERA_ARGS[@]}"
-    run utilities/test_modules/test_fov_supply.py --wsi "$path" --level "$CAMERA_LEVEL"
+    run tests/test_fov_supply.py --wsi "$path" --level "$CAMERA_LEVEL"
 done
 echo ""
 # the last line says it all: ALL PASS, or FAILED with the exit code

@@ -2,7 +2,7 @@
 '''Train GloRet (Arch 1) and LogLoRet (Arch 2) of `stage2_retrieval/proposal.md` on synthetic FoVs, made as they are
 used.
 
-    python training/GloRet/cli/train.py --heads GloRet-SelfAttn-AttnPool LogLoRet-SelfAttn-AttnPool+dustbin \\
+    python -m locascope.training.GloRet.train --heads GloRet-SelfAttn-AttnPool LogLoRet-SelfAttn-AttnPool+dustbin \\
         --encoder gigapath --pooling cls_avg --epochs 20
 
 A head is a method of the proposal's names -- `GloRet-{ContextEn}-{GlobalEn}`, `LogLoRet-{ContextEn}-{GlobalEn}+{no-match}`
@@ -60,48 +60,45 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities'))
-from _paths import LOG_DIR, RESULT_DIR, setup_import_paths              # noqa: E402
-setup_import_paths()
-sys.path.insert(0, os.path.join(_HERE, '..', '..', '..', 'utilities', 'bench_modules'))   # BenchCommon
+from locascope.paths import DATASETS_DIR, LOG_DIR, RESULT_DIR   # noqa: E402
 
 import numpy as np                                                    # noqa: E402
 import torch                                                          # noqa: E402
 
-from AccessDatasets import by_source, locate                          # noqa: E402
-from CpuBudget import CpuBudget                                        # noqa: E402
-from BenchCommon import require_gpu_if_allocated                      # noqa: E402
-from FovSupply import FOV_RECIPES, add_fov_args, fov_from_args                     # noqa: E402
-from RerankChoices import build_rerank                                # noqa: E402
-from Checkpoints import data_tag, save_rerank_checkpoint              # noqa: E402
-from GloRet import NO_MATCH, TILE_POOLS, NetCfg, combo_problem   # noqa: E402
-from TileEncoderFunc import encoder_config                           # noqa: E402
-from stage2_retrieval.ArmSpec import SEARCHES, learned_weights       # noqa: E402
-from stage2_retrieval.Retriever import EncoderPool                    # noqa: E402
-from stage2_retrieval.RetrieverGloRet import WindowEncodings          # noqa: E402
-from stage2_retrieval.RetrieverSlidingWinSimRot import (RetrieverSlidingWinSimRot,   # noqa: E402
+from locascope.core.slides.AccessDatasets import by_source, locate                          # noqa: E402
+from locascope.host.cpu import CpuBudget                                        # noqa: E402
+from locascope.cli.bench.BenchCommon import require_gpu_if_allocated                      # noqa: E402
+from locascope.core.query_sim.FovSupply import FOV_RECIPES, add_fov_args, fov_from_args                     # noqa: E402
+from locascope.core.networks.RerankChoices import build_rerank                                # noqa: E402
+from locascope.core.networks.Checkpoints import data_tag, save_rerank_checkpoint              # noqa: E402
+from locascope.core.networks.GloRet import NO_MATCH, TILE_POOLS, NetCfg, combo_problem   # noqa: E402
+from locascope.core.backbones.TileEncoder import encoder_config                           # noqa: E402
+from locascope.core.stage2_retrieval.ArmSpec import SEARCHES, learned_weights       # noqa: E402
+from locascope.core.stage2_retrieval.Retriever import EncoderPool                    # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverGloRet import WindowEncodings          # noqa: E402
+from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import (RetrieverSlidingWinSimRot,   # noqa: E402
                                                         RetrieverSlidingWinSimRotConfig)
 
-from training.GloRet.Runtime import (all_sum, broadcast_parameters, dist_done, dist_init,   # noqa: E402
+from locascope.training.GloRet.Runtime import (all_sum, broadcast_parameters, dist_done, dist_init,   # noqa: E402
                                       gather_objects, plain_args, sync_gradients, wandb_finish,
                                       wandb_init, wandb_log)
-from training.GloRet.Steps import (KS, StepCfg, begin_visit_peak, visit_peak_gb, gloret_rank, gloret_rerank_rank, idle_step,   # noqa: E402
+from locascope.training.GloRet.Steps import (KS, StepCfg, begin_visit_peak, visit_peak_gb, gloret_rank, gloret_rerank_rank, idle_step,   # noqa: E402
                                    logloret_rank, own_rank, recall_at, upstream_rank)
-from training.GloRet.Items import SOURCES   # noqa: E402
-from training.GloRet.Patches import (FROZEN_POOLING, POOLING as PATCH_POOLING, PatchSource,   # noqa: E402
+from locascope.training.GloRet.Items import SOURCES   # noqa: E402
+from locascope.training.GloRet.Patches import (FROZEN_POOLING, POOLING as PATCH_POOLING, PatchSource,   # noqa: E402
                                      load_pool)
-from training.GloRet.Lazy import gloret_rerank_rank_lazy, lazy_level_of, logloret_rank_lazy   # noqa: E402
-from training.GloRet.Episodes import PoolCfg, run_visit   # noqa: E402
-from training.GloRet.Full import FullCfg, make_split   # noqa: E402
-from training.GloRet.Losses import SOFT_TARGETS   # noqa: E402
-from training.GloRet.RealPhotos import RealPhoto, choose_photos, real_stream, write_list   # noqa: E402
-from training.GloRet.Pool import Memory, TopP, parse_top_p   # noqa: E402
-from training.GloRet.Rerank import RerankCfg, logloret_level_rank   # noqa: E402
-from training.GloRet.Profile import start as profile_start   # noqa: E402
-from training.GloRet.Supply import (CardBudget, Fov, FovResult, Level, MemoryFeatureStore, fov_of, fov_stream,   # noqa: E402
+from locascope.training.GloRet.Lazy import gloret_rerank_rank_lazy, lazy_level_of, logloret_rank_lazy   # noqa: E402
+from locascope.training.GloRet.Episodes import PoolCfg, run_visit   # noqa: E402
+from locascope.training.GloRet.Full import FullCfg, make_split   # noqa: E402
+from locascope.training.GloRet.Losses import SOFT_TARGETS   # noqa: E402
+from locascope.training.GloRet.RealPhotos import RealPhoto, choose_photos, real_stream, write_list   # noqa: E402
+from locascope.training.GloRet.Pool import Memory, TopP, parse_top_p   # noqa: E402
+from locascope.training.GloRet.Rerank import RerankCfg, logloret_level_rank   # noqa: E402
+from locascope.training.GloRet.Profile import start as profile_start   # noqa: E402
+from locascope.training.GloRet.Supply import (CardBudget, Fov, FovResult, Level, MemoryFeatureStore, fov_of, fov_stream,   # noqa: E402
                                     level_of, take_timers, tick)
-from training.GloRet.LogLayout import hard_line, memory_line, hard_negatives_block, labels, losses_block, num, recall_block, rule, steps_block, table, timing_lines   # noqa: E402
-from training.GloRet.Usage import UsageMeter, advice, usage_line, usage_lines   # noqa: E402
+from locascope.training.GloRet.LogLayout import hard_line, memory_line, hard_negatives_block, labels, losses_block, num, recall_block, rule, steps_block, table, timing_lines   # noqa: E402
+from locascope.training.GloRet.Usage import UsageMeter, advice, usage_line, usage_lines   # noqa: E402
 
 #: The width of one patch token of each encoder (what `NetCfg.in_dim` is for TilePool `attnpool`); a tile's grid
 #: entry is `P * TOKEN_DIM` numbers.
@@ -407,7 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
                          '(`RealPhotos.py`; a seeded draw from the checklists); 0 = off. Monitoring only: no head is selected on them')
     ap.add_argument('--real-dataset', default='ki67_with_photo', help='the dataset of the real photos')
     ap.add_argument('--real-job', default='RealTest', help='the cache job of the real-photo runs (the confirmed places\' windows)')
-    ap.add_argument('--real-checklists', default='/work/u26130998/datasets/Ki67_with_photo/checklists')
+    ap.add_argument('--real-checklists', default=os.path.join(DATASETS_DIR, 'Ki67_with_photo', 'checklists'))
     ap.add_argument('--real-stage1', default='prototype-uni2-attn-set-transformer-attn-score-cross-on',
                     help='the stage 1 and stage 2 arm the checklist rows were labelled from')
     ap.add_argument('--real-stage2', default='slidewin-gigapath-cls-mean')

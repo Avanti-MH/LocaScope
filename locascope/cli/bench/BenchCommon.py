@@ -9,7 +9,7 @@ Three programs run shots through the stages and keep the same entries:
                                           oracle's
     cli/driver/locate_photo.py            real photos (no ground truth), the
                                           stage-1 route
-    bench_modules/bench_stage1_mpp.py     stage 1 only, several methods
+    bench/bench_stage1_mpp.py     stage 1 only, several methods
 
 and three read them: `cli/plot/plot_locascope.py`, `cli/metrics/
 analyze_stage1_metrics.py`, `bench_stage2_retriever.py` (its slides and
@@ -54,28 +54,28 @@ from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping, Opti
 import numpy as np
 import torch
 
-import Cache                                                           # noqa: E402
-from ConfigArgs        import add_config_args, config_from_args          # noqa: E402
-from ConfigIdentity    import file_fingerprint, record, short_id                          # noqa: E402
-from LocaScopePipeline import LocaScopePipeline, construct_stage        # noqa: E402
-from PatchingLib       import QueryPatchContainer                       # noqa: E402
-from TileSampler       import PlanSpec                                  # noqa: E402
-from TissueMaskConfig  import (MASK_RECIPES, MaskMaker, add_mask_args,  # noqa: E402
+from locascope.core.cache import Cache                                                           # noqa: E402
+from locascope.core.config.ConfigArgs import add_config_args, config_from_args          # noqa: E402
+from locascope.core.config.ConfigIdentity import file_fingerprint, record, short_id                          # noqa: E402
+from locascope.core.pipeline import LocaScopePipeline, construct_stage        # noqa: E402
+from locascope.core.tiles.PatchingLib import QueryPatchContainer                       # noqa: E402
+from locascope.core.tiles.TileSampler import PlanSpec                                  # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import (MASK_RECIPES, MaskMaker, add_mask_args,  # noqa: E402
                                mask_cfg_from_args)
-from AccessDatasets    import by_source, locate                         # noqa: E402
-from SlideReader       import SlideReader                               # noqa: E402
-from camera            import Render                                    # noqa: E402
-from FovSupply         import FovSupply, add_fov_args, fov_from_args    # noqa: E402
-from stage1_estimation.StageInterface import EstMppResult               # noqa: E402
-from stage2_retrieval.Context import nearest_window, query_dims          # noqa: E402
-from stage2_retrieval.Retriever import RetrievalOutput, Retriever        # noqa: E402
-from stage2_retrieval.StageInterface import (Candidate, CandidateSet,  # noqa: E402
+from locascope.core.slides.AccessDatasets import by_source, locate                         # noqa: E402
+from locascope.core.slides.SlideReader import SlideReader                               # noqa: E402
+from locascope.core.query_sim.camera import Render                                    # noqa: E402
+from locascope.core.query_sim.FovSupply import FovSupply, add_fov_args, fov_from_args    # noqa: E402
+from locascope.core.stage1_estimation.StageInterface import EstMppResult               # noqa: E402
+from locascope.core.stage2_retrieval.Context import nearest_window, query_dims          # noqa: E402
+from locascope.core.stage2_retrieval.Retriever import RetrievalOutput, Retriever        # noqa: E402
+from locascope.core.stage2_retrieval.StageInterface import (Candidate, CandidateSet,  # noqa: E402
                                              RerankedCandidate, ShiftedCandidate)
-from stage3_localization.StageInterface import LocalizationResultSet     # noqa: E402
-import stage1_estimation                                                 # noqa: E402
-import stage2_retrieval                                                  # noqa: E402
-import stage3_localization                                               # noqa: E402
-from stage2_retrieval.Naming import config_label, entry_name, stage_name   # noqa: E402
+from locascope.core.stage3_localization.StageInterface import LocalizationResultSet     # noqa: E402
+from locascope.core import stage1_estimation                                                 # noqa: E402
+from locascope.core import stage2_retrieval                                                  # noqa: E402
+from locascope.core import stage3_localization                                               # noqa: E402
+from locascope.core.stage2_retrieval.Naming import config_label, entry_name, stage_name   # noqa: E402
 
 
 #: The route whose level is the one the FoV was placed at.
@@ -119,7 +119,7 @@ def stage_hexid(cfg: Any, also_id: tuple = ()) -> str:
     checkpoint the config reads, so a retrained file under the same name is another entry and a renamed
     file with the same bytes is the same one. A checkpoint that is not there is a part of its own (the
     build fails on it later). A config that reads none keeps the id it had."""
-    from stage1_estimation.StageInterface import weights_path    # noqa: PLC0415
+    from locascope.core.stage1_estimation.StageInterface import weights_path    # noqa: PLC0415
     prints: List[str] = []
     for name in weights_of_config(cfg):
         try:
@@ -133,7 +133,7 @@ def stage_hexid(cfg: Any, also_id: tuple = ()) -> str:
 
 def weights_prints(cfg: Any) -> Dict[str, str]:
     """`{'weights[<file>]': fingerprint}` of every checkpoint `cfg` reads, for its record."""
-    from stage1_estimation.StageInterface import weights_path    # noqa: PLC0415
+    from locascope.core.stage1_estimation.StageInterface import weights_path    # noqa: PLC0415
     out: Dict[str, str] = {}
     for name in weights_of_config(cfg):
         try:
@@ -167,7 +167,7 @@ def phase_record(cfg: Any, name: str, after: str, **upstream) -> dict:
 def as_chain(cfg: Any, cls: type) -> Tuple[Any, type]:
     """A stage-2 config as a chain: a single retriever is a chain of one phase, so every stage 2 is filed the
     same way, phase by phase."""
-    from stage2_retrieval.MultiPhases import MultiPhases, MultiPhasesConfig   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.MultiPhases import MultiPhases, MultiPhasesConfig   # noqa: PLC0415
     if isinstance(cfg, MultiPhasesConfig):
         return cfg, cls
     return MultiPhasesConfig(phases=(cfg,)), MultiPhases
@@ -344,7 +344,7 @@ def run_stage1(est: Any, img: np.ndarray, tables: Tables,
     and what the method has beside it -- a KNN's `neighbours`, a voting
     method's per-patch `probs` and every rule of RULES over them (`votes`).
     The method's EstMppResult; None when it failed."""
-    from stage1_estimation.FoVVote import QUALITY_SIGNALS, diagnose  # noqa: PLC0415
+    from locascope.core.stage1_estimation.FoVVote import QUALITY_SIGNALS, diagnose  # noqa: PLC0415
     t0 = time.perf_counter()
     try:
         if hasattr(est, 'patch_probs'):
@@ -797,7 +797,7 @@ def truth_rows(out: RetrievalOutput, img: np.ndarray, qc: QueryPatchContainer, t
     scores: Optional[Maps] = out.extras['window_scores'].value if scored else None
     tiles: List[Dict[str, Any]] = []
     if scores and 'tile_sims' in out.extras:
-        from stage2_retrieval.RetrieverSlidingWinSimRot import tile_sim_rows   # noqa: PLC0415
+        from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import tile_sim_rows   # noqa: PLC0415
         for a in _scored(scores, found):
             window: Candidate = Candidate(a.region, a.lattice, a.row, a.col, a.rotation, 0.0)
             # the window's own tiles: the retriever's table without the rank column

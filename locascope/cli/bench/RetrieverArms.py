@@ -39,13 +39,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-import stage2_retrieval
-from BenchCommon import ORACLE, TRUTH_VERSION, Truth, phase_ids, phase_record, phase_roles, write_phase
-from PatchingLib import QueryPatchContainer
-from stage2_retrieval.ArmSpec import SEP, ArmSpec, parse_arm, phase_configs
-from stage2_retrieval.Context import LevelFeatures, feature_key, reordered
-from stage2_retrieval.MultiPhases import MultiPhasesConfig
-from stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever
+from locascope.core import stage2_retrieval
+from locascope.cli.bench.BenchCommon import ORACLE, TRUTH_VERSION, Truth, phase_ids, phase_record, phase_roles, write_phase
+from locascope.core.tiles.PatchingLib import QueryPatchContainer
+from locascope.core.stage2_retrieval.ArmSpec import SEP, ArmSpec, parse_arm, phase_configs
+from locascope.core.stage2_retrieval.Context import LevelFeatures, feature_key, reordered
+from locascope.core.stage2_retrieval.MultiPhases import MultiPhasesConfig
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever
 
 MODE_RANKED, MODE_LISTED = 'ranked', 'listed'
 #: a sliding window scored in one streamed pass; any other retriever; a reranker

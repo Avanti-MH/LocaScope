@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How many tiles does each (slide, tile_size, ds) yield, and in which buckets?
 
-    python utilities/cli/diagnostics/probe_tile_yield.py --dataset @legacy-val [--seg uni2_pca] [--n 500]
+    python -m locascope.cli.diagnostics.probe_tile_yield --dataset @legacy-val [--seg uni2_pca] [--n 500]
 
 Outputs (in result/<SLURM_JOB_NAME or ProbeTileYield>/):
     tile_yield.png
@@ -105,29 +105,23 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (os.path.join(_HERE, '..', '..'),
-          os.path.join(_HERE, '..', '..', '..', 'aiNNModel')):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 import numpy as np                                              # noqa: E402
 import matplotlib                                               # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                 # noqa: E402
 
-from _paths import job_result_dir, setup_import_paths          # noqa: E402
+from locascope.paths import job_result_dir   # noqa: E402
 
-setup_import_paths()
 
-from Cache import wsi_stem_of                                    # noqa: E402
-from TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
-from PatchingLib import region_grids                             # noqa: E402
-from SafeSlide import SafeSlide                                  # noqa: E402
-from ReadGeometry import levels_up_to                        # noqa: E402
-from TileSampler import PRE_TILE_FACTOR, SAMPLER_RECIPES, TileSampler  # noqa: E402
-from TissueMask import SlideMask                # noqa: E402
-from DsLadder import DEFAULT_RUNGS, DsLadder              # noqa: E402
-from WsiSelection import resolve_wsi_paths                       # noqa: E402
+from locascope.core.cache.Cache import wsi_stem_of                                    # noqa: E402
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker             # noqa: E402
+from locascope.core.tiles.PatchingLib import region_grids                             # noqa: E402
+from locascope.core.slides.SafeSlide import SafeSlide                                  # noqa: E402
+from locascope.core.slides.ReadGeometry import levels_up_to                        # noqa: E402
+from locascope.core.tiles.TileSampler import PRE_TILE_FACTOR, SAMPLER_RECIPES, TileSampler  # noqa: E402
+from locascope.core.tiles.TissueMask import SlideMask                # noqa: E402
+from locascope.core.slides.DsLadder import DEFAULT_RUNGS, DsLadder              # noqa: E402
+from locascope.cli.diagnostics.WsiSelection import resolve_wsi_paths                       # noqa: E402
 
 
 #: Where build_mask_store.py pre-warms masks by default.
@@ -242,7 +236,7 @@ class TileYieldProbe:
         the CPU, once."""
         if self._per_tile is None:
             import torch                                            # noqa: PLC0415
-            from TileEncoderFunc import (admissible_poolings,    # noqa: PLC0415
+            from locascope.core.backbones.TileEncoder import (admissible_poolings,    # noqa: PLC0415
                                          encoder_config, pool_slots)
             over = {'head': self.head} if self.head else {}
             cfg = encoder_config(self.encoder, **over)
