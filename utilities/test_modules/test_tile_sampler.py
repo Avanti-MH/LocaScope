@@ -565,8 +565,7 @@ def t_buckets_cut_where_the_edges_say():
     # float64 on purpose: this is the FUNCTION's contract, and 0.15, 0.30,
     # 0.85 and 0.95 are none of them representable in float32. The first run of
     # this test used float32 and 0.95 arrived as 0.9499999881, one bucket low
-    # -- the test was wrong and the code was right, which is the same shape as
-    # the DELTA_MAX episode in CLAUDE.md.
+    # -- the test was wrong and the code was right.
     score = np.array([0.0, 0.1499, 0.15, 0.2999, 0.30, 0.4999, 0.50,
                       0.6999, 0.70, 0.85, 0.9499, 0.95, 0.999, 1.0], np.float64)
     got = [names[i] for i in assign_buckets(score, edges)]

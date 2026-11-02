@@ -60,7 +60,7 @@ export HF_HOME="${HF_HOME:-${LOCASCOPE_OUTPUT_ROOT:-/work/u26130998}/model_weigh
 # wandb writes its run directories to $WANDB_DIR/wandb, and $WANDB_DIR defaults
 # to the CURRENT DIRECTORY -- which is the repo, since jobscripts are submitted
 # from the checkout. That put 101 MB of run output inside the working tree by
-# 2026-09-16, against CLAUDE.md's rule that everything a run produces lives
+# 2026-09-16, against the rule that everything a run produces lives
 # under /work/u26130998 where an `rm -rf` of the tree or a `git clean` cannot
 # take it and nothing can be staged by accident. Same knob, same reason, as
 # HF_HOME above.

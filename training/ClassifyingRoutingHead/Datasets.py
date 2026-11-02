@@ -1,6 +1,6 @@
 '''Training/eval data for ClassifyingRoutingHead. See spec.md's "Camera: train vs
-eval", "Caching" and "Handle count" sections for the reasoning; this file is
-the implementation of all three.
+eval" and "Handle count" sections for the reasoning; this file is
+the implementation of both.
 
     rows = build_manifest('ki67_pure', masks=MaskMaker(MASK_RECIPES['hest'], job),
                           draw_job=job, n_per_rung=100)   # positions only

@@ -135,7 +135,7 @@ DEFAULT_MASK_CACHE_JOB = 'BuildMaskStore'
 
 
 #: Every string a reader will see. Rewritten on every run so the definitions
-#: cannot drift from the code that produced them (ClaudeRules section 12).
+#: cannot drift from the code that produced them.
 DEFINITIONS = [
     ('n_requested', 'tiles asked for in this cell'),
     ('n_got', 'tiles the rejection sampler returned before the budget ran out'),

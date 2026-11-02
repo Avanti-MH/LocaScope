@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """GigaPath optimization configs -- speed AND accuracy, one script.
 
-Merge of `bench_gigapath_accuracy.py` (does fp16 change the ANSWER) and
-`bench_gigapath_infer.py` (does fp16/flash-attn/compile change the SPEED).
-Both existed to answer the one CLAUDE.md sentence that cites them together:
+Merge of two earlier benches, one for accuracy (does fp16 change the ANSWER) and
+one for speed (does fp16/flash-attn/compile change the SPEED).
+Both existed to answer one claim that cites them together:
 "fp16 alone went to production with cos=0.99995 and a 5.5x speedup" -- one
 number from each file. They shared a near-identical 6-config table
 (baseline fp32 / fp16 / flash-attn / compile / fp16+flash / ALL) and each

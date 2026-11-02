@@ -526,7 +526,7 @@ MAX_SINGLE_GRID_DISTANCE = math.hypot(HALF_TILE, HALF_TILE)      # 181.02
 #: nearest-neighbour spacing 128*sqrt(2) = 181.02, whose covering radius is
 #: 181.02/sqrt(2) = 128 exactly.
 #:
-#: CLAUDE.md records the mirror image of this mistake: an earlier DELTA_MAX was
+#: The mirror image of this mistake was made once before: an earlier DELTA_MAX was
 #: set to 128 "by a derivation that applied to the union of both grids, while
 #: the value being checked was the distance to one grid, whose bound is 181".
 #: Same two numbers, swapped. Both times the derivation lost to the data, which

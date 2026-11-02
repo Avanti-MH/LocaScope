@@ -1298,7 +1298,7 @@ def main() -> int:
         print('\nno head ran: every requested head belongs to another baseline')
         return 1
 
-    # NO encoder level in the path. CLAUDE.md's rule is there so two encoders'
+    # NO encoder level in the path. Such a level would exist so two encoders'
     # outputs cannot overwrite each other; one run covering several of them
     # writes ONE file that names the encoder in a COLUMN instead, which answers
     # the same question and keeps the comparison in one table. The weights

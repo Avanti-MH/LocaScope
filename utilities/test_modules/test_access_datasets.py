@@ -7,7 +7,7 @@
 today, potentially others later), which is why this test sits in the flat
 `test_modules/` directory rather than under any one package's `Test<Package>/`
 subdirectory -- filing it under one consumer's jobscript would say something
-false about who it belongs to (CLAUDE.md's own rule for this).
+false about who it belongs to.
 
 `AccessDatasets.py` holds one naming-convention rule per DATASET, so
 `list_names()`/`locate()` are directory reads, not table lookups, and almost

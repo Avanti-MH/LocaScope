@@ -96,7 +96,7 @@ from TissueMaskConfig import MASK_RECIPES                        # noqa: E402
 
 #: Every string a reader will see, and what it actually computes. Written to
 #: <figure>_definitions.csv on every run so the definitions cannot drift away
-#: from the code that produced them (ClaudeRules section 12).
+#: from the code that produced them.
 DEFINITIONS = [
     ('slide, per-cell mean colour',
      'the scanned rectangle with each cell replaced by the mean colour of the '

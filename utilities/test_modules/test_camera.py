@@ -21,8 +21,7 @@ check does not hide the seed check.
                 they replaced, value for value, and what each costs.
 
 Two slides, two formats, on purpose. BRACS is SVS and steps 4x per pyramid
-level; Ki67 is MIRAX and steps 2x (CLAUDE.md, "Pyramid spacing decides how hard
-stage 1 is"). `SlideReader.level_of` picks the level by searching for the coarsest
+level; Ki67 is MIRAX and steps 2x. `SlideReader.level_of` picks the level by searching for the coarsest
 level not coarser than the requested ds, so the two pyramids send it down different
 branches -- a test on one format alone leaves the other's arithmetic
 unexercised. `TestReadPath.sh` runs both.

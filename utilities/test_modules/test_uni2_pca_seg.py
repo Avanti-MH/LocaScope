@@ -36,8 +36,8 @@ the margin is the measurement of how wrong the rejected design would have been.
 WHAT IS DELIBERATELY NOT ASSERTED
 ----------------------------------
 That the mask is correct. There is no tissue ground truth here, and inventing a
-threshold on the foreground fraction would be exactly the guess
-ClaudeRules section 8 forbids. What the --wsi tier does instead is PRINT
+threshold on the foreground fraction would be a guess
+with no data behind it. What the --wsi tier does instead is PRINT
 `fit_report` next to the tissue fractions this project has already measured
 (BRACS 38.2 / 24.4 / 23.1 percent, Ki67 9.2 / 5.9 / 4.6 / 3.5) and assert only
 that the result is not degenerate. A number near 0.5 on a Ki67 slide means the

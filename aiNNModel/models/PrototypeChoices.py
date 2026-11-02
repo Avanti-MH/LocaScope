@@ -46,8 +46,7 @@ FUNCTION, `(in_dim, device) -> (nn.Module, config-or-None)`; Stage 3 is
 `(in_dim, device) -> nn.Module` -- not a `(class, config_class)` tuple the
 way `ClassifyingRoutingHead.HEAD_CHOICES` is: what config fields a future arm
 needs is not always known ahead of a second entry to test the shape
-against -- the same calibration-not-guessing reasoning `ClaudeRules.md`
-states for thresholds. A builder function is free to read whatever CLI
+against -- the same calibration-not-guessing reasoning as for thresholds. A builder function is free to read whatever CLI
 args or literal hyperparameters it needs.
 '''
 from __future__ import annotations

@@ -19,8 +19,8 @@ ALL Stage 2 arms live HERE, in ONE file, the same organisation
 
 Lives in `aiNNModel/models/`, not the training package, because it is
 encoder/head plumbing (a module that turns tile embeddings into a
-prototype), not training logic -- the same line CLAUDE.md's repo-layout
-section already draws for `Heads.py`/`common/Head.py`.
+prototype), not training logic -- the same line drawn for
+`Heads.py`/`common/Head.py`.
 '''
 from __future__ import annotations
 

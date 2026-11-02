@@ -376,7 +376,7 @@ def _levels_off(row: dict):
     continuous `estimated_mpp` at all (it is a discrete rung classification,
     not a continuous ds estimate), so there is no relative-mpp-error to
     compute -- this is an honest substitute, not the same number, and reads
-    the same way CLAUDE.md's own note does: 0 = correct, 1 = one level off."""
+    as: 0 = correct, 1 = one level off."""
     pred, gt = float(row['pred_rung']), float(row['gt_rung'])
     return abs(math.log2(pred) - math.log2(gt))
 

@@ -61,7 +61,7 @@ def weight_filename(encoder_name: str, frozen: bool, head_name: str,
     THE DATA FIRST: the name says what a file was trained on before what it is,
     so two trainings of one arm on two datasets never overwrite each other.
     Then the ENCODER, because `_paths.encoder_tag(encoder, head)` already spells
-    an encoder-plus-head name that way and CLAUDE.md's result paths follow it
+    an encoder-plus-head name that way and the result paths follow it
     (`conch_vit_attn_pool`); a second ordering for the same pair of facts is a
     second convention. `encoder` is the REGISTRY name (`convnext_v2`, not
     `ConvNeXt`), same rule.
