@@ -98,6 +98,8 @@ class FovRecipe:
 #:                         native level up to ds 16, a third of a level's
 #:                         budget allowed to overlap so a coarse level whose
 #:                         disjoint lattice runs out still fills.
+#: bench-real              `bench` with the gap measured on the real microscope photos of ki67_with_photo (darker, no
+#:                         vignette, sharp, 1.12 times zoomed in): see the comment on the entry.
 #: plain                   the class defaults written out: the real photos'
 #:                         sensor, the full gap with no mpp jitter, the plain
 #:                         lattice draw, every native level. What a diagnostic
@@ -125,6 +127,48 @@ FOV_RECIPES: Dict[str, FovRecipe] = {
             distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
             vignette_p=1.0, distortion_p=1.0, defocus_radius=2,
             chromatic_shift=2, noise_sigma=3.0, jpeg_quality=85,
+            photometric=True, geometric=True),
+        sampler=SamplerConfig(
+            n_per_rung=50, seed=0,
+            richness=RichnessConfig(
+                scorer='background',
+                edges=(0.15, 0.30, 0.50, 0.70, 0.85, 0.95),
+                floors=(0.05, 0.15, 0.50, 0.0, 0.0, 0.0, 0.0),
+                caps=(0.15, 0.25, 0.60, 0.20, 0.20, 0.0, 0.0),
+                bucket_frame='per_rung', floor_frame='ask'),
+            overlap=OverlapConfig(
+                step=0.5, max_overlap_ratio=0.5, overlapping_share=1 / 3,
+                jitter_offsets=((0.25, 1.0), (1.0, 0.25), (0.75, 1.0),
+                                (1.0, 0.75), (1.25, 1.25)),
+                jitter_cap=0.0),
+            inherit=InheritConfig(stack_kind='F', share=0.0, source_rung=None,
+                                  on_incomplete='drop'),
+            candidates='lattice', max_tries_per_tile=5, reserve_in_region=True),
+        rungs='native', max_ds=16.0),
+    # `bench` with the gap of the real microscope photos of ki67_with_photo as `utilities/cli/diagnostics/diag_domain_gap.py`
+    # measured it (2026-10-26, 212 photos of 16 slides, against the scan's own crop of the same tissue): the background
+    # 0.25 darker (p10..p90 0.21..0.35), the vignette nearly absent (corner / centre 0.98), as sharp as the scan (0.99), the
+    # white point not tinted (R/B 1.015), noise about +0.2 grey levels, and every photo 0.893 of its level's pixel in
+    # footprint -- 1.12 times zoomed in, within +-1 per cent, not a 5 per cent jitter around 1 (which would also REPLACE
+    # `scale_range`). The ranges are a first estimate from those figures, to be set against the same diagnostic
+    # (`--fov bench-real`), not a fit. The brightness is a gain (`x * (1 + b)`), so the contrast is stretched back about the
+    # mean (`c` near `-b / (1 + b)`): the two together are close to a plain lowering, which is what the photos show (their
+    # contrast is the scan's, 1.03). What is NOT measured is kept as `bench` has it: the lens distortion, the stage shift,
+    # the angle (the photos' residual is 0.9 degrees, inside +-3) and the rotations.
+    # Second estimate (2026-10-26, after the first diagnostic): the contrast stretch also raised the saturation (1.75 against
+    # the photos' 1.33) and the sharpness (1.49 against 0.99), and the noise was 0.54 against 0.19 grey levels, so
+    # `saturation` 0.78, `noise_sigma` 0.5 (noise is added after the contrast, linear in sigma); `defocus_radius` 1 was too soft (sharpness 0.54 against 0.99, the radius is an integer), so 0 and `noise_sigma` 0.8.
+    'bench-real': FovRecipe(
+        sensor=(1440, 1024),
+        gap=DomainGapConfig(
+            rotation_choices=(0, 90, 180, 270), angle_jitter_deg=3.0,
+            scale_range=(1.08, 1.16), query_mpp_jitter=0.0,
+            brightness_range=(-0.38, -0.22), contrast_range=(0.25, 0.55),
+            saturation=0.78, color_temp_range=(-0.03, 0.03),
+            vignette_range=(0.0, 0.05), stage_shift_max=3,
+            distortion_k1_range=(-0.04, 0.04), distortion_k2=0.0,
+            vignette_p=1.0, distortion_p=1.0, defocus_radius=0,
+            chromatic_shift=1, noise_sigma=0.8, jpeg_quality=100,
             photometric=True, geometric=True),
         sampler=SamplerConfig(
             n_per_rung=50, seed=0,
