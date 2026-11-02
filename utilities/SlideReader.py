@@ -251,6 +251,12 @@ def _identity(item):
     return item
 
 
+# Seconds a DataLoader waits for its next block before it raises. A block is a few seconds' read; one a worker lost (its
+# feeder thread failed writing to /dev/shm: "No space left on device") never comes, and without a limit the process
+# waits for it for ever while the others wait in a collective (job 605745: 3 hours, until NCCL's timeout).
+READ_TIMEOUT_S = 600
+
+
 class GridRead:
     """What `read_grid` returns: iterate it for the blocks, in order (region,
     then block of rows); `len` (blocks), `n_tiles` and `one_read_per_region`
@@ -280,7 +286,8 @@ class GridRead:
     def __iter__(self) -> Iterator[GridBlock]:
         loader = torch.utils.data.DataLoader(
             self._blocks, batch_size=None, num_workers=self.workers,
-            collate_fn=_identity, pin_memory=False)
+            collate_fn=_identity, pin_memory=False,
+            timeout=READ_TIMEOUT_S if self.workers > 0 else 0)
         for blocks in loader:
             yield from blocks
 
@@ -455,7 +462,8 @@ class SlideReader:
         loader = torch.utils.data.DataLoader(
             _Points(self.path, points, spec, ds, level, self.resize),
             batch_size=batch, shuffle=False, num_workers=self.workers,
-            pin_memory=False, drop_last=False)
+            pin_memory=False, drop_last=False,
+            timeout=READ_TIMEOUT_S if self.workers > 0 else 0)
         yield from loader
 
     def _read(self, p: ReadPlan) -> np.ndarray:
