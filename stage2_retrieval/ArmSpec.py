@@ -41,10 +41,13 @@ SEP: str = '::'
 @dataclass(frozen=True)
 class MethodInfo:
     """What a method takes. `ops` are the operations after `+` (empty: it takes none), `raw` that its
-    pooling must be `raw`, `retriever` which side of an arm it stands on."""
+    pooling must be `raw`. `retriever`: it may be the first part of an arm (it searches the slide's whole grid
+    of windows, or is handed all of them); `reranker`: it may follow another part (it scores the list it is
+    handed). A method may be both (`Retriever.takes_wsi`, `Retriever.takes_candidates` say how)."""
     ops: Tuple[str, ...] = ()
     raw: bool = False
     retriever: bool = True
+    reranker: bool = False
 
 
 #: Every method an arm may name. The operations of a retriever are the same choice the stage makes
@@ -58,16 +61,52 @@ METHODS: Dict[str, MethodInfo] = {
     'ClusterBow':    MethodInfo(),
     'WinEmbed':      MethodInfo(),
     # second phase: they reorder it
-    'Dual':      MethodInfo(ops=('dual', 'cos_main'), retriever=False),
-    'CSLS':      MethodInfo(ops=('csls', 'rank'), retriever=False),
-    'Corr':      MethodInfo(ops=('diag', 'contrast', 'mnn', 'sinkhorn'), retriever=False),
-    'CandGraph': MethodInfo(ops=('nbr_support', 'prominence', 'rot_margin'), raw=True, retriever=False),
-    'Shift':     MethodInfo(retriever=False),
-    'TokenMatch': MethodInfo(raw=True, retriever=False),
-    'TileGT':    MethodInfo(ops=('tilegt', 'tilegt_rot'), retriever=False),
-    'CorrNet':   MethodInfo(retriever=False),
-    'XEnc':      MethodInfo(retriever=False),
+    'Dual':      MethodInfo(ops=('dual', 'cos_main'), retriever=False, reranker=True),
+    'CSLS':      MethodInfo(ops=('csls', 'rank'), retriever=False, reranker=True),
+    'Corr':      MethodInfo(ops=('diag', 'contrast', 'mnn', 'sinkhorn'), retriever=False, reranker=True),
+    'CandGraph': MethodInfo(ops=('nbr_support', 'prominence', 'rot_margin'), raw=True, retriever=False, reranker=True),
+    'Shift':     MethodInfo(retriever=False, reranker=True),
+    'TokenMatch': MethodInfo(raw=True, retriever=False, reranker=True),
+    'TileGT':    MethodInfo(ops=('tilegt', 'tilegt_rot'), retriever=False, reranker=True),
+    'CorrNet':   MethodInfo(retriever=False, reranker=True),
+    'XEnc':      MethodInfo(retriever=False, reranker=True),
 }
+
+#: The names of the proposal (`proposal.md` §4, §5.2, §6.4, §11), spelt here so an arm's name needs no torch;
+#: `test_neural` holds them equal to `aiNNModel/models/GloRet.py`'s.
+CONTEXT_EN: Tuple[str, ...] = ('SelfAttn', 'GNN', 'SptSelfAttn', 'Identity', 'CLSTrans')
+GLOBAL_EN: Tuple[str, ...] = ('AttnPool', 'MaskedMean', 'CNN', 'GraphPool', 'Align', 'Identity')
+SEARCHES: Tuple[str, ...] = ('exact', 'hnsw', 'ivf')
+NO_MATCH: Tuple[str, ...] = ('dustbin', 'sinkhorn', 'sigmoid')
+
+
+def learned_combo(context: str, global_en: str, arch: int) -> bool:
+    """Whether `GloRet` (`arch` 1) or `LogLoRet` (2) has a method with this ContextEn and GlobalEn: `CLSTrans` goes
+    with `Identity` and only it, `GraphPool` with `GNN`, `Align` is Arch 1's alone (GloRet.combo_problem)."""
+    if (context == 'CLSTrans') != (global_en == 'Identity'):
+        return False
+    if global_en == 'GraphPool' and context != 'GNN':
+        return False
+    return not (global_en == 'Align' and arch != 1)
+
+
+def _learned_methods() -> Dict[str, MethodInfo]:
+    """`GloRet-{ContextEn}-{GlobalEn}` and `LogLoRet-{ContextEn}-{GlobalEn}`. Both can be the first part of an arm
+    (GloRet searches the slide's windows; LogLoRet is handed all of them) and can follow another (they score the
+    list they are given). GloRet's operation is how its window vectors are searched, none for `Align`, which has
+    none; LogLoRet's is the no-match option it was trained with."""
+    out: Dict[str, MethodInfo] = {}
+    for context in CONTEXT_EN:
+        for global_en in GLOBAL_EN:
+            if learned_combo(context, global_en, 1):
+                out[f'GloRet-{context}-{global_en}'] = MethodInfo(
+                    ops=() if global_en == 'Align' else SEARCHES, retriever=True, reranker=True)
+            if learned_combo(context, global_en, 2):
+                out[f'LogLoRet-{context}-{global_en}'] = MethodInfo(ops=NO_MATCH, retriever=True, reranker=True)
+    return out
+
+
+METHODS.update(_learned_methods())
 
 
 class ArmSyntaxError(ValueError):
@@ -124,8 +163,9 @@ def _segment(method_token: str, spec_token: str, default_encoder: str, first: bo
     if first and not info.retriever:
         raise ArmSyntaxError(f'{method} reorders a list and cannot be an arm\'s first part; '
                              f'a retriever is {", ".join(m for m, i in METHODS.items() if i.retriever)}')
-    if not first and info.retriever:
-        raise ArmSyntaxError(f'{method} finds windows and cannot follow another part of an arm')
+    if not first and not info.reranker:
+        raise ArmSyntaxError(f'{method} finds windows and cannot follow another part of an arm; a part that can '
+                             f'is {", ".join(m for m, i in METHODS.items() if i.reranker)}')
     rest: str = spec_token
     cut: int = 0
     if '@' in rest:
@@ -188,15 +228,22 @@ def expand(retrievers: List[ArmSpec], rerankers: List[Segment]) -> List[ArmSpec]
 MAIN_ONLY: str = '-M'
 
 
-#: The `<data>` segment of the weights `training/RerankHead` writes at its default training data
-#: (`--train-datasets bracs/train ki67_pure`; `Checkpoints.data_tag`).
-RERANK_DATA: str = 'bracs_train+ki67_pure'
+#: The `<data>` segment of the weights `training/RerankHead` and `training/GloRet` write at their default training
+#: data (`--train-datasets @pure-train`; `Checkpoints.data_tag`).
+RERANK_DATA: str = 'pure-train'
 
 
 def weights_name(encoder: str, pooling: str, arch: str, data: str = RERANK_DATA) -> str:
     """`RerankHead/weights/<data>--<encoder>--<pooling>--<arch>--best.pt`, where training writes them
     (`Checkpoints.weights_name`, spelt here so an arm's config does not import torch)."""
     return 'RerankHead/weights/' + '--'.join((data, encoder, pooling, arch, 'best')) + '.pt'
+
+
+def learned_weights(encoder: str, pooling: str, method: str, op: str = '', data: str = RERANK_DATA) -> str:
+    """`GloRet/weights/<data>--<encoder>--<pooling>--<method>[--<op>]--best.pt`. The operation is in the name when
+    it was trained in (LogLoRet's no-match option); GloRet's search is not."""
+    tail: Tuple[str, ...] = (method, op, 'best') if op and method.startswith('LogLoRet-') else (method, 'best')
+    return 'GloRet/weights/' + '--'.join((data, encoder, pooling, *tail)) + '.pt'
 
 
 def _encoder(seg: Segment, pooling: str) -> Any:
@@ -226,6 +273,26 @@ def segment_config(seg: Segment, *, first: bool, topk_in: int, raw_topk: int, mi
         pooling, overlap = pooling[:-len(MAIN_ONLY)], False
     if pooling == RAW and seg.method not in ('CandGraph', 'TokenMatch'):
         raise NotImplementedError(f'{seg.text()}: the stage has no `raw` reading for {seg.method} yet')
+    if pooling == 'attnpool':
+        raise NotImplementedError(f'{seg.text()}: TilePool attnpool reads the patch tokens of every tile, which the '
+                                  f'level features the stage keeps are not (they are pooled by the encoder)')
+    if seg.method.startswith(('GloRet-', 'LogLoRet-')):
+        weights: str = learned_weights(seg.encoder, pooling, seg.method, seg.op)
+        if seg.method.startswith('GloRet-') and first:
+            from stage2_retrieval.RetrieverGloRet import RetrieverGloRetConfig   # noqa: PLC0415
+            return RetrieverGloRetConfig(encoder=_encoder(seg, pooling), weights=weights, method=seg.method,
+                                         tile_size=256, overlap=overlap, raw_topk=raw_topk,
+                                         min_sep_tiles=min_sep_tiles, search=seg.op or 'exact', band=16)
+        from stage2_retrieval.Context import feature_key               # noqa: PLC0415
+        enc_l: Any = _encoder(seg, pooling)
+        reuse_l: Tuple[str, ...] = ('level_features',) if feature_key(enc_l, 256, overlap) in offered else ()
+        from stage2_retrieval import RetrieverGloRet as RG             # noqa: PLC0415
+        read: int = raw_topk if first else topk_in
+        if seg.method.startswith('GloRet-'):
+            return RG.RerankerGloRetConfig(encoder=enc_l, weights=weights, method=seg.method, tile_size=256,
+                                           overlap=overlap, topk_in=read, reuse=reuse_l, batch=256)
+        return RG.RerankerLogLoRetConfig(encoder=enc_l, weights=weights, method=seg.method, no_match=seg.op,
+                                         tile_size=256, overlap=overlap, topk_in=read, reuse=reuse_l, batch=64)
     if first:
         enc: Any = _encoder(seg, pooling)
         common: Dict[str, Any] = dict(encoder=enc, tile_size=256, overlap=overlap, raw_topk=raw_topk,

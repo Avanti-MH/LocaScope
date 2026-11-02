@@ -66,6 +66,22 @@ WINEMBED_RECIPES: Dict[str, RetrieverWinEmbedConfig] = {
         encoder=encoder_config('uni2', pooling='cls_avg').with_model(dtype='fp16'),
         weights='RerankHead/weights/bracs_train+ki67_pure--uni2--cls_avg--winembed--best.pt',
         tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256),
+    # TEMPORARY: kept until `gigapath-avg` below is checked to give the same answers on the real photos (RealTest); then this recipe,
+    # RerankHead.BK/ and the RealTest cache entry of these weights go.
+    # gigapath `cls_avg`, the checkpoint of RerankHead job 597492 (val R@30 0.999), kept in RerankHead.BK/ while a new
+    # RerankHead job writes RerankHead/weights/ under the same names. The weights' name is not identity, their content is
+    # (through the stage's id), so a run on the new ones is another cache entry, not a hit on this one.
+    'gigapath-avg-bk': RetrieverWinEmbedConfig(
+        encoder=encoder_config('gigapath', pooling='cls_avg').with_model(dtype='fp16'),
+        weights='RerankHead.BK/weights/pure-train--gigapath--cls_avg--winembed--best.pt',
+        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256),
+    # gigapath `cls_avg`, the checkpoint the RerankHead job 614471 wrote to RerankHead/weights/ (val R@30 0.997, epoch 19):
+    # the current one, `--stage2 winembed:gigapath-avg`. The weights' content is identity (through the stage's id), so it is
+    # a cache entry of its own and no hit on `gigapath-avg-bk`'s.
+    'gigapath-avg': RetrieverWinEmbedConfig(
+        encoder=encoder_config('gigapath', pooling='cls_avg').with_model(dtype='fp16'),
+        weights='RerankHead/weights/pure-train--gigapath--cls_avg--winembed--best.pt',
+        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256),
 }
 
 

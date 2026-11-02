@@ -10,6 +10,23 @@ ClusterBow, WinEmbed) eats stage 1's `EstMppResult` and searches a level; a RERA
 eats another retriever's `RetrievalOutput` and reorders the list it was handed. Nothing else tells them apart:
 a reranker is a retriever whose upstream is a list. `MultiPhases` chains them.
 
+TWO WAYS TO BE HANDED THE WINDOWS
+---------------------------------
+A retriever is given its windows in one of two ways, and a class says which it takes (`takes_wsi`,
+`takes_candidates`, read off `UPSTREAM`):
+
+    WSI             `retrieve(est, query)` with stage 1's `EstMppResult`. The retriever finds the level, and
+                    lists the slide's whole grid of windows by itself -- no candidate set is made, so it may
+                    share work between the overlapping windows (a box filter, vectors computed once for the
+                    slide). It only makes sense as the first phase.
+    candidate set   `retrieve(out, query)` with the `RetrievalOutput` of the phase before. It scores the
+                    windows it is given and nothing else. It works at any phase. As the FIRST phase it is
+                    handed every window of the slide (`all_windows`), which costs a candidate per window.
+
+A class may take both (set `UPSTREAM = (EstMppResult, RetrievalOutput)` and implement `run_wsi` and
+`run_candidates`; `run` dispatches). Which phase a method may stand at is `ArmSpec.METHODS`'s, and the
+chain is refused when a method is put where it cannot work (`MultiPhases`).
+
 What a retriever reads comes in three layers:
 
     1. `upstream`              stage 1's estimate, or the upstream retriever's output     (`retrieve`)
@@ -204,14 +221,15 @@ class EncoderPool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Retriever(IdentifiedBuild):
-    """Subclass, set `UPSTREAM`, implement `run`. `retrieve` is the call everyone makes and no subclass
+    """Subclass, set `UPSTREAM`, implement `run` (or `run_wsi` and/or `run_candidates`, one for each interface
+    the class takes). `retrieve` is the call everyone makes and no subclass
     overrides: it checks the upstream's type, runs, and cuts the list to the consumer's `topk`.
 
     `encoders` is a pool to take encoders from (shared with the caller and the other retrievers of a run);
     without one the retriever builds its own. `model` is None unless a subclass loads one of its own."""
 
-    #: The upstream types `run` accepts: `(EstMppResult,)` for a first phase, `(RetrievalOutput,)` for a
-    #: reranker. Set by every subclass.
+    #: The upstream types `run` accepts: `(EstMppResult,)` for the WSI interface, `(RetrievalOutput,)` for the
+    #: candidate-set interface, both for a method that takes either. Set by every subclass.
     UPSTREAM: Tuple[type, ...] = ()
     #: The tables `tables` writes besides the list, by name: what an entry of this retriever holds and a cache
     #: hit asks for (`BenchCommon.phase_roles`). None by default.
@@ -269,9 +287,65 @@ class Retriever(IdentifiedBuild):
         out: RetrievalOutput = self.run(upstream, query)
         return cut(out, topk)
 
+    @classmethod
+    def takes_wsi(cls) -> bool:
+        """True when the class takes stage 1's estimate and finds the slide's windows itself (the WSI
+        interface)."""
+        from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+        return EstMppResult in cls.UPSTREAM
+
+    @classmethod
+    def takes_candidates(cls) -> bool:
+        """True when the class takes the list of the phase before (the candidate-set interface)."""
+        return RetrievalOutput in cls.UPSTREAM
+
     def run(self, upstream: Any, query: 'np.ndarray') -> RetrievalOutput:
-        """The whole list (`list_limit` long, or every window there is when fewer exist). Subclasses."""
-        raise NotImplementedError(f'{type(self).__name__}.run')
+        """The whole list (`list_limit` long, or every window there is when fewer exist). By default the
+        upstream's type picks `run_wsi` or `run_candidates`; a subclass with one interface may override `run`
+        instead."""
+        from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+        if isinstance(upstream, EstMppResult):
+            return self.run_wsi(upstream, query)
+        return self.run_candidates(upstream, query)
+
+    def run_wsi(self, upstream: Any, query: 'np.ndarray') -> RetrievalOutput:
+        """The WSI interface: search the slide's whole grid of windows (the list as `run` describes it)."""
+        raise NotImplementedError(f'{type(self).__name__} does not take stage 1\'s estimate: it needs a list')
+
+    def run_candidates(self, upstream: RetrievalOutput, query: 'np.ndarray') -> RetrievalOutput:
+        """The candidate-set interface: score the windows of `upstream` (the list as `run` describes it)."""
+        raise NotImplementedError(f'{type(self).__name__} does not take a list')
+
+    def all_windows(self, upstream: Any, query: 'np.ndarray') -> RetrievalOutput:
+        """Every window of the slide the query fits, as a list of candidates scored 0, for a method that
+        takes candidates and stands first (`MultiPhases` hands it this). The level is the one the WSI interface
+        would search (`SlideLevels.route`: stage 1's, or the nearest finer one that holds the query), at every
+        rotation the query fits at, on both lattices. The list carries no extras and no order. It is a
+        candidate per window -- some millions for a large slide -- which is what the WSI interface exists to
+        avoid."""
+        from stage2_retrieval.Context import SlideLevels              # noqa: PLC0415
+        from stage2_retrieval.StageInterface import Candidate         # noqa: PLC0415
+        tile: int = int(getattr(self.cfg, 'tile_size', 256))
+        overlap: bool = bool(getattr(self.cfg, 'overlap', True))
+        if self.wsi is None:
+            raise RuntimeError(f'{type(self).__name__}: call build(wsi, mask) first')
+        levels: SlideLevels = SlideLevels(self.wsi, self.mask, tile, overlap)
+        dims: Dict[int, Tuple[int, int]] = levels.query_dims(query)
+
+        def search(level: int) -> CandidateSet:
+            frame: CandidateSet = levels.frame(level)
+            found: List[Any] = []
+            for rotation in levels.fitting_rotations(level, dims):
+                rows, cols = dims[rotation]
+                for region, grid in enumerate(frame.grids):
+                    for lattice, (g_rows, g_cols) in (('main', (grid.grid_rows, grid.grid_cols)),
+                                                      ('offset', (grid.overlap_rows, grid.overlap_cols))):
+                        found += [Candidate(region, lattice, i, j, int(rotation), 0.0)
+                                  for i in range(int(g_rows) - rows + 1) for j in range(int(g_cols) - cols + 1)]
+            return dataclasses.replace(frame, candidates=tuple(found))
+
+        return RetrievalOutput(candidates=levels.route(int(upstream.chosen_level), dims,
+                                                       lambda level: None, search))
 
     def tables(self, out: RetrievalOutput, qc: Any) -> Dict[str, List[Dict[str, Any]]]:
         """The extras of `out` this retriever writes as tables of its entry, by table name. None by default."""

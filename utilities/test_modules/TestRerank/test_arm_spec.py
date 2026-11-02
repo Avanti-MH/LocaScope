@@ -8,8 +8,9 @@ Pure text: no slide, no model, no GPU.
 WHAT THIS DEFENDS
 -----------------
     grammar    `[encoder:]Method::pooling[+op][@K]` repeated, joined by `::`: what is read is what is meant
-    rules      a method with no operation has no `+`; one that takes no pooling writes `raw`; a retriever
-               is first and only first, a reranker after it
+    rules      a method with no operation has no `+`; one that takes no pooling writes `raw`; a method may be
+               first when its `retriever` flag says so and may follow when its `reranker` flag says so (one
+               may have both); today a retriever is first and only first, a reranker after it
     canonical  one arm has one text: the retriever's encoder is always written, a reranker's only when
                it is another one; parsing the text of an arm gives the arm
     product    k retrievers x h rerankers are k x h arms, a reranker with no encoder takes its retriever's
@@ -101,6 +102,72 @@ def t_a_retriever_is_first_and_a_reranker_is_after_it() -> str:
     return 'order is enforced'
 
 
+def t_where_a_method_may_stand_is_its_two_flags_and_a_method_may_have_both() -> str:
+    from dataclasses import replace                                  # noqa: PLC0415
+    methods = sys.modules['stage2_retrieval.ArmSpec'].METHODS
+    assert all(i.retriever or i.reranker for i in methods.values()), 'a method that can stand nowhere'
+    both = sorted(m for m, i in methods.items() if i.retriever and i.reranker)
+    assert both and all(m.startswith(('GloRet-', 'LogLoRet-')) for m in both), f'only the learned ones take both: {both}'
+    kept = methods['SlidingWindow']
+    try:
+        methods['SlidingWindow'] = replace(kept, reranker=True)     # both: first, and after another part
+        assert parse_arm('uni2:SlidingWindow::cls_avg+mean').retriever.method == 'SlidingWindow'
+        two = parse_arm('uni2:SlidingWindow::cls_avg+mean::SlidingWindow::cls+mean')
+        assert [s.method for s in two.segments] == ['SlidingWindow', 'SlidingWindow']
+    finally:
+        methods['SlidingWindow'] = kept
+    assert 'cannot follow' in refused('uni2:SlidingWindow::cls_avg+mean::SlidingWindow::cls+mean'), \
+        'the flag is what lets it follow'
+    return 'retriever: may be first; reranker: may follow; a method with both does either'
+
+
+def t_a_chain_starts_with_a_method_that_takes_the_wsi_or_a_list_and_continues_only_with_a_list() -> str:
+    from stage2_retrieval.MultiPhases import MULTIPHASES_RECIPES, MultiPhasesConfig   # noqa: PLC0415
+    sliding, dual = MULTIPHASES_RECIPES['uni2-avg-dual'].phases
+    MultiPhasesConfig(phases=(sliding,))
+    MultiPhasesConfig(phases=(dual,))                    # a list-eating phase first is handed every window
+    MultiPhasesConfig(phases=(sliding, dual))
+    for bad in ((dual, sliding), (sliding, sliding)):
+        try:
+            MultiPhasesConfig(phases=bad)
+            raise AssertionError('a phase that takes the WSI followed another')
+        except ValueError as exc:
+            assert 'cannot stand after another phase' in str(exc), exc
+    return 'WSI or list first; after a phase only a list-eating one'
+
+
+def t_the_learned_methods_are_named_for_the_proposal_and_build_their_phases() -> str:
+    from GloRet import CONTEXT_EN as NET_CONTEXT, GLOBAL_EN as NET_GLOBAL, NO_MATCH as NET_NO_MATCH, combo_problem   # noqa: PLC0415
+    spec = sys.modules['stage2_retrieval.ArmSpec']
+    assert (spec.CONTEXT_EN, spec.GLOBAL_EN, spec.NO_MATCH) == (NET_CONTEXT, NET_GLOBAL, NET_NO_MATCH), 'two spellings'
+    for context in NET_CONTEXT:
+        for global_en in NET_GLOBAL:
+            for arch in (1, 2):
+                assert spec.learned_combo(context, global_en, arch) == (combo_problem(context, global_en, arch) is None)
+    names = list(spec.METHODS)
+    assert len([n for n in names if n.startswith('GloRet-')]) == 18 and len([n for n in names if n.startswith('LogLoRet-')]) == 14
+    assert parse_arm('uni2:GloRet-SelfAttn-AttnPool::cls_avg+exact').text() == 'uni2:GloRet-SelfAttn-AttnPool::cls_avg+exact'
+    assert 'has no operation' in refused('uni2:GloRet-SelfAttn-Align::cls_avg+exact')
+    assert 'not a method' in refused('uni2:GloRet-CLSTrans-AttnPool::cls_avg+exact')
+    assert 'not a method' in refused('uni2:LogLoRet-SelfAttn-Align::cls_avg+dustbin')
+    assert 'needs one of its operations' in refused('uni2:LogLoRet-SelfAttn-AttnPool::cls_avg')
+    from stage2_retrieval.ArmSpec import phase_configs                                                               # noqa: PLC0415
+    from stage2_retrieval.RetrieverGloRet import (RerankerGloRetConfig, RerankerLogLoRetConfig,                     # noqa: PLC0415
+                                                  RetrieverGloRetConfig)
+    first = phase_configs(parse_arm('uni2:GloRet-SelfAttn-AttnPool::cls_avg+exact::LogLoRet-GNN-MaskedMean::cls_avg+sinkhorn@10'))
+    assert [type(c) for c in first] == [RetrieverGloRetConfig, RerankerLogLoRetConfig]
+    assert first[0].weights.endswith('pure-train--uni2--cls_avg--GloRet-SelfAttn-AttnPool--best.pt') and first[0].search == 'exact'
+    assert first[1].weights.endswith('--LogLoRet-GNN-MaskedMean--sinkhorn--best.pt'), first[1].weights
+    after = phase_configs(parse_arm('uni2:SlidingWindow::cls_avg+mean@100::GloRet-Identity-MaskedMean::cls_avg+hnsw'))
+    assert type(after[1]) is RerankerGloRetConfig and after[1].topk_in == 100
+    try:
+        phase_configs(parse_arm('uni2:GloRet-SelfAttn-AttnPool::attnpool+exact'))
+        raise AssertionError('attnpool was built')
+    except NotImplementedError as exc:
+        assert 'patch tokens' in str(exc)
+    return '18 GloRet and 14 LogLoRet methods, spelt as in the networks; they build the first or the later phase'
+
+
 def t_the_cut_is_a_whole_number_after_the_pooling_and_op() -> str:
     seg: Segment = parse_arm('uni2:SlidingWindow::cls+mean@500').retriever
     assert seg.cut == 500 and seg.text() == 'uni2:SlidingWindow::cls+mean@500'
@@ -167,11 +234,7 @@ def t_an_arm_is_the_config_of_its_chain() -> str:
         raise AssertionError('a phase reading more than it is handed was accepted')
     except ValueError:
         pass
-    try:
-        MultiPhasesConfig(phases=(cfg.phases[1],))
-        raise AssertionError('a reranker first was accepted')
-    except ValueError:
-        pass
+    MultiPhasesConfig(phases=(cfg.phases[1],))        # a phase that takes a list may stand first: it is handed every window
     return 'topk_in 100/100/30, reuse only where the key is the same, raw and bad chains refused'
 
 

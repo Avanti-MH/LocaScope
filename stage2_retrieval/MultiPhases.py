@@ -50,10 +50,15 @@ class MultiPhasesConfig(RetrieverConfig):
         length: Optional[int] = None
         for i, cfg in enumerate(self.phases):
             cls: type = retriever_class(cfg)
-            wants: type = EstMppResult if i == 0 else RetrievalOutput
-            if wants not in getattr(cls, 'UPSTREAM', ()):
-                raise ValueError(f'phase {i} ({type(cfg).__name__}) does not eat '
-                                 f'{"stage 1" if i == 0 else "a list"}')
+            eats: Tuple[type, ...] = getattr(cls, 'UPSTREAM', ())
+            # the first phase takes stage 1's estimate (the WSI interface) or, handed every window of the
+            # slide, a list; every later phase takes a list
+            ok: bool = (EstMppResult in eats or RetrievalOutput in eats) if i == 0 else RetrievalOutput in eats
+            if not ok:
+                raise ValueError(f'phase {i} ({type(cfg).__name__}) cannot stand '
+                                 f'{"first" if i == 0 else "after another phase"}: it eats '
+                                 f'{" or ".join(t.__name__ for t in eats) or "nothing"} '
+                                 f'(only a method that takes a list can follow a phase)')
             if i and length is not None and int(getattr(cfg, 'topk_in', 0)) > length:
                 raise ValueError(f'phase {i} reads {cfg.topk_in} candidates of a list {length} long')
             length = int(getattr(cfg, 'raw_topk', getattr(cfg, 'topk_in', 0)))
@@ -111,6 +116,8 @@ class MultiPhases(Retriever):
             elif i and not len(out.candidates):
                 out = RetrievalOutput(candidates=out.candidates, parent=out)
             else:
+                if not i and not p.takes_wsi():
+                    out = p.all_windows(out, query)       # the first phase takes a list: every window of the slide
                 out = p.retrieve(out, query)
         return out
 

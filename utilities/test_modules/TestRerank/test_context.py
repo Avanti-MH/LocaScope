@@ -24,6 +24,9 @@ WHAT THIS DEFENDS
     retriever    (`Retriever.py`) an unbuilt retriever, a wrong upstream and a topk longer than the
                  config's list are refused; topk is a prefix and keeps the extras; fewer windows than
                  raw_topk come back as they are
+    interfaces   (`Retriever.py`) a retriever takes the WSI, a list or both and `run` picks by the upstream's
+                 type, each refusing the other's; `all_windows` is every window the query fits at the
+                 level the WSI interface would search, on both lattices and all four rotations
     bridge       the matching extra is taken (the nearest, or a farther one); none of the kind: the
                  retriever makes its own; the kind under another key only: BridgeError
     encoders     one loaded model per trunk, read through any pooling; another trunk (encoder or
@@ -439,6 +442,75 @@ def t_retriever_checks_its_upstream_and_the_consumers_topk() -> str:
         except kind:
             pass
     return 'unbuilt, wrong upstream, topk > raw_topk all refused; topk a prefix'
+
+
+def _est(level: int) -> Any:
+    from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+    return EstMppResult(estimated_ds=1.0, estimated_mpp=0.25, chosen_ds=1.0, chosen_mpp=0.25, chosen_level=level)
+
+
+class _Both(Retriever):
+    """Takes either interface; says which one ran."""
+
+    UPSTREAM = (RetrievalOutput,)
+
+    def __init__(self) -> None:
+        super().__init__(SimpleNamespace(raw_topk=5, topk_in=5, tile_size=TILE, overlap=True), 'cpu')
+        self.ran: List[str] = []
+
+    def run_wsi(self, upstream: Any, query: Any) -> RetrievalOutput:
+        self.ran.append('wsi')
+        return RetrievalOutput(candidates=cset([]))
+
+    def run_candidates(self, upstream: RetrievalOutput, query: Any) -> RetrievalOutput:
+        self.ran.append('candidates')
+        return RetrievalOutput(candidates=upstream.candidates)
+
+
+def t_a_retriever_takes_the_wsi_a_list_or_both_and_run_picks_by_the_upstream() -> str:
+    from stage1_estimation.StageInterface import EstMppResult     # noqa: PLC0415
+    class_only_wsi: type = type('OnlyWsi', (_Both,), {'UPSTREAM': (EstMppResult,)})
+    class_only_list: type = type('OnlyList', (_Both,), {'UPSTREAM': (RetrievalOutput,)})
+    class_both: type = type('Both', (_Both,), {'UPSTREAM': (EstMppResult, RetrievalOutput)})
+    assert (class_only_wsi.takes_wsi(), class_only_wsi.takes_candidates()) == (True, False)
+    assert (class_only_list.takes_wsi(), class_only_list.takes_candidates()) == (False, True)
+    assert (class_both.takes_wsi(), class_both.takes_candidates()) == (True, True)
+    r: _Both = class_both()
+    r.build(_Slide(), None)
+    r.retrieve(_est(0), None)
+    r.retrieve(RetrievalOutput(candidates=cset([])), None)
+    assert r.ran == ['wsi', 'candidates'], 'the upstream type picks the interface'
+    for cls, upstream in ((class_only_wsi, RetrievalOutput(candidates=cset([]))), (class_only_list, _est(0))):
+        r2: _Both = cls()
+        r2.build(_Slide(), None)
+        try:
+            r2.retrieve(upstream, None)
+            raise AssertionError(f'{cls.__name__} ate an upstream it does not take')
+        except TypeError:
+            pass
+    return 'WSI only, list only, both: each refuses the other\'s upstream; both dispatches by type'
+
+
+def t_all_windows_is_every_window_the_query_fits_at_the_level_the_wsi_interface_searches() -> str:
+    r: _Both = _Both()
+    r.build(_Slide(), None)
+    query: np.ndarray = np.zeros((3 * TILE, 4 * TILE, 3), dtype=np.uint8)           # 3 x 4 tiles; 4 x 3 turned
+    out: RetrievalOutput = r.all_windows(_est(0), query)
+    cs: CandidateSet = out.candidates
+    grid: Any = cs.grids[0]
+    expected: int = 0
+    for rows, cols in ((3, 4), (4, 3), (3, 4), (4, 3)):
+        expected += ((grid.grid_rows - rows + 1) * (grid.grid_cols - cols + 1)
+                     + (grid.overlap_rows - rows + 1) * (grid.overlap_cols - cols + 1))
+    assert cs.level == 0 and len(cs) == expected, (cs.level, len(cs), expected)
+    assert len({c.key() for c in cs.candidates}) == len(cs), 'a window listed twice'
+    assert {c.rotation for c in cs.candidates} == {0, 90, 180, 270} and {c.lattice for c in cs.candidates} == {'main', 'offset'}
+    assert all(c.score == 0.0 for c in cs.candidates) and not out.extras, 'no score, no extras: it is only the set'
+    coarse: CandidateSet = r.all_windows(_est(2), query).candidates
+    assert coarse.level == 1 and coarse.irretrievable_lvl == (2,), 'the level the WSI interface would walk to'
+    assert not len(r.all_windows(_est(2), np.zeros((20 * TILE, 20 * TILE, 3), dtype=np.uint8)).candidates), \
+        'a query no level holds has no windows'
+    return f'{len(cs)} windows at L0 for a 3 x 4 query; L2 too small -> L1; nothing fits -> empty'
 
 
 def t_the_bridge_lock_takes_the_matching_extra_or_nothing_and_refuses_another() -> str:

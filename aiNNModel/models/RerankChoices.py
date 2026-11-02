@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict
 
 import torch.nn as nn
 
+from GloRet import build_gloret, build_logloret
 from RerankHeads import (CandidateContext, ContextCfg, CorrNet, CorrNetCfg, EmbedCfg,
                          StackCfg, StackNet, TileGT, TileGTCfg, TileGTContext, WinEmbedder)
 
@@ -38,6 +39,8 @@ RERANK_CHOICES: Dict[str, Callable[[Dict[str, Any]], nn.Module]] = {
     'tilegt_ctx': _tilegt_ctx,
     'winembed': lambda cfg: WinEmbedder(EmbedCfg(**_tuple_shapes(cfg))),
     'stack': lambda cfg: StackNet(StackCfg(**cfg)),
+    'gloret': build_gloret,
+    'logloret': build_logloret,
 }
 
 

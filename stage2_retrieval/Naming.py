@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional, Tuple
 
-from stage2_retrieval.ArmSpec import ArmSpec, MAIN_ONLY, RAW, Segment
+from stage2_retrieval.ArmSpec import ArmSpec, MAIN_ONLY, METHODS, RAW, Segment
 
 #: The word each method is filed under.
 METHOD_SLUGS: Dict[str, str] = {
@@ -32,8 +32,15 @@ METHOD_SLUGS: Dict[str, str] = {
     'Dual': 'dual', 'CSLS': 'csls', 'Corr': 'corr', 'CandGraph': 'candgraph', 'Shift': 'shift',
     'TokenMatch': 'tokenmatch', 'XEnc': 'xenc', 'TileGT': 'tilegt', 'CorrNet': 'corrnet', 'Stack': 'stack'}
 
-#: Each config class: the method it is, and the field that holds its operation ('' for none).
+#: Each learned method (`GloRet-SelfAttn-AttnPool`, ...) is filed under its lower-cased name.
+METHOD_SLUGS.update({m: m.lower() for m in METHODS if m.startswith(('GloRet-', 'LogLoRet-'))})
+
+#: Each config class: the method it is, and the field that holds its operation ('' for none). A learned method's
+#: config holds many methods: its own `method` field says which (the method here is empty).
 CONFIG_NAMES: Dict[str, Tuple[str, str]] = {
+    'RetrieverGloRetConfig': ('', 'search'),
+    'RerankerGloRetConfig': ('', ''),
+    'RerankerLogLoRetConfig': ('', 'no_match'),
     'RetrieverSlidingWinSimRotConfig': ('SlidingWindow', 'score'),
     'RetrieverBagOfTilesConfig': ('BagOfTiles', 'mode'),
     'RetrieverTileVoteConfig': ('TileVote', 'backend'),
@@ -91,6 +98,7 @@ def config_label(cfg: Any) -> str:
     if name not in CONFIG_NAMES:
         raise KeyError(f'{name} is not a stage-2 method this names; they are {sorted(CONFIG_NAMES)}')
     method, op_field = CONFIG_NAMES[name]
+    method = str(getattr(cfg, 'method', '') or method)
     enc: Optional[Any] = getattr(cfg, 'encoder', None)
     encoder: str = str(getattr(enc, 'REGISTERED_AS', '') or '') if enc is not None else ''
     pooling: str = RAW if method in RAW_METHODS else (str(enc.pooling) or 'default')
