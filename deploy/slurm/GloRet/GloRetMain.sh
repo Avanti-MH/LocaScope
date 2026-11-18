@@ -75,7 +75,7 @@ case "${SLURM_JOB_NAME:-}" in
   *Profile) EXTRA="$EXTRA --profile" ;;     # -J SmokeGloRetMainProfile: also run the first pool choice and the first step of each head under torch.profiler
 esac
 case "${SLURM_JOB_NAME:-}" in
-  Exp*) EXTRA="--out /work/u26130998/result/$SLURM_JOB_NAME" ;;
+  Exp*) EXTRA="$EXTRA --out /work/u26130998/result/$SLURM_JOB_NAME" ;;
 esac
 
 echo "================================================================================"

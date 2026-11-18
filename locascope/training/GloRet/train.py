@@ -60,7 +60,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-from locascope.paths import DATASETS_DIR, LOG_DIR, RESULT_DIR   # noqa: E402
+from locascope.paths import DATASETS_DIR, LOG_DIR, RESULT_DIR, job_result_dir   # noqa: E402
 
 import numpy as np                                                    # noqa: E402
 import torch                                                          # noqa: E402
@@ -889,6 +889,7 @@ def main() -> int:
     global RANK
     RANK = int(os.environ.get('RANK', '0'))        # torchrun's, known before the process group is joined
     args: argparse.Namespace = parse_args()
+    out_dir: str = args.out or job_result_dir('GloRet')        # the one place this job writes its own products to (the weights are the shared exception: `weights_file`)
     runs: List[HeadRun] = [parse_head(h) for h in args.heads]
     rank, world, local = dist_init()
     args.rank, args.world = rank, world
@@ -989,7 +990,7 @@ def main() -> int:
     stores: Dict[str, MemoryFeatureStore] = {}
     list_stores: Dict[str, MemoryFeatureStore] = {}
     card_budget: Optional[CardBudget] = CardBudget(int(args.gpu_levels_gb * 1e9)) if args.gpu_levels_gb > 0 else None
-    profile_start(os.path.join(args.out or RESULT_DIR) if args.profile and rank == 0 else None)
+    profile_start(out_dir if args.profile and rank == 0 else None)
 
     encoders: EncoderPool = EncoderPool(device)        # one copy of each encoder, shared by the retrievers of a process
     # stage C: the attention pool of a trained network, frozen; a tile is pooled as it is encoded and the level kept
@@ -1028,7 +1029,7 @@ def main() -> int:
         say(f'real photos: {len(real_photos)} confirmed photos of {len(per_slide)} slides (monitoring only)   '
             + ' '.join(f'{s.split(",")[0]}:{n}' for s, n in sorted(per_slide.items())), console=True)
         if rank == 0:
-            write_list(real_photos, os.path.join(args.out or RESULT_DIR, 'RealPhotos', f'seed{args.real_seed}_n{args.real_photos}.tsv'))
+            write_list(real_photos, os.path.join(out_dir, f'seed{args.real_seed}_n{args.real_photos}.tsv'))
     real_slide_of: Dict[str, int] = {s: i % world for i, s in enumerate(sorted({p.slide for p in real_photos}))}
 
     # the slides this process trains on, every epoch: every `world`-th of the list by name

@@ -198,7 +198,7 @@ MASK_CACHE_JOB="${MASK_CACHE_JOB:-Masks}"
 # A smoke draws with its own numbers (N_PER_RUNG 4), which no real run can reuse:
 # its draws go to its own cache (Smoke*, what make clean-smoke removes). Its masks
 # are the real ones, so they stay shared.
-if [ "$SMOKE" = "1" ]; then DRAW_DEFAULT="${SLURM_JOB_NAME:-SmokeClassifyingRoutingHead}"; else DRAW_DEFAULT=MppRoutingHead; fi
+if [ "$SMOKE" = "1" ]; then DRAW_DEFAULT="${SLURM_JOB_NAME:-SmokeClassifyingRoutingHead}"; else DRAW_DEFAULT=MppRoutingHead; fi   # MppRoutingHead: the classifier's old name, kept as the draw cache both trainers share
 DRAW_CACHE_JOB="${DRAW_CACHE_JOB:-$DRAW_DEFAULT}"
 CACHE_ARGS="--mask-cache-job $MASK_CACHE_JOB --draw-cache-job $DRAW_CACHE_JOB"
 TRAIN_EXTRA_ARGS="$TRAIN_EXTRA_ARGS $CACHE_ARGS"

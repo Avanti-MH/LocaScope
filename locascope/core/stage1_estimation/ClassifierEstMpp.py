@@ -141,7 +141,7 @@ class ClassifierEstMppResult(EstMppResult):
     answer.
 
     NOT `tile_size`/`query_patch_count`, even though the old
-    `GigapathKnnEstiMppResult` this was drafted against carried both. Copying
+    `GigapathKnnEstiMppResult` this was drafted against (since removed) carried both. Copying
     that Result's fields without re-deriving why each one is there was the
     mistake this one corrects: `tile_size` is already on
     `cfg.tile_size` and `query_patch_count` is already knowable from the input

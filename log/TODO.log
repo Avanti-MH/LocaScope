@@ -28,6 +28,12 @@
     換層的邏輯（往細的層找，irretrievable_lvl / alter_lvl）依賴它。region 過濾本身註明是單調的，
     「整個 query 放得下」只是推論。
 
+[ ] 2026-11-11 | ExpCoae — arm B（clssig）若有效，再擴充池化預測目標（來源：training/CoAE/spec.md 池化預測列）
+    現況：cls′ 線性預測 4×4 池化，只含 pc 3 + tw 1；lp8、lp24 不放（局部相位在 64 px 格內轉好幾圈，平均後為 0）。
+    待做：先看 ExpCoae `koleo0.1-fmcls-clssig1` 的 pc／tw 有沒有用；有用才加「池化後留得住的相位量」
+    （格內相位能量，或格內相位一致程度 = 相位向量的 resultant length）。lp8、lp24 的紀錄寫在這一條。
+    判讀只用 real-cofig、real-cls、real-latent 的驗證數字，不用真實照片選設定。
+
 [x] 2026-11-02 | Cache 的 photos 層：照片集 id 與 record 的決定（從已刪的根目錄 plan.md 移入）
     - 照片集 id：一個 id 代表一張 slide 的整個照片資料夾。每個檔案寫成「檔名:檔案大小」，依檔名排序後整串
       hash 取 16 碼。增加、刪除、改名、換大小的照片都會產生新 id；搬動或重新複製資料夾不影響（不含路徑、
@@ -1879,3 +1885,21 @@ front of whoever flips it.
       inliers / matches 同時相等，所以 H 沒變。另外 18 張 stage 3 失敗，座標退回 stage 2 視窗起點，本來就是整數。
     - 結論：重構沒有改變任何 stage 的計算。stage 1 全等只說明這 30 張的 KNN 都投 L0，不證明參考庫抽到的 tile
       和舊的相同（cached plan 會保留讀取範圍）。diag 用完即刪，沒有進 git。
+
+## 2026-11-16  清理「為了和舊版一致而留的舊程式碼／新舊比較」— C 類（範圍大，之後再清）
+使用者規則：重寫驗證相同後，刪舊程式碼與新舊比較程式碼，保留備份與舊結果。A、B 類（phase_separation.py 的 legacy/regression、
+test_coae.py 的 _losses_by_hand、tile_confusion.py 的 with_old_rows/OLD_CHECK/advance）併進因子卡實作；以下 C 類延後。
+清單來源：/work/u26130998/.claude/changespec/coae/reader.md（2026-11-16）。
+  - [ ] repo 測試裡的 FROZEN 舊實作副本：test_patching_lib、test_locascope_stages、test_read_geometry、test_fov_supply、test_camera、
+        test_config_identity、test_gloret、test_sim_gpu 等（一個模組一個模組清，每次跑該測試）。
+  - [ ] test_arm_spec.py:137-139：ArmSpec 與 GloRet 兩份名稱常數相等的斷言（應改成單一來源）。
+  - [ ] bench_stage2_retriever.py:478-481、2187-2195 與 analyze_stage2_metrics.py:324-346（OLD_MODES/mode_of/family_of/normalise）：
+        讀舊 CSV／裸 token 的轉換；刪後舊 bench 結果不能用新分析讀，要先決定舊結果怎麼處理。
+  - [ ] scratch/diag diag_read_exp.py:193-337：凍結舊讀取器與新讀取器的 PASS/FAIL 比較。
+  - [ ] scratch/realtest migrate_coae_arm.sh（v1）、migrate_coae_arm_v2.sh：一次性遷移（v2 已跑，ops.log 在 backup）；留作紀錄或移封存。
+  - [x] 2026-11-17 已改：realtest.py、ClassifierEstMpp.py、ClassifyingRoutingHead.sh、run.sh；ArmSpec.py:221 對照後未發現不符；Supply.py 併入舊探針撤除。原項：註解與程式不符（只改文字）：realtest.py:216（ncc_<run> 實為 ncc_<md5(arm)[:12]>）、ArmSpec.py:221、ClassifierEstMpp.py:144、
+        Supply.py:288-290（real:<source>）、PrototypicalRoutingHead.sh:85 vs ClassifyingRoutingHead.sh:201（MppRoutingHead 是否舊名）、
+        run.sh:60-62（註解掉的 migrate_checkpoint）。
+
+## 2026-11-17  兩份 RealPhotos.py 合併成一個共用模組
+- [ ] locascope/training/GloRet/RealPhotos.py（GloRet 的真實照片抽樣清單）與 locascope/training/RerankHead/RealPhotos.py（winembed 的真實照片觀察驗證：清單讀取、H 檢查 RealPhoto/centre_error、real_stream）做的是類似的事，違反「一個工具、可替換部件」。等 winembed（GigaCoAE+RN3:WinEmbed::latent）訓練完，檢查能否合併成一個共用模組（例如 locascope/core/ 下的 RealPhotos：清單、H、抽樣策略可插拔），GloRet 與 RerankHead 都改 import 它。
