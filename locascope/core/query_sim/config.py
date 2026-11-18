@@ -65,6 +65,7 @@ class DomainGapConfig(IdentifiedConfig):
     # ── Noise + JPEG ──────────────────────────────────────────────────────────
     noise_sigma:  float = 3.0
     jpeg_quality: int   = 85
+    jpeg:         bool  = True    # False: no codec at all (the photo is stored lossless: bmp / png); jpeg_quality 100 is still a lossy encode
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
     photometric: bool = True   # if False, skip color/vignette/lens/noise/jpeg
@@ -79,6 +80,7 @@ class DomainGapConfig(IdentifiedConfig):
         'distortion_k1_range': (-0.04, 0.04), 'distortion_k2': 0.0,
         'vignette_p': 1.0, 'distortion_p': 1.0, 'defocus_radius': 2,
         'chromatic_shift': 2, 'noise_sigma': 3.0, 'jpeg_quality': 85,
+        'jpeg': True,
         'photometric': True, 'geometric': True}
 
     def __post_init__(self):

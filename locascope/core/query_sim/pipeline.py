@@ -112,7 +112,8 @@ def _sample_params(cfg: DomainGapConfig, rng: random.Random,
         # rather than for correction); it exists so the same seed reproduces
         # the same shot.
         'noise_seed':        rng.getrandbits(32),
-        'jpeg_quality':      cfg.jpeg_quality,
+        # the quality APPLIED: None when the config has no codec (cfg.jpeg False) -- no key is added, a render record's cells stay as they are
+        'jpeg_quality':      cfg.jpeg_quality if cfg.jpeg else None,
         'saturation':        cfg.saturation,
         # k2 rides on the SAME coin: `distortion_p` turns the lens distortion
         # off, and leaving a non-zero k2 behind would leave it half on.
@@ -210,7 +211,8 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
 
     SENSOR STAGE -- what the optics and the sensor do to that image. Vignetting
     falls off from the optical axis, distortion is normalised to the sensor
-    half-width, and JPEG's 8x8 blocks tile the delivered photograph. All three
+    half-width, and JPEG's 8x8 blocks tile the delivered photograph (when the
+    config has a codec: cfg.jpeg). All three
     read a frame size, so all three must see the sensor's, not the read's.
 
     The scene stage ends by cropping to the sensor plus `lens_margin` -- what the
@@ -268,10 +270,12 @@ def _apply_params(img: np.ndarray, cfg: DomainGapConfig, p: dict,
 
     # Per-pixel from here down, so they run on the exact sensor frame: the
     # vignette's falloff is then measured against the real half-width, and
-    # JPEG's blocks tile the delivered image rather than a padded one.
+    # JPEG's blocks (when the config has a codec: cfg.jpeg) tile the delivered
+    # image rather than a padded one.
     img = apply_vignette(img, strength=p['vignette_strength'])
     img = apply_noise(img, sigma=p['noise_sigma'], seed=p['noise_seed'])
-    img = apply_jpeg(img, quality=p['jpeg_quality'])
+    if cfg.jpeg:
+        img = apply_jpeg(img, quality=p['jpeg_quality'])
     return img
 
 

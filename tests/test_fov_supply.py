@@ -250,6 +250,17 @@ def run_supply(wsi, mask, level_ds, new, expect) -> None:
     except TypeError:
         expect(True, 'a Render is not iterable')
 
+    # A gap without a codec records `jpeg_quality` None, and the render record's cells carry it back as None.
+    from dataclasses import replace
+    from locascope.core.query_sim.FovSupply import _cells, _params
+    m = got[0][0]
+    nocodec = Render(reader, SENSOR, replace(fov_cfg(), jpeg=False), ds=float(m.ds), seed=0)
+    img_nc, p_nc = nocodec.capture_with_gt(m.fov_rect[0], m.fov_rect[1], rng=random.Random(0))
+    expect(img_nc is not None, 'a gap with jpeg False takes the photo')
+    back = _params(_cells(0, p_nc)) if p_nc is not None else {}
+    expect(p_nc is not None and p_nc['jpeg_quality'] is None and back.get('jpeg_quality', 0) is None,
+           'a gap with jpeg False: jpeg_quality is None in the params and after the render record\'s cells')
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])

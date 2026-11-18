@@ -5,6 +5,7 @@ one row is enough to reproduce the exact crop from the same WSI + coordinates.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -39,7 +40,7 @@ class FOVRecord:
     stage_shift_dx:    int
     stage_shift_dy:    int
     noise_sigma:       float
-    jpeg_quality:      int
+    jpeg_quality:      Optional[int]   # None: no codec
 
     @classmethod
     def from_capture(cls, filename: str, wsi_path: str, camera, x: int, y: int,
@@ -72,5 +73,5 @@ class FOVRecord:
             stage_shift_dx    = int(p['stage_shift_dx']),
             stage_shift_dy    = int(p['stage_shift_dy']),
             noise_sigma       = float(p['noise_sigma']),
-            jpeg_quality      = int(p['jpeg_quality']),
+            jpeg_quality      = None if p['jpeg_quality'] is None else int(p['jpeg_quality']),
         )

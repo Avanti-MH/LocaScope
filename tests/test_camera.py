@@ -19,6 +19,8 @@ check does not hide the seed check.
                 `capture(rng=)` twice, must give bit-identical pixels.
     augment     `query_sim/augment/` ops against frozen copies of the bodies
                 they replaced, value for value, and what each costs.
+    codec       `DomainGapConfig.jpeg` False is the photo before the codec
+                (synthetic, no slide).
 
 Two slides, two formats, on purpose. BRACS is SVS and steps 4x per pyramid
 level; Ki67 is MIRAX and steps 2x. `SlideReader.level_of` picks the level by searching for the coarsest
@@ -851,13 +853,43 @@ def run_fingerprint(args, wsi=None, level_ds=None) -> int:
         return 1
 
 
-SECTIONS = ('sensor', 'reach', 'map', 'seed', 'augment', 'fingerprint')
+def run_codec(args, wsi=None, level_ds=None) -> int:
+    """`DomainGapConfig.jpeg` False is the photo as it is before the codec (synthetic, no slide): the same draws and the same
+    params but for `jpeg_quality` (None: no codec), the same pixels as the codec's input; the codec on is that photo through
+    `apply_jpeg`."""
+    from dataclasses import replace
+    from locascope.core.query_sim.FovSupply import FOV_RECIPES
+    from locascope.core.query_sim.augment.color import apply_jpeg
+    failures = []
+
+    def check(ok, what):
+        print(f'  {"ok  " if ok else "FAIL"} {what}', flush=True)
+        if not ok:
+            failures.append(what)
+
+    img = np.random.default_rng(5).integers(0, 256, (128, 160, 3), dtype=np.uint8)
+    cfg = replace(FOV_RECIPES['bench'].gap, geometric=False, stage_shift_max=0)
+    for s in range(3):
+        a, pa = simulate_with_gt(img, cfg=replace(cfg, jpeg=False), rng=random.Random(s))
+        b, pb = simulate_with_gt(img, cfg=cfg, rng=random.Random(s))
+        check(pa['jpeg_quality'] is None and pb['jpeg_quality'] == 85, f'seed {s}: jpeg_quality is None without the codec, 85 with it')
+        check(set(pa) == set(pb), f'seed {s}: no key is added to params')
+        check(all(pa[k] == pb[k] for k in pa if k != 'jpeg_quality'), f'seed {s}: every other parameter is equal')
+        check(np.array_equal(apply_jpeg(a, 85), b), f'seed {s}: the codec on is the codec-free photo through apply_jpeg(85)')
+        check(not np.array_equal(a, b), f'seed {s}: the codec changes the pixels')
+    return 1 if failures else 0
+
+
+#: sections that read no slide
+SLIDE_FREE = ('fingerprint', 'codec')
+
+SECTIONS = ('sensor', 'reach', 'map', 'seed', 'augment', 'fingerprint', 'codec')
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--wsi', default=None,
-                    help='the slide; every section but fingerprint needs one')
+                    help='the slide; every section but fingerprint and codec needs one')
     ap.add_argument('--level', type=int, default=1,
                     help='pyramid level for map / seed / augment')
     ap.add_argument('--seed', type=int, default=0)
@@ -870,11 +902,11 @@ def main() -> int:
     args = ap.parse_args()
     # Default: every slide section with --wsi, the slide-free one without.
     only = args.only or ([s for s in SECTIONS if s != 'fingerprint']
-                         if args.wsi else ['fingerprint'])
+                         if args.wsi else list(SLIDE_FREE))
     wsi = level_ds = None
-    if any(s != 'fingerprint' for s in only):
+    if any(s not in SLIDE_FREE for s in only):
         if not args.wsi:
-            ap.error('--wsi is needed for every section but fingerprint')
+            ap.error('--wsi is needed for every section but fingerprint and codec')
         wsi = SafeSlide(args.wsi)
         base_mpp = wsi.base_mpp
         level_ds = float(wsi.level_downsamples[args.level])
@@ -883,6 +915,7 @@ def main() -> int:
               f'level_mpp={level_mpp:.4f}')
 
     runners = {'fingerprint': lambda: run_fingerprint(args),
+               'codec': lambda: run_codec(args),
                'sensor': lambda: run_sensor(args, wsi, level_ds),
                'reach': lambda: run_reach(args, wsi, level_ds),
                'map': lambda: run_map(args, wsi, level_ds),

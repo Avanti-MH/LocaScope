@@ -251,7 +251,9 @@ def t_camera_flags():
     got = C.config_from_args(args, base, 'camera')
     assert got.rotation_choices == (0, 90) and got.scale_range == (0.9, 1.1)
     assert got.photometric is False and got.noise_sigma == 0.0
-    assert got.jpeg_quality == base.jpeg_quality
+    assert got.jpeg_quality == base.jpeg_quality and got.jpeg is True
+    nocodec = C.config_from_args(ap.parse_args(['--no-camera-jpeg']), base, 'camera')
+    assert nocodec.jpeg is False and nocodec.jpeg_quality == base.jpeg_quality
     # `--camera-query-mpp` is a PREFIX of `--camera-query-mpp-jitter`: with
     # abbreviations on, this would set the jitter instead of failing
     assert _refused(ap, ['--camera-query-mpp', '0.5']), \

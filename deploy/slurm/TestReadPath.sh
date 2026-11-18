@@ -84,9 +84,9 @@ run() {
 }
 run tests/test_read_geometry.py
 run tests/test_tile_sampler.py
-run tests/test_camera.py --only fingerprint
-# SafeSlide against the one slide with a known hole (its own default).
-[ -n "$SLIDES" ] && run tests/test_safe_slide.py
+run tests/test_camera.py --only fingerprint codec
+# SafeSlide against a slide with a known hole: not run -- no slide on nano4 has a scanner hole (2026-11-15);
+# run tests/test_safe_slide.py --wsi <path> --bad-x .. by hand when one turns up.
 for name in $SLIDES; do
     # locate() raises KeyError listing every known name if this one is not
     # found, which is a better failure than the test reading the wrong tissue.
