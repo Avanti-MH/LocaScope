@@ -12,7 +12,7 @@ again; trained together, a level is encoded once for all of them.
 THE DATA (`Visits.py`): training slides are `--train-datasets` (`@pure-train`), which shares no slide
 with the validation and test sets (`@pure-half-val`, `@pure-half-test`). A source dataset's own id
 (`ki67_pure`, `bracs/train`) is the whole of it, validation and test slides included. For each slide the
-retriever (`RetrieverSlidingWinSimRot` of `--encoder` read through `--pooling`) is built, FoV positions are drawn over every level with a
+retriever (the sliding window of `--encoder` read through `--pooling`, `ArmSpec.parse_arm`) is built, FoV positions are drawn over every level with a
 seed of their own (`--fov-seed`), and a LEVEL AT A TIME `--fov-per-visit` of them
 are photographed and put through the retriever. A visit's FoVs are trained on
 `--steps-per-visit` times, `--fovs-per-step` at once, and dropped.
@@ -30,6 +30,11 @@ the gain is read off the same FoVs. The checkpoint is the epoch that scores best
 at `--select-k`. Weights: `RerankHead/weights/<data>--<encoder>--<pooling>--<arch>[--<tag>]--
 <best|last>.pt` under the results root (`weights_path`).
 
+REAL PHOTOS (`--real-val <list>`, off by default; `RealPhotos.py`): beside the validation, every epoch, a list of real
+photos is scored the same way (the slidewin row and each head, R@k, per group of the list), printed and sent to wandb under
+`real-photo (observe only)`. OBSERVED ONLY: the checkpoint is chosen on the simulated validation (`selected`), the
+real figures are in no checkpoint and nothing stops or is tuned on them.
+
 NOT YET: crash-resume (a killed job restarts from its `_last` weights only with
 `--init-from last`; the optimiser is not restored).
 '''
@@ -42,8 +47,9 @@ import sys
 import threading
 import time
 import traceback
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 from locascope.paths import LOG_DIR, RESULT_DIR   # noqa: E402
@@ -57,11 +63,10 @@ from locascope.cli.bench.BenchCommon import require_gpu_if_allocated            
 from locascope.core.query_sim.FovSupply import add_fov_args, fov_from_args                     # noqa: E402
 from locascope.core.networks.RerankChoices import build_rerank                                # noqa: E402
 from locascope.core.networks.Checkpoints import data_tag, save_rerank_checkpoint, weights_name   # noqa: E402
-from locascope.core.backbones.TileEncoder import encoder_config                           # noqa: E402
-from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import (RetrieverSlidingWinSimRot,   # noqa: E402
-                                                        RetrieverSlidingWinSimRotConfig)
+from locascope.core.stage2_retrieval import retriever_class                              # noqa: E402
+from locascope.core.stage2_retrieval.ArmSpec import ArmSpec, ArmSyntaxError, family_of, parse_arm, phase_configs   # noqa: E402
 
-from locascope.training.RerankHead.Embed import EmbedVisit, embed_loss, embed_rank, fov_of, visit_of   # noqa: E402
+from locascope.training.RerankHead.Embed import EmbedVisit, embed_loss, embed_rank, fov_of, pool_report, visit_of   # noqa: E402
 from locascope.training.RerankHead.Labels import LabelConfig                    # noqa: E402
 from locascope.training.RerankHead.Metrics import KS, recall_at                 # noqa: E402
 from locascope.training.RerankHead.Runtime import (all_sum, broadcast_parameters, dist_done, dist_init,   # noqa: E402
@@ -70,8 +75,11 @@ from locascope.training.RerankHead.Runtime import (all_sum, broadcast_parameters
 from locascope.training.RerankHead.Usage import UsageMeter, advice, usage_lines   # noqa: E402
 from locascope.training.RerankHead.Steps import (NEURAL_ARCHS, build_head, first_phase_rank,   # noqa: E402
                                         idle_step, rank_of, train_step)
-from locascope.training.RerankHead.Visits import (FovData, FovResult, MemoryFeatureStore, fov_stream,   # noqa: E402
-                                        prepare_fov, take_timers, tick)
+from locascope.training.RerankHead.Visits import (FovData, FovResult, LevelDiskCache, MemoryFeatureStore,   # noqa: E402
+                                        drawn_levels, fov_stream, precompute_levels, prepare_fov, take_timers, tick)
+from locascope.training.RerankHead.RealPhotos import (DATASET, OBSERVE, RealPhoto, list_path, read_list,   # noqa: E402
+                                                      real_stream)
+from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES                             # noqa: E402
 
 ARCHS: Tuple[str, ...] = (*NEURAL_ARCHS, 'winembed')
 
@@ -150,9 +158,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--heads', nargs='+', choices=ARCHS, default=['tilegt'])
-    ap.add_argument('--encoder', default='uni2', choices=('uni2', 'gigapath'),
+    ap.add_argument('--encoder', default='uni2',
                     help='the encoder of the sliding-window retriever whose list the heads rerank, and of the '
-                         'features they read')
+                         'features they read: uni2 | gigapath | a CoAE encoder (`GigaCoAE+<arm>`, with --pooling a '
+                         'usage of the network; the winembed head only). The arm grammar (`ArmSpec.py`) refuses a '
+                         'name it does not know')
     ap.add_argument('--pooling', default='cls_avg',
                     help='the pooling the encoder is read through (the heads read the same)')
     ap.add_argument('--k', type=int, default=500,
@@ -168,6 +178,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help='draw other FoV positions (and photograph them with other camera draws) every epoch: the '
                          'seed is --fov-seed plus the epoch. Off: the same ~30 thousand FoVs every epoch')
     ap.add_argument('--val-fov-seed', type=int, default=0)
+    ap.add_argument('--real-val', default='',
+                    help='a list of real photos (`RealPhotos.LISTS/<name>.tsv`) scored every epoch beside the validation. '
+                         'OBSERVED ONLY: no checkpoint is chosen on them, nothing stops or is tuned on them; \'\' = off')
     ap.add_argument('--mask-cache-job', default='Masks', help='where the hest masks are')
     # data per visit
     ap.add_argument('--fov-per-visit', type=int, default=64)
@@ -177,8 +190,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                     help='FoVs one process takes a step on; with several processes the step is this times '
                          'their number')
     ap.add_argument('--keep-levels', action=argparse.BooleanOptionalAction, default=True,
-                    help='keep each slide\'s encoded levels on the host between epochs (a slide is the same '
-                         'process\'s every epoch). Off: encode them every epoch, which is most of the time')
+                    help='keep each slide\'s encoded levels on the host in fp16 (a slide is the same process\'s every '
+                         'epoch), all of them read or encoded BEFORE the first epoch (`Visits.precompute_levels`). '
+                         'Off: encode them every epoch, which is most of the time')
+    ap.add_argument('--feature-cache-job', default='RerankHead',
+                    help='the disk cache the levels are read from and written to, `result/cache/<job>/` (fp16, named by '
+                         'the retriever\'s config and checkpoint content: `Visits.LevelDiskCache`)')
     ap.add_argument('--prefetch', type=int, default=2,
                     help='visits made ahead of the training by a thread (0: none); each holds its level\'s '
                          'window grids on the GPU')
@@ -243,7 +260,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args: argparse.Namespace = ap.parse_args(argv)
     if args.select_k not in KS:
         ap.error(f'--select-k must be one of {KS}')
+    if args.real_val and not os.path.isfile(list_path(args.real_val)):
+        ap.error(f'--real-val {args.real_val}: no list {list_path(args.real_val)}')
+    try:
+        retriever_arm(args.encoder, args.pooling)
+    except ArmSyntaxError as exc:
+        ap.error(f'--encoder {args.encoder} --pooling {args.pooling}: {exc}')
+    if family_of(args.encoder) is not None and set(args.heads) != {'winembed'}:
+        ap.error(f'--encoder {args.encoder}: a learned encoder offers no level_features; the only head that trains on it is winembed')
     return args
+
+
+def retriever_arm(encoder: str, pooling: str) -> ArmSpec:
+    """The arm of the retriever whose list is reranked: the sliding window on this encoder and pooling (its baseline settings).
+    The arm grammar is what refuses an encoder or a pooling it does not know (a CoAE encoder with no such usage)."""
+    return parse_arm(f'{encoder}:SlidingWindow::{pooling}+mean')
 
 
 def slides_of(datasets: Sequence[str], n: int) -> List[Tuple[str, str, str]]:
@@ -425,7 +456,7 @@ def prefetch(items: Iterator[Visit], depth: int, device: Any) -> Iterator[Visit]
 
 def train_visit(runs: List[HeadRun], neural: List[FovData], embed: Optional[EmbedVisit],
                 args: argparse.Namespace, rng: np.random.Generator, weights: Dict[str, float],
-                label_cfg: LabelConfig) -> Dict[str, float]:
+                label_cfg: LabelConfig, visit_no: int) -> Dict[str, float]:
     """`--steps-per-visit` steps of every head on one visit's FoVs."""
     logs: Dict[str, List[float]] = {}
     sync: Optional[Callable[[torch.nn.Module], None]] = (
@@ -438,16 +469,33 @@ def train_visit(runs: List[HeadRun], neural: List[FovData], embed: Optional[Embe
             for _ in range(args.steps_per_visit if args.world > 1 else 0):
                 idle_step(run.model, run.opt, args.clip, lambda m: sync_gradients(m, False))
             continue
-        for _ in range(args.steps_per_visit):
+        for step in range(args.steps_per_visit):
             pick: np.ndarray = rng.choice(pool, size=min(args.fovs_per_step, pool), replace=False)
             if run.arch == 'winembed':
                 assert embed is not None
                 run.model.train()
                 run.opt.zero_grad(set_to_none=True)
-                with torch.autocast(device_type=args.device.split(':')[0], dtype=torch.bfloat16):
-                    loss: torch.Tensor = embed_loss(run.model, embed, [embed.fovs[i] for i in pick],
-                                                    label_cfg, args.embed_temperature)
+                kept: List[Tuple[torch.Tensor, ...]] = []
+                # fp32 throughout (no autocast): the same arithmetic as the inference (`WindowEmbeddings.embed`)
+                loss: torch.Tensor = embed_loss(run.model, embed, [embed.fovs[i] for i in pick],
+                                                label_cfg, args.embed_temperature, kept)
+                where: str = (f'rank {args.rank} slide {embed.fovs[0].slide} L{embed.fovs[0].level} visit {visit_no} step {step + 1} '
+                              f'FoVs {[int(embed.fovs[i].index) for i in pick]} of {pool}')
+                if not bool(torch.isfinite(loss)):
+                    raise FloatingPointError(f'non-finite loss at {where}\n{pool_report(kept, args.embed_temperature)}')
                 loss.float().backward()
+                bad: List[str] = []
+                largest: Tuple[float, str] = (0.0, '-')
+                for pname, p in run.model.named_parameters():
+                    if p.grad is None:
+                        continue
+                    if bool(torch.isfinite(p.grad).all()):
+                        largest = max(largest, (float(p.grad.norm()), pname))
+                    else:
+                        bad.append(f'{pname} (nan {int(torch.isnan(p.grad).sum())}, inf {int(torch.isinf(p.grad).sum())})')
+                if bad:
+                    raise FloatingPointError(f'non-finite grad of {", ".join(bad)}; largest finite grad norm {largest[0]:.4g} of {largest[1]} '
+                                             f'(loss {float(loss.detach()):.4g}) at {where}\n{pool_report(kept, args.embed_temperature)}')
                 if sync is not None:
                     sync(run.model)
                 torch.nn.utils.clip_grad_norm_(run.model.parameters(), args.clip)
@@ -500,7 +548,7 @@ def run_epoch(epoch: int, runs: List[HeadRun], slides: List[Tuple[str, str, str]
             all_sum(1.0, device)                 # this process has a visit: the rounds are counted by all of them
         tick('wait_for_the_others', time.perf_counter() - t0)
         t0 = time.perf_counter()
-        logs: Dict[str, float] = train_visit(runs, visit.neural, visit.embed, args, rng, weights, label_cfg)
+        logs: Dict[str, float] = train_visit(runs, visit.neural, visit.embed, args, rng, weights, label_cfg, visits_done + 1)
         tick('train_steps', time.perf_counter() - t0)
         for k, v in logs.items():
             sums.setdefault(k, []).append(v)
@@ -537,32 +585,54 @@ def timing_line(who: str, wall: float, timers: Dict[str, float]) -> str:
             f'steps {t("train_steps"):.0f} s')
 
 
+SELECTS: str = 'val'                            # the ONE set a checkpoint is chosen on, and the only one written into it
+SLIDEWIN_ROW: str = 'slidewin'                  # THE row name of the retriever's own order (the same feature's slidewin); a head's row is its arch
+STAGE2_TITLE: str = 'stage 2, by method'        # THE heading of every table: each row is a stage 2 retriever, not a phase of one
+
+
+@dataclass(frozen=True)
+class ValSet:
+    """A set of FoVs scored every epoch: the simulated validation, or a list of real photos (observed only)."""
+    title: str                                  # heads its rows in the log
+    prefix: str                                 # wandb: '<prefix>/<name>/<key>'
+    stream: Callable[[], Iterator[FovResult]]   # this process's share, made anew every epoch
+    group: Callable[[FovResult], str]           # '' or a group's name: a row is '<group>/<name>' when it has one
+
+
 @torch.no_grad()
-def validate(runs: List[HeadRun], slides: List[Tuple[str, str, str]], args: argparse.Namespace,
-             make_retriever: Any, fov: Any, label_cfg: LabelConfig, pooling: str, device: Any,
-             workers: int) -> Dict[str, Dict[str, float]]:
-    """`{name: recall figures}` for the retriever's own order (`first_phase`) and
-    each head, on the held-out FoVs: `R@k` for every k, `ceiling`, `n`."""
-    ranks: Dict[str, List[float]] = {'first_phase': []}
-    for run in runs:
-        ranks[run.arch] = []
+def score(runs: List[HeadRun], vs: ValSet, args: argparse.Namespace, pooling: str,
+          label_cfg: LabelConfig) -> Dict[str, Dict[str, float]]:
+    """`{row: recall figures}` for the retriever's own order (`SLIDEWIN_ROW`) and each head, on the FoVs of `vs`, a row
+    per group the set has (`<group>/<name>`): `R@k` for every k, `ceiling`, `n`."""
+    ranks: Dict[str, List[float]] = defaultdict(list)
     embed_state: Dict[str, Any] = {}
-    stream = fov_stream(slides, make_retriever, fov, args.mask_cache_job, device, label_cfg,
-                        args.val_fov_per_visit, args.val_fov_seed, 0, workers=workers, topk=args.k,
-                        say=lambda text: say('  val ' + text))
-    for res in stream:
-        ranks['first_phase'].append(first_phase_rank(res))
+    for res in vs.stream():
+        g: str = vs.group(res)
+        row: Callable[[str], str] = lambda name: f'{g}/{name}' if g else name            # noqa: E731
+        ranks[row(SLIDEWIN_ROW)].append(first_phase_rank(res))
         for run in runs:
             if run.model is None:
                 continue
             if run.arch == 'winembed':
-                ranks[run.arch].append(embed_rank(run.model, res, pooling, label_cfg, embed_state))
+                ranks[row(run.arch)].append(embed_rank(run.model, res, pooling, label_cfg, embed_state))
             else:
-                ranks[run.arch].append(rank_of(run.arch, run.model, res, pooling))
+                ranks[row(run.arch)].append(rank_of(run.arch, run.model, res, pooling))
     if args.world > 1:                                    # the slides were shared out: every FoV counts once
-        parts: List[Dict[str, List[float]]] = gather_objects(ranks, args.world)
-        ranks = {name: [r for part in parts for r in part[name]] for name in ranks}
-    return {name: recall_at(r) for name, r in ranks.items() if r}
+        parts: List[Dict[str, List[float]]] = gather_objects(dict(ranks), args.world)
+        ranks = defaultdict(list, {name: [r for part in parts for r in part.get(name, [])]
+                                   for name in sorted({n for part in parts for n in part})})
+    return {name: recall_at(r) for name, r in sorted(ranks.items()) if r}
+
+
+def selected(figures_of: Mapping[str, Dict[str, Dict[str, float]]]) -> Dict[str, Dict[str, float]]:
+    """The figures a checkpoint is chosen on and that are written into it: the simulated validation's, whatever else was scored."""
+    return figures_of[SELECTS]
+
+
+def figure_metrics(val_sets: Mapping[str, ValSet], figures_of: Mapping[str, Dict[str, Dict[str, float]]]) -> Dict[str, float]:
+    """The wandb metrics of every set scored: `<prefix>/<row>/<key>`."""
+    return {f'{val_sets[key].prefix}/{name}/{k}': v
+            for key, figs in figures_of.items() for name, f in figs.items() for k, v in f.items()}
 
 
 def weights_path(args: argparse.Namespace, encoder: str, pooling: str, arch: str, which: str) -> str:
@@ -588,11 +658,9 @@ def main() -> int:
                                          near_sigma=args.near_sigma, loc_min_iou=args.loc_min_iou)
     encoder: str = args.encoder
     pooling: str = args.pooling
-    # the retriever whose list is reranked: the sliding window's baseline settings on this encoder and pooling,
-    # every field written (no recipe to register for an encoder and pooling that is asked for)
-    retr_cfg: RetrieverSlidingWinSimRotConfig = RetrieverSlidingWinSimRotConfig(
-        encoder=encoder_config(encoder, pooling=pooling).with_model(dtype='fp16'),
-        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, score='mean')
+    # the retriever whose list is reranked: the sliding window's baseline settings on this encoder and pooling, as the arm
+    # grammar makes them (no recipe to register for an encoder and pooling that is asked for)
+    retr_cfg: Any = phase_configs(retriever_arm(encoder, pooling), raw_topk=1000, min_sep_tiles=1.0)[0]
     train_slides: List[Tuple[str, str, str]] = slides_of(args.train_datasets, args.n_train_wsi)
     val_slides: List[Tuple[str, str, str]] = slides_of(args.val_datasets, args.n_val_wsi)
     say(f'heads      : {" ".join(args.heads)}   retriever {encoder} (K={args.k}, pooling {pooling})', console=True)
@@ -600,6 +668,8 @@ def main() -> int:
         f'{args.fov_per_visit} FoVs a visit, {args.steps_per_visit} steps of {args.fovs_per_step}', console=True)
     say(f'val        : {len(val_slides)} slides of {" ".join(args.val_datasets)}   '
         f'{args.val_fov_per_visit} FoVs a visit', console=True)
+    say(f'real-val   : {args.real_val or "off"}' + (f'   {list_path(args.real_val)}   ({OBSERVE})' if args.real_val else ''),
+        console=True)
     if args.dry_run:
         say('dry run: nothing opened, nothing written', console=True)
         return 0
@@ -623,19 +693,46 @@ def main() -> int:
 
     meter: Optional[UsageMeter] = (UsageMeter(args.usage_interval, 600.0, show_usage).start()
                                    if args.usage_interval > 0 and local == 0 else None)
-    # A slide's levels are encoded the first time it is visited and kept on the host (`MemoryFeatureStore`), so
-    # every later epoch finds them: the slides are the same process's every epoch (below), each process holding
-    # only its own. `--no-keep-levels` encodes them again each time.
+    # A slide's levels are all read from the disk cache or encoded BEFORE the first epoch (`precompute_levels`, below) and
+    # kept on the host in fp16 (`MemoryFeatureStore`), so every visit finds them: the slides are the same process's every
+    # epoch, each process holding and writing only its own. `--no-keep-levels` encodes them again each time.
     stores: Dict[str, MemoryFeatureStore] = {}
+    slide_paths: Dict[str, str] = {name: path for _, name, path in train_slides + val_slides}
 
-    def make_retriever(slide: str) -> RetrieverSlidingWinSimRot:
-        store: Optional[MemoryFeatureStore] = stores.setdefault(slide, MemoryFeatureStore()) if args.keep_levels else None
-        return RetrieverSlidingWinSimRot(retr_cfg, device, read_workers=args.read_workers or budget.workers,
+    def make_retriever(slide: str) -> Any:
+        if args.keep_levels and slide not in stores:
+            stores[slide] = MemoryFeatureStore(
+                LevelDiskCache(args.feature_cache_job, slide_paths[slide], retr_cfg, MASK_RECIPES['hest']), slide)
+        store: Optional[MemoryFeatureStore] = stores[slide] if args.keep_levels else None
+        return retriever_class(retr_cfg)(retr_cfg, device, read_workers=args.read_workers or budget.workers,
                                          feature_store=store)
 
     # the slides this process trains on, every epoch: every `world`-th of the list by name
     my_slides: List[Tuple[str, str, str]] = sorted(train_slides, key=lambda s: s[1])[rank::world]
     runs: List[HeadRun] = [HeadRun(arch=a) for a in args.heads]
+    # the sets scored every epoch; the checkpoint is chosen on `SELECTS` alone (`selected`), the rest is observed
+    val_sets: Dict[str, ValSet] = {SELECTS: ValSet(
+        f'validation: {STAGE2_TITLE} (the share of FoVs whose first hit is in the top k)', 'val',
+        lambda: fov_stream(val_slides[rank::world], make_retriever, val_fov, args.mask_cache_job, device, label_cfg,
+                           args.val_fov_per_visit, args.val_fov_seed, 0, workers=budget.workers, topk=args.k,
+                           say=lambda text: say('  val ' + text)),
+        lambda res: '')}
+    real_photos: List[RealPhoto] = read_list(args.real_val) if args.real_val else []
+    real_slides: List[str] = []
+    my_real: List[RealPhoto] = []
+    if real_photos:                                 # the one condition; everything after walks `val_sets`
+        group_of: Dict[Tuple[str, int], str] = {(p.slide, p.index): p.group for p in real_photos}
+        real_slides = sorted({p.slide for p in real_photos})[rank::world]     # a slide is one process's
+        my_real = [p for p in real_photos if p.slide in real_slides]
+        slide_paths.update({s: str(locate(s, dataset=DATASET).path) for s in real_slides})
+        val_sets['real'] = ValSet(
+            f'{OBSERVE}: {STAGE2_TITLE}, list {args.real_val}, {len(real_photos)} photos; found = found by the gigapath winembed, '
+            'missed = missed by it and found by another arm; chosen by those results, never selected on', OBSERVE,
+            lambda: real_stream(my_real, make_retriever, args.mask_cache_job, device, label_cfg, budget.workers,
+                                lambda text: say('  real ' + text), args.k),
+            lambda res: group_of[(res.slide, res.index)])
+        say('real-val   : ' + ', '.join(f'{g} {n}' for g, n in sorted(Counter(group_of.values()).items()))
+            + f' photos of {len({p.slide for p in real_photos})} slides', console=True)
     # one wandb run per arm: a formal run first deletes the earlier runs of its name (not one still running); a smoke
     # run (stopped after a few visits) has a name of its own and deletes nothing
     arm_name: str = (args.run_name or '-'.join([encoder, *args.heads] + ([args.tag] if args.tag else []))) \
@@ -643,6 +740,32 @@ def main() -> int:
     wb = (wandb_init(args.wandb_project, args.wandb_mode, arm_name, config=plain_args(args),
                      replace_previous=not args.max_visits) if rank == 0 else None)
     started: float = time.perf_counter()
+    if args.keep_levels:
+        # Every level of this process's slides -- training, validation, real photos -- is read from the disk cache or
+        # encoded and written to it, ONCE, before the first epoch; the visits only read the host store. The levels are
+        # those the FoV draw of epoch 0 (and the validation's, and the real photos') puts a FoV at: a level another
+        # epoch's draw adds is read or encoded at its visit and kept the same way.
+        say('\n======== precompute: every level of this process\'s slides, before epoch 1 ========', console=True, flush=True)
+        done: Tuple[int, int] = (0, 0)
+        for title, part, levels_of in (
+                ('train', my_slides, lambda name, reader, mask: drawn_levels(reader, fov, mask)),
+                ('val', val_slides[rank::world], lambda name, reader, mask: drawn_levels(reader, val_fov, mask)),
+                ('real', [(DATASET, s, slide_paths[s]) for s in real_slides],
+                 lambda name, reader, mask: [p.level for p in my_real if p.slide == name])):
+            say(f'-- precompute {title}: {len(part)} slides', flush=True)
+            got: Tuple[int, int] = precompute_levels(part, make_retriever, args.mask_cache_job, device, levels_of, say)
+            done = (done[0] + got[0], done[1] + got[1])
+        mine_gb: List[float] = [sum(s.nbytes() for s in stores.values()) / 1e9,
+                                sum(s.disk_bytes for s in stores.values()) / 1e9]
+        say(f'precompute done in {(time.perf_counter() - started) / 60:.1f} min: {done[0]} levels read from the cache, '
+            f'{done[1]} newly encoded; {mine_gb[0]:.1f} GB in memory, {mine_gb[1]:.1f} GB of cache files; '
+            f'{host_memory()}', console=True, flush=True)
+        if world > 1:
+            every: List[List[float]] = gather_objects(mine_gb + [float(done[0]), float(done[1])], world)
+            say(f'precompute, all {world} processes: {sum(e[0] for e in every):.1f} GB in memory, '
+                f'{sum(e[1] for e in every):.1f} GB of cache files under {os.path.join(RESULT_DIR, "cache", args.feature_cache_job)}, '
+                f'{sum(e[2] for e in every):.0f} levels read from the cache, {sum(e[3] for e in every):.0f} newly encoded',
+                console=True, flush=True)
     for epoch in range(args.epochs):
         say(f'\n======== epoch {epoch + 1}/{args.epochs} ========', console=True, flush=True)
         epoch_started: float = time.perf_counter()
@@ -658,10 +781,11 @@ def main() -> int:
         for run in runs:
             if run.sched is not None:
                 run.sched.step()
-        val_started: float = time.perf_counter()
-        figures: Dict[str, Dict[str, float]] = validate(runs, val_slides[rank::world], args, make_retriever,
-                                                        val_fov, label_cfg, pooling, device, budget.workers)
-        say(timing_line(f'rank {rank}, validation', time.perf_counter() - val_started, take_timers()), console=True)
+        figures_of: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for key, vs in val_sets.items():
+            val_started: float = time.perf_counter()
+            figures_of[key] = score(runs, vs, args, pooling, label_cfg)
+            say(timing_line(f'rank {rank}, {vs.prefix}', time.perf_counter() - val_started, take_timers()), console=True)
         say(f'  levels kept on the host: {sum(s.nbytes() for s in stores.values()) / 1e9:.1f} GB '
             f'({sum(s.hits for s in stores.values())} read back, {sum(s.misses for s in stores.values())} encoded)')
         metrics: Dict[str, float] = dict(losses)
@@ -679,24 +803,26 @@ def main() -> int:
             metrics[f'usage/{node["host"]}/cpu_busy'] = node['cpu_mean']
             metrics[f'usage/{node["host"]}/mem_peak_gb'] = node['mem_peak']
             metrics[f'usage/{node["host"]}/shm_peak_gb'] = node['shm_peak']
-        say('  validation (share of FoVs whose first hit is in the top k)', console=True)
-        for name, f in figures.items():
-            say(f'    {name:12s} ' + '  '.join(f'R@{k} {f[f"R@{k}"]:.3f}' for k in KS)
-                + f'   ceiling {f["ceiling"]:.3f}  n {f["n"]}', console=True)
-            metrics.update({f'val/{name}/{key}': v for key, v in f.items()})
+        for key, vs in val_sets.items():
+            say('  ' + vs.title, console=True)
+            for name, f in figures_of[key].items():
+                say(f'    {name:18s} ' + '  '.join(f'R@{k} {f[f"R@{k}"]:.3f}' for k in KS)
+                    + f'   ceiling {f["ceiling"]:.3f}  n {f["n"]}', console=True)
+        metrics.update(figure_metrics(val_sets, figures_of))
+        figures: Dict[str, Dict[str, float]] = selected(figures_of)        # from here to wandb_log nothing reads `figures_of`
         for run in runs:
             if run.arch not in figures or run.model is None:
                 continue
-            score: float = figures[run.arch][f'R@{args.select_k}']
-            for which in (('last',) + (('best',) if score > run.best else ())) if rank == 0 else ():
+            chosen: float = figures[run.arch][f'R@{args.select_k}']
+            for which in (('last',) + (('best',) if chosen > run.best else ())) if rank == 0 else ():
                 save_rerank_checkpoint(
                     weights_path(args, encoder, pooling, run.arch, which), model=run.model, arch=run.arch,
                     pooling=pooling, encoder=encoder, epoch=epoch + 1, val=figures[run.arch],
                     run_args=plain_args(args), extra=run.extra,
                     optimizer_state=run.opt.state_dict() if run.opt is not None else None)
-            if score > run.best:
-                run.best, run.best_epoch = score, epoch + 1
-                say(f'    [{run.arch}] new best R@{args.select_k} {score:.3f} -> '
+            if chosen > run.best:
+                run.best, run.best_epoch = chosen, epoch + 1
+                say(f'    [{run.arch}] new best R@{args.select_k} {chosen:.3f} -> '
                     f'{weights_path(args, encoder, pooling, run.arch, "best")}', console=True, flush=True)
         wandb_log(wb, epoch + 1, metrics)
     wandb_finish(wb)

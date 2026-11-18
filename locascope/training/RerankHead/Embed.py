@@ -48,6 +48,18 @@ class EmbedVisit:
     fovs: List[EmbedFov]
 
 
+def require_finite(features: torch.Tensor, what: str) -> None:
+    """Raise FloatingPointError when a `[..., F]` feature tensor holds a NaN or an inf: one such tile makes every window that holds it
+    non-finite, and a single non-finite gradient (shared by `sync_gradients`) makes every process's model NaN for good."""
+    ok: torch.Tensor = torch.isfinite(features)
+    if bool(ok.all()):
+        return
+    n_nan: int = int(torch.isnan(features).any(dim=-1).sum())
+    n_inf: int = int(torch.isinf(features).any(dim=-1).sum())
+    n_bad: int = int((~ok.all(dim=-1)).sum())
+    raise FloatingPointError(f'{what}: {n_bad} tiles with non-finite features ({n_nan} with a NaN, {n_inf} with an inf)')
+
+
 def visit_of(res: FovResult, pooling: str) -> EmbedVisit:
     """A new visit from the first FoV of a level: the retriever's grids of this level
     (references; they stay valid after the retriever moves on) and the level-0 origin
@@ -59,6 +71,7 @@ def visit_of(res: FovResult, pooling: str) -> EmbedVisit:
             g: torch.Tensor = res.source.reference_grid(region, lattice, pooling)
             if not g.numel():
                 continue
+            require_finite(g, f'grid {res.slide} L{res.level} region {region} {lattice}')
             grids[(region, lattice)] = g
             xs: List[int] = [pg.tile_origin_l0(lattice, 0, c)[0] for c in range(int(g.shape[1]))]
             ys: List[int] = [pg.tile_origin_l0(lattice, r, 0)[1] for r in range(int(g.shape[0]))]
@@ -69,6 +82,8 @@ def visit_of(res: FovResult, pooling: str) -> EmbedVisit:
 
 
 def fov_of(res: FovResult) -> EmbedFov:
+    for rot, qg in res.queries.items():
+        require_finite(qg, f'query {res.slide} L{res.level} FoV {res.index} rotation {rot}')
     return EmbedFov(queries=res.queries, where=res.where, slide=res.slide, level=res.level, index=res.index)
 
 
@@ -93,8 +108,9 @@ def window_labels(xs: torch.Tensor, ys: torch.Tensor, w: float, h: float, region
 
 
 def embed_loss(model: nn.Module, visit: EmbedVisit, fovs: Sequence[EmbedFov], cfg: LabelConfig,
-               temperature: float) -> torch.Tensor:
-    """The mean over `fovs` of the pool softmax loss (see the module docstring)."""
+               temperature: float, keep: Optional[List[Tuple[torch.Tensor, ...]]] = None) -> torch.Tensor:
+    """The mean over `fovs` of the pool softmax loss (see the module docstring). `keep`, when given, receives each FoV's detached
+    `(logits, pos, near, target)` pool, for `pool_report` when the loss turns out non-finite."""
     tiles: Dict[Tuple[int, str], torch.Tensor] = {key: model.tiles(g.float()) for key, g in visit.grids.items()}
     windows: Dict[Tuple[Tuple[int, str], Tuple[int, int]], torch.Tensor] = {}
     total: Optional[torch.Tensor] = None
@@ -123,11 +139,27 @@ def embed_loss(model: nn.Module, visit: EmbedVisit, fovs: Sequence[EmbedFov], cf
                 near.append(n.reshape(-1))
                 target.append(t.reshape(-1).float())
         every: torch.Tensor = torch.ones(sum(len(x) for x in logits), dtype=torch.bool, device=logits[0].device)
-        loss: torch.Tensor = pool_softmax_loss(torch.cat(logits), torch.cat(pos), every, temperature,
-                                               torch.cat(near), torch.cat(target))
+        pool_logits, pool_pos, pool_near, pool_target = torch.cat(logits), torch.cat(pos), torch.cat(near), torch.cat(target)
+        if keep is not None:
+            keep.append((pool_logits.detach(), pool_pos, pool_near, pool_target))
+        loss: torch.Tensor = pool_softmax_loss(pool_logits, pool_pos, every, temperature, pool_near, pool_target)
         total = loss if total is None else total + loss
     assert total is not None
     return total / len(fovs)
+
+
+def pool_report(keep: Sequence[Tuple[torch.Tensor, ...]], temperature: float) -> str:
+    """One line a FoV of the pools `embed_loss` kept: the logits' min / max and whether any is NaN or inf, the pool's size, its positives,
+    the near windows' soft targets' min / max / sum, and the temperature."""
+    lines: List[str] = []
+    for i, (logit, pos, near, target) in enumerate(keep):
+        t: torch.Tensor = target[near]
+        lines.append(f'    pool {i}: logits min {float(logit.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).min()):.4g} '
+                     f'max {float(logit.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).max()):.4g} '
+                     f'nan {int(torch.isnan(logit).sum())} inf {int(torch.isinf(logit).sum())}; size {len(logit)}; '
+                     f'positives {int(pos.sum())}; near {int(near.sum())} targets min {float(t.min()) if len(t) else 0.0:.4g} '
+                     f'max {float(t.max()) if len(t) else 0.0:.4g} sum {float(t.sum()):.4g}; temperature {temperature}')
+    return '\n'.join(lines)
 
 
 @torch.no_grad()

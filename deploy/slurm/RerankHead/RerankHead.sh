@@ -30,6 +30,9 @@ source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 #    sbatch deploy/slurm/RerankHead/RerankHead.sh                       # tilegt, uni2 cls_avg (K = 500 of its list)
 #    ENCODER=gigapath EXTRA="--k 100" sbatch deploy/slurm/RerankHead/RerankHead.sh
 #    HEADS="tilegt corrnet winembed" TAG=run1 sbatch deploy/slurm/RerankHead/RerankHead.sh
+#    HEADS=winembed ENCODER=GigaCoAE+RN3 POOLING=latent sbatch deploy/slurm/RerankHead/RerankHead.sh   # a CoAE network's usage as the tile feature (winembed only)
+#    REAL_VAL=gigapath-winembed_found50_missed50 HEADS=winembed sbatch deploy/slurm/RerankHead/RerankHead.sh   # + the real photos of real_val/<name>.tsv scored every epoch, observed only; no list yet: made first, once (make_list.py)
+#    REAL_VAL=gigapath-winembed_found50_missed50 REAL_VAL_BUILD_ONLY=1 sbatch --partition=dev --gpus-per-node=1 --cpus-per-task=4 --mem=16G --time=00:30:00 deploy/slurm/RerankHead/RerankHead.sh   # only the list, no training
 #    DRY_RUN=1 bash deploy/slurm/RerankHead/RerankHead.sh                # the plan; opens nothing
 #    SMOKE=1 sbatch deploy/slurm/RerankHead/RerankHead.sh                # 2 slides a dataset, 3 visits, 1 epoch
 #
@@ -41,7 +44,7 @@ source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 #    EXTRA="--sampler-n-per-rung 100 --fov-per-visit 96" sbatch ...
 # =============================================================================
 HEADS="${HEADS:-tilegt}"
-ENCODER="${ENCODER:-uni2}"              # the sliding window's encoder: uni2 | gigapath
+ENCODER="${ENCODER:-uni2}"              # the sliding window's encoder: uni2 | gigapath | GigaCoAE+<arm> (POOLING a usage; winembed only)
 POOLING="${POOLING:-cls_avg}"
 EPOCHS="${EPOCHS:-30}"
 TAG="${TAG:-}"
@@ -50,6 +53,8 @@ N_TRAIN_WSI="${N_TRAIN_WSI:-0}"          # slides per training dataset; 0 = all
 N_VAL_WSI="${N_VAL_WSI:-10}"            # slides of each dataset @pure-half-val draws from
 READ_WORKERS="${READ_WORKERS:-5}"        # slide-read workers a process; 0 = all its CPUs. Job 605745 (4 nodes x 4 GPUs x 11 workers): CPUs
                                          # peaked at 26-51% of 48, and /dev/shm (the blocks the workers hand over) ran out on a node
+REAL_VAL="${REAL_VAL:-}"                # a list of real photos (real_val/<name>.tsv) scored every epoch beside the validation; observed only, '' = off; not there yet: made first (once)
+REAL_VAL_BUILD_ONLY="${REAL_VAL_BUILD_ONLY:-0}"   # 1 = only make the list of REAL_VAL (when it is not there) and stop: no training
 EXTRA="${EXTRA:-}"
 SMOKE="${SMOKE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -76,6 +81,22 @@ case "${SLURM_JOB_NAME:-}" in
 esac
 [ "$DRY_RUN" = "1" ] && EXTRA="--dry-run $EXTRA"
 
+# The list of real photos is made once, by this job, before the training (one process; the training only reads it). One that is already
+# there is read as it is, never made again. DRY_RUN opens nothing, so it makes nothing.
+if [ -n "$REAL_VAL" ] && [ "$DRY_RUN" != "1" ]; then
+  REAL_VAL_LIST="locascope/training/RerankHead/real_val/$REAL_VAL.tsv"
+  if [ -f "$REAL_VAL_LIST" ]; then
+    echo "  real-val list exists, read as it is: $REAL_VAL_LIST"
+  else
+    echo "  real-val list is not there, making it: $REAL_VAL_LIST"
+    python -u -m locascope.training.RerankHead.real_val.make_list "$REAL_VAL" || { echo "making the list $REAL_VAL failed"; exit 3; }
+  fi
+fi
+if [ "$REAL_VAL_BUILD_ONLY" = "1" ]; then
+  [ -n "$REAL_VAL" ] || { echo "REAL_VAL_BUILD_ONLY=1 needs REAL_VAL=<list name>"; exit 2; }
+  exit 0
+fi
+
 # One process per GPU the job was given (`torchrun`): each takes every Nth slide of an epoch, encodes its levels and
 # trains on them, and after every step the gradients are averaged over the processes, so there is one model. With
 # fewer GPUs, ask for them with their share of the CPUs and memory:
@@ -101,7 +122,8 @@ export PYTHONWARNINGS="ignore:Plan failed with a cudnnException:UserWarning"   #
 
 $LAUNCH -m locascope.training.RerankHead.train \
   --heads $HEADS --encoder "$ENCODER" --pooling "$POOLING" --epochs "$EPOCHS" --tag "$TAG" --select-k "$SELECT_K" \
-  --n-train-wsi "$N_TRAIN_WSI" --n-val-wsi "$N_VAL_WSI" --read-workers "$READ_WORKERS" $EXTRA
+  --n-train-wsi "$N_TRAIN_WSI" --n-val-wsi "$N_VAL_WSI" --read-workers "$READ_WORKERS" \
+  --real-val "$REAL_VAL" $EXTRA
 status=$?
 
 # With several processes each wrote its own log, <log>.r<rank>; this file has the settings, the epochs and the

@@ -1,0 +1,18 @@
+make_list: list gigapath-winembed_found50_missed50, SEED 0, PER_GROUP 50, FOUND 0.6, CENTRE_TOL_PX 2.0
+slides: S1104043,G7E,110207, S1128162,G7E,110727, S1140701,G7E,111018, S1151088,G7E,111220
+found arm: winembed-gigapath-cls-avg
+missed arms (tie-break order): slidewin-gigapath-cls-mean, slidewin-uni2-cls-avg-mean, slidewin-GigaCoAE-RN3-fm-head-mean, slidewin-GigaCoAE-RP3-fm-head-mean, phasetiles-raw-localphase
+
+| group | slide | ncc found | candidates | quota | drawn | missed: later arm used | not a candidate (reason: photos) |
+|---|---|---|---|---|---|---|---|
+| found | S1104043,G7E,110207 | 69 | 69 | 14 | 14 | 0 | - |
+| found | S1128162,G7E,110727 | 9 | 9 | 9 | 9 | 0 | - |
+| found | S1140701,G7E,111018 | 203 | 203 | 14 | 14 | 0 | - |
+| found | S1151088,G7E,111220 | 262 | 262 | 13 | 13 | 0 | - |
+| missed | S1104043,G7E,110207 | 63 | 63 | 17 | 17 | 0 | - |
+| missed | S1128162,G7E,110727 | 0 | 0 | 0 | 0 | 0 | - |
+| missed | S1140701,G7E,111018 | 142 | 142 | 17 | 17 | 0 | - |
+| missed | S1151088,G7E,111220 | 211 | 211 | 16 | 16 | 0 | - |
+
+drawn: found 50, missed 50, total 100
+homography off its centre: 0  (not 0 = report, do not widen CENTRE_TOL_PX)
