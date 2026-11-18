@@ -175,7 +175,9 @@ class MaskMaker:
             print(f'  [mask] {entry.record_path(seg_id)} is stale, segmenting '
                   f'again: ' + '; '.join(stale), flush=True)
 
+        t0 = time.perf_counter()
         slide_mask = self._segment(wsi, with_components)
+        t1 = time.perf_counter()
         with entry.writing(seg_id, dict(
                 want, seg_id=seg_id,
                 segmenter_id=self.segmenter.identity_id(),
@@ -184,6 +186,7 @@ class MaskMaker:
                 created_at=time.strftime('%Y-%m-%dT%H:%M:%S'),
                 **slide_mask.geometry())) as put:
             slide_mask.save(put('mask', '.safetensors'))
+        print(f'  timing mask: segment {t1 - t0:.1f} s + record and save {time.perf_counter() - t1:.1f} s', flush=True)
         return slide_mask, False
 
     def record(self) -> Dict:
@@ -240,13 +243,22 @@ MASK_RECIPES: Dict[str, TissueMaskConfig] = {
             model=ModelConfig(source='torchvision', arch=HEST_ARCH,
                               dtype='fp32', weights=None)),
         min_region_ratio=0.01, merge=True),
+    # UNI2-PCA, the one recipe (2026-11-11; the plain stratified fit with every tile encoded was retired: on Ki67 MRXS it
+    # fitted PC1 to the scanner's camera frames, 28-33 % "tissue", IoU 0.08-0.17 with HEST ds 4):
+    #   fit_tissue_frac=0.5   half the fit sample from tiles HEST ds 4 calls tissue
+    #   unscanned_margin=0    a tile touching the canvas the scanner never photographed is background, not encoded
+    #   skip_blank_sd=2.0     a tile of flat glass with flat glass all around (grey sd < 2 at ds 8) is background, not
+    #                         encoded: no HEST-tissue tile was ever skipped on the three Ki67 slides measured
+    #   stored_components=1   only PC1 beside the mask (what it is a threshold of)
     'uni2_pca': TissueMaskConfig(
         seg=Uni2PcaSegConfig(
             method='uni2-pca-seg', encoder='uni2', tile=224, components=16,
             background_threshold=0.5, larger_pca_as_fg=True, morph_kernel=7,
             feature_norm=False, fp16=True, fit_tiles=1000, fit_bins=10,
-            fit_seed=0, fit_ds=32.0, limit_bounds=True, batch_tiles=64,
-            workers=8),
+            fit_seed=0, fit_ds=32.0, fit_tissue_frac=0.5, fit_tissue_cache='Masks',
+            unscanned_margin=0,
+            read_level=0, skip_blank_sd=2.0,
+            stored_components=1, limit_bounds=True, batch_tiles=128, workers=8),
         min_region_ratio=0.01, merge=True),
 }
 

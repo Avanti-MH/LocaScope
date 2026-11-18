@@ -188,7 +188,7 @@ def t_every_identity_field_moves_the_hash():
         if isinstance(value, bool):
             bumped = not value
         elif isinstance(value, float):
-            bumped = value * 2 + 1
+            bumped = value + 1.0          # moves every float (value * 2 + 1 left -1.0, an "off" default, where it was)
         elif isinstance(value, int):
             bumped = value + 1
         elif isinstance(value, str):

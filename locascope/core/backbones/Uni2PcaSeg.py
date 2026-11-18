@@ -277,6 +277,144 @@ def stratified_positions(saturation: np.ndarray, n: int, bins: int = 10,
             for k in unique]
 
 
+_T_LAST: List[float] = [0.0]
+
+
+def _tick(label: str) -> None:
+    """Timing probe: print the seconds since the last tick under `label` (an empty label only restarts the clock)."""
+    import time                                                      # noqa: PLC0415
+    now: float = time.perf_counter()
+    if label:
+        print(f'  timing step: {label} {now - _T_LAST[0]:.1f} s', flush=True)
+    _T_LAST[0] = now
+
+
+#: The last alpha thumbnail `scanned_tiles` read (one slide at a time): segment_slide asks for the one components_wsi did.
+_VALID_MEMO: dict = {}
+
+
+def scanned_tiles(wsi, origin, shape: Tuple[int, int], cell_px: float, tile_cells: int = 16,
+                  ds: float = 16.0) -> np.ndarray:
+    """`[rows // tile_cells, cols // tile_cells]` (rounded up) bool on the TILE grid of a `[rows, cols]` cell grid:
+    True where every cell of the UNI2 tile lies inside what the scanner photographed. From the alpha of ONE read at the
+    level nearest `ds` (SafeSlide.read_region_valid); `cell_px` = level-0 px per cell.
+
+    By tile, not by cell: the ViT sees a tile at once, so a tile with any canvas in it carries that straight edge in all
+    its cells -- with a 2-cell margin by cell the frame lines stayed (S1100333, 2026-11-10: 7,248 cells of 6.9 M removed).
+    The one answer to "does this tile touch the canvas": `components_wsi` skips these tiles and `scanned_cells` blanks
+    them, so the two cannot disagree."""
+    reader = getattr(wsi, 'read_region_valid', None)
+    if reader is None:
+        raise TypeError(f'unscanned_margin needs a SafeSlide (read_region_valid), got {type(wsi).__name__}')
+    rows, cols = shape
+    level: int = level_for(wsi.level_downsamples, ds)
+    got: float = float(wsi.level_downsamples[level])
+    size: Tuple[int, int] = (max(1, int(np.ceil(cols * cell_px / got))), max(1, int(np.ceil(rows * cell_px / got))))
+    key = (_path_of(wsi), level, int(origin[0]), int(origin[1]), size)
+    if _VALID_MEMO.get('key') != key:                            # components_wsi and segment_slide ask the same: read once
+        _VALID_MEMO.clear()
+        _VALID_MEMO.update(key=key, valid=reader((int(origin[0]), int(origin[1])), level, size)[1])
+    valid = _VALID_MEMO['valid']
+    # the share of each cell's footprint that is scanned (area resize: a cell touching one unscanned pixel is < 1)
+    share: np.ndarray = cv2.resize(valid.astype(np.float32), (cols, rows), interpolation=cv2.INTER_AREA)
+    ok: np.ndarray = (share >= 0.999).astype(np.uint8)
+    t: int = max(1, int(tile_cells))
+    ty, tx = -(-rows // t), -(-cols // t)
+    padded: np.ndarray = np.zeros((ty * t, tx * t), np.uint8)
+    padded[:rows, :cols] = ok
+    return padded.reshape(ty, t, tx, t).min(axis=(1, 3)).astype(bool)          # every cell of the tile scanned
+
+
+def scanned_cells(wsi, origin, shape: Tuple[int, int], cell_px: float, margin: int,
+                  tile_cells: int = 16, ds: float = 16.0) -> np.ndarray:
+    """`[rows, cols]` bool on the cell grid: True where the cell's whole UNI2 tile is scanned (`scanned_tiles`) and the
+    cell is at least `margin` cells from a tile that is not."""
+    rows, cols = shape
+    t: int = max(1, int(tile_cells))
+    whole: np.ndarray = scanned_tiles(wsi, origin, shape, cell_px, t, ds).astype(np.uint8)
+    ok: np.ndarray = np.repeat(np.repeat(whole, t, axis=0), t, axis=1)[:rows, :cols].copy()
+    if margin > 0:
+        ok = cv2.erode(ok, np.ones((2 * margin + 1, 2 * margin + 1), np.uint8))
+    print(f'  unscanned: {int((ok == 0).sum())} of {rows * cols} cells left out (margin {margin})', flush=True)
+    return ok.astype(bool)
+
+
+def blank_tiles(wsi, origin, n_rows: int, n_cols: int, tile_l0: float, sd_max: float,
+                ds: float = 8.0) -> Tuple[np.ndarray, np.ndarray]:
+    """`(blank, sd)` on the `[n_rows, n_cols]` tile lattice: `sd` the grey standard deviation of each tile from ONE
+    read at the level nearest `ds` (0.299R + 0.587G + 0.114B over the tile's pixels there), `blank` True where the
+    tile AND its 8 neighbours all have sd < `sd_max` -- flat glass with flat glass around it.
+
+    Only to choose what UNI2 is not shown: a blank tile is background without being encoded. The 3 x 3 rule keeps
+    every tile next to anything with structure, so an edge of tissue, or a faint section beside a darker one, is
+    still encoded. At ds 8 a 224 px tile is 28 px: the sd there is of structure the size of a few cells, not noise."""
+    level: int = level_for(wsi.level_downsamples, ds)
+    got: float = float(wsi.level_downsamples[level])
+    side: float = tile_l0 / got                                       # a tile's side in thumbnail px
+    w, h = max(1, int(np.ceil(n_cols * side))), max(1, int(np.ceil(n_rows * side)))
+    rgb: np.ndarray = wsi.read_region_rgb((int(origin[0]), int(origin[1])), level, (w, h))
+    # a tile is b x b thumbnail px, b the rounded side: a MIRAX level is ~2^L, so the blocks drift by a pixel or two over
+    # the whole rectangle, against a 28 px tile
+    b: int = max(1, int(round(side)))
+    rows_b, cols_b = min(n_rows, rgb.shape[0] // b), min(n_cols, rgb.shape[1] // b)
+    sd: np.ndarray = np.full((n_rows, n_cols), np.inf, np.float32)   # a tile the thumbnail does not cover is never blank
+    weights: np.ndarray = np.array([0.299, 0.587, 0.114], np.float32)
+    for r0 in range(0, rows_b, 64):                                   # bands of 64 tile rows: no full-size float copy
+        r1: int = min(rows_b, r0 + 64)
+        grey: np.ndarray = rgb[r0 * b:r1 * b, :cols_b * b].astype(np.float32) @ weights
+        sd[r0:r1, :cols_b] = grey.reshape(r1 - r0, b, cols_b, b).std(axis=(1, 3))
+    flat: np.ndarray = (sd < sd_max).astype(np.uint8)
+    blank: np.ndarray = cv2.erode(flat, np.ones((3, 3), np.uint8), borderType=cv2.BORDER_REPLICATE).astype(bool)
+    return blank, sd
+
+
+def stratified_among(saturation: np.ndarray, allowed: np.ndarray, n: int, bins: int = 10,
+                     seed: int = 0) -> List[Tuple[int, int]]:
+    """`stratified_positions` over only the tile positions `allowed` holds: `n` of
+    them, spread over those tiles' own saturation quantiles. All of them when
+    fewer than `n` are allowed."""
+    flat_ok: np.ndarray = np.flatnonzero(allowed.ravel())
+    if n <= 0 or len(flat_ok) == 0:
+        return []
+    if len(flat_ok) <= n:
+        return [(int(k // saturation.shape[1]), int(k % saturation.shape[1])) for k in flat_ok]
+    rng = np.random.default_rng(seed)
+    order = flat_ok[np.argsort(saturation.ravel()[flat_ok], kind='stable')]
+    per_bin = max(1, n // bins)
+    picked: List[int] = []
+    for b in range(bins):
+        idx = order[b * len(order) // bins:(b + 1) * len(order) // bins]
+        if len(idx) == 0:
+            continue
+        step = max(1, len(idx) // per_bin)
+        picked.extend(idx[min(len(idx) - 1, k * step + rng.integers(0, step))]
+                      for k in range(min(per_bin, len(idx))))
+    unique = np.unique(np.array(picked, dtype=np.int64))
+    return [(int(k // saturation.shape[1]), int(k % saturation.shape[1])) for k in unique]
+
+
+def hest_tissue_tiles(wsi, origin, shape: Tuple[int, int], tile_l0: int, cache: str,
+                      device) -> np.ndarray:
+    """`[n_y, n_x]` bool, the fit grid (`tile_saturation`'s): a tile is tissue when a
+    HEST ds 4 mask (MASK_RECIPES['hest'], read from / written to `cache`) calls
+    half of it or more tissue. The mask and this grid start at the same
+    `scanned_rect` origin (both use limit_bounds)."""
+    from locascope.core.tiles.TissueMaskConfig import MASK_RECIPES, MaskMaker   # noqa: PLC0415
+    with MaskMaker(MASK_RECIPES['hest'], cache or None, device) as maker:
+        slide_mask, hit = maker.slide_mask(wsi)
+    if tuple(slide_mask.origin) != tuple(int(v) for v in origin):
+        raise ValueError(f'the HEST mask starts at {slide_mask.origin}, the fit grid at {origin}')
+    raster: np.ndarray = np.asarray(slide_mask.mask)
+    n_y, n_x = shape
+    cells: int = max(1, int(round(tile_l0 / slide_mask.mask_ds)))   # mask cells per fit tile side
+    rows, cols = min(n_y, raster.shape[0] // cells), min(n_x, raster.shape[1] // cells)
+    frac: np.ndarray = np.zeros((n_y, n_x), dtype=np.float32)
+    block: np.ndarray = raster[:rows * cells, :cols * cells].reshape(rows, cells, cols, cells)
+    frac[:rows, :cols] = block.mean(axis=(1, 3), dtype=np.float32)
+    print(f'  fit sample: HEST ds 4 mask ({"cached" if hit else "made"}) calls {int((frac >= 0.5).sum())} '
+          f'of {n_y * n_x} fit tiles tissue', flush=True)
+    return frac >= 0.5
+
 def _path_of(wsi) -> str:
     """The file a handle opened. The readers' workers each reopen the slide
     from it -- a handle carried across a fork is shared by every process."""
@@ -402,6 +540,50 @@ class Uni2PcaSegConfig(TissueSegConfig):
     fit_seed: int = 0
     fit_ds: float = 32.0
 
+    #: The share of `fit_tiles` drawn from tiles a HEST ds 4 mask calls tissue
+    #: (half of the tile or more), the rest from the others; each side spread over
+    #: saturation as `stratified_positions` spreads the whole. 0 = the plain
+    #: stratified sample.
+    #:
+    #: Why: equal picks per saturation quantile have the composition of the AREA
+    #: (see `stratified_positions`), so a Ki67 slide whose tissue is 2 percent of
+    #: the scanned rectangle gives ~20 tissue tiles in 1000, and PC1 is the largest
+    #: variance among the rest -- on S1100333 (2026-11-10, 28.5 percent "tissue",
+    #: IoU 0.078 with HEST ds 4) that was the scanner's camera frames against the
+    #: unscanned canvas. HEST only CHOOSES the sample; the mask is still UNI2-PCA's.
+    fit_tissue_frac: float = 0.0
+    #: Whose cache the HEST ds 4 mask is read from (MaskMaker made_by); made and
+    #: written there on a miss. Where it is kept, not what it is: not identity.
+    fit_tissue_cache: str = 'Masks'
+
+    #: Cells of a UNI2 tile not wholly inside what the scanner photographed are
+    #: background, and so are the `unscanned_margin` cells next to them; -1 = off. On a MIRAX the scanned
+    #: rectangle is a union of camera frames, and the canvas between them is no
+    #: image at all (SafeSlide composites it to the background colour): a UNI2 tile
+    #: across a frame's edge sees a straight edge no tissue has, and its cells came
+    #: out as thin lines along every frame (S1100333, the fit-from-tissue uni2_pca, 2026-11-10).
+    #: Read from the alpha of one thumbnail (`SafeSlide.read_region_valid`, ds ~16).
+    unscanned_margin: int = -1
+
+    #: The pyramid level UNI2 reads at; 0 = level 0, as `LEVEL` argues. The mask's ds
+    #: is the patch size times that level's downsample (14 at level 0, 28 at level 1).
+    #: Level 1 is a quarter of the tiles, and on a 0.24 um/px scan it is ~0.49 um/px,
+    #: the 20x UNI2 was trained at. Identity: a different level is a different mask.
+    read_level: int = 0
+
+    #: Tiles that are flat glass with flat glass all around (grey sd below this at ds 8,
+    #: `blank_tiles`) are background WITHOUT being encoded; -1 = off, every tile is
+    #: encoded. Speed, but not free: the call is no longer UNI2's alone for those tiles,
+    #: so it is identity. 2026-11-10: a Ki67 MRXS was 280 s with every scanned tile
+    #: encoded; UNI2 runs ~910 tiles/s and nothing else was left to take away.
+    skip_blank_sd: float = -1.0
+
+    #: How many of the components are stored beside the mask (the first k; 0 = none). The mask is a threshold of the
+    #: FIRST, so 1 keeps a `background_threshold` sweep at seconds per slide (`SlideMask.components`); all 16 were 2.2 GB
+    #: for a Ki67 MRXS, 680 GB for the 311 registered slides (2026-11-11). Where they are kept, not what the mask is:
+    #: not identity.
+    stored_components: int = 1
+
     #: Restrict everything to `openslide.bounds-*`. See `scanned_rect`.
     limit_bounds: bool = True
 
@@ -421,8 +603,10 @@ class Uni2PcaSegConfig(TissueSegConfig):
                 'larger_pca_as_fg': True, 'morph_kernel': 7,
                 'feature_norm': False, 'fp16': True, 'fit_tiles': 1000,
                 'fit_bins': 10, 'fit_seed': 0, 'fit_ds': 32.0,
+                'fit_tissue_frac': 0.0, 'unscanned_margin': -1, 'read_level': 0,
+                'skip_blank_sd': -1.0,
                 'limit_bounds': True}
-    NOT_IDENTITY = ('batch_tiles', 'workers')
+    NOT_IDENTITY = ('batch_tiles', 'workers', 'fit_tissue_cache', 'stored_components')
 
     def build(self, device: Optional[torch.device] = None) -> 'Uni2PcaSegmenter':
         return Uni2PcaSegmenter(self, device or torch.device('cpu'))
@@ -605,14 +789,28 @@ class Uni2PcaSegmenter(TissueSegmenter):
         # The tile side in LEVEL-0 pixels, so positions can be addressed in the
         # coordinate system read_region actually takes.
         tile_l0 = int(round(cfg.tile * level_ds))
+        _tick('')
         saturation = tile_saturation(wsi, origin, span, tile_l0, cfg.fit_ds)
-        positions = stratified_positions(saturation, cfg.fit_tiles,
-                                         cfg.fit_bins, cfg.fit_seed)
+        _tick('fit: saturation thumbnail ds 32')
+        n_tissue_tiles: int = 0
+        if cfg.fit_tissue_frac > 0:
+            tissue = hest_tissue_tiles(wsi, origin, saturation.shape, tile_l0,
+                                       cfg.fit_tissue_cache, self.device)
+            self._hest_tiles = tissue
+            n_tissue_tiles = int(tissue.sum())
+            n_in: int = int(round(cfg.fit_tissue_frac * cfg.fit_tiles))
+            positions = (stratified_among(saturation, tissue, n_in, cfg.fit_bins, cfg.fit_seed)
+                         + stratified_among(saturation, ~tissue, cfg.fit_tiles - n_in,
+                                            cfg.fit_bins, cfg.fit_seed + 1))
+        else:
+            positions = stratified_positions(saturation, cfg.fit_tiles,
+                                             cfg.fit_bins, cfg.fit_seed)
         if not positions:
             raise RuntimeError(
                 f'no fit positions: the scanned rectangle {span} holds fewer '
                 f'than one {tile_l0} px tile at level {level} (ds {level_ds:g})')
 
+        _tick('fit: HEST mask + positions')
         batches = []
         for tiles, _, _ in self._read_tiles(wsi, origin, positions, level):
             batches.append(self._cells(tiles).cpu().numpy())
@@ -625,10 +823,12 @@ class Uni2PcaSegmenter(TissueSegmenter):
         # without a seed the same config on the same slide gives a different
         # basis and the SAME identity_id: one name, two things, the failure
         # ConfigIdentity exists to prevent.
+        _tick('fit: 1000 tiles read + UNI2')
         pca = PCA(n_components=cfg.components,
                   random_state=cfg.fit_seed).fit(sample)
         scaler = MinMaxScaler(clip=True).fit(pca.transform(sample))
         self._project = _GpuProjection(pca, scaler, self.device)
+        _tick('PCA fit')
 
         scaled_pc1 = scaler.transform(pca.transform(sample))[:, 0]
         foreground = (scaled_pc1 > cfg.background_threshold
@@ -639,6 +839,8 @@ class Uni2PcaSegmenter(TissueSegmenter):
             'level_ds': level_ds,
             'tile_l0': tile_l0,
             'positions': len(positions),
+            'fit_tissue_frac': float(cfg.fit_tissue_frac),
+            'hest_tissue_tiles': n_tissue_tiles,
             'cells': int(sample.shape[0]),
             'explained_variance_top3':
                 float(pca.explained_variance_ratio_[:3].sum()),
@@ -795,7 +997,7 @@ class Uni2PcaSegmenter(TissueSegmenter):
             tiles = tiles.numpy()
             yield tiles, _cell_means(tiles, cells), index.numpy()
 
-    def _read_lattice(self, wsi, region, grid, ds, level, cells=None):
+    def _read_lattice(self, wsi, region, grid, ds, level, cells=None, rows_needed=None):
         """Every tile of `grid` (the scanned rectangle's lattice), in row-major
         order: `SlideReader.read_grid`, a block of rows per call on the workers.
         Yields what `_read_tiles` yields, `index` = row * cols + col.
@@ -805,6 +1007,10 @@ class Uni2PcaSegmenter(TissueSegmenter):
         is the whole scanned rectangle."""
         from locascope.core.slides.SlideReader import SlideReader, integer_downsample
 
+        # A MIRAX level is ~2^L, not exactly (2.00007...): read it as the integer, as grey_sd_map does. The drift over a
+        # whole scanned rectangle is a few level-0 px, against a 28 px cell at level 1. Farther than 1e-3 off: refused.
+        if not integer_downsample(ds) and abs(ds - round(ds)) <= 1e-3 * ds:
+            ds = float(round(ds))
         if not integer_downsample(ds):
             raise ValueError(
                 f'level {level} is ds {ds:g}: read_grid reads a non-integer ds '
@@ -813,10 +1019,38 @@ class Uni2PcaSegmenter(TissueSegmenter):
         reader = SlideReader(_path_of(wsi), workers=self.cfg.workers)
         cols = grid.lattice_dims('main')[1]
         batch = self.cfg.batch_tiles
-        for block in reader.read_grid([region], [grid], ds, tile=self.cfg.tile,
+        # `rows_needed` ([rows] bool): only the lattice rows with a tile to encode are read -- the runs of them, each a
+        # region of its own, in ONE read_grid (a block says which region it is of). Runs closer than 3 rows are joined:
+        # a few rows read for nothing cost less than a worker hand-off. 2026-11-11: 12 % of a Ki67 MRXS's tiles were
+        # encoded and the whole rectangle was read, 66 s of waiting for the reader against 47 s of UNI2.
+        regions, grids, starts = [region], [grid], [0]
+        if rows_needed is not None and not bool(np.all(rows_needed)):
+            from locascope.core.tiles.PatchingLib import PatchGrid                  # noqa: PLC0415
+            from locascope.core.tiles.TissueMask import TissueRegion                # noqa: PLC0415
+            runs: List[List[int]] = []
+            for r in np.flatnonzero(rows_needed).tolist():
+                if runs and r - runs[-1][1] <= 3:
+                    runs[-1][1] = r + 1
+                else:
+                    runs.append([r, r + 1])
+            step = int(round(self.cfg.tile * ds))                   # a lattice row in level-0 px
+            regions, grids, starts = [], [], []
+            for r0, r1 in runs:
+                sub = TissueRegion(x=region.x, y=region.y + r0 * step, w=region.w, h=(r1 - r0) * step, index=len(regions))
+                g = PatchGrid.for_region(sub, ds, self.cfg.tile, overlap=False, level=level)
+                if g.lattice_dims('main') != (r1 - r0, cols):
+                    raise RuntimeError(f'rows {r0}:{r1} make a {g.lattice_dims("main")} lattice, not ({r1 - r0}, {cols})')
+                regions.append(sub)
+                grids.append(g)
+                starts.append(r0)
+            print(f'        reading {sum(r1 - r0 for r0, r1 in runs)} of {len(rows_needed)} lattice rows, in {len(runs)} runs',
+                  flush=True)
+        if not regions:
+            return
+        for block in reader.read_grid(regions, grids, ds, tile=self.cfg.tile,
                                       offset=False, level=level):
             tiles = block.main.numpy()
-            first = block.row0 * cols
+            first = (starts[block.region] + block.row0) * cols
             for s in range(0, len(tiles), batch):
                 part = tiles[s:s + batch]
                 yield (part, _cell_means(part, cells),
@@ -852,18 +1086,38 @@ class Uni2PcaSegmenter(TissueSegmenter):
         them, not about the bit they produced. Threshold sweeps read them; the
         mask store writes them; every other reader leaves them on disk.
         """
-        components, _ = self.components_wsi(wsi)
+        level: int = int(self.cfg.read_level)
+        level_ds: float = float(wsi.level_downsamples[level])
+        if abs(level_ds - round(level_ds)) <= 1e-3 * level_ds:       # as components_wsi: a MIRAX ~2^L read as the integer
+            level_ds = float(round(level_ds))
+        cell_l0: float = self._cell_px * level_ds                     # level-0 px per mask cell
+        # THIS slide's basis, always: one segmenter does many slides (build_mask_store), and components_wsi fits only when
+        # nothing is fitted -- 2026-11-11 every slide after a run's first was projected on the first's basis
+        self.fit(wsi, level)
+        components, _ = self.components_wsi(wsi, level)
+        _tick('')
         pc1 = components[..., 0].astype(np.float32)
         tissue = (pc1 > self.cfg.background_threshold
                   if self.cfg.larger_pca_as_fg
                   else pc1 < self.cfg.background_threshold)
-        tissue = self._clean(tissue)
-
         origin, _ = scanned_rect(wsi, self.cfg.limit_bounds)
-        covered = (tissue.shape[1] * self._cell_px, tissue.shape[0] * self._cell_px)
+        if self.cfg.unscanned_margin >= 0:
+            tissue &= scanned_cells(wsi, origin, tissue.shape, cell_l0,
+                                    self.cfg.unscanned_margin,
+                                    tile_cells=self.cfg.tile // self._cell_px)
+        if getattr(self, '_blank', None) is not None:                  # not encoded: background, said explicitly
+            t = self.cfg.tile // self._cell_px
+            flat = np.repeat(np.repeat(self._blank, t, axis=0), t, axis=1)[:tissue.shape[0], :tissue.shape[1]]
+            tissue &= ~flat
+        _tick('threshold + blanking (alpha reused)')
+        tissue = self._clean(tissue)
+        _tick('morphology (close, open)')
+
+        covered = (int(round(tissue.shape[1] * cell_l0)), int(round(tissue.shape[0] * cell_l0)))
         return SlideMask(mask=tissue, origin=origin, span=covered,
-                         mask_ds=float(self._cell_px), report=self.fit_report,
-                         components=components)
+                         mask_ds=float(cell_l0), report=self.fit_report,
+                         components=(np.ascontiguousarray(components[..., :self.cfg.stored_components])
+                                     if self.cfg.stored_components > 0 else None))
 
     def _clean(self, tissue: np.ndarray) -> np.ndarray:
         """Close then open, in cells. See `Uni2PcaSegConfig.morph_kernel`.
@@ -917,6 +1171,8 @@ class Uni2PcaSegmenter(TissueSegmenter):
         cfg = self.cfg
         origin, span = scanned_rect(wsi, cfg.limit_bounds)
         level_ds = float(wsi.level_downsamples[level])
+        if abs(level_ds - round(level_ds)) <= 1e-3 * level_ds:       # a MIRAX ~2^L: the lattice and the read share the integer (_read_lattice)
+            level_ds = float(round(level_ds))
         region = TissueRegion(x=int(origin[0]), y=int(origin[1]),
                               w=int(span[0]), h=int(span[1]), index=0)
         grid = PatchGrid.for_region(region, level_ds, cfg.tile, overlap=False,
@@ -935,18 +1191,49 @@ class Uni2PcaSegmenter(TissueSegmenter):
                  if thumbnail else None)
 
         cells = (side, side) if thumbnail else None
-        done = 0
-        # Quarters, not every batch -- a slide's scanned rectangle is
-        # 10^5-10^6 tiles (see this method's own docstring), and printing
-        # every `batch_tiles`-sized step is 1500+ lines nobody reads. One
-        # line per ~25% still says the run is alive without flooding a log.
-        report_every = max(1, len(positions) // 4)
-        next_report = report_every
-        for tiles, small, index in self._read_lattice(wsi, region, grid,
-                                                      level_ds, level, cells):
+        # Tiles that touch the canvas a MIRAX scanner never photographed are background whatever UNI2 says of them
+        # (`unscanned_margin`, `scanned_cells` in segment_slide): they are not encoded at all -- on a Ki67 MRXS that is
+        # over half the tiles. Their components stay 0. Only when the recipe blanks them; otherwise every tile is encoded.
+        skip: Optional[np.ndarray] = None
+        if cfg.unscanned_margin >= 0:
+            scanned: np.ndarray = scanned_tiles(wsi, origin, (n_rows * side, n_cols * side),
+                                                self._cell_px * level_ds, side)
+            skip = ~scanned[:n_rows, :n_cols].reshape(-1)
+            _tick('alpha thumbnail ds 16')
+            print(f'        {int(skip.sum())} of {len(positions)} tiles touch the unscanned canvas: not encoded', flush=True)
+        self._blank = None
+        if cfg.skip_blank_sd >= 0:
+            blank, tile_sd = blank_tiles(wsi, origin, n_rows, n_cols, self._cell_px * level_ds * side, cfg.skip_blank_sd)
+            self._blank = blank
+            _tick('grey thumbnail ds 8 + blank tiles')
+            flat = blank.reshape(-1)
+            fresh = int((flat & ~skip).sum()) if skip is not None else int(flat.sum())
+            skip = flat if skip is None else (skip | flat)
+            hest = getattr(self, '_hest_tiles', None)
+            on_hest = (f'; of the {int(hest.sum())} tiles HEST ds 4 calls tissue, {int((hest[:n_rows, :n_cols] & blank).sum())} are blank'
+                       if hest is not None else '')
+            print(f'        {fresh} more tiles are flat glass all around (grey sd < {cfg.skip_blank_sd:g} at ds 8, 3 x 3): not '
+                  f'encoded{on_hest}', flush=True)
+            if hest is not None:                                     # what the threshold is against: the sd of tissue and of the rest
+                h = hest[:n_rows, :n_cols]
+                q = lambda v: ' / '.join(f'{x:.2f}' for x in np.quantile(v[np.isfinite(v)], [0.01, 0.05, 0.25, 0.5])) if v.size else '-'
+                print(f'        tile grey sd at ds 8, quantiles 1 / 5 / 25 / 50 %: HEST tissue {q(tile_sd[h])}; '
+                      f'the rest (scanned) {q(tile_sd[~h & ~skip.reshape(n_rows, n_cols)])}', flush=True)
+        import time                                                          # noqa: PLC0415  timing probe
+        t_read = t_encode = t_place = 0.0
+        t_all = time.perf_counter()
+        kept_tiles: List[np.ndarray] = []
+        kept_small: List[Optional[np.ndarray]] = []
+        kept_index: List[np.ndarray] = []
+        n_kept = 0
+
+        def encode(tiles: np.ndarray, small: Optional[np.ndarray], index: np.ndarray) -> None:
+            nonlocal t_encode, t_place
+            t0 = time.perf_counter()
             projected = self._project(self._cells(tiles))
             projected = projected.reshape(len(index), side, side, -1)
-            projected = projected.to(torch.float16).cpu().numpy()
+            projected = projected.to(torch.float16).cpu().numpy()            # .cpu() waits for the GPU: encode time is real
+            t1 = time.perf_counter()
             for b, k in enumerate(index.tolist()):
                 row, col = positions[k]
                 ys = slice(row * side, (row + 1) * side)
@@ -954,11 +1241,59 @@ class Uni2PcaSegmenter(TissueSegmenter):
                 components[ys, xs] = projected[b]
                 if thumbnail:
                     thumb[ys, xs] = small[b]
-            done += len(index)
+            t_encode += t1 - t0
+            t_place += time.perf_counter() - t1
+
+        def flush(final: bool) -> None:
+            nonlocal kept_tiles, kept_small, kept_index, n_kept
+            while n_kept >= cfg.batch_tiles or (final and n_kept):
+                tiles = np.concatenate(kept_tiles)
+                index = np.concatenate(kept_index)
+                small = np.concatenate(kept_small) if thumbnail else None
+                take = min(cfg.batch_tiles, len(index))
+                encode(tiles[:take], small[:take] if thumbnail else None, index[:take])
+                kept_tiles, kept_index = [tiles[take:]], [index[take:]]
+                kept_small = [small[take:]] if thumbnail else []
+                n_kept = len(index) - take
+
+        done = 0
+        # Quarters, not every batch -- a slide's scanned rectangle is
+        # 10^5-10^6 tiles (see this method's own docstring), and printing
+        # every `batch_tiles`-sized step is 1500+ lines nobody reads. One
+        # line per ~25% still says the run is alive without flooding a log.
+        report_every = max(1, len(positions) // 4)
+        next_report = report_every
+        rows_needed = None if skip is None else ~skip.reshape(n_rows, n_cols).all(axis=1)
+        reads = iter(self._read_lattice(wsi, region, grid, level_ds, level, cells, rows_needed))
+        while True:
+            t0 = time.perf_counter()
+            got = next(reads, None)
+            t_read += time.perf_counter() - t0
+            if got is None:
+                break
+            tiles, small, index = got
+            if skip is not None:
+                keep = ~skip[index]
+                tiles, index = tiles[keep], index[keep]
+                small = small[keep] if thumbnail else small
+            if len(index):
+                kept_tiles.append(tiles)
+                kept_index.append(index)
+                if thumbnail:
+                    kept_small.append(small)
+                n_kept += len(index)
+                flush(False)
+            done += len(got[2])
             if done >= next_report or done >= len(positions):
                 print(f'        projecting {done}/{len(positions)} tiles '
                      f'({100 * done // len(positions)}%)', flush=True)
                 next_report += report_every
+        flush(True)
+        total = time.perf_counter() - t_all
+        encoded = len(positions) - (int(skip.sum()) if skip is not None else 0)
+        print(f'  timing uni2: total {total:.1f} s = waiting for reads {t_read:.1f} s + UNI2 and projection {t_encode:.1f} s '
+              f'+ placing {t_place:.1f} s  ({encoded} tiles encoded, {encoded / max(t_encode, 1e-9):.0f} tiles/s on the GPU, '
+              f'batch {cfg.batch_tiles})', flush=True)
         return components, thumb
 
     # ── the one encoder call ────────────────────────────────────────────────

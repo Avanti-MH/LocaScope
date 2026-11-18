@@ -134,6 +134,17 @@ class SafeSlide(openslide.OpenSlide):
         self._reports = 0
         self._min_chunk = int(min_chunk)
 
+    def sibling(self) -> SafeSlide:
+        """Another handle on the same file with the same recovery settings.
+
+        For a thread of its own: a failed read replaces the handle, and that
+        must not be one another thread is reading. Its `reopens` and `holes`
+        start empty; the caller adds them to this slide's when it is done.
+        """
+        return SafeSlide(self._filename, record_holes=self._record_holes,
+                         warn=self._warn, warn_limit=self._warn_limit,
+                         min_chunk=self._min_chunk)
+
     # ── recovery ─────────────────────────────────────────────────────────────
 
     def _report(self, err: BaseException, location: Location, level: int,

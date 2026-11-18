@@ -116,7 +116,44 @@ class HestSegmenter(PlaneSegmenter):
                 ckpt = _download_ckpt()
             _load_published(model, ckpt)
 
-        self.model = model.to(device).eval()
+        # channels_last: the layout cuDNN's convolutions run fastest in on a tensor-core GPU. Speed only.
+        self.model = model.to(device).eval().to(memory_format=torch.channels_last)
+        # Every interior tile of a tiled plane is the same shape, so the convolution
+        # algorithm is searched once and reused. Speed only: no field of the config.
+        if torch.device(device).type == 'cuda':
+            torch.backends.cudnn.benchmark = True
+        self._mean = torch.tensor((0.485, 0.456, 0.406), device=device).view(1, 3, 1, 1)
+        self._std = torch.tensor((0.229, 0.224, 0.225), device=device).view(1, 3, 1, 1)
+
+    #: tiles of one shape sent through the network together (TissueSeg.tiled_apply)
+    #: and threads reading the next tiles meanwhile. Speed only, not identity: a
+    #: tile sees the same pixels either way. Set on the built segmenter to change.
+    batch_tiles: int = 16
+    read_workers: int = 4
+
+    def _autocast(self):
+        """fp16 when the config says so (`model.dtype`, which IS identity: a
+        different seg_id, a mask beside the fp32 one), on a GPU only."""
+        import contextlib                                     # noqa: PLC0415
+        if self.cfg.model.dtype == 'fp16' and torch.device(self.device).type == 'cuda':
+            return torch.autocast('cuda', dtype=torch.float16)
+        return contextlib.nullcontext()
+
+    @torch.no_grad()
+    def segment_batch(self, images) -> list:
+        """RGB uint8 images of ONE shape -> one [H, W] uint8 mask each, 1 = tissue.
+
+        The same normalisation as `_TRANSFORM` (x / 255, ImageNet mean and std),
+        done on the GPU for the whole batch rather than per image on the CPU."""
+        if not images:
+            return []
+        stack = torch.from_numpy(np.ascontiguousarray(np.stack(images)))   # [B, H, W, 3] uint8
+        x = stack.to(self.device, non_blocking=True).permute(0, 3, 1, 2).float().div_(255.0)
+        x = ((x - self._mean) / self._std).contiguous(memory_format=torch.channels_last)
+        with self._autocast():
+            out = self.model(x)['out']                          # [B, 2, H, W]
+        masks = (out.argmax(dim=1) == _TISSUE_CLASS).to(torch.uint8).cpu().numpy()
+        return list(masks)
 
     @property
     def runs(self) -> bool:
@@ -132,7 +169,8 @@ class HestSegmenter(PlaneSegmenter):
         pil = Image.fromarray(image) if isinstance(image, np.ndarray) \
             else image.convert('RGB')
         tensor = _TRANSFORM(pil).unsqueeze(0).to(self.device)   # [1, 3, H, W]
-        out = self.model(tensor)['out']                         # [1, 2, H, W]
+        with self._autocast():
+            out = self.model(tensor)['out']                     # [1, 2, H, W]
         mask = out.argmax(dim=1).squeeze(0).cpu().numpy()       # [H, W] 0 or 1
         return (mask == _TISSUE_CLASS).astype(np.uint8)
 

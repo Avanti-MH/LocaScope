@@ -29,6 +29,7 @@ came from, so there is nothing to undo.
 """
 
 import copy
+import functools
 import json
 import zlib
 from dataclasses import dataclass
@@ -88,17 +89,28 @@ MASK_RAW: str = 'raw'
 #: ... of a file whose `mask` tensor is `zlib.compress(np.packbits(mask))`, a
 #: 1-D uint8 of bytes; `rows` and `cols` in the metadata give the shape back.
 MASK_PACKED: str = 'packbits+zlib'
-_MASK_ZLIB_LEVEL: int = 6
+#: 1, not 6 (2026-11-10): the raster is long runs of 0, which level 1 already shrinks to a few MB at
+#: ds 1, and level 6 spent tens of seconds of one core per slide on the last few percent. What is
+#: stored decompresses to the same array either way; only the file bytes differ.
+_MASK_ZLIB_LEVEL: int = 1
 
 
 def pack_mask(mask: np.ndarray) -> Optional[np.ndarray]:
     """The bytes of `mask` (2-D uint8, 0 or 1) as a 1-D uint8 array, or None
     when it holds any other value: packing keeps one bit per cell, so a mask
     with a 2 in it would come back different and is stored raw instead."""
+    import time                                                  # noqa: PLC0415  timing probe
+    t0 = time.perf_counter()
     if mask.size and int(mask.max()) > 1:
         return None
-    blob: bytes = zlib.compress(np.packbits(mask.reshape(-1)).tobytes(),
-                                _MASK_ZLIB_LEVEL)
+    t1 = time.perf_counter()
+    bits: np.ndarray = np.packbits(mask.reshape(-1))
+    t2 = time.perf_counter()
+    # the packed array itself, not .tobytes(): zlib reads any buffer, and the copy was 1/8 of the mask
+    blob: bytes = zlib.compress(bits, _MASK_ZLIB_LEVEL)
+    t3 = time.perf_counter()
+    print(f'  timing pack: max {t1 - t0:.1f} s + packbits {t2 - t1:.1f} s + zlib(level {_MASK_ZLIB_LEVEL}) '
+          f'{t3 - t2:.1f} s  ({mask.size / 1e9:.1f} G cells -> {len(blob) / 1e6:.1f} MB)', flush=True)
     return np.frombuffer(blob, dtype=np.uint8).copy()
 
 
@@ -137,7 +149,7 @@ class SlideMask:
     division to find out how blocky the mask is. `report` is whatever the
     segmenter wanted to say about the fit that produced it.
     """
-    mask:    np.ndarray               # [rows, cols] bool or uint8, 1 = tissue
+    mask:    np.ndarray               # [rows, cols] bool, True = tissue (see __post_init__)
     origin:  Tuple[int, int]          # (x, y) level-0
     span:    Tuple[int, int]          # (w, h) level-0 actually covered
     mask_ds: float                    # level-0 px per mask px
@@ -150,9 +162,26 @@ class SlideMask:
     #: mask does not pay for them: `load(with_components=False)`.
     components: Optional[np.ndarray] = None
 
-    @property
+    def __post_init__(self) -> None:
+        """ONE dtype for a mask in memory: bool. A segmenter may hand in uint8 0 / 1 (a tiled plane, HEST) and a file
+        reads back uint8 (packbits): either becomes a bool VIEW of the same bytes, no copy -- at ds 1 a copy is 18.7 GB.
+        Anything else (0 / 255, a float) is compared to 0, which copies. So every reader gets bool and none converts;
+        uint8 is made only at an OpenCV call and on disk."""
+        mask: np.ndarray = np.asarray(self.mask)
+        if mask.dtype == bool:
+            return
+        if mask.dtype == np.uint8 and (mask.size == 0 or int(mask.max()) <= 1):
+            object.__setattr__(self, 'mask', mask.view(bool))
+        else:
+            object.__setattr__(self, 'mask', mask != 0)
+
+    @functools.cached_property
     def fraction(self) -> float:
-        return float(np.asarray(self.mask).astype(bool).mean())
+        """Counted once, not cast: a ds 1 mask is 18.7 G cells, and `astype(bool).mean()` made a
+        second 18.7 GB array every time it was asked (geometry() asks twice per save). The same
+        number: a count of the cells that are not 0, over the cell count."""
+        mask = np.asarray(self.mask)
+        return float(np.count_nonzero(mask) / mask.size) if mask.size else 0.0
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -179,7 +208,8 @@ class SlideMask:
         The raster is stored packed (`MASK_PACKED`) unless `packed` is False or
         it holds a value other than 0 and 1 (`MASK_RAW`); `load` returns the
         same array for both."""
-        mask = np.ascontiguousarray(np.asarray(self.mask).astype(np.uint8))
+        # the bool raster's own bytes as uint8 0 / 1: a view, not a copy (a broadcast -- method '' -- is made contiguous)
+        mask = np.ascontiguousarray(np.asarray(self.mask)).view(np.uint8)
         if mask.ndim != 2:
             raise ValueError(f'mask must be 2-D, got shape {mask.shape}')
         blob: Optional[np.ndarray] = pack_mask(mask) if packed else None
@@ -198,8 +228,11 @@ class SlideMask:
         metadata['mask_encoding'] = encoding
         metadata['report_json'] = json.dumps(self.report or {}, sort_keys=True,
                                              default=str)
+        import time                                              # noqa: PLC0415  timing probe
+        t0 = time.perf_counter()
         with atomic_file(path) as tmp:
             save_file(tensors, str(tmp), metadata=metadata)
+        print(f'  timing write: {time.perf_counter() - t0:.1f} s', flush=True)
         return Path(path)
 
     @classmethod
@@ -241,11 +274,8 @@ class TissueMask:
     """A `SlideMask` placed on its slide, plus the regions found in it."""
 
     def __init__(self, wsi, slide_mask: SlideMask):
-        # No copy when it is already bool: a read-only broadcast (method '')
-        # and a 771 MB plane both pass through as they are.
+        # bool already (SlideMask.__post_init__): a read-only broadcast (method '') and a 771 MB plane pass as they are
         main_mask = np.asarray(slide_mask.mask)
-        if main_mask.dtype != bool:
-            main_mask = main_mask.astype(bool)
         rows, cols = main_mask.shape[:2]
         span_w, span_h = slide_mask.span
         wsi_mpp_x = float(wsi.properties.get('openslide.mpp-x', 0))

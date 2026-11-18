@@ -48,6 +48,7 @@ With one region there is nothing to compare across.
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Tuple, Union
@@ -178,7 +179,30 @@ def tiled_apply(method: Callable[[np.ndarray], np.ndarray], H: int, W: int,
     method runs, so a convolutional method never sees a tile edge where the
     stitched mask has a seam. `source` and `name` (the slide) only label the
     log line.
+
+    SPEED, without changing what a tile is. Two things the method may offer:
+
+      `read_workers` (int)  threads that call `get_tile` ahead of the method,
+                            at most `2 * read_workers + batch` tiles in flight,
+                            so the reading hides behind the GPU (measured on
+                            S1100333 at ds 1, before: read 237 s + method 477 s
+                            one after the other). `get_tile` must then be safe
+                            to call from several threads.
+      `segment_batch` and   tiles of the SAME expanded shape go to the method
+      `batch_tiles` (int)   together, up to `batch_tiles` at a time. The grid
+                            makes all interior tiles one shape; the edge rows
+                            and columns are other shapes and form their own,
+                            smaller batches. Nothing is padded, so each tile
+                            sees exactly the pixels it saw alone.
+
+    Neither is identity: the tiles, their overlap and the stitch are the same,
+    so the mask is the one a one-by-one pass gives (up to the GPU's own
+    float order).
     """
+    import time                                                  # noqa: PLC0415  timing probe
+    from collections import deque                                # noqa: PLC0415
+    from concurrent.futures import Future, ThreadPoolExecutor    # noqa: PLC0415
+
     n_h = n_w = 1
     while (H // n_h) * (W // n_w) > budget_px:
         if H // n_h >= W // n_w:
@@ -188,32 +212,91 @@ def tiled_apply(method: Callable[[np.ndarray], np.ndarray], H: int, W: int,
 
     tile_h = H // n_h
     tile_w = W // n_w
+    batch: int = max(1, int(getattr(method, 'batch_tiles', 1) or 1))
+    segment_batch: Optional[Callable] = getattr(method, 'segment_batch', None) if batch > 1 else None
+    if segment_batch is None:
+        batch = 1
+    workers: int = max(0, int(getattr(method, 'read_workers', 0) or 0))
     print(f'  tiled {source}{f" [{name}]" if name else ""}: '
           f'{n_h}x{n_w} = {n_h * n_w} tiles at '
           f'~{tile_h}x{tile_w} each (input {H}x{W}, budget '
-          f'{budget_px / 1e6:.1f}M px, stitch_overlap={stitch_overlap})', flush=True)
+          f'{budget_px / 1e6:.1f}M px, stitch_overlap={stitch_overlap}, '
+          f'batch {batch}, read workers {workers})', flush=True)
 
-    result = np.zeros((H, W), dtype=np.uint8)
+    # every tile: its kept rect and its expanded (read) rect
+    cells = []
     for i in range(n_h):
         for j in range(n_w):
             y0 = i * tile_h
             x0 = j * tile_w
             y1 = H if i == n_h - 1 else (i + 1) * tile_h
             x1 = W if j == n_w - 1 else (j + 1) * tile_w
+            cells.append(((y0, x0, y1, x1),
+                          (max(0, y0 - stitch_overlap), max(0, x0 - stitch_overlap),
+                           min(H, y1 + stitch_overlap), min(W, x1 + stitch_overlap))))
 
-            y0e = max(0, y0 - stitch_overlap)
-            x0e = max(0, x0 - stitch_overlap)
-            y1e = min(H, y1 + stitch_overlap)
-            x1e = min(W, x1 + stitch_overlap)
+    t_read = t_method = t_stitch = 0.0
+    t_start = time.perf_counter()
+    result = np.zeros((H, W), dtype=np.uint8)
 
-            tile_mask = method(get_tile(y0e, x0e, y1e, x1e))
+    def stitch(cell, tile_mask: np.ndarray) -> None:
+        (y0, x0, y1, x1), (y0e, x0e, _, _) = cell
+        trim_t = y0 - y0e
+        trim_l = x0 - x0e
+        result[y0:y1, x0:x1] = tile_mask[trim_t: trim_t + (y1 - y0),
+                                         trim_l: trim_l + (x1 - x0)]
 
-            trim_t = y0 - y0e
-            trim_l = x0 - x0e
-            result[y0:y1, x0:x1] = tile_mask[
-                trim_t : trim_t + (y1 - y0),
-                trim_l : trim_l + (x1 - x0),
-            ]
+    def run(group) -> None:
+        nonlocal t_method, t_stitch
+        t1 = time.perf_counter()
+        if segment_batch is not None:
+            masks = segment_batch([tile for _, tile in group])
+        else:
+            masks = [method(tile) for _, tile in group]
+        t2 = time.perf_counter()
+        for (cell, _), tile_mask in zip(group, masks):
+            stitch(cell, tile_mask)
+        t_method += t2 - t1
+        t_stitch += time.perf_counter() - t2
+
+    pool = ThreadPoolExecutor(workers) if workers else None
+    ahead: 'deque[Tuple[object, Future]]' = deque()
+    queue_ahead = 2 * workers + batch
+    upcoming = iter(cells)
+
+    def fill() -> None:
+        while pool is not None and len(ahead) < queue_ahead:
+            cell = next(upcoming, None)
+            if cell is None:
+                return
+            ahead.append((cell, pool.submit(get_tile, *cell[1])))
+
+    group = []
+    try:
+        fill()
+        for cell in (cells if pool is None else iter(lambda: ahead[0][0] if ahead else None, None)):
+            t0 = time.perf_counter()
+            if pool is None:
+                tile = get_tile(*cell[1])
+            else:
+                _, future = ahead.popleft()
+                tile = future.result()
+                fill()
+            t_read += time.perf_counter() - t0
+            if group and (len(group) == batch or group[0][1].shape != tile.shape):
+                run(group)
+                group = []
+            group.append((cell, tile))
+        if group:
+            run(group)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    total = time.perf_counter() - t_start
+    print(f'  timing {source}{f" [{name}]" if name else ""}: total {total:.1f} s = read {t_read:.1f} s '
+          f'({"waiting for the readers" if workers else "in line"}) + method {t_method:.1f} s + stitch {t_stitch:.1f} s  '
+          f'({n_h * n_w} tiles, {H * W / max(total, 1e-9) / 1e6:.1f} M px/s)', flush=True)
     return result
 
 
@@ -336,7 +419,8 @@ class PlaneSegmenter(TissueSegmenter):
         if not self.runs:
             mask = np.broadcast_to(True, g.shape)
         else:
-            mask = self._segment_plane(wsi, g).astype(bool)
+            # uint8 0 / 1 from the tiled plane: SlideMask makes it its bool view (no copy)
+            mask = self._segment_plane(wsi, g)
         # The span is the level-0 extent the mask actually covers, not the
         # canvas: pairing the canvas width with a cropped mask width would
         # inflate mask_ds by 1/crop_fraction and silently misplace everything.
@@ -352,6 +436,20 @@ class PlaneSegmenter(TissueSegmenter):
         rows, cols = g.shape
         ox, oy = g.origin
         reader = SlideReader(wsi)
+        # tiled_apply may call `read` from several threads (`read_workers`). One
+        # handle per thread: SafeSlide replaces its handle when a read fails, and
+        # another thread must not be reading through the one being replaced.
+        path = getattr(wsi, '_filename', None)
+        local = threading.local()
+
+        def reader_here() -> SlideReader:
+            if not path or threading.current_thread() is threading.main_thread():
+                return reader
+            mine = getattr(local, 'reader', None)
+            if mine is None:
+                from locascope.core.slides.SafeSlide import SafeSlide   # noqa: PLC0415
+                mine = local.reader = SlideReader(SafeSlide(path))
+            return mine
 
         def read(y0: int, x0: int, y1: int, x1: int) -> np.ndarray:
             """One (y0:y1, x0:x1) rect of the level, as RGB: `SlideReader.read`
@@ -364,7 +462,7 @@ class PlaneSegmenter(TissueSegmenter):
             the background colour (`read_region_rgb`), never black: a
             segmentation model would call a black field tissue.
             """
-            img = reader.read(ox + int(round(x0 * g.level_ds)),
+            img = reader_here().read(ox + int(round(x0 * g.level_ds)),
                               oy + int(round(y0 * g.level_ds)),
                               ReadSpec(x1 - x0, y1 - y0), g.level_ds, level=g.level)
             if img is None:
