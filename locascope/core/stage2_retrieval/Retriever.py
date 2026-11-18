@@ -234,6 +234,9 @@ class Retriever(IdentifiedBuild):
     #: The tables `tables` writes besides the list, by name: what an entry of this retriever holds and a cache
     #: hit asks for (`BenchCommon.phase_roles`). None by default.
     TABLES: Tuple[str, ...] = ()
+    #: The extra that holds the tile features this retriever's first phase read (a `GridSource`): what a trainer
+    #: of a head that reads them asks the output for (`training/RerankHead/Visits.py`).
+    FEATURES: str = 'level_features'
 
     def __init__(self, cfg: IdentifiedConfig, device: Optional[Any] = None, *,
                  encoders: Optional[EncoderPool] = None, multi_gpu: bool = False) -> None:

@@ -11,7 +11,11 @@ the default 1000 long. The text is for people; the hash is the identity (everyth
 the other settings of the method, the checkpoint it reads, the mask, ...).
 
 The name is made from the CONFIG (`config_label`), so a phase of `--stage2 <method>:<recipe>`, of
-`--stage2 arm:<arm>` and of the bench's arm of the same config is one name and one file.
+`--stage2 arm:<arm>` and of the bench's arm of the same config is one name and one file. A config that
+spells its own encoder and pooling (`arm_encoder`, `arm_pooling`) is named by them: a CoAE retriever is
+`slidewin-GigaCoAE-<arm>-<feature>-<score>` (`GigaCoAE+RN3:SlidingWindow::fm_head+mean` is
+`slidewin-GigaCoAE-RN3-fm-head-mean`; `GigaCoAE+RPV2:PhaseTiles::latent` is `phasetiles-GigaCoAE-RPV2-latent`). A config's own
+`arm_pooling` comes before a method's `raw`.
 
 A reranker is an entry of its own. It reads a list a retriever (or another reranker) made, and its name
 says whose with `_after-` and the upstream's hash, which is also one of its own hash's parts: the same
@@ -28,7 +32,7 @@ from locascope.core.stage2_retrieval.ArmSpec import ArmSpec, MAIN_ONLY, METHODS,
 #: The word each method is filed under.
 METHOD_SLUGS: Dict[str, str] = {
     'SlidingWindow': 'slidewin', 'BagOfTiles': 'bagoftiles', 'TileVote': 'tilevote',
-    'ClusterBow': 'clusterbow', 'WinEmbed': 'winembed',
+    'ClusterBow': 'clusterbow', 'WinEmbed': 'winembed', 'PhaseTiles': 'phasetiles',
     'Dual': 'dual', 'CSLS': 'csls', 'Corr': 'corr', 'CandGraph': 'candgraph', 'Shift': 'shift',
     'TokenMatch': 'tokenmatch', 'XEnc': 'xenc', 'TileGT': 'tilegt', 'CorrNet': 'corrnet', 'Stack': 'stack'}
 
@@ -46,6 +50,8 @@ CONFIG_NAMES: Dict[str, Tuple[str, str]] = {
     'RetrieverTileVoteConfig': ('TileVote', 'backend'),
     'RetrieverClusterBowConfig': ('ClusterBow', ''),
     'RetrieverWinEmbedConfig': ('WinEmbed', ''),
+    'RetrieverCoaeConfig': ('SlidingWindow', 'score'),
+    'RetrieverPhaseTilesConfig': ('PhaseTiles', 'arm_op'),
     'RerankerDualConfig': ('Dual', 'order_by'),
     'RerankerCslsConfig': ('CSLS', 'mode'),
     'RerankerCorrConfig': ('Corr', 'order_by'),
@@ -59,7 +65,7 @@ CONFIG_NAMES: Dict[str, Tuple[str, str]] = {
 }
 
 #: The methods that take no pooling: their name says `raw`.
-RAW_METHODS: Tuple[str, ...] = ('CandGraph', 'TokenMatch', 'Stack')
+RAW_METHODS: Tuple[str, ...] = ('CandGraph', 'TokenMatch', 'Stack', 'PhaseTiles')
 
 #: The length of a list nothing is said about.
 DEFAULT_LENGTH: int = 1000
@@ -80,7 +86,7 @@ def label(method: str, encoder: str, pooling: str, operation: str = '', cut: int
     reads none."""
     parts: list[str] = [METHOD_SLUGS[method]]
     if encoder:
-        parts.append(encoder)
+        parts.append(slug(encoder))
     parts.append(slug(pooling) + (MAIN_ONLY if main_only else ''))
     if operation:
         parts.append(slug(operation))
@@ -100,8 +106,8 @@ def config_label(cfg: Any) -> str:
     method, op_field = CONFIG_NAMES[name]
     method = str(getattr(cfg, 'method', '') or method)
     enc: Optional[Any] = getattr(cfg, 'encoder', None)
-    encoder: str = str(getattr(enc, 'REGISTERED_AS', '') or '') if enc is not None else ''
-    pooling: str = RAW if method in RAW_METHODS else (str(enc.pooling) or 'default')
+    encoder: str = str(getattr(cfg, 'arm_encoder', '') or (getattr(enc, 'REGISTERED_AS', '') if enc is not None else '') or '')
+    pooling: str = str(getattr(cfg, 'arm_pooling', '') or (RAW if method in RAW_METHODS else (enc.pooling or 'default')))
     length: int = int(getattr(cfg, 'raw_topk', getattr(cfg, 'topk_in', DEFAULT_LENGTH)))
     return label(method, '' if method in ('CandGraph', 'Stack') else encoder, pooling,
                  str(getattr(cfg, op_field)) if op_field else '',

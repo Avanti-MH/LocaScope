@@ -87,7 +87,7 @@ ORACLE = 'oracle'
 #: `--stage2-encoder-pooling cls_avg`); a chain's `phases` (configs of different
 #: classes) are chosen by the recipe or the arm: no flag sets a chain.
 _NOT_FLAGS = {1: ('encoder', 'mask_cfg', 'sampler_cfg', 'levels'),
-              2: ('phases',), 3: ()}
+              2: ('phases', 'tiles', 'source'), 3: ()}
 
 
 def weights_of_config(cfg: Any) -> List[str]:

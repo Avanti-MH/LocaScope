@@ -20,6 +20,7 @@ METHODS: Dict[str, Tuple[str, str, str]] = {
     'tilevote': ('locascope.core.stage2_retrieval.RetrieverTileVote', 'TILEVOTE_RECIPES', 'RetrieverTileVote'),
     'clusterbow': ('locascope.core.stage2_retrieval.RetrieverClusterBow', 'CLUSTERBOW_RECIPES', 'RetrieverClusterBow'),
     'winembed': ('locascope.core.stage2_retrieval.RetrieverWinEmbed', 'WINEMBED_RECIPES', 'RetrieverWinEmbed'),
+    'phasetiles': ('locascope.core.stage2_retrieval.RetrieverPhaseTiles', 'PHASETILES_RECIPES', 'RetrieverPhaseTiles'),
     'multiphases': ('locascope.core.stage2_retrieval.MultiPhases', 'MULTIPHASES_RECIPES', 'MultiPhases'),
 }
 
@@ -30,6 +31,8 @@ RETRIEVERS: Dict[str, Tuple[str, str]] = {
     'RetrieverTileVoteConfig': ('locascope.core.stage2_retrieval.RetrieverTileVote', 'RetrieverTileVote'),
     'RetrieverClusterBowConfig': ('locascope.core.stage2_retrieval.RetrieverClusterBow', 'RetrieverClusterBow'),
     'RetrieverWinEmbedConfig': ('locascope.core.stage2_retrieval.RetrieverWinEmbed', 'RetrieverWinEmbed'),
+    'RetrieverPhaseTilesConfig': ('locascope.core.stage2_retrieval.RetrieverPhaseTiles', 'RetrieverPhaseTiles'),
+    'RetrieverCoaeConfig': ('locascope.core.stage2_retrieval.RetrieverCoae', 'RetrieverCoae'),
     'RerankerDualConfig': ('locascope.core.stage2_retrieval.RerankerScorers', 'RerankerDual'),
     'RerankerCslsConfig': ('locascope.core.stage2_retrieval.RerankerScorers', 'RerankerCsls'),
     'RerankerCorrConfig': ('locascope.core.stage2_retrieval.RerankerScorers', 'RerankerCorr'),

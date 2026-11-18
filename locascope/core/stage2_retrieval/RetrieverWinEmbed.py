@@ -16,6 +16,10 @@ over, if a slide were too large to multiply.
 It encodes its own level and query (`Context.WindowSearch`) and offers them as `level_features`, with the
 score of every window as `window_scores`. The checkpoint must have been trained on features of the pooling
 the config's encoder names.
+
+The tile features it reads come from one of two sources (`FmTiles`, `CoaeTiles`): the FM's own pooling, or a usage
+of a CoAE checkpoint (`cfg.tiles`: `GigaCoAE+<arm>:WinEmbed::<usage>`). The CoAE source offers no `level_features`
+(a reranker must not read the network's vectors as the FM's own), only `window_scores`.
 """
 
 from __future__ import annotations
@@ -30,9 +34,11 @@ from locascope.core.config.ConfigIdentity import register
 from locascope.core.slides.SafeSlide import SafeSlide
 from locascope.core.backbones.TileEncoder import TileEncoder, TileEncoderConfig, encoder_config
 from locascope.core.stage1_estimation.StageInterface import EstMppResult, weights_path
+from locascope.core.stage2_retrieval.ArmSpec import coae_encoder_name
 from locascope.core.stage2_retrieval.Context import (LATTICES, GridSource, LevelFeatures, QueryFeatures, WindowSearch,
-                                      first_phase_output, top_candidates)
-from locascope.core.stage2_retrieval.Retriever import EncoderPool, RetrievalOutput, Retriever, RetrieverConfig
+                                      feature_key, first_phase_output, top_candidates)
+from locascope.core.stage2_retrieval.Retriever import EncoderPool, Extra, RetrievalOutput, Retriever, RetrieverConfig
+from locascope.core.stage2_retrieval.RetrieverCoae import CoaeTilesConfig, coae_tile_encoder
 from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, Candidate, CandidateSet
 
 
@@ -41,7 +47,9 @@ from locascope.core.stage2_retrieval.StageInterface import ROTATIONS, Candidate,
 class RetrieverWinEmbedConfig(RetrieverConfig):
     """The encoder (pooling included) and tile cut, a `winembed` checkpoint (`weights`: by name, which is not
     identity; its content is, through the stage's id), the offset lattice, the list's length (`raw_topk`) and
-    separation (`min_sep_tiles`). `band` is how many window rows are embedded at a time (memory)."""
+    separation (`min_sep_tiles`). `band` is how many window rows are embedded at a time (memory). `tiles`: None
+    reads the FM's pooled features (`encoder`); a `CoaeTilesConfig` reads a usage of a CoAE checkpoint, and `encoder`
+    then names the FM that checkpoint reads (pooling 'cls'), as in `RetrieverCoaeConfig`."""
     encoder:       TileEncoderConfig
     weights:       str
     tile_size:     int   = 256
@@ -49,14 +57,27 @@ class RetrieverWinEmbedConfig(RetrieverConfig):
     raw_topk:      int   = 1000
     min_sep_tiles: float = 1.0
     band:          int   = 256
+    tiles:         Optional[CoaeTilesConfig] = None
 
-    BASELINE = {'tile_size': 256, 'overlap': True, 'raw_topk': 1000, 'min_sep_tiles': 1.0}
+    BASELINE = {'tile_size': 256, 'overlap': True, 'raw_topk': 1000, 'min_sep_tiles': 1.0, 'tiles': None}
     NOT_IDENTITY = ('weights', 'band')
     VERSION = 1
+
+    @property
+    def arm_encoder(self) -> str:
+        """The encoder name the arm writes: `<Fm>CoAE+<arm>` for a CoAE source; '' for the FM's own (the name falls back to the encoder's)."""
+        return '' if self.tiles is None else coae_encoder_name(str(getattr(self.encoder, 'REGISTERED_AS', '')), self.tiles.weights)
+
+    @property
+    def arm_pooling(self) -> str:
+        """The arm's pooling: the CoAE usage; '' for the FM's own (the pooling falls back to the encoder's)."""
+        return '' if self.tiles is None else self.tiles.feature
 
     def __post_init__(self) -> None:
         if self.band < 1 or self.raw_topk < 1:
             raise ValueError('band and raw_topk must be >= 1')
+        if self.tiles is not None and str(self.encoder.pooling) != 'cls':
+            raise ValueError(f'the CoAE checkpoint reads the FM\'s CLS: the encoder\'s pooling must be \'cls\', got {self.encoder.pooling!r}')
 
 
 #: Named retrievers, every field written out; `--stage2 winembed:<name>`. The weights are what
@@ -65,7 +86,7 @@ WINEMBED_RECIPES: Dict[str, RetrieverWinEmbedConfig] = {
     'uni2-avg': RetrieverWinEmbedConfig(
         encoder=encoder_config('uni2', pooling='cls_avg').with_model(dtype='fp16'),
         weights='RerankHead/weights/bracs_train+ki67_pure--uni2--cls_avg--winembed--best.pt',
-        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256),
+        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256, tiles=None),
     # TEMPORARY: kept until `gigapath-avg` below is checked to give the same answers on the real photos (RealTest); then this recipe,
     # RerankHead.BK/ and the RealTest cache entry of these weights go.
     # gigapath `cls_avg`, the checkpoint of RerankHead job 597492 (val R@30 0.999), kept in RerankHead.BK/ while a new
@@ -74,14 +95,14 @@ WINEMBED_RECIPES: Dict[str, RetrieverWinEmbedConfig] = {
     'gigapath-avg-bk': RetrieverWinEmbedConfig(
         encoder=encoder_config('gigapath', pooling='cls_avg').with_model(dtype='fp16'),
         weights='RerankHead.BK/weights/pure-train--gigapath--cls_avg--winembed--best.pt',
-        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256),
+        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256, tiles=None),
     # gigapath `cls_avg`, the checkpoint the RerankHead job 614471 wrote to RerankHead/weights/ (val R@30 0.997, epoch 19):
     # the current one, `--stage2 winembed:gigapath-avg`. The weights' content is identity (through the stage's id), so it is
     # a cache entry of its own and no hit on `gigapath-avg-bk`'s.
     'gigapath-avg': RetrieverWinEmbedConfig(
         encoder=encoder_config('gigapath', pooling='cls_avg').with_model(dtype='fp16'),
         weights='RerankHead/weights/pure-train--gigapath--cls_avg--winembed--best.pt',
-        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256),
+        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, band=256, tiles=None),
 }
 
 
@@ -142,6 +163,73 @@ class WindowEmbeddings:
         return maps
 
 
+class FmTiles:
+    """The tile features of the FM's own pooling (`cfg.encoder`): the source of a config with no `tiles`."""
+
+    def __init__(self, cfg: RetrieverWinEmbedConfig, encoders: EncoderPool, feature_store: Optional[Any]) -> None:
+        self.cfg: RetrieverWinEmbedConfig = cfg
+        self.encoders: EncoderPool = encoders
+        #: what the retriever's `WindowSearch` keeps the level's features in: the one given
+        self.store: Optional[Any] = feature_store
+        self._encoder: Optional[TileEncoder] = None
+
+    def encoder(self) -> TileEncoder:
+        """The FM's tile encoder, taken from the pool on first use."""
+        if self._encoder is None:
+            self._encoder = self.encoders.get(self.cfg.encoder)
+        return self._encoder
+
+    def model(self) -> torch.nn.Module:
+        """What `IdentifiedBuild.weights_id` hashes: the FM."""
+        return self.encoder().model
+
+    def pooling(self) -> str:
+        """The name of the features a level and a query are held in (`GridSource`): the encoder's own."""
+        return self.encoder().feature_pooling
+
+    def output(self, cs: CandidateSet, level: Optional[LevelFeatures], qf: Optional[QueryFeatures],
+               scores: Dict[Tuple[int, int, str], torch.Tensor]) -> RetrievalOutput:
+        """The list and, as extras, the features it was made from (`level_features`) and the score of every window."""
+        return first_phase_output(cs, level, qf, self.encoder(), self.cfg.tile_size, self.cfg.overlap, scores)
+
+
+class CoaeTiles:
+    """The tile features of a usage of a CoAE checkpoint (`cfg.tiles`): the source of a config with `tiles`."""
+
+    #: no store: one keyed by the encoder's config (MultiPhases') would hand this retriever the FM's own level features
+    store: Optional[Any] = None
+
+    def __init__(self, cfg: RetrieverWinEmbedConfig, device: Any) -> None:
+        assert cfg.tiles is not None
+        self.cfg: RetrieverWinEmbedConfig = cfg
+        self.tiles: CoaeTilesConfig = cfg.tiles
+        self.device: Any = device
+        self._encoder: Optional[Any] = None
+
+    def encoder(self) -> Any:
+        """The network as a tile encoder (`RetrieverCoae.coae_tile_encoder`), built from the checkpoint on first use."""
+        if self._encoder is None:
+            self._encoder = coae_tile_encoder(self.tiles.weights, self.tiles.feature, self.cfg.encoder, self.cfg.tile_size, self.device)
+        return self._encoder
+
+    def model(self) -> torch.nn.Module:
+        """What `IdentifiedBuild.weights_id` hashes: the FM the network loaded (the checkpoint's content is in the stage's id)."""
+        return self.encoder().net.fm.vit
+
+    def pooling(self) -> str:
+        """The arm's word for the usage (`latent`), not `CoaeTileEncoder.feature_pooling` ('coae-latent'): it is the name training
+        passes around, writes into the checkpoint (`ckpt['pooling']`) and `WindowEmbeddings.loaded` checks."""
+        return self.tiles.feature
+
+    def output(self, cs: CandidateSet, level: Optional[LevelFeatures], qf: Optional[QueryFeatures],
+               scores: Dict[Tuple[int, int, str], torch.Tensor]) -> RetrievalOutput:
+        """The list and the score of every window; no `level_features` (a reranker must not read the network's vectors as the FM's own)."""
+        if not len(cs) or level is None:
+            return RetrievalOutput(candidates=cs)
+        key: Tuple[Any, ...] = ('coae', self.tiles.feature) + feature_key(self.cfg.encoder, self.cfg.tile_size, self.cfg.overlap)
+        return RetrievalOutput(candidates=cs, extras={'window_scores': Extra('window_scores', key, scores)})
+
+
 class RetrieverWinEmbed(Retriever):
     """See the module docstring."""
 
@@ -152,20 +240,15 @@ class RetrieverWinEmbed(Retriever):
                  feature_store: Optional[Any] = None) -> None:
         super().__init__(cfg, device, encoders=encoders, multi_gpu=multi_gpu)
         self.cfg: RetrieverWinEmbedConfig = cfg
-        self._encoder: Optional[TileEncoder] = None
-        self.search: WindowSearch = WindowSearch(lambda: self.encoder, cfg.tile_size, cfg.overlap, self.device,
-                                                 read_workers, feature_store)
+        self.tiles: Union[FmTiles, CoaeTiles] = (CoaeTiles(cfg, self.device) if cfg.tiles is not None
+                                                 else FmTiles(cfg, self.encoders, feature_store))
+        self.search: WindowSearch = WindowSearch(self.tiles.encoder, cfg.tile_size, cfg.overlap, self.device,
+                                                 read_workers, self.tiles.store)
         self.embeddings: WindowEmbeddings = WindowEmbeddings(cfg.weights, cfg.band)
 
     @property
-    def encoder(self) -> TileEncoder:
-        if self._encoder is None:
-            self._encoder = self.encoders.get(self.cfg.encoder)
-        return self._encoder
-
-    @property
     def model(self) -> torch.nn.Module:
-        return self.encoder.model
+        return self.tiles.model()
 
     @model.setter
     def model(self, value: Any) -> None:
@@ -187,13 +270,12 @@ class RetrieverWinEmbed(Retriever):
         made: Dict[str, Any] = {}
 
         def scorer(level: LevelFeatures, qf: QueryFeatures, frame: CandidateSet) -> CandidateSet:
-            source: GridSource = GridSource(level, qf, self.encoder.feature_pooling)
+            source: GridSource = GridSource(level, qf, self.tiles.pooling())
             made['scores'] = self.embeddings.window_maps(source, len(level.grids), level.level)
             return top_candidates(made['scores'], frame, self.cfg.raw_topk, self.cfg.min_sep_tiles, Candidate)
 
         cs, level, qf = self.search.run(int(upstream.chosen_level), query, scorer)
-        return first_phase_output(cs, level, qf, self.encoder, self.cfg.tile_size, self.cfg.overlap,
-                                  made.get('scores', {}))
+        return self.tiles.output(cs, level, qf, made.get('scores', {}))
 
 
-__all__ = ['RetrieverWinEmbed', 'RetrieverWinEmbedConfig', 'WINEMBED_RECIPES', 'WindowEmbeddings']
+__all__ = ['CoaeTiles', 'FmTiles', 'RetrieverWinEmbed', 'RetrieverWinEmbedConfig', 'WINEMBED_RECIPES', 'WindowEmbeddings']

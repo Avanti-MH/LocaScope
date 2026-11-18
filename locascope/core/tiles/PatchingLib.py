@@ -811,12 +811,14 @@ class WsiFeaturesMap:
         return cls(regions, [FeaturesMap(g, f) for g, f in zip(grids, feats)],
                    ds=ds, level=level, tile_size=tile_size, overlap=overlap)
 
-    def to(self, device) -> 'WsiFeaturesMap':
+    def to(self, device, dtype=None) -> 'WsiFeaturesMap':
         '''The same maps with their features on `device` -- one move per
-        region, for features read back from a cache onto the host.'''
+        region, for features read back from a cache onto the host. `dtype`,
+        when given, is what they are held in from then on (fp16 on the host,
+        fp32 again on the device).'''
         return WsiFeaturesMap(
             self.regions,
-            [FeaturesMap(m.grid, m.features.to(device), source=m.source)
+            [FeaturesMap(m.grid, m.features.to(device, dtype=dtype), source=m.source)
              for m in self.maps],
             ds=self.ds, level=self.level, tile_size=self.tile_size,
             overlap=self.overlap)

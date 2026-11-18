@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=TestConfig             # -> log/%x
-#SBATCH --partition=dev                   # Partition
+#SBATCH --partition=8gpus                 # Partition (dev needs >= 16 GPUs since 2026-11-17)
 #SBATCH --time=00:20:00                   # both are seconds
 #SBATCH --account=MST114560               # Account
 #SBATCH --nodes=1                         # Number of nodes
@@ -31,7 +31,7 @@ source deploy/slurm/_env.sh    # HF_HOME; must be exported before python starts
 #    sbatch deploy/slurm/TestConfig.sh
 #    ONLY="test_config_args" sbatch deploy/slurm/TestConfig.sh
 # =============================================================================
-ONLY="${ONLY:-test_config_identity test_config_args}"
+ONLY="${ONLY:-test_config_identity test_config_args test_phasetiles_edge}"
 
 status=0
 for t in $ONLY; do

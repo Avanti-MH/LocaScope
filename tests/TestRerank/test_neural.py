@@ -458,8 +458,11 @@ class _LevelMap:
         self.regions, self.ds, self.level, self.tile_size, self.overlap = regions, 4.0 ** level, level, 256, True
         self.maps: List[_FeatureMap] = [_FeatureMap(f) for f in features]
 
-    def to(self, device: str) -> '_LevelMap':
-        return _LevelMap(self.regions, self.level, [m.features.to(device) for m in self.maps])
+    def to(self, device: str, dtype: Optional[torch.dtype] = None) -> '_LevelMap':
+        return _LevelMap(self.regions, self.level, [m.features.to(device, dtype=dtype) for m in self.maps])
+
+    def n_patches(self) -> int:
+        return sum(int(m.features.shape[0]) for m in self.maps)
 
 
 def t_a_slides_levels_are_kept_on_the_host_and_found_again_only_when_they_are_the_same() -> str:
@@ -478,6 +481,34 @@ def t_a_slides_levels_are_kept_on_the_host_and_found_again_only_when_they_are_th
     assert store.load(regions, **{**geo, 'tile_size': 224}) is None, 'another tile cut'
     assert store.load(regions[:1], **geo) is None, 'other regions: another mask'
     return 'a level is kept and found again; another level, tile cut or regions is a miss'
+
+
+def t_a_level_kept_in_fp16_is_scored_in_fp32_within_a_thousandth_and_a_non_finite_one_is_refused() -> str:
+    from types import SimpleNamespace                                             # noqa: PLC0415
+    from locascope.training.RerankHead.Visits import MemoryFeatureStore                     # noqa: PLC0415
+    torch.manual_seed(0)
+    store: MemoryFeatureStore = MemoryFeatureStore(who='slide')
+    regions = [SimpleNamespace(x=0, y=0, w=100, h=50, index=0), SimpleNamespace(x=200, y=0, w=80, h=80, index=1)]
+    geo = dict(ds=4.0, level=1, tile_size=256, overlap=True)
+    originals: List[torch.Tensor] = [0.5 + 1.5 * torch.rand(6, 16), 0.5 + 1.5 * torch.rand(3, 16)]   # fp32, away from zero
+    store.save(_LevelMap(regions, 1, originals))
+    assert store.nbytes() == (6 + 3) * 16 * 2, 'held in fp16 on the host'
+    got = store.load(regions, **geo)
+    assert got is not None and all(m.features.dtype == torch.float16 for m in got.maps), 'read back in fp16'
+    scored = got.to('cpu', torch.float32)                       # what `Context.encode_level` does on the device
+    for m, want in zip(scored.maps, originals):
+        assert m.features.dtype == torch.float32, 'scored in fp32'
+        rel: float = float(((m.features - want).abs() / want.abs()).max())
+        assert rel < 1e-3, f'fp16 round trip: largest relative error {rel:.2e}'
+    for bad in (float('nan'), float('inf'), 1e5):
+        poisoned: torch.Tensor = originals[0].clone()
+        poisoned[0, 0] = bad
+        try:
+            store.save(_LevelMap(regions, 1, [poisoned, originals[1]]))
+            raise AssertionError(f'{bad} was kept')
+        except FloatingPointError:
+            pass
+    return 'fp16 on the host, fp32 when scored, relative error < 1e-3; nan, inf and a value past fp16 are refused'
 
 
 def t_prefetch_makes_the_items_ahead_in_order_raises_their_error_and_stops_when_asked() -> str:
@@ -643,6 +674,111 @@ def t_the_embedding_pool_labels_are_the_list_labels_by_broadcasting() -> str:
     return 'pos, near and the soft target by broadcasting == the list labels, at the right and at a wrong rotation'
 
 
+
+
+def t_the_retrievers_name_the_extra_their_features_are_in_and_only_the_trainers_store_is_theirs_alone() -> str:
+    from locascope.core.stage2_retrieval.Retriever import Retriever                         # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverCoae import RetrieverCoae                 # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRot   # noqa: PLC0415
+    from locascope.training.RerankHead.Visits import MemoryFeatureStore                     # noqa: PLC0415
+    assert MemoryFeatureStore.single_retriever is True
+    assert Retriever.FEATURES == 'level_features' and RetrieverSlidingWinSimRot.FEATURES == 'level_features'
+    assert RetrieverCoae.FEATURES == 'tile_features'
+    return 'level_features / tile_features (CoAE)'
+
+
+def t_the_trainers_first_phase_is_the_arm_grammars_sliding_window() -> str:
+    from locascope.core.backbones.TileEncoder import encoder_config                         # noqa: PLC0415
+    from locascope.core.stage2_retrieval import retriever_class                             # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import phase_configs                       # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverSlidingWinSimRot import RetrieverSlidingWinSimRotConfig   # noqa: PLC0415
+    from locascope.training.RerankHead.train import retriever_arm                           # noqa: PLC0415
+    made: Any = phase_configs(retriever_arm('gigapath', 'cls_avg'), raw_topk=1000, min_sep_tiles=1.0)[0]
+    by_hand: RetrieverSlidingWinSimRotConfig = RetrieverSlidingWinSimRotConfig(
+        encoder=encoder_config('gigapath', pooling='cls_avg').with_model(dtype='fp16'),
+        tile_size=256, overlap=True, raw_topk=1000, min_sep_tiles=1.0, score='mean')
+    assert made == by_hand and made.identity_id() == by_hand.identity_id(), 'the grammar makes the config the trainer wrote by hand'
+    coae: Any = phase_configs(retriever_arm('GigaCoAE+RN3', 'latent'), raw_topk=1000, min_sep_tiles=1.0)[0]
+    assert type(coae).__name__ == 'RetrieverCoaeConfig' and coae.feature == 'latent'
+    assert retriever_class(coae).FEATURES == 'tile_features', 'the trainer reads the CoAE features through the retriever\'s own name'
+    return 'gigapath cls_avg: the same config and id; GigaCoAE+RN3 latent: RetrieverCoae'
+
+
+def t_real_photo_figures_are_observed_and_never_select() -> str:
+    from locascope.training.RerankHead import train as T                                    # noqa: PLC0415
+    from locascope.training.RerankHead.RealPhotos import OBSERVE                            # noqa: PLC0415
+
+    def fig(r30: float) -> Dict[str, float]:
+        return {'R@1': r30 / 2, 'R@30': r30, 'ceiling': 1.0, 'n': 10}
+
+    sw: str = T.SLIDEWIN_ROW
+    assert sw == 'slidewin' and 'first_phase' not in (sw, 'winembed')
+    a: Dict[str, Dict[str, float]] = {sw: fig(0.5), 'winembed': fig(0.6)}
+    b: Dict[str, Dict[str, float]] = {f'found/{sw}': fig(0.1), 'found/winembed': fig(0.2),
+                                      f'missed/{sw}': fig(0.3), 'missed/winembed': fig(0.4)}
+    b2: Dict[str, Dict[str, float]] = {name: fig(1.0 - f['R@30']) for name, f in b.items()}
+    assert T.SELECTS == 'val'
+    assert sw not in T.ARCHS, 'a head is chosen by its arch name in `selected(...)`: the slidewin row is never a head, so it is never read'
+    assert all(k in a for k in ('winembed',)) and all(not k.startswith(('found/', 'missed/')) for k in T.selected({'val': a, 'real': b}))
+    assert T.selected({'val': a, 'real': b}) is a and T.selected({'val': a, 'real': b2}) is a and T.selected({'val': a}) is a
+    sets: Dict[str, Any] = {'val': T.ValSet('v', 'val', lambda: iter(()), lambda res: ''),
+                            'real': T.ValSet('r', OBSERVE, lambda: iter(()), lambda res: 'found')}
+    both: Dict[str, float] = T.figure_metrics(sets, {'val': a, 'real': b})
+    both2: Dict[str, float] = T.figure_metrics(sets, {'val': a, 'real': b2})
+    alone: Dict[str, float] = T.figure_metrics(sets, {'val': a})
+    assert 'observe only' in OBSERVE
+    real_keys: List[str] = [k for k in both if not k.startswith('val/')]
+    assert real_keys and all(k.startswith(OBSERVE + '/') for k in real_keys), real_keys
+    assert f'{OBSERVE}/missed/winembed/R@30' in both
+    val_of: Callable[[Dict[str, float]], Dict[str, float]] = lambda m: {k: v for k, v in m.items() if k.startswith('val/')}                 # noqa: E731
+    assert val_of(both) == val_of(both2) == alone and alone, 'the validation keys and values do not move with the real figures'
+    assert T.parse_args([]).real_val == ''
+    try:
+        T.parse_args(['--real-val', 'nosuch'])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError('a list that is not there is refused')
+    return 'selected() is the validation whatever the real figures; real keys under ' + OBSERVE
+
+
+def t_a_real_photos_place_and_turn_come_from_its_homography() -> str:
+    from locascope.training.RerankHead.RealPhotos import RealPhoto, placed, upright         # noqa: PLC0415
+    h_img, w_img = 1024, 1440
+    idx: np.ndarray = np.stack(np.meshgrid(np.arange(w_img), np.arange(h_img)), axis=-1).astype(np.float64)   # idx[v, u] = (u, v)
+    scale: float = 0.9
+    theta: float = np.deg2rad(1.5)
+    rot_m: np.ndarray = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    shift: np.ndarray = np.array([3000.0, 2000.0])
+    crop: Tuple[float, float] = (1000.0, 800.0)
+    for k in range(4):
+        for ds in (1.0, 2.0):
+            turned: np.ndarray = np.rot90(idx, k)          # turned[yr, xr] is the photo pixel now at (xr, yr)
+            hr, wr = turned.shape[:2]
+            probes: List[Tuple[int, int]] = [(0, 0), (wr - 1, 0), (0, hr - 1)]            # (xr, yr)
+            src: np.ndarray = np.array([[*turned[yr, xr], 1.0] for xr, yr in probes])      # the photo pixels (u, v, 1)
+            dst: np.ndarray = np.array([scale * (rot_m @ np.array(p, dtype=np.float64)) + shift for p in probes])   # on the crop
+            m: np.ndarray = np.linalg.solve(src, dst)
+            h: np.ndarray = np.vstack([m.T, [0.0, 0.0, 1.0]])
+            p: RealPhoto = RealPhoto(slide='s', index=0, group='found', path='', level=0, ds=ds, h=tuple(float(v) for v in h.ravel()),
+                          crop=crop, centre=(0.0, 0.0), size=(h_img, w_img))
+            rot, s = upright(p)
+            assert rot == 90 * k, (k, ds, rot)
+            assert abs(s - scale) < 1e-6, (k, s)
+            xr, yr = (wr // 256) * 256 / 2.0, (hr // 256) * 256 / 2.0
+            c: np.ndarray = scale * (rot_m @ np.array([xr, yr])) + shift
+            want: Tuple[float, float] = (crop[0] + float(c[0]) * ds, crop[1] + float(c[1]) * ds)
+            got: Tuple[float, float] = placed(p).truth.centre(256)
+            assert placed(p).truth.rot == 90 * k
+            assert np.hypot(got[0] - want[0], got[1] - want[1]) <= 2 * ds, (k, ds, got, want)
+    real: RealPhoto = RealPhoto(
+        slide='S1104233,G7E,110207', index=3, group='found', path='', level=0, ds=1.0,
+        h=(-0.011690511523794474, -0.8938407241661341, 1552.920634177613, 0.8921782047221545, -0.0123972972047118,
+           561.3779910749671, -1.1778803300451807e-06, -1.4137828449040393e-06, 1.0),
+        crop=(215052.0, 141936.0), centre=(216140.56811523438, 143135.2840576172), size=(1024, 1440))
+    assert real.centre_error() < 0.1, real.centre_error()
+    assert upright(real)[0] == 270, upright(real)
+    return 'upright() and the grid centre follow np.rot90 at k = 0..3 (ds 1, 2); a real row: centre error < 0.1 px, rot 270'
 
 
 _TESTS =[t for n, t in sorted(globals().items(), key=lambda kv: kv[0])

@@ -77,6 +77,18 @@ def query_dims(query: Any, tile_size: int, overlap: bool) -> Dict[int, Tuple[int
     return out
 
 
+def frame_mismatch(a: Sequence[PatchGrid], b: Sequence[PatchGrid]) -> Optional[str]:
+    """None when the two lists of grids are one frame; else what differs (the first difference)."""
+    if len(a) != len(b):
+        return f'{len(a)} regions against {len(b)}'
+    for i, (g, h) in enumerate(zip(a, b)):
+        ka: Tuple[Any, ...] = (g.origin_l0, g.width, g.height, g.tile_size)
+        kb: Tuple[Any, ...] = (h.origin_l0, h.width, h.height, h.tile_size)
+        if ka != kb:
+            return f'region {i}: {ka} against {kb}'
+    return None
+
+
 class SlideLevels:
     """The geometry of a bound slide for one tile cut, per level: the tissue regions that can host a tile and
     their grids, read off the mask (no pixel is read), cached; the query's tile grid at each rotation; which
@@ -85,13 +97,19 @@ class SlideLevels:
 
     `self.mask` is never replaced. Each level takes a `patchable` view of it, so every level starts from the
     whole segmentation -- filtering is monotone in ds, and a level that narrowed the mask in place would leave
-    a later, finer level unable to see what the coarse pass dropped."""
+    a later, finer level unable to see what the coarse pass dropped.
 
-    def __init__(self, wsi: Any, mask: Any, tile_size: int, overlap: bool) -> None:
+    Each region's box is grown on all four sides by `edge_px` px of the level (never past the slide's canvas);
+    0 is the box itself."""
+
+    def __init__(self, wsi: Any, mask: Any, tile_size: int, overlap: bool, edge_px: int = 0) -> None:
+        if edge_px < 0:
+            raise ValueError(f'edge_px must be >= 0, got {edge_px}')
         self.wsi: Any = wsi
         self.mask: Any = mask
         self.tile_size: int = int(tile_size)
         self.overlap: bool = bool(overlap)
+        self.edge_px: int = int(edge_px)
         self._geometry: Dict[int, Tuple[List[TissueRegion], List[PatchGrid]]] = {}
         #: {level: why} for a level whose preparation raised; remembered so a level that failed once is not
         #: read again for every query. Failures that depend on the query (it does not fit) are not kept here.
@@ -100,18 +118,29 @@ class SlideLevels:
     def ds(self, level: int) -> float:
         return float(self.wsi.level_downsamples[int(level)])
 
+    def _grown(self, r: TissueRegion, ds: float) -> TissueRegion:
+        """`r` grown by `edge_px` level px on every side, each side stopping at the slide's canvas (the box itself is never cut)."""
+        w0, h0 = self.wsi.level_dimensions[0]
+        m0: int = int(round(self.edge_px * ds))                                         # level-0 px
+        left: int = max(0, min(m0, int(r.x)))
+        top: int = max(0, min(m0, int(r.y)))
+        right: int = max(0, min(m0, int(w0) - int(math.ceil(r.x + r.w))))
+        bottom: int = max(0, min(m0, int(h0) - int(math.ceil(r.y + r.h))))
+        return TissueRegion(x=r.x - left, y=r.y - top, w=r.w + left + right, h=r.h + top + bottom, index=r.index)
+
     def geometry(self, level: int) -> Tuple[List[TissueRegion], List[PatchGrid]]:
-        """The regions at `level` that can host a tile, and their grids."""
+        """The regions at `level` that can host a tile (each box grown by `edge_px`), and their grids."""
         cached: Optional[Tuple[List[TissueRegion], List[PatchGrid]]] = self._geometry.get(int(level))
         if cached is not None:
             return cached
         ds: float = self.ds(level)
-        regions: List[TissueRegion]
+        boxes: List[TissueRegion]
         if self.mask is not None:
-            regions = self.mask.patchable(self.tile_size * ds).tissue_regions
+            boxes = self.mask.patchable(self.tile_size * ds).tissue_regions
         else:
             w0, h0 = self.wsi.level_dimensions[0]
-            regions = [TissueRegion(x=0, y=0, w=w0, h=h0, index=0)]
+            boxes = [TissueRegion(x=0, y=0, w=w0, h=h0, index=0)]
+        regions: List[TissueRegion] = [self._grown(r, ds) for r in boxes]
         grids: List[PatchGrid] = region_grids(regions, ds=ds, level=int(level), tile_size=self.tile_size,
                                               overlap=self.overlap)
         self._geometry[int(level)] = (regions, grids)
@@ -266,7 +295,8 @@ def encode_level(reader: Any, levels: SlideLevels, level: int, encoder: Any, dev
     if feature_store is not None:
         features = feature_store.load(regions, **geo)
         if features is not None:
-            features = features.to(device)              # read onto the host; moved to the device once, here
+            # read onto the host (a store may hold it in fp16); moved to the device once, here, and scored in fp32
+            features = features.to(device, torch.float32)
     if features is None:
         blocks: Any = reader.read_grid(regions, grids, ds, tile=levels.tile_size, offset=levels.overlap,
                                        level=int(level))
@@ -307,11 +337,15 @@ class WindowSearch:
     both to the retriever's `scorer`. A tool a retriever holds, not a base class: the scoring is the
     retriever's own.
 
-    `encoder` is a callable, so the encoder is loaded only when a level or a query is actually encoded."""
+    `encoder` is a callable, so the encoder is loaded only when a level or a query is actually encoded.
+    The query is encoded by `encoder` too, unless the retriever gives `query_encoder` (a callable the same way):
+    another encoder whose output has the level features' width and lives in their space."""
 
     def __init__(self, encoder: Callable[[], Any], tile_size: int, overlap: bool, device: Any,
-                 read_workers: int = 0, feature_store: Optional[Any] = None) -> None:
+                 read_workers: int = 0, feature_store: Optional[Any] = None,
+                 query_encoder: Optional[Callable[[], Any]] = None) -> None:
         self._encoder: Callable[[], Any] = encoder
+        self._query_encoder: Callable[[], Any] = query_encoder if query_encoder is not None else encoder
         self.tile_size: int = int(tile_size)
         self.overlap: bool = bool(overlap)
         self.device: Any = device
@@ -345,6 +379,19 @@ class WindowSearch:
             self._by_level[level] = feats
         return self._by_level[level]
 
+    def precompute(self, level: int) -> Tuple[float, int]:
+        """`(seconds, tiles)` of `level` read or encoded into `feature_store` (which must be given) and nothing kept here:
+        the store holds it, `level_features` finds it there when a query is searched."""
+        import time                                                   # noqa: PLC0415
+        if self.levels is None or self.reader is None:
+            raise RuntimeError('call build(wsi, mask) first')
+        if self.feature_store is None:
+            raise RuntimeError('precompute puts a level into a feature store, and none was given')
+        started: float = time.perf_counter()
+        feats: LevelFeatures = encode_level(self.reader, self.levels, level, self._encoder(), self.device,
+                                            self.feature_store)
+        return time.perf_counter() - started, sum(len(g) for g in feats.grids)
+
     def run(self, routed: int, query: Any,
             scorer: Callable[[LevelFeatures, QueryFeatures, CandidateSet], CandidateSet]
             ) -> Tuple[CandidateSet, Optional[LevelFeatures], Optional[QueryFeatures]]:
@@ -364,7 +411,7 @@ class WindowSearch:
 
         def search(level: int) -> CandidateSet:
             if 'query' not in state:
-                state['query'] = encode_query(query, self._encoder(), self.tile_size, self.overlap)
+                state['query'] = encode_query(query, self._query_encoder(), self.tile_size, self.overlap)
             assert self.levels is not None
             return scorer(state['level'], state['query'], self.levels.frame(level))
 
@@ -1070,9 +1117,9 @@ class RerankFeatures:
             self._by_level = {level: encode_level(self.reader, self.levels, level, self._encoder(), self.device,
                                                   self.feature_store)}
         feats: LevelFeatures = self._by_level[level]
-        if len(feats.grids) != len(upstream.candidates.grids):
-            raise ValueError(f'the list is in {len(upstream.candidates.grids)} regions and this reranker '
-                             f'cuts {len(feats.grids)}: another mask or tile')
+        why: Optional[str] = frame_mismatch(feats.grids, upstream.candidates.grids)
+        if why is not None:
+            raise ValueError(f'the list and this reranker cut different frames ({why}): another mask, tile or edge_px')
         qf: QueryFeatures = encode_query(query, self._encoder(), self.tile_size, self.overlap)
         return GridSource(feats, qf, self._encoder().feature_pooling), True
 

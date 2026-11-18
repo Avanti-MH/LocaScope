@@ -23,19 +23,44 @@ An arm is a RETRIEVER and then any number of RERANKERS, joined by `::`. Each one
 The text of an arm is canonical: the retriever's encoder is always written, a reranker's only when it
 is not the retriever's. `parse_arm(text, default_encoder).text()` is that text, so one arm has one name.
 
+A CoAE checkpoint is read as an ENCODER of the sliding window, whose pooling is the CoAE feature (`COAE_PARTS`):
+
+    <Fm>CoAE+<arm>:SlidingWindow::fm_head+mean
+    <Fm>CoAE+<arm>:WinEmbed::latent
+    <Fm>CoAE+<arm>:PhaseTiles::latent
+
+(the window embedder reads the same features: its tile features are a usage of the network, its weights a `winembed` checkpoint trained on them;
+PhaseTiles reads a usage that is a map of cells, `COAE_MAPS`, and stitches the tiles' latent into a map it searches: its pooling is the usage and it has no `+`).
+What a method takes when it reads a CoAE encoder is `COAE_READS`'s, not `METHODS`'s.
+`<Fm>CoAE+<arm>` (`<Fm>`: `Giga` | `Uni2`, `COAE_FMS`) names the checkpoint `CoaeTrain/<dir>/weights/epoch<k>.pt` (`coae_weights`; the run's last epoch, `CoaeConfig.last_checkpoint`), `<arm>` being the training arm's code
+(`CoaeConfig.arm`: `RP3`, `RN3`, `RP3.pool512.epochs12`, ...; it does not say the FM, the prefix does) and `<dir>` the directory of that run (`CoaeConfig.dir_name`:
+`large-mix-vref`, `large-mix-vref-nce`, `large-mix-vref-uni2-nce`, ...; it does say the FM), got by building the config the code and the FM name and asking it. It is the first part of an arm only: a part after it names its own
+encoder (`::gigapath:Dual::cls_avg+dual`). A learned encoder is an ENCODER FAMILY (`ENCODER_FAMILIES`): it parses its own names and says
+what it can be read by, so this grammar does not know CoAE by name.
+
 This file knows the NAMES and what each takes -- not how a method works. `RetrieverArms.py` (bench)
 builds the retrievers and rerankers a spec names.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import re
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
+
+from locascope.training.CoAE.Config import CoaeConfig, config_of_arm as coae_config_of_arm, config_of_dir as coae_config_of_dir      # the names of a CoAE run: pure dataclasses, no torch
 
 #: the pooling of a method that takes none: the patch tokens, as they are
 RAW: str = 'raw'
 
 SEP: str = '::'
+
+#: A pooling written with this suffix searches the main lattice only (`cls_avg-M`).
+MAIN_ONLY: str = '-M'
+
+
+class ArmSyntaxError(ValueError):
+    """The text is not an arm; the message says where."""
 
 
 @dataclass(frozen=True)
@@ -50,6 +75,190 @@ class MethodInfo:
     reranker: bool = False
 
 
+#: A CoAE tile feature = parts, each made unit, joined, made unit again (`training/CoAE/Validate.unit_feature`); the cosine is
+#: the plain one, no mean taken off. The parts (`Validate.tile_parts`): cls_fm (the FM's own CLS), cls (cls'), place (cls' through its
+#: linear head, a channel scaled by the network's running sd), latent (the s x s x L cells flat), latent_avg (their mean cell),
+#: latent_dev (the cells minus that mean, flat: the arrangement alone), latent2 / latent4 (the cells averaged down to 2 x 2 /
+#: 4 x 4, flat), cofig (the decoder's Co-figure, a channel scaled by the targets' running sd). The key is the arm's pooling (the feature the sliding window scores).
+COAE_PARTS: Dict[str, Tuple[str, ...]] = {
+    'fm': ('cls_fm',),                                                  # the reference: the FM's CLS alone, through the same path
+    # singles
+    'cls': ('cls',), 'place': ('place',), 'latent': ('latent',), 'latent_avg': ('latent_avg',), 'latent_dev': ('latent_dev',),
+    'latent2': ('latent2',), 'latent4': ('latent4',), 'cofig': ('cofig',),
+    'head': ('head',),                                                  # place less its common vector pool_mu / pool_sd
+    # combinations
+    'fm_cls': ('cls_fm', 'cls'), 'cls_latent': ('cls', 'latent'), 'cls_latent_avg': ('cls', 'latent_avg'),
+    'fm_cls_latent': ('cls_fm', 'cls', 'latent'), 'fm_cls_latent_avg': ('cls_fm', 'cls', 'latent_avg'),
+    'fm_head': ('cls_fm', 'head'),
+    'latent4_head': ('latent4', 'head'), 'fm_latent4_head': ('cls_fm', 'latent4', 'head')}
+
+#: `<Fm>CoAE+<arm>`: the FM a CoAE checkpoint reads, by the prefix of its encoder name (the arm's code does not say it)
+COAE_FMS: Dict[str, str] = {'Giga': 'gigapath', 'Uni2': 'uni2'}
+#: the CoAE usages that are a map of cells (what PhaseTiles can stitch)
+COAE_MAPS: Tuple[str, ...] = ('latent',)
+#: tiles a forward when a map is made (RealTest's --batch-size; TileEncoderConfig.batch_size is not identity)
+COAE_MAP_BATCH: int = 1024
+COAE_TAG: str = 'CoAE'
+COAE_TRAIN: str = 'CoaeTrain'                         # result/<this>/<dir>/weights/epoch<k>.pt: where the training writes a run
+COAE_ARM: str = r'[A-Za-z0-9._+-]+'                   # what an arm's code (CoaeConfig.arm) is made of
+COAE_DIR: str = r'[A-Za-z0-9._+-]+'                   # what a run's directory name (CoaeConfig.dir_name) is made of
+COAE_WEIGHTS_DIR: str = '/weights/'                   # <run dir>/weights/<CoaeConfig.last_checkpoint>: where a run's checkpoints are
+
+
+def coae_encoder(name: str) -> Optional[Tuple[str, str]]:
+    """(the FM, the training arm) of a CoAE encoder name `<Fm>CoAE+<arm>`, None for any other encoder name.
+    A name of that shape with an unknown `<Fm>`, with no `+<arm>`, or an arm with a character outside [A-Za-z0-9._+-] raises
+    ArmSyntaxError. The names reach the arm's directory under `CoaeTrain/`, its last epoch, and no other FM."""
+    head, plus, arm = name.partition('+')
+    if not head.endswith(COAE_TAG):
+        return None
+    fm: str = head[:-len(COAE_TAG)]
+    if fm not in COAE_FMS:
+        raise ArmSyntaxError(f'{name!r}: no CoAE checkpoints of the FM {fm!r}; they are {", ".join(COAE_FMS)}')
+    if not plus or not re.fullmatch(COAE_ARM, arm):               # no '+', or '+' with nothing after it, too
+        raise ArmSyntaxError(f'{name!r}: a CoAE encoder is `{head}+<arm>` (e.g. {head}+RP3), the arm made of [A-Za-z0-9._+-], got {arm!r}')
+    try:
+        coae_config_of_arm(arm, COAE_FMS[fm])
+    except ValueError as exc:
+        raise ArmSyntaxError(f'{name!r}: {arm!r} is not the code of a CoAE arm: {exc}') from exc
+    return COAE_FMS[fm], arm
+
+
+def coae_weights(arm: str, fm: str) -> str:
+    """`CoaeTrain/<dir>/weights/epoch<k>.pt`: the last epoch of the run of the arm `arm` (a code, `CoaeConfig.arm`) on the FM `fm` (`gigapath`,
+    `uni2`: the value of `COAE_FMS`); `<dir>` is the run's directory name (`CoaeConfig.dir_name`) and `epoch<k>.pt` its `last_checkpoint`, of the
+    config the code and the FM name (`config_of_arm`): one table makes both names and reads both."""
+    cfg: CoaeConfig = coae_config_of_arm(arm, fm)
+    return f'{COAE_TRAIN}/{cfg.dir_name}{COAE_WEIGHTS_DIR}{cfg.last_checkpoint}'
+
+
+def coae_encoder_name(fm: str, weights: str) -> str:
+    """The encoder name `<Fm>CoAE+<arm>` of a checkpoint `coae_weights` names (its inverse: the FM's prefix and the directory's config's code);
+    ValueError for any other path, or a run of another FM than `fm`."""
+    tags: List[str] = [tag for tag, name in COAE_FMS.items() if name == fm]
+    if not tags:
+        raise ValueError(f'no CoAE encoder name for the FM {fm!r}; they are {", ".join(COAE_FMS.values())}')
+    found: Optional[re.Match[str]] = re.fullmatch(re.escape(COAE_TRAIN) + r'/(' + COAE_DIR + r')' + re.escape(COAE_WEIGHTS_DIR) + r'(epoch\d+\.pt)', weights)
+    if found is None:
+        raise ValueError(f'{weights!r} is not a checkpoint `coae_weights` names ({COAE_TRAIN}/<dir>{COAE_WEIGHTS_DIR}epoch<k>.pt)')
+    cfg: CoaeConfig = coae_config_of_dir(found.group(1))
+    if cfg.fm.encoder != fm:
+        raise ValueError(f'{weights!r} is a run of another FM ({cfg.fm.encoder}), not {fm}')
+    if found.group(2) != cfg.last_checkpoint:
+        raise ValueError(f'{weights!r} is not the last epoch of its run ({cfg.last_checkpoint})')
+    return f'{tags[0]}{COAE_TAG}+{cfg.arm}'
+
+
+# ── what a CoAE encoder is read by ────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class CoaeRead:
+    """How a method reads a CoAE encoder as an arm's first part."""
+    info: Optional[MethodInfo]         # what the method takes then; None: its own (METHODS)
+    features: Tuple[str, ...]          # the usages it can read
+    config: Callable[[str, str, 'Segment', Dict[str, Any]], Any]      # (fm, arm, seg, common) -> the first phase's config
+
+
+def _coae_geo(fm: str, common: Dict[str, Any]) -> Dict[str, Any]:
+    """The fields of a CoAE retriever's config that the sliding window and the window embedder share."""
+    from locascope.core.backbones.TileEncoder import encoder_config                     # noqa: PLC0415
+    return dict(encoder=encoder_config(fm, pooling='cls').with_model(dtype='fp16'), tile_size=common['tile_size'],
+                overlap=common['overlap'], raw_topk=common['raw_topk'], min_sep_tiles=common['min_sep_tiles'])
+
+
+def _coae_slidewin(fm: str, arm: str, seg: 'Segment', common: Dict[str, Any]) -> Any:
+    from locascope.core.stage2_retrieval.RetrieverCoae import RetrieverCoaeConfig               # noqa: PLC0415
+    return RetrieverCoaeConfig(**_coae_geo(fm, common), weights=coae_weights(arm, fm), feature=common['pooling'], score=seg.op)
+
+
+def _coae_winembed(fm: str, arm: str, seg: 'Segment', common: Dict[str, Any]) -> Any:
+    from locascope.core.stage2_retrieval.RetrieverCoae import CoaeTilesConfig                   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverWinEmbed import RetrieverWinEmbedConfig       # noqa: PLC0415
+    return RetrieverWinEmbedConfig(**_coae_geo(fm, common), weights=weights_name(seg.encoder, common['pooling'], 'winembed'), band=256,
+                                   tiles=CoaeTilesConfig(weights=coae_weights(arm, fm), feature=common['pooling']))
+
+
+def _coae_phasetiles(fm: str, arm: str, seg: 'Segment', common: Dict[str, Any]) -> Any:
+    from locascope.core.backbones.TileEncoder import encoder_config                     # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverPhaseTiles import coae_latent_config     # noqa: PLC0415
+    enc: Any = replace(encoder_config(fm, pooling='cls').with_model(dtype='fp16'), batch_size=COAE_MAP_BATCH)
+    return coae_latent_config(enc, coae_weights(arm, fm), feature=common['pooling'], overlap=common['overlap'], raw_topk=common['raw_topk'],
+                              min_sep_tiles=common['min_sep_tiles'])
+
+
+#: The methods that read a CoAE encoder as an arm's first part, and how each reads it. PhaseTiles reads a usage that is a map of cells
+#: (`COAE_MAPS`): its pooling is the usage and it has no operation to choose.
+COAE_READS: Dict[str, CoaeRead] = {'SlidingWindow': CoaeRead(None, tuple(COAE_PARTS), _coae_slidewin),
+                                   'WinEmbed': CoaeRead(None, tuple(COAE_PARTS), _coae_winembed),
+                                   'PhaseTiles': CoaeRead(MethodInfo(), COAE_MAPS, _coae_phasetiles)}
+COAE_METHODS: Tuple[str, ...] = tuple(COAE_READS)
+
+
+# ── encoder families: a learned encoder is read by its own rules ──────────────
+
+class EncoderFamily(Protocol):
+    """A family of learned encoders an arm may name (CoAE: `<Fm>CoAE+<arm>`); the plain FM encoders are the fallback
+    (`TileEncoder`'s own registry). The grammar below asks the family, and knows none by name."""
+
+    def parse(self, name: str) -> Optional[Any]:
+        """The family's spec of an encoder name, None when the name is not of this family; ArmSyntaxError for a name of its shape that is wrong."""
+
+    def check(self, spec: Any, method: str, pooling: str, first: bool) -> None:
+        """ArmSyntaxError when the family's encoder cannot be read that way (by this method, as this part, with this pooling)."""
+
+    def method_info(self, method: str) -> Optional[MethodInfo]:
+        """What `method` takes when it reads this family's encoder; None: the method's own."""
+
+    def retriever_config(self, spec: Any, seg: 'Segment', common: Dict[str, Any]) -> Any:
+        """The first phase's config; `common`: tile_size, overlap, raw_topk, min_sep_tiles and `pooling` (the segment's, `-M` taken off)."""
+
+
+#: filled by `register_family(name)(cls)`: one instance a family, asked in the order they were registered
+ENCODER_FAMILIES: Dict[str, EncoderFamily] = {}
+
+
+def register_family(name: str) -> Callable[[type], type]:
+    """Class decorator: `ENCODER_FAMILIES[name]` = an instance of the class."""
+    def add(cls: type) -> type:
+        ENCODER_FAMILIES[name] = cls()
+        return cls
+    return add
+
+
+def family_of(name: str) -> Optional[Tuple[EncoderFamily, Any]]:
+    """(the family, its spec) of an encoder name: the first registered family whose `parse` is not None; None for a plain FM encoder."""
+    for family in ENCODER_FAMILIES.values():
+        spec: Optional[Any] = family.parse(name)
+        if spec is not None:
+            return family, spec
+    return None
+
+
+@register_family('CoAE')
+class CoaeFamily:
+    """`<Fm>CoAE+<arm>`: a CoAE checkpoint as the encoder of the sliding window, of the window embedder or of the tile-map search
+    (`COAE_READS`), its pooling a feature (`COAE_PARTS`; for the tile-map search one of `COAE_MAPS`)."""
+
+    def parse(self, name: str) -> Optional[Tuple[str, str]]:
+        return coae_encoder(name)
+
+    def method_info(self, method: str) -> Optional[MethodInfo]:
+        return COAE_READS[method].info if method in COAE_READS else None
+
+    def check(self, spec: Tuple[str, str], method: str, pooling: str, first: bool) -> None:
+        if method not in COAE_READS or not first:
+            raise ArmSyntaxError('a CoAE encoder is read by the sliding window, the window embedder or the tile-map search, as an arm\'s first part: '
+                                 '`<Fm>CoAE+<arm>:SlidingWindow::<feature>+mean`, `<Fm>CoAE+<arm>:WinEmbed::<feature>`, '
+                                 f'`<Fm>CoAE+<arm>:PhaseTiles::{COAE_MAPS[0]}` (the methods: {", ".join(COAE_READS)})')
+        feature: str = pooling[:-len(MAIN_ONLY)] if pooling.endswith(MAIN_ONLY) else pooling
+        if feature not in COAE_READS[method].features:
+            raise ArmSyntaxError(f'a CoAE encoder read by {method} has no feature {feature!r}; it has {", ".join(COAE_READS[method].features)}')
+
+    def retriever_config(self, spec: Tuple[str, str], seg: 'Segment', common: Dict[str, Any]) -> Any:
+        fm, arm = spec
+        return COAE_READS[seg.method].config(fm, arm, seg, common)
+
+
 #: Every method an arm may name. The operations of a retriever are the same choice the stage makes
 #: (`SlidingWindow` is `SlidingWinSimRot`'s window score; `min` is the bench's alone); a reranker's are
 #: either an algorithm (`CSLS`: `csls` | `rank`) or the output column the list is ordered by.
@@ -60,6 +269,7 @@ METHODS: Dict[str, MethodInfo] = {
     'TileVote':      MethodInfo(ops=('exact', 'hnsw', 'ivf')),
     'ClusterBow':    MethodInfo(),
     'WinEmbed':      MethodInfo(),
+    'PhaseTiles':  MethodInfo(ops=('localphase', 'congruency'), raw=True),
     # second phase: they reorder it
     'Dual':      MethodInfo(ops=('dual', 'cos_main'), retriever=False, reranker=True),
     'CSLS':      MethodInfo(ops=('csls', 'rank'), retriever=False, reranker=True),
@@ -107,10 +317,6 @@ def _learned_methods() -> Dict[str, MethodInfo]:
 
 
 METHODS.update(_learned_methods())
-
-
-class ArmSyntaxError(ValueError):
-    """The text is not an arm; the message says where."""
 
 
 @dataclass(frozen=True)
@@ -166,6 +372,9 @@ def _segment(method_token: str, spec_token: str, default_encoder: str, first: bo
     if not first and not info.reranker:
         raise ArmSyntaxError(f'{method} finds windows and cannot follow another part of an arm; a part that can '
                              f'is {", ".join(m for m, i in METHODS.items() if i.reranker)}')
+    enc_name: str = encoder or default_encoder
+    found: Optional[Tuple[EncoderFamily, Any]] = family_of(enc_name) if enc_name else None
+    info = (found[0].method_info(method) if found is not None else None) or info      # what the method takes when this encoder reads it
     rest: str = spec_token
     cut: int = 0
     if '@' in rest:
@@ -184,8 +393,16 @@ def _segment(method_token: str, spec_token: str, default_encoder: str, first: bo
         raise ArmSyntaxError(f'{method} has no operation {op!r}; it has {", ".join(info.ops)}')
     if info.ops and not plus:
         raise ArmSyntaxError(f'{method} needs one of its operations: {method}{SEP}{pooling}+{"|".join(info.ops)}')
+    if found is not None:
+        found[0].check(found[1], method, pooling, first)
     return Segment(method=method, pooling=pooling, op=op, encoder=encoder or (default_encoder if first else ''),
                    cut=cut)
+
+
+def _no_coae_after(seg: Segment) -> None:
+    """A part after the retriever reads tiles with an encoder of its own: a learned encoder (a family's) is the first part's alone."""
+    if seg.encoder and family_of(seg.encoder) is not None:
+        raise ArmSyntaxError('a part after a retriever with a learned encoder must name its own encoder (e.g. gigapath:Dual::cls_avg+dual)')
 
 
 def parse_arm(text: str, default_encoder: str = '') -> ArmSpec:
@@ -203,6 +420,8 @@ def parse_arm(text: str, default_encoder: str = '') -> ArmSpec:
         raise ArmSyntaxError(f'{text!r}: the retriever has no encoder; write `uni2:{head.method}{SEP}...`')
     fixed: List[Segment] = [head] + [s if s.encoder else Segment(s.method, s.pooling, s.op, head.encoder, s.cut)
                                      for s in segments[1:]]
+    for s in fixed[1:]:
+        _no_coae_after(s)
     return ArmSpec(tuple(fixed))
 
 
@@ -218,15 +437,12 @@ def expand(retrievers: List[ArmSpec], rerankers: List[Segment]) -> List[ArmSpec]
     for r in retrievers:
         for seg in rerankers:
             fixed: Segment = seg if seg.encoder else Segment(seg.method, seg.pooling, seg.op, r.retriever.encoder, seg.cut)
+            _no_coae_after(fixed)
             out.append(ArmSpec(r.segments + (fixed,)))
     return out
 
 
 # ── an arm as the config of the chain it names ────────────────────────────────
-
-#: A pooling written with this suffix searches the main lattice only (`cls_avg-M`).
-MAIN_ONLY: str = '-M'
-
 
 #: The `<data>` segment of the weights `training/RerankHead` and `training/GloRet` write at their default training
 #: data (`--train-datasets @pure-train`; `Checkpoints.data_tag`).
@@ -294,6 +510,10 @@ def segment_config(seg: Segment, *, first: bool, topk_in: int, raw_topk: int, mi
         return RG.RerankerLogLoRetConfig(encoder=enc_l, weights=weights, method=seg.method, no_match=seg.op,
                                          tile_size=256, overlap=overlap, topk_in=read, reuse=reuse_l, batch=64)
     if first:
+        family: Optional[Tuple[EncoderFamily, Any]] = family_of(seg.encoder)
+        if family is not None:
+            return family[0].retriever_config(family[1], seg, dict(tile_size=256, overlap=overlap, raw_topk=raw_topk,
+                                                                   min_sep_tiles=min_sep_tiles, pooling=pooling))
         enc: Any = _encoder(seg, pooling)
         common: Dict[str, Any] = dict(encoder=enc, tile_size=256, overlap=overlap, raw_topk=raw_topk,
                                       min_sep_tiles=min_sep_tiles)

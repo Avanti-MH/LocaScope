@@ -264,6 +264,90 @@ def t_multiphases_runs_its_phases_and_a_cached_phase_is_not_run() -> str:
     return 'phase 0 from the cache, phase 1 run on it'
 
 
+def t_the_window_embedder_reads_a_coae_encoder_as_the_first_part_and_its_config_names_both_checkpoints() -> str:
+    from locascope.cli.bench.BenchCommon import weights_of_config                                    # noqa: PLC0415
+    from locascope.core.config.ConfigIdentity import config_from_json, config_json                   # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import coae_weights, phase_configs                  # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverWinEmbed import (WINEMBED_RECIPES,                 # noqa: PLC0415
+                                                                   RetrieverWinEmbedConfig)
+    text: str = 'GigaCoAE+RN3:WinEmbed::latent'
+    assert parse_arm(text).text() == text
+    refused(f'{text}+mean')                                                      # WinEmbed has no operation
+    refused('GigaCoAE+RN3:WinEmbed::nosuch')                                     # the network has no such usage
+    refused('uni2:SlidingWindow::cls+mean::GigaCoAE+RN3:WinEmbed::latent')       # not the first part
+    refused('GigaCoAE+RN3:BagOfTiles::latent+gap')                               # no other method reads a CoAE encoder
+    cfg: RetrieverWinEmbedConfig = phase_configs(parse_arm(text))[0]
+    assert isinstance(cfg, RetrieverWinEmbedConfig), type(cfg).__name__
+    assert cfg.weights == 'RerankHead/weights/pure-train--GigaCoAE+RN3--latent--winembed--best.pt', cfg.weights
+    assert cfg.tiles.weights == coae_weights('RN3', 'gigapath') and cfg.tiles.feature == 'latent'
+    assert cfg.encoder.pooling == 'cls', 'the encoder names the FM the checkpoint reads'
+    assert weights_of_config(cfg) == sorted([cfg.weights, coae_weights('RN3', 'gigapath')]), weights_of_config(cfg)
+    assert any(p.startswith('tiles=') for p in cfg.identity_parts()), 'the CoAE source is identity'
+    assert config_from_json(config_json(cfg.tiles)) == cfg.tiles, 'the CoAE source config comes back from json (the whole config does not: its encoder is a TileEncoderConfig base, which json rebuilds as the base class)'
+    plain: RetrieverWinEmbedConfig = phase_configs(parse_arm('gigapath:WinEmbed::cls_avg'))[0]
+    assert plain.tiles is None
+    for config in (plain, WINEMBED_RECIPES['gigapath-avg'], WINEMBED_RECIPES['uni2-avg']):
+        assert not any(p.startswith('tiles') for p in config.identity_parts()), 'a config with no `tiles` keeps its id'
+    assert plain.identity_id() == WINEMBED_RECIPES['gigapath-avg'].identity_id()
+    return text
+
+
+def t_phasetiles_reads_a_coae_encoder_as_the_first_part_and_its_config_is_a_latent_map() -> str:
+    from locascope.cli.bench.BenchCommon import stage_hexid, weights_of_config                       # noqa: PLC0415
+    from locascope.core.stage2_retrieval.ArmSpec import coae_weights, phase_configs                  # noqa: PLC0415
+    from locascope.core.stage2_retrieval.Naming import config_label                                  # noqa: PLC0415
+    from locascope.core.stage2_retrieval.RetrieverPhaseTiles import (MAPS, PHASETILES_RECIPES,       # noqa: PLC0415
+                                                                     RetrieverPhaseTilesConfig)
+    for arm in ('RPV2', 'xP2', 'RP2'):
+        text: str = f'GigaCoAE+{arm}:PhaseTiles::latent'
+        assert parse_arm(text).text() == text, text
+    text = 'GigaCoAE+RPV2:PhaseTiles::latent'
+    assert parse_arm('GigaCoAE+RPV2:PhaseTiles::latent-M').text() == 'GigaCoAE+RPV2:PhaseTiles::latent-M'
+    assert phase_configs(parse_arm('GigaCoAE+RPV2:PhaseTiles::latent-M'))[0].overlap is False, 'a -M latent map searches the main lattice only'
+    refused(f'{text}+tent')                                                      # a map has no operation to choose
+    refused('GigaCoAE+RPV2:PhaseTiles::raw+localphase')                          # the pixel map is not read by an encoder
+    refused('GigaCoAE+RPV2:PhaseTiles::latent2')                                 # only a usage that is a map of cells
+    refused('GigaCoAE+RPV2:PhaseTiles::fm_head')
+    refused('uni2:PhaseTiles::latent')                                           # PhaseTiles on a plain FM still takes `raw`
+    refused('uni2:SlidingWindow::cls+mean::GigaCoAE+RPV2:PhaseTiles::latent')    # not the first part
+    assert parse_arm('uni2:PhaseTiles::raw+localphase').text() == 'uni2:PhaseTiles::raw+localphase'
+    cfg: RetrieverPhaseTilesConfig = phase_configs(parse_arm(text))[0]
+    assert isinstance(cfg, RetrieverPhaseTilesConfig), type(cfg).__name__
+    assert cfg.rep == 'coae-latent', cfg.rep
+    assert (cfg.cell, cfg.query_tile, cfg.tile_stride, cfg.pool_px, cfg.edge_px) == (32, 256, 384, 96, 1024)
+    assert cfg.source is not None
+    assert cfg.source.tiles.weights == coae_weights('RPV2', 'gigapath') == 'CoaeTrain/large-mix-vref-sims-bench+bench-real-vnce/weights/epoch2.pt', \
+        cfg.source.tiles.weights
+    assert cfg.source.grid_stride == 128 and cfg.source.merge == 'tent' and cfg.source.encoder.pooling == 'cls'
+    assert weights_of_config(cfg) == [coae_weights('RPV2', 'gigapath')], weights_of_config(cfg)
+    assert any(p.startswith('source') for p in cfg.identity_parts()), 'the latent source is identity'
+    other: RetrieverPhaseTilesConfig = phase_configs(parse_arm('GigaCoAE+xP2:PhaseTiles::latent'))[0]
+    assert cfg.identity_id() == other.identity_id(), 'the weights\' name is not identity'
+    assert stage_hexid(cfg) != stage_hexid(other), 'the weights\' content (or that it is missing) is'
+    for name, recipe in PHASETILES_RECIPES.items():
+        assert not any(p.startswith('source') for p in recipe.identity_parts()), f'{name}: a pixel map keeps its id'
+    assert PHASETILES_RECIPES['localphase'].identity_parts() == ['retriever="RetrieverPhaseTilesConfig"', 'edge_px=1024'], \
+        'phasetiles:localphase keeps the parts of its stage id cf65f987a76f50ec'
+    assert tuple(MAPS) == ('localphase', 'congruency', 'coae-latent'), tuple(MAPS)
+    assert [k for k, v in MAPS.items() if v.encoded] == ['coae-latent']
+    refused_config(lambda: RetrieverPhaseTilesConfig(rep='coae-latent'))         # an encoded map needs its source
+    refused_config(lambda: RetrieverPhaseTilesConfig(rep='localphase', source=cfg.source))   # a pixel map takes none
+    refused_config(lambda: RetrieverPhaseTilesConfig(rep='nosuch'))
+    assert (cfg.arm_encoder, cfg.arm_pooling, cfg.arm_op) == ('GigaCoAE+RPV2', 'latent', ''), (cfg.arm_encoder, cfg.arm_pooling, cfg.arm_op)
+    assert config_label(PHASETILES_RECIPES['localphase']) == 'phasetiles-raw-localphase'
+    assert config_label(PHASETILES_RECIPES['congruency']) == 'phasetiles-raw-congruency'
+    return text
+
+
+def refused_config(make: Callable[[], object]) -> None:
+    """`make()` must raise ValueError (a config that is refused)."""
+    try:
+        make()
+    except ValueError:
+        return
+    raise AssertionError('the config should have been refused')
+
+
 _TESTS = [t for n, t in sorted(globals().items(), key=lambda kv: kv[0]) if n.startswith('t_')]
 
 

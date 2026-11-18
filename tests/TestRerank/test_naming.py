@@ -24,7 +24,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -67,6 +67,9 @@ def t_a_every_method_has_its_word_and_the_labels_read_as_written() -> str:
                    'clusterbow-gigapath-cls-avg', 'corr-gigapath-cls-avg-sinkhorn',
                    'csls-uni2-grid2x2-csls', 'csls-uni2-grid2x2-csls-k100',
                    'candgraph-raw-nbr-support', 'slidewin-uni2-cls-avg-M-min'], got
+    assert arm_label(parse_arm('GigaCoAE+RP3:SlidingWindow::fm_head+mean')) == 'slidewin-GigaCoAE-RP3-fm-head-mean'
+    assert arm_label(parse_arm('GigaCoAE+RP3.pool512.epochs12:SlidingWindow::fm_head+mean')) == 'slidewin-GigaCoAE-RP3-pool512-epochs12-fm-head-mean'
+    assert arm_label(parse_arm('gigapath:SlidingWindow::cls+mean')) == 'slidewin-gigapath-cls-mean'
     return ', '.join(got[4:7])
 
 
@@ -125,6 +128,28 @@ def t_f_a_recipe_and_the_arm_of_its_config_are_one_config() -> str:
     via_arm = recipe('arm:uni2:SlidingWindow::cls_avg+mean')
     assert via_arm[0] == 'multiphases' and via_arm[1] == 'uni2:SlidingWindow::cls_avg+mean'
     return ', '.join(got)
+
+
+def t_g_a_window_embedder_on_a_coae_encoder_is_named_by_the_checkpoint_and_its_usage() -> str:
+    arm: str = 'GigaCoAE+RN3:WinEmbed::latent'
+    assert arm_label(parse_arm(arm)) == 'winembed-GigaCoAE-RN3-latent', arm_label(parse_arm(arm))
+    assert arm_label(parse_arm('gigapath:WinEmbed::cls_avg')) == 'winembed-gigapath-cls-avg'
+    cfg: Any = config_of_arm(parse_arm(arm)).phases[0]
+    assert (cfg.arm_encoder, cfg.arm_pooling) == ('GigaCoAE+RN3', 'latent'), (cfg.arm_encoder, cfg.arm_pooling)
+    assert stage_name('winembed', cfg, 'x') == 'GigaCoAE-RN3-latent', stage_name('winembed', cfg, 'x')
+    return arm_label(parse_arm(arm))
+
+
+def t_h_a_latent_map_is_named_by_the_checkpoint_and_its_usage_and_a_pixel_map_by_raw_and_its_op() -> str:
+    from locascope.core.stage2_retrieval.RetrieverPhaseTiles import PHASETILES_RECIPES                # noqa: PLC0415
+    arm: str = 'GigaCoAE+RPV2:PhaseTiles::latent'
+    assert arm_label(parse_arm(arm)) == 'phasetiles-GigaCoAE-RPV2-latent', arm_label(parse_arm(arm))
+    cfg: Any = config_of_arm(parse_arm(arm)).phases[0]
+    assert stage_name('multiphases', cfg, 'x') == 'GigaCoAE-RPV2-latent', stage_name('multiphases', cfg, 'x')
+    assert (cfg.arm_encoder, cfg.arm_pooling, cfg.arm_op) == ('GigaCoAE+RPV2', 'latent', ''), (cfg.arm_encoder, cfg.arm_pooling, cfg.arm_op)
+    assert config_label(PHASETILES_RECIPES['localphase']) == 'phasetiles-raw-localphase'
+    assert config_label(PHASETILES_RECIPES['congruency']) == 'phasetiles-raw-congruency'
+    return arm_label(parse_arm(arm))
 
 
 _TESTS = [t for n, t in sorted(globals().items(), key=lambda kv: kv[0])
